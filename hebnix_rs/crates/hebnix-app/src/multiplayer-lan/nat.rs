@@ -287,10 +287,16 @@ struct UpnpMapping {
 
 impl UpnpMapping {
     fn open(local_port: u16) -> UpnpOutcome {
-        let gateway = match igd_next::search_gateway(igd_next::SearchOptions {
+        let mut options = igd_next::SearchOptions {
             timeout: Some(UPNP_SEARCH_TIMEOUT),
             ..Default::default()
-        }) {
+        };
+        // an unbound multicast search can leave through the wrong adapter
+        // (TAP, wintun, virtual switches) and never reach the router
+        if let Some(ip) = local_ip_towards(SocketAddr::from(([8, 8, 8, 8], 80))) {
+            options.bind_addr = SocketAddr::from((ip, 0));
+        }
+        let gateway = match igd_next::search_gateway(options) {
             Ok(gateway) => gateway,
             Err(error) => return UpnpOutcome::Unavailable(error.to_string()),
         };
