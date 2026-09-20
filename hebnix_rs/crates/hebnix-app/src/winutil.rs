@@ -61,10 +61,12 @@ pub fn main_window_hwnd() -> Option<HWND> {
     find_hebnix_window(true)
 }
 
-/// pin/unpin the main window over everything (incl the game) without
-/// activating it. same os mechanism the plugin windows use, works no matter
-/// who has focus.
+/// Pin/unpin the main window over everything (incl. the game) without
+/// activating it. A topmost Hebnix is only useful while Hebnix or Rocket
+/// League owns the foreground; never let it cover an unrelated application.
 pub fn set_main_window_topmost(topmost: bool) {
+    let topmost =
+        topmost && (foreground_window_is_ours() || hebnix_sdk::process::is_rocket_league_focused());
     if let Some(hwnd) = find_hebnix_window(true) {
         unsafe {
             let _ = SetWindowPos(
@@ -326,8 +328,7 @@ pub fn start_rocket_league(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     if cfg.mode == RlLaunchMode::HeroicDirect {
-        return crate::rl_launch::heroic_launch(cfg, None)
-            .map_err(std::io::Error::other);
+        return crate::rl_launch::heroic_launch(cfg, None).map_err(std::io::Error::other);
     }
 
     let launch = simple_launch_uri(cfg, game_path);
@@ -363,8 +364,7 @@ pub fn restart_rocket_league(
     }
 
     if cfg.mode == RlLaunchMode::HeroicDirect {
-        return crate::rl_launch::heroic_launch(cfg, None)
-            .map_err(std::io::Error::other);
+        return crate::rl_launch::heroic_launch(cfg, None).map_err(std::io::Error::other);
     }
 
     let launch = simple_launch_uri(cfg, game_path);

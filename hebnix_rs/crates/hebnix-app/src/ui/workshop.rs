@@ -564,10 +564,6 @@ pub struct WorkshopState {
     view: WorkshopView,
     background_changer: BackgroundChangerState,
     multiplayer: MultiplayerState,
-    /// mirrored from Config.rl_launch by render() each frame, so the
-    /// Workshop LAN -multihome relaunch (deep in prepare_multiplayer, spawned
-    /// on its own thread) knows how to launch Rocket League without every
-    /// intermediate method needing its own copy of the parameter.
     rl_launch: crate::config::RlLaunchCfg,
 }
 

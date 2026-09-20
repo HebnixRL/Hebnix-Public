@@ -2186,7 +2186,9 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             let path = path.map(std::path::PathBuf::from);
             let key = format!(
                 "savesummary:{}",
-                path.as_deref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+                path.as_deref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default()
             );
             let mut map = async_save_summary().lock().unwrap();
             if !map.contains_key(&key) {

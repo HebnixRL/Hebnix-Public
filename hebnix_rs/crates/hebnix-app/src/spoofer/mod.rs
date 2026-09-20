@@ -346,11 +346,15 @@ impl SpooferManager {
             self.http_active.store(false, Ordering::Relaxed);
             return Err(error);
         }
+        self.start_skill_bridge()?;
         Ok(())
     }
 
     pub fn stop_http(&self) {
         self.http_active.store(false, Ordering::Relaxed);
+        if !self.socket_active.load(Ordering::Relaxed) {
+            self.stop_skill_bridge();
+        }
         self.stop_reverse_if_unused();
         self.maybe_stop_crl();
     }
@@ -384,7 +388,27 @@ impl SpooferManager {
             self.socket_active.store(false, Ordering::Relaxed);
             return Err(error);
         }
+        self.start_skill_bridge()?;
         Ok(())
+    }
+
+    pub fn spawn_item(
+        &self,
+        request: &crate::item_spawning::ItemSpawnRequest,
+    ) -> Result<(), String> {
+        self.start_skill_bridge()?;
+        let psy_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs() as i64;
+        let message = crate::item_spawning::reward_message(request, psy_time)?;
+        let slot = self
+            .skill_bridge
+            .lock()
+            .map_err(|_| "item bridge lock poisoned")?;
+        slot.as_ref()
+            .ok_or_else(|| "PsyNet websocket bridge is not running".to_string())?
+            .send_text(message)
     }
 
     pub fn stop_socket(&self) {

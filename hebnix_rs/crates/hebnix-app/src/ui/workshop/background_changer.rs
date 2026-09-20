@@ -55,6 +55,7 @@ const ARENAS: &[(&str, &str)] = &[
 ];
 
 const SCENERY_DONORS: &[(&str, &str)] = &[
+    ("ShatterShot_VFX", "Core 707 — scenery"),
     (
         "BG_Stadium_10A_P",
         "DFH Stadium (10th Anniversary) — scenery",
@@ -62,6 +63,7 @@ const SCENERY_DONORS: &[(&str, &str)] = &[
     ("BG_NeoTokyo_Arcade", "Neo Tokyo (Arcade) — scenery"),
     ("BG_NeoTokyo_Hax", "Neo Tokyo (Hacked) — scenery"),
     ("BG_Woods_Day_P", "Drift Woods (Day) — scenery"),
+    ("UtopiaStadium_P", "Utopia Coliseum — scenery"),
     ("BG_FNI_Stadium", "Forbidden Temple (Fire & Ice) — scenery"),
 ];
 
@@ -145,8 +147,8 @@ impl BackgroundChangerState {
             .collect();
         self.installed_hosts
             .sort_by_key(|index| ARENAS[*index].1.to_ascii_lowercase());
-        // Dedicated BG_* packages are portable scenery layers. Restricting donors
-        // here prevents arena geometry and collision from being streamed as scenery.
+        // Approved packages are filtered into portable exterior-only layers.
+        // Full arena sources never stream their gameplay geometry or collision.
         self.installed_donors = SCENERY_DONORS
             .iter()
             .copied()
@@ -258,7 +260,7 @@ impl BackgroundChangerState {
         let ctx = ui.ctx().clone();
         ui.heading("Background Changer");
         ui.label("Keep an arena's gameplay and networking, but borrow another arena's fog, sky, buildings, and distant scenery.");
-        ui.small("Background sources are limited to dedicated scenery packages that Rocket League can load safely.");
+        ui.small("Approved sources are filtered to keep only sky, atmosphere, buildings, and distant scenery; donor arena geometry is removed.");
         ui.add_space(8.0);
         ui.colored_label(egui::Color32::from_rgb(230, 170, 60), "Close Rocket League before applying or restoring a background. Changes load when the game starts.");
         ui.add_space(12.0);

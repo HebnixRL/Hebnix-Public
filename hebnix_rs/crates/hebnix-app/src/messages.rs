@@ -84,7 +84,10 @@ pub enum AppMsg {
         bytes: Vec<u8>,
     },
     PluginDownloadDone {
-        result: Result<String, String>,
+        result: Result<(String, String), String>,
+    },
+    ThemeInstallDone {
+        result: Result<(String, String), String>,
     },
     // overlay.send from a plugin, lands in that plugin's page next frame
     OverlayPost {

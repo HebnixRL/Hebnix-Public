@@ -4,9 +4,6 @@ use std::path::Path;
 
 const STEAM_API: &[u8] = include_bytes!("../../../vendor/steam_api64.dll");
 const RLAPI_BRIDGE: &[u8] = include_bytes!("../../../../rlapi_bridge/dist/rlapi-bridge.exe");
-const CURL_IMPERSONATE: &[u8] =
-    include_bytes!("../../../vendor/curl-impersonate/curl-impersonate.exe");
-const CURL_CA_CERTS: &[u8] = include_bytes!("../../../vendor/curl-impersonate/cacert.pem");
 
 pub fn ensure_present(base_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(base_dir)?;
@@ -16,10 +13,6 @@ pub fn ensure_present(base_dir: &Path) -> std::io::Result<()> {
     write_if_changed(&base_dir.join("steam_api64.dll"), STEAM_API)?;
     write_if_changed(&base_dir.join("rlapi-bridge.exe"), RLAPI_BRIDGE)?;
 
-    let curl_dir = base_dir.join("curl-impersonate");
-    std::fs::create_dir_all(&curl_dir)?;
-    write_if_changed(&curl_dir.join("curl-impersonate.exe"), CURL_IMPERSONATE)?;
-    write_if_changed(&curl_dir.join("cacert.pem"), CURL_CA_CERTS)?;
     Ok(())
 }
 
