@@ -117,57 +117,6 @@ impl Default for RlLaunchCfg {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RlLaunchMode {
-    /// guess Steam-vs-Epic from rl_path, same as always
-    #[default]
-    Unconfigured,
-
-    /// a real, owned Steam catalog listing - steam://run supports
-    /// overriding the launch options with an extra argument directly
-    SteamNative,
-
-    /// the real Epic Games Launcher install
-    EpicDirect,
-
-    /// a Steam non-Steam-shortcut whose target is Heroic
-    SteamShortcutToHeroic,
-
-    /// Heroic only, no Steam or Epic Games Launcher involved at all
-    HeroicDirect,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RlLaunchCfg {
-    pub mode: RlLaunchMode,
-
-    /// SteamNative: RL's real Steam appid (252950).
-    /// SteamShortcutToHeroic: the shortcut's computed rungameid.
-    pub steam_id: String,
-
-    /// path to the Heroic binary
-    pub heroic_binary: String,
-
-    /// Epic catalog app name - "Sugar" for Rocket League
-    pub heroic_app_name: String,
-
-    pub heroic_runner: String,
-}
-
-impl Default for RlLaunchCfg {
-    fn default() -> Self {
-        Self {
-            mode: RlLaunchMode::Unconfigured,
-            steam_id: "252950".to_string(),
-            heroic_binary: String::new(),
-            heroic_app_name: "Sugar".to_string(),
-            heroic_runner: "legendary".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatchSource {
     #[default]
