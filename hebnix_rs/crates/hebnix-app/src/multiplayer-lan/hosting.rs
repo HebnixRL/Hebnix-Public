@@ -307,9 +307,9 @@ mod tests {
     #[test]
     fn rewrites_the_physical_lan_endpoint_to_the_tap_host() {
         let payload = unreal_ansi_string("192.168.0.119:7777");
-        let (_, _, replacement) = find_unreal_lan_endpoint(&payload, "192.10.192.1")
+        let (_, _, replacement) = find_unreal_lan_endpoint(&payload, "10.242.77.1")
             .expect("the LAN endpoint should be found");
-        assert_eq!(replacement, unreal_ansi_string("192.10.192.1:7777"));
+        assert_eq!(replacement, unreal_ansi_string("10.242.77.1:7777"));
     }
     #[test]
     fn rewrites_binary_and_equal_length_lan_endpoints() {
@@ -319,8 +319,8 @@ mod tests {
         let mut text = b"172.31.64.1:7777".to_vec();
         assert!(replace_equal_length_ascii_endpoint(
             &mut text,
-            "192.10.192.1"
+            "10.242.77.1"
         ));
-        assert_eq!(text, b"192.10.192.1:7777");
+        assert_eq!(text, b"10.242.77.1:7777");
     }
 }
