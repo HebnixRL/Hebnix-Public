@@ -82,6 +82,41 @@ impl Default for SettingsCfg {
         }
     }
 }
+/// How Rocket League actually gets launched/restarted - used by the
+/// Restart Rocket League button and Workshop LAN's Host/Join. The default
+/// preserves the original Steam-vs-Epic path detection for existing configs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RlLaunchMode {
+    #[default]
+    Unconfigured,
+    SteamNative,
+    EpicDirect,
+    SteamShortcutToHeroic,
+    HeroicDirect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RlLaunchCfg {
+    pub mode: RlLaunchMode,
+    pub steam_id: String,
+    pub heroic_binary: String,
+    pub heroic_app_name: String,
+    pub heroic_runner: String,
+}
+
+impl Default for RlLaunchCfg {
+    fn default() -> Self {
+        Self {
+            mode: RlLaunchMode::Unconfigured,
+            steam_id: "252950".to_string(),
+            heroic_binary: String::new(),
+            heroic_app_name: "Sugar".to_string(),
+            heroic_runner: "legendary".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PatchSource {
@@ -107,6 +142,7 @@ pub struct PatcherCfg {
 pub struct Config {
     pub window: WindowCfg,
     pub settings: SettingsCfg,
+    pub rl_launch: RlLaunchCfg,
     pub patcher: PatcherCfg,
     /// enabled state keyed by plugin slug
     pub plugins: BTreeMap<String, bool>,

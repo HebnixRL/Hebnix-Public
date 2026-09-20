@@ -100,6 +100,8 @@ pub fn note_foreground() {
 }
 
 pub fn set_main_window_topmost(topmost: bool) {
+    let topmost =
+        topmost && (foreground_window_is_ours() || hebnix_sdk::process::is_rocket_league_focused());
     if let Some(window) = main_window() {
         unsafe {
             let _ = SetWindowPos(

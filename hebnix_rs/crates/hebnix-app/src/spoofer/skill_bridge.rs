@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::http::{HeaderName, HeaderValue};
@@ -32,6 +32,7 @@ const FORWARD_HEADERS: &[&str] = &[
 
 pub struct SkillBridge {
     running: Arc<AtomicBool>,
+    outbound: Sender<String>,
 }
 
 impl SkillBridge {
@@ -52,6 +53,7 @@ impl SkillBridge {
             format!("Rank bridge listening on {LISTEN_ADDR}\n"),
         );
         let running = Arc::new(AtomicBool::new(true));
+        let (outbound, outbound_rx) = unbounded::<String>();
         let thread_running = Arc::clone(&running);
         let thread_tx = tx.clone();
         std::thread::Builder::new()
@@ -65,8 +67,11 @@ impl SkillBridge {
                     let ranks = Arc::clone(&ranks);
                     let tx = thread_tx.clone();
                     let dump_path = dump_path.clone();
+                    let outbound_rx = outbound_rx.clone();
                     std::thread::spawn(move || {
-                        if let Err(error) = handle_connection(stream, ranks, &dump_path) {
+                        if let Err(error) =
+                            handle_connection(stream, ranks, outbound_rx, &dump_path)
+                        {
                             let _ = tx.send(AppMsg::Log(format!(
                                 "[Spoofer] Rank websocket bridge: {error}"
                             )));
@@ -75,7 +80,13 @@ impl SkillBridge {
                 }
             })
             .map_err(|error| format!("cannot start rank websocket bridge: {error}"))?;
-        Ok(Self { running })
+        Ok(Self { running, outbound })
+    }
+
+    pub fn send_text(&self, message: String) -> Result<(), String> {
+        self.outbound
+            .send(message)
+            .map_err(|_| "PsyNet websocket bridge is not running".into())
     }
 
     pub fn stop(&self) {
@@ -87,6 +98,7 @@ impl SkillBridge {
 fn handle_connection(
     stream: TcpStream,
     ranks: Arc<Mutex<HashMap<i32, (i32, f64)>>>,
+    outbound: Receiver<String>,
     dump_path: &std::path::Path,
 ) -> Result<(), String> {
     let request_state = Arc::new(Mutex::new(None::<(String, Vec<(String, String)>)>));
@@ -155,6 +167,12 @@ fn handle_connection(
     let rule = RankRule::new(ranks);
     loop {
         let mut progressed = false;
+        while let Ok(text) = outbound.try_recv() {
+            local
+                .send(Message::Text(text))
+                .map_err(|error| format!("send item reward to game failed: {error}"))?;
+            progressed = true;
+        }
         match local.read() {
             Ok(message) => {
                 progressed = true;

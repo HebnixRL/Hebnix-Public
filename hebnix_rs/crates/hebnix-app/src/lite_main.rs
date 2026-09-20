@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod deep_link;
 mod discord_presence;
 mod dpi_fix;
 mod hotkey;
@@ -104,6 +105,7 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 fn main() -> eframe::Result {
     let base_dir = config::base_dir();
     setup_logging(&base_dir);
+    deep_link::register_and_queue_from_args(&base_dir);
     if let Err(error) = runtime_assets::ensure_present(&base_dir) {
         tracing::warn!("failed to prepare Hebnix runtime assets: {error}");
     }

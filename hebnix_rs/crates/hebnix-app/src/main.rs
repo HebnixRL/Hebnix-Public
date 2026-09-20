@@ -18,9 +18,12 @@ mod cosmetic_upk {
 mod decal_patcher {
     pub use crate::patcher::decal_patcher::*;
 }
+mod deep_link;
 mod discord_presence;
 mod dpi_fix;
 mod hotkey;
+#[path = "item-spawning/mod.rs"]
+mod item_spawning;
 mod messages;
 mod monitor;
 #[path = "multiplayer-lan/mod.rs"]
@@ -31,6 +34,7 @@ mod patch_core {
 }
 mod plugins;
 mod presets;
+mod rl_launch;
 mod runtime_assets;
 mod spoofer;
 mod statsapi_ini;
@@ -163,6 +167,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     setup_logging(&base_dir);
+    deep_link::register_and_queue_from_args(&base_dir);
     if let Err(error) = runtime_assets::ensure_present(&base_dir) {
         tracing::warn!("failed to prepare Hebnix runtime assets: {error}");
     }

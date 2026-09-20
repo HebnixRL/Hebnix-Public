@@ -130,6 +130,7 @@ pub struct LiteApp {
     changelog_popup: Option<crate::update::ChangelogEntry>,
     launch_path_notice: bool,
     quitting: bool,
+    plugin_delete_prompt: Option<String>,
 }
 
 impl LiteApp {
@@ -326,6 +327,7 @@ impl LiteApp {
             changelog_popup: None,
             launch_path_notice: false,
             quitting: false,
+            plugin_delete_prompt: None,
         };
         app.theme_options = theme::list_themes(&app.themes_dir);
         if start_hidden {
@@ -623,9 +625,16 @@ impl LiteApp {
                 AppMsg::PluginDownloadDone { result } => {
                     self.install_modal.downloading_id = None;
                     match result {
-                        Ok(message) => {
-                            self.console.write(format!("[Console] {message}"));
-                            self.plugin_mgr.refresh(&mut self.config, true);
+                        Ok((plugin_id, message)) => {
+                            match self
+                                .plugin_mgr
+                                .enable_installed_plugin(&plugin_id, &mut self.config)
+                            {
+                                Ok(()) => self.console.write(format!("[Console] {message}")),
+                                Err(error) => self.console.write(format!(
+                                    "[Console] Plugin was installed but could not be enabled: {error}"
+                                )),
+                            }
                             self.save_config();
                         }
                         Err(error) => self
@@ -633,6 +642,17 @@ impl LiteApp {
                             .write(format!("[Console] Plugin installation failed: {error}")),
                     }
                 }
+                AppMsg::ThemeInstallDone { result } => match result {
+                    Ok((name, author)) => {
+                        self.theme_options = theme::list_themes(&self.themes_dir);
+                        self.console.write(format!(
+                            "[Console] Installed Theme {name} by {author}"
+                        ));
+                    }
+                    Err(error) => self
+                        .console
+                        .write(format!("[Console] Theme installation failed: {error}")),
+                },
                 AppMsg::AppUpdateFetched { result } => {
                     if let Ok(Some(info)) = result {
                         self.console
@@ -1057,6 +1077,7 @@ impl LiteApp {
         self.render_overlay_order(ui);
 
         let mut updates = Vec::new();
+        let mut deletes: Vec<String> = Vec::new();
         let mut settings = None;
         egui::ScrollArea::vertical()
             .id_salt("lite_plugins_list")
@@ -1087,6 +1108,12 @@ impl LiteApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        if ui.add(egui::Button::new(
+                                            egui::RichText::new("🗑")
+                                                .color(Color32::from_rgb(0xe7, 0x4c, 0x3c)),
+                                        )).on_hover_text("Delete plugin").clicked() {
+                                            deletes.push(plugin.slug.clone());
+                                        }
                                         if plugin.load_error.is_none()
                                             && ui
                                                 .add_enabled(
@@ -1135,6 +1162,9 @@ impl LiteApp {
             });
             self.save_config();
         }
+        for slug in deletes {
+            self.plugin_delete_prompt = Some(slug);
+        }
         if let Some(slug) = settings {
             self.selected_settings_plugin = Some(slug);
             self.tab = Tab::Settings;
@@ -1142,6 +1172,46 @@ impl LiteApp {
         }
     }
 
+    fn render_plugin_delete_prompt(&mut self, ctx: &egui::Context) {
+        let Some(slug) = self.plugin_delete_prompt.clone() else {
+            return;
+        };
+        let plugin_name = self
+            .plugin_mgr
+            .plugins
+            .iter()
+            .find(|plugin| plugin.slug == slug)
+            .map(|plugin| plugin.display_name().to_string())
+            .unwrap_or(slug.clone());
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Delete plugin?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Are you sure you want to delete {plugin_name}?"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Yes").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("No").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            self.plugin_delete_prompt = None;
+            match self.plugin_mgr.delete_plugin(&slug, &mut self.config) {
+                Ok(()) => self.console.write(format!("[Plugins] Deleted {slug}.")),
+                Err(error) => self.console.write(format!("[Plugins] {error}")),
+            }
+            self.save_config();
+        } else if cancel {
+            self.plugin_delete_prompt = None;
+        }
+    }
     fn render_update_modal(&mut self, ctx: &egui::Context) {
         let Some(info) = self.update_info.clone() else {
             return;
@@ -1587,14 +1657,26 @@ impl LiteApp {
         });
     }
 
+    fn download_theme(&self, theme_id: &str) {
+        let theme_id = theme_id.to_string();
+        let themes_dir = self.themes_dir.clone();
+        let fonts_dir = self.fonts_dir.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::deep_link::install_theme(&theme_id, &themes_dir, &fonts_dir);
+            let _ = tx.send(AppMsg::ThemeInstallDone { result });
+        });
+    }
     fn download_plugin(&mut self, id: &str) {
         self.install_modal.downloading_id = Some(id.to_string());
         let id = id.to_string();
         let plugin_dir = self.plugin_dir.clone();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = download_and_extract_plugin(&id, &plugin_dir)
-                .map(|_| format!("Plugin {id} installed."));
+            let result = crate::deep_link::plugin_identity(&id).and_then(|(name, author)| {
+                download_and_extract_plugin(&id, &plugin_dir)?;
+                Ok((id.clone(), format!("{name} by {author} was installed.")))
+            });
             let _ = tx.send(AppMsg::PluginDownloadDone { result });
         });
     }
@@ -1787,6 +1869,9 @@ impl LiteApp {
             if ui.button("Open Folder").clicked() {
                 let _ = open::that(&self.themes_dir);
             }
+            if ui.button("Open Fonts Folder").clicked() {
+                let _ = open::that(&self.fonts_dir);
+            }
         });
         ui.horizontal(|ui| {
             ui.label("Window Opacity:");
@@ -1914,45 +1999,52 @@ impl LiteApp {
             changed = true;
         }
 
-        let selected = self.config.settings.discord_show_score as u8
-            + self.config.settings.discord_show_map as u8
-            + self.config.settings.discord_show_gamemode as u8;
-        if ui
-            .add_enabled(
-                !self.config.settings.discord_show_score || selected > 1,
-                egui::Checkbox::new(&mut self.config.settings.discord_show_score, "Show score"),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        let selected = self.config.settings.discord_show_score as u8
-            + self.config.settings.discord_show_map as u8
-            + self.config.settings.discord_show_gamemode as u8;
-        if ui
-            .add_enabled(
-                !self.config.settings.discord_show_map || selected > 1,
-                egui::Checkbox::new(&mut self.config.settings.discord_show_map, "Show map"),
-            )
-            .changed()
-        {
-            changed = true;
-        }
-        let selected = self.config.settings.discord_show_score as u8
-            + self.config.settings.discord_show_map as u8
-            + self.config.settings.discord_show_gamemode as u8;
-        if ui
-            .add_enabled(
-                !self.config.settings.discord_show_gamemode || selected > 1,
-                egui::Checkbox::new(
-                    &mut self.config.settings.discord_show_gamemode,
-                    "Show gamemode",
-                ),
-            )
-            .changed()
-        {
-            changed = true;
-        }
+        ui.indent("lite_discord_game_state_fields", |ui| {
+            ui.add_enabled_ui(self.config.settings.discord_game_state, |ui| {
+                let selected = self.config.settings.discord_show_score as u8
+                    + self.config.settings.discord_show_map as u8
+                    + self.config.settings.discord_show_gamemode as u8;
+                if ui
+                    .add_enabled(
+                        !self.config.settings.discord_show_score || selected > 1,
+                        egui::Checkbox::new(
+                            &mut self.config.settings.discord_show_score,
+                            "Show score",
+                        ),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                let selected = self.config.settings.discord_show_score as u8
+                    + self.config.settings.discord_show_map as u8
+                    + self.config.settings.discord_show_gamemode as u8;
+                if ui
+                    .add_enabled(
+                        !self.config.settings.discord_show_map || selected > 1,
+                        egui::Checkbox::new(&mut self.config.settings.discord_show_map, "Show map"),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                let selected = self.config.settings.discord_show_score as u8
+                    + self.config.settings.discord_show_map as u8
+                    + self.config.settings.discord_show_gamemode as u8;
+                if ui
+                    .add_enabled(
+                        !self.config.settings.discord_show_gamemode || selected > 1,
+                        egui::Checkbox::new(
+                            &mut self.config.settings.discord_show_gamemode,
+                            "Show gamemode",
+                        ),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            });
+        });
 
         ui.horizontal(|ui| {
             let mut custom = !self.config.settings.discord_game_state;
@@ -2514,6 +2606,12 @@ impl eframe::App for LiteApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        for plugin_id in crate::deep_link::take_pending_plugin_ids(&self.base_dir) {
+            self.download_plugin(&plugin_id);
+        }
+        for theme_id in crate::deep_link::take_pending_theme_ids(&self.base_dir) {
+            self.download_theme(&theme_id);
+        }
         self.handle_messages(&ctx);
         dpi_fix::install_on_all_windows();
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
@@ -2616,6 +2714,7 @@ impl eframe::App for LiteApp {
         self.plugin_mgr.flush_window_positions();
         self.render_game_overlay();
         self.render_install_modal(&ctx);
+        self.render_plugin_delete_prompt(&ctx);
         self.render_notices(&ctx);
         self.render_launch_path_notice(&ctx);
         self.render_changelog_popup(&ctx);
