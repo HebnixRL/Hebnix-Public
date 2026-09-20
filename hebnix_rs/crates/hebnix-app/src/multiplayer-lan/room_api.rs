@@ -125,15 +125,24 @@ impl RoomClient {
 
 fn api_error(error: ureq::Error) -> String {
     match error {
-        ureq::Error::Status(_, response) => response
-            .into_json::<serde_json::Value>()
-            .ok()
-            .and_then(|body| {
-                body.get("error")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| "the multiplayer API rejected the request".to_string()),
+        ureq::Error::Status(code, response) => {
+            let body = response.into_string().unwrap_or_default();
+            serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|json| {
+                    json.get("error")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| {
+                    let snippet: String = body
+                        .chars()
+                        .filter(|character| !character.is_control())
+                        .take(120)
+                        .collect();
+                    format!("the multiplayer API rejected the request (HTTP {code}: {snippet})")
+                })
+        }
         error => error.to_string(),
     }
 }
