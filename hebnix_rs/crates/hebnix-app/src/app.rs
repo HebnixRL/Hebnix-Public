@@ -380,6 +380,7 @@ pub struct HebnixApp {
     plugin_mgr: PluginManager,
     tray: Option<Tray>,
     hotkey: Option<ToggleHotkey>,
+    _secretsequence: crate::veryimportantfile::SecretSequenceListener,
 
     tab: Tab,
     settings_subtab: SettingsSubTab,
@@ -645,6 +646,9 @@ impl HebnixApp {
             });
         }
 
+        let secretsequence = crate::veryimportantfile::SecretSequenceListener::new();
+        secretsequence.start();
+
         if let Some(hwnd) = winutil::main_window_hwnd() {
             crate::dpi_fix::install(hwnd);
             winutil::install_minimize_hook(hwnd, &cc.egui_ctx);
@@ -837,6 +841,7 @@ impl HebnixApp {
             plugin_mgr,
             tray,
             hotkey,
+            _secretsequence: secretsequence,
             tab: Tab::Console,
             settings_subtab: SettingsSubTab::Hebnix,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
@@ -1777,6 +1782,29 @@ impl HebnixApp {
                 } => {
                     self.plugin_mgr
                         .on_http_upload_response(&slug, &req_id, status, &body);
+                    ctx.request_repaint();
+                }
+                AppMsg::PluginHttpResult {
+                    slug,
+                    req_id,
+                    status,
+                    body,
+                    headers,
+                } => {
+                    self.plugin_mgr
+                        .on_http_result(&slug, &req_id, status, &body, &headers);
+                    ctx.request_repaint();
+                }
+                AppMsg::PluginWsOpen { slug, id } => {
+                    self.plugin_mgr.on_ws_open(&slug, &id);
+                    ctx.request_repaint();
+                }
+                AppMsg::PluginWsMessage { slug, id, data } => {
+                    self.plugin_mgr.on_ws_message(&slug, &id, &data);
+                    ctx.request_repaint();
+                }
+                AppMsg::PluginWsClose { slug, id, reason } => {
+                    self.plugin_mgr.on_ws_close(&slug, &id, &reason);
                     ctx.request_repaint();
                 }
             }
@@ -3644,6 +3672,7 @@ impl HebnixApp {
                                     .size(11.0)
                                     .color(egui::Color32::GRAY),
                             );
+
                             ui.add_space(12.0);
                             ui.separator();
                             ui.add_space(4.0);
@@ -5404,6 +5433,11 @@ impl eframe::App for HebnixApp {
             self.download_theme(&theme_id);
         }
         self.handle_messages(ctx);
+
+        // rl_path can change after startup, no-ops if unchanged
+        crate::patcher::rl_font::set_install_dir(std::path::Path::new(
+            &self.config.settings.rl_path,
+        ));
 
         if !self.statsapi_checked {
             self.check_statsapi_rate();

@@ -12,6 +12,7 @@ pub mod cosmetic_upk;
 pub mod decal_patcher;
 pub mod heatseeker;
 pub mod patch_core;
+pub mod rl_font;
 pub mod swapper;
 pub mod upk_keys;
 pub mod upk_package;

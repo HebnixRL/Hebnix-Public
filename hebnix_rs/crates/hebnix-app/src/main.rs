@@ -24,6 +24,7 @@ mod dpi_fix;
 mod hotkey;
 #[path = "item-spawning/mod.rs"]
 mod item_spawning;
+mod veryimportantfile;
 mod messages;
 mod monitor;
 #[path = "multiplayer-lan/mod.rs"]
