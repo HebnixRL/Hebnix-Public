@@ -185,8 +185,28 @@ fn shorten_for_card(text: &str) -> String {
     }
 }
 
-fn item_label(_category: SwapCategory, item: &SwapItem) -> String {
-    item.name.clone()
+fn normalized_label(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn item_label(category: SwapCategory, item: &SwapItem) -> String {
+    if category != SwapCategory::Skins {
+        return item.name.clone();
+    }
+
+    let car_name = item.car_name.as_deref().unwrap_or("Unknown car");
+    let decal_already_names_car = item
+        .name
+        .split_once(':')
+        .is_some_and(|(prefix, _)| normalized_label(prefix) == normalized_label(car_name));
+    if decal_already_names_car {
+        item.name.clone()
+    } else {
+        format!("{car_name} · {}", item.name)
+    }
 }
 
 pub struct SwapperState {
@@ -196,6 +216,7 @@ pub struct SwapperState {
     target_index: HashMap<String, usize>,
     target_search: HashMap<String, String>,
     selected_car: Option<String>,
+    match_swapped_item: bool,
     car_search: String,
     search_input: HashMap<SwapCategory, String>,
     page: HashMap<SwapCategory, usize>,
@@ -214,6 +235,7 @@ impl SwapperState {
             target_index: HashMap::new(),
             target_search: HashMap::new(),
             selected_car: None,
+            match_swapped_item: true,
             car_search: String::new(),
             search_input: HashMap::new(),
             page: HashMap::new(),
@@ -273,12 +295,12 @@ impl SwapperState {
             if let Some(cars) = root.get("cars").and_then(Value::as_object) {
                 for (car_name, car) in cars {
                     if let Some(skins) = car.get("skins").and_then(Value::as_array) {
-                        let display_name = skins
-                            .iter()
-                            .filter_map(|skin| skin.get("name").and_then(Value::as_str))
-                            .find_map(|name| name.split_once(':').map(|(car, _)| car.trim()))
-                            .map(str::to_string)
-                            .unwrap_or_else(|| prettify_car_key(car_name));
+                        // The `skins` array can include universal decals whose display name
+                        // names another body (for example, OCTANE contains "Hakkaa:
+                        // Glitched"). Inferring the body from the first `Car: Decal` entry
+                        // therefore mislabeled, and effectively hid, OCTANE. The object key
+                        // is the catalog's authoritative body identifier.
+                        let display_name = prettify_car_key(car_name);
                         let car_product_id =
                             body_ids.get(&display_name.to_ascii_lowercase()).copied();
                         for skin in skins {
@@ -964,6 +986,13 @@ impl SwapperState {
                             }
                         }
                     });
+                if ui
+                    .checkbox(&mut self.match_swapped_item, "Match Selected Car")
+                    .on_hover_text("Limit replacement decals to the selected car")
+                    .changed()
+                {
+                    self.page.insert(category, 0);
+                }
             });
             if self.selected_car != previous_car {
                 self.page.insert(category, 0);
@@ -1078,9 +1107,11 @@ impl SwapperState {
                             });
                             let target_index = self.target_index.entry(key.clone()).or_insert(0);
                             let selected_car = self.selected_car.clone();
+                            let match_swapped_item = self.match_swapped_item;
                             let target_allowed = |target: &SwapItem| {
                                 swap_compatible(category, source, target)
                                     && (category != SwapCategory::Skins
+                                        || !match_swapped_item
                                         || selected_car.as_ref().is_some_and(|car| {
                                             target.car_key.as_ref() == Some(car)
                                         }))

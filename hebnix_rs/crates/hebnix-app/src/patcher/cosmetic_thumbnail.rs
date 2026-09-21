@@ -97,7 +97,17 @@ pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
             }
         }
     }
-    let joined: Vec<u8> = chunks.iter().flatten().copied().collect();
+    // A thumbnail package can contain multiple independently compressed
+    // exports. Prefer a complete frame from one export before joining them:
+    // joining can place a trailer from one export after pixels from another,
+    // which produces a valid-but-corrupt image.
+    for chunk in chunks.iter().rev() {
+        if let Some((pixels, width, height)) = generic_frame(chunk, category) {
+            if let Ok(png) = bgra_png(pixels, width, height) {
+                return Ok(png);
+            }
+        }
+    }    let joined: Vec<u8> = chunks.iter().flatten().copied().collect();
     if let Some((pixels, width, height)) = generic_frame(&joined, category) {
         return bgra_png(pixels, width, height);
     }
