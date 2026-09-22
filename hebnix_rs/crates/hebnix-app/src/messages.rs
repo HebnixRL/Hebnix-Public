@@ -48,14 +48,14 @@ pub enum AppMsg {
     },
     BackgroundChangerDone(Result<String, String>),
     WorkshopMultiplayerProgress(String),
-    WorkshopMultiplayerPrepared {
-        result: Result<
-            (
-                crate::multiplayer_lan::TapSession,
-                Option<crate::multiplayer_lan::JoinedRoom>,
-            ),
-            String,
-        >,
+    // result of spawning the tsnet sidecar and requesting the tailnet come up
+    WorkshopTailnetStarted {
+        result: Result<std::sync::Arc<crate::multiplayer_lan::TsnetSidecarHandle>, String>,
+    },
+    // result of launching Rocket League with the tailnet multihome address
+    // (and, for a guest, joining the room first)
+    WorkshopMultiplayerLaunched {
+        result: Result<Option<crate::multiplayer_lan::JoinedRoom>, String>,
     },
     WorkshopHostStarted {
         result: Result<crate::multiplayer_lan::HostSession, String>,
@@ -69,11 +69,9 @@ pub enum AppMsg {
     WorkshopHostSessionCheck {
         result: Result<crate::multiplayer_lan::Room, String>,
     },
-    WorkshopWizardCheck {
+    WorkshopLaunchCheck {
         rl_open: bool,
-        tap_ready: bool,
         launch_ready: bool,
-        detected_map: Option<String>,
     },
     // "install from hebnix" plugin metadata fetch done
     PluginFetch {

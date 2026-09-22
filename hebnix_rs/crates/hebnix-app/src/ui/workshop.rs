@@ -15,9 +15,10 @@ use sha2::{Digest, Sha256};
 
 use crate::messages::AppMsg;
 use crate::multiplayer_lan::{
-    CreateRoomRequest, FIRST_GUEST_ADDRESS, GUEST_ADDRESS_RANGE, GuestSession, HOST_ADDRESS,
-    HostSession, JoinRoomRequest, JoinedRoom, MapDescriptor, RoomClient, UpdatePlayerRequest,
-    ensure_host_rule, ensure_join_rule_if_needed, ensure_rocket_league_lan_rule,
+    CreateRoomRequest, GuestSession, HostSession, JoinRoomRequest, JoinedRoom, MapDescriptor,
+    ROOM_API_BASE_URL, RL_LAN_PORT, RoomClient, TSNET_CONTROL_URL, TsnetSidecarHandle,
+    UpdatePlayerRequest, ensure_beacon_relay_rule, ensure_rocket_league_lan_rule,
+    ensure_sidecar_rule,
 };
 mod background_changer;
 use background_changer::BackgroundChangerState;
@@ -59,7 +60,7 @@ fn rocket_league_executable(rl_path: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not find RocketLeague.exe in the configured game folder.".to_string())
 }
 
-fn multiplayer_player_identity(player_token: String) -> UpdatePlayerRequest {
+fn multiplayer_player_identity(player_token: String, tailnet_ip: String) -> UpdatePlayerRequest {
     let info = hebnix_sdk::log::parse_launch_log(None, false, "INT");
     let detected_platform = hebnix_sdk::process::find_rocket_league()
         .map(|process| process.platform.as_str().to_string());
@@ -84,6 +85,7 @@ fn multiplayer_player_identity(player_token: String) -> UpdatePlayerRequest {
         platform_id,
         platform,
         display_name,
+        tailnet_ip,
     }
 }
 
@@ -119,6 +121,11 @@ fn rocket_league_launched_with_multihome(address: &str) -> bool {
     rocket_league_multihome_address().is_some_and(|found| found == address)
 }
 
+// no subnet filtering here anymore: tailnet addresses are assigned
+// dynamically by headscale, not drawn from a fixed prefix Hebnix can
+// recognize, so this just returns whatever -multihome value RL was last
+// launched with and lets callers compare it against the address they
+// actually expect.
 fn rocket_league_multihome_address() -> Option<String> {
     let path = dirs::document_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -135,9 +142,7 @@ fn rocket_league_multihome_address() -> Option<String> {
             .chars()
             .take_while(|character| character.is_ascii_digit() || *character == '.')
             .collect();
-        address
-            .starts_with(&format!("{}.", crate::multiplayer_lan::VPN_SUBNET))
-            .then_some(address)
+        (!address.is_empty()).then_some(address)
     })
 }
 
@@ -472,35 +477,45 @@ struct MultiplayerState {
     wizard_started: bool,
     mode: MultiplayerMode,
     host_name: String,
-    port: u16,
     join_pin: String,
-    join_after_start: bool,
     identity_update_in_flight: bool,
     identity_updated: bool,
-    prepared_tap: Option<crate::multiplayer_lan::TapSession>,
-    pending_join: Option<JoinedRoom>,
     hosted: Option<HostSession>,
     joined: Option<GuestSession>,
+    /// guest: the room joined during launch_multiplayer, waiting for the
+    /// "Join by PIN" button to actually start the GuestSession
+    pending_join: Option<JoinedRoom>,
     status: String,
-    binding_status: String,
-    tap_ready_before_launch: bool,
-    restarting_rocket_league: bool,
     setup_progress: Option<String>,
     saved_host: Option<SavedHost>,
     saved_room: Option<crate::multiplayer_lan::Room>,
     saved_host_checked: bool,
     saved_host_checking: bool,
     detected_target: Option<String>,
-    wizard_check: WizardCheck,
-    multihome_check_attempts: u8,
-}
-
-struct WizardCheck {
-    rl_open: bool,
-    tap_ready: bool,
-    launch_ready: bool,
     detected_map: Option<String>,
-    in_flight: bool,
+
+    // tsnet sidecar / tailnet state
+    sidecar: Option<Arc<TsnetSidecarHandle>>,
+    tailnet_requested: bool,
+    tailnet_ip: Option<String>,
+
+    // replaces the old three-phase TAP wizard gate (tap_ready no longer
+    // exists as a separate step: the tailnet comes up before Rocket League
+    // is ever launched, so there's only "is the tailnet up" and "did RL
+    // launch with the right address")
+    rl_open: bool,
+    launch_ready: bool,
+    multihome_check_attempts: u8,
+    multihome_check_in_flight: bool,
+    /// true while Hebnix itself is closing/relaunching Rocket League, so the
+    /// RL-monitor's "closed" transition doesn't arm the crash grace window
+    /// for a restart Hebnix initiated on purpose
+    launching_rocket_league: bool,
+
+    /// set when Rocket League closes with a session still active; if it
+    /// doesn't come back before this deadline, the session is torn down for
+    /// real (see CRASH_GRACE_WINDOW)
+    shutdown_deadline: Option<std::time::Instant>,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -515,34 +530,30 @@ impl Default for MultiplayerState {
             wizard_started: false,
             mode: MultiplayerMode::Host,
             host_name: "Hebnix Workshop".to_string(),
-            port: 47777,
             join_pin: String::new(),
-            join_after_start: false,
             identity_update_in_flight: false,
             identity_updated: false,
-            prepared_tap: None,
-            pending_join: None,
             hosted: None,
             joined: None,
+            pending_join: None,
             status: "Choose a downloaded map to host, or enter a four-digit pin to join."
                 .to_string(),
-            binding_status: String::new(),
-            tap_ready_before_launch: false,
-            restarting_rocket_league: false,
             setup_progress: None,
             saved_host: None,
             saved_room: None,
             saved_host_checked: false,
             saved_host_checking: false,
             detected_target: None,
-            wizard_check: WizardCheck {
-                rl_open: false,
-                tap_ready: false,
-                launch_ready: false,
-                detected_map: None,
-                in_flight: false,
-            },
+            detected_map: None,
+            sidecar: None,
+            tailnet_requested: false,
+            tailnet_ip: None,
+            rl_open: false,
+            launch_ready: false,
             multihome_check_attempts: 0,
+            multihome_check_in_flight: false,
+            launching_rocket_league: false,
+            shutdown_deadline: None,
         }
     }
 }
@@ -893,7 +904,7 @@ impl WorkshopState {
                     {
                         self.multiplayer.mode = MultiplayerMode::Host;
                         self.multiplayer.wizard_started = true;
-                        self.refresh_wizard_status(tx, ctx);
+                        self.start_tailnet(tx, ctx);
                     }
                     if ui
                         .add_sized([width, 38.0], egui::Button::new("Join"))
@@ -901,7 +912,7 @@ impl WorkshopState {
                     {
                         self.multiplayer.mode = MultiplayerMode::Join;
                         self.multiplayer.wizard_started = true;
-                        self.refresh_wizard_status(tx, ctx);
+                        self.start_tailnet(tx, ctx);
                     }
                 });
             });
@@ -910,14 +921,12 @@ impl WorkshopState {
         let mut host = false;
         let mut stop = false;
         let mut join = false;
-        let mut prepare_host = false;
-        let mut prepare_guest = false;
+        let mut launch = false;
         let mut close_game = false;
         let is_admin = crate::spoofer::is_admin();
         let setup_in_progress = self.multiplayer.setup_progress.is_some();
-        let rl_open = self.multiplayer.wizard_check.rl_open;
-        let tap_ready = self.multiplayer.wizard_check.tap_ready;
-        let wizard_ready = rl_open && tap_ready && self.multiplayer.wizard_check.launch_ready;
+        let tailnet_ready = self.multiplayer.tailnet_ip.is_some();
+        let wizard_ready = tailnet_ready && self.multiplayer.rl_open && self.multiplayer.launch_ready;
 
         if self.multiplayer.mode == MultiplayerMode::Host
             && self.multiplayer.saved_host.is_some()
@@ -929,7 +938,7 @@ impl WorkshopState {
             let tx = tx.clone();
             let repaint = ctx.clone();
             std::thread::spawn(move || {
-                let result = RoomClient::new("https://api.hebnix.com").get_room(&pin);
+                let result = RoomClient::new(ROOM_API_BASE_URL).get_room(&pin);
                 let _ = tx.send(AppMsg::WorkshopHostSessionCheck { result });
                 repaint.request_repaint();
             });
@@ -978,81 +987,53 @@ impl WorkshopState {
                     self.multiplayer.join_pin.truncate(4);
                 }
             }
-            if !rl_open {
-                ui.label(match self.multiplayer.mode {
-                    MultiplayerMode::Host => "Step 1: Rocket League is closed.",
-                    MultiplayerMode::Join => "Step 2: Rocket League is closed.",
-                });
+            if !tailnet_ready {
+                ui.label("Connecting to the private Workshop network...");
+            } else if !self.multiplayer.rl_open {
                 let pin_ready = self.multiplayer.mode != MultiplayerMode::Join
                     || self.multiplayer.join_pin.len() == 4;
+                ui.label(match self.multiplayer.mode {
+                    MultiplayerMode::Host => "Step 1: Start Rocket League on the Workshop network.",
+                    MultiplayerMode::Join => "Step 2: Join and start Rocket League on the Workshop network.",
+                });
                 if ui
                     .add_enabled(
                         !setup_in_progress && is_admin && pin_ready,
                         egui::Button::new(match self.multiplayer.mode {
-                            MultiplayerMode::Host => "Set up TAP & start Rocket League",
+                            MultiplayerMode::Host => "Start Rocket League",
                             MultiplayerMode::Join => "Join & start Rocket League",
                         }),
                     )
                     .clicked()
                 {
-                    match self.multiplayer.mode {
-                        MultiplayerMode::Host => prepare_host = true,
-                        MultiplayerMode::Join => {
-                            self.multiplayer.join_after_start = true;
-                            prepare_guest = true;
-                        }
-                    }
+                    launch = true;
                 }
-            } else if !tap_ready {
-                ui.label(match self.multiplayer.mode {
-                    MultiplayerMode::Host => {
-                        "Step 1: The Workshop LAN adapter is not configured for hosting."
-                    }
-                    MultiplayerMode::Join => {
-                        "Step 2: The Workshop LAN adapter is not configured for joining."
-                    }
-                });
-                if ui.button("Close Rocket League").clicked() {
-                    close_game = true;
-                }
-            } else if !self.multiplayer.wizard_check.launch_ready {
+            } else if !self.multiplayer.launch_ready {
                 if self.waiting_for_multihome_check() {
                     ui.label(match self.multiplayer.mode {
                         MultiplayerMode::Host => {
-                            "Step 1: Waiting for Rocket League to apply the Workshop host address."
+                            "Step 1: Waiting for Rocket League to apply the Workshop address."
                         }
                         MultiplayerMode::Join => {
-                            "Step 2: Waiting for Rocket League to apply your Workshop address."
+                            "Step 2: Waiting for Rocket League to apply the Workshop address."
                         }
                     });
                     ui.small("Checking the Rocket League launch command... ");
                 } else {
-                    ui.label(match self.multiplayer.mode {
-                    MultiplayerMode::Host => {
-                        "Step 1: Rocket League was not started with the Workshop host address."
-                    }
-                    MultiplayerMode::Join => {
-                        "Step 2: Rocket League was not started with your assigned Workshop address."
-                    }
-                });
+                    ui.label(
+                        "Rocket League was not started with the Workshop network address.",
+                    );
                     ui.small(
-                    "Rocket League must restart because multihome is fixed when the game starts.",
-                );
+                        "Rocket League must restart because multihome is fixed when the game starts.",
+                    );
                     if ui.button("Close Rocket League").clicked() {
                         close_game = true;
                     }
                 }
             } else {
-                ui.label(match self.multiplayer.mode {
-                    MultiplayerMode::Host => {
-                        "Step 1: Rocket League and the Workshop LAN adapter are ready."
-                    }
-                    MultiplayerMode::Join => {
-                        "Step 2: Rocket League and the Workshop LAN adapter are ready."
-                    }
-                });
+                ui.label("Rocket League is ready on the Workshop network.");
                 match self.multiplayer.mode {
-                    MultiplayerMode::Host => match &self.multiplayer.wizard_check.detected_map {
+                    MultiplayerMode::Host => match &self.multiplayer.detected_map {
                         Some(name) => {
                             ui.label(format!("Step 2: Detected LAN Match on map {name}."));
                             if self.multiplayer.hosted.is_none()
@@ -1067,15 +1048,20 @@ impl WorkshopState {
                             }
                         }
                         None => {
-                            ui.label(if self.multiplayer.wizard_check.in_flight {
-                                "Step 2: Checking for a LAN Match..."
-                            } else {
-                                "Step 2: Waiting for LAN Match."
-                            });
+                            ui.label("Step 2: Waiting for LAN Match.");
                         }
                     },
                     MultiplayerMode::Join => {
-                        ui.label("Step 3: Join the host session below.");
+                        if self.multiplayer.joined.is_none()
+                            && ui
+                                .add_enabled(
+                                    is_admin && !setup_in_progress,
+                                    egui::Button::new("Join by PIN"),
+                                )
+                                .clicked()
+                        {
+                            join = true;
+                        }
                     }
                 }
             }
@@ -1088,60 +1074,23 @@ impl WorkshopState {
                         egui::TextEdit::singleline(&mut self.multiplayer.host_name)
                             .hint_text("Host name"),
                     );
-                    ui.horizontal(|ui| {
-                        ui.label("Tunnel UDP port");
-                        ui.add(egui::DragValue::new(&mut self.multiplayer.port).range(1..=65535));
-                    });
-                    if self.multiplayer.hosted.is_some() {
-                        let pin = &self.multiplayer.hosted.as_ref().unwrap().credentials.pin;
+                    if let Some(session) = &self.multiplayer.hosted {
                         ui.add_space(8.0);
-                        ui.strong(format!("Hosting PIN: {pin}"));
+                        ui.strong(format!("Hosting PIN: {}", session.credentials.pin));
                         ui.label("This session refreshes every five minutes.");
-                        ui.small(self.multiplayer.hosted.as_ref().unwrap().reachability.summary());
-                        let stats = &self.multiplayer.hosted.as_ref().unwrap().stats;
                         ui.small(format!(
-                            "Tunnel: {} · sent {} · received {} · delivered {}",
-                            if stats.connected.load(Ordering::Relaxed) {
+                            "Tunnel: {} · sent {} · received {}",
+                            if session.stats.connected.load(Ordering::Relaxed) {
                                 "peer connected"
                             } else {
                                 "waiting for peer"
                             },
-                            stats.sent.load(Ordering::Relaxed),
-                            stats.received.load(Ordering::Relaxed),
-                            stats.delivered.load(Ordering::Relaxed)
+                            session.stats.sent.load(Ordering::Relaxed),
+                            session.stats.received.load(Ordering::Relaxed),
                         ));
-                        if let Ok(flow) = stats.last_sent_lan_udp.lock() {
+                        if let Ok(flow) = session.stats.last_beacon_relayed.lock() {
                             if !flow.is_empty() {
-                                ui.small(format!("Rocket League LAN UDP out: {flow}"));
-                            } else {
-                                ui.small("Rocket League LAN UDP out: not observed");
-                            }
-                        }
-                        if let Ok(flow) = stats.last_received_lan_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Rocket League LAN UDP in: {flow}"));
-                            } else {
-                                ui.small("Rocket League LAN UDP in: not observed");
-                            }
-                        }
-                        if let Ok(flow) = stats.last_sent_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest TAP UDP out: {flow}"));
-                            }
-                        }
-                        if let Ok(flow) = stats.last_received_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest TAP UDP in: {flow}"));
-                            }
-                        }
-                        if let Ok(flow) = stats.last_sent_broadcast_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest non-system TAP broadcast out: {flow}"));
-                            }
-                        }
-                        if let Ok(flow) = stats.last_received_broadcast_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest non-system TAP broadcast in: {flow}"));
+                                ui.small(format!("Latest: {flow}"));
                             }
                         }
                         if ui.button("Stop hosting").clicked() {
@@ -1153,33 +1102,14 @@ impl WorkshopState {
             if self.multiplayer.mode == MultiplayerMode::Join {
                 columns[0].group(|ui| {
                     ui.heading("Join workshop map");
-                    if wizard_ready
-                        && self.multiplayer.mode == MultiplayerMode::Join
-                        && !self.multiplayer.join_after_start
-                    {
-                        if ui
-                            .add_enabled(
-                                is_admin
-                                    && !setup_in_progress
-                                    && self.multiplayer.join_pin.len() == 4,
-                                egui::Button::new("Join by PIN"),
-                            )
-                            .clicked()
-                        {
-                            join = true;
-                        }
-                    } else if self.multiplayer.joined.is_none() {
-                        ui.small("Complete the setup steps above before joining.");
-                    }
                     if let Some(session) = &self.multiplayer.joined {
                         let room = &session.joined.room;
                         ui.add_space(8.0);
                         ui.strong(&room.host_name);
-                        ui.label(format!("{}:{}", room.endpoint.host, room.endpoint.port));
                         ui.label(format!("Map: {}", room.map.name));
                         ui.label("Install the matching Workshop map before connecting.");
                         ui.small(format!(
-                            "Tunnel: {} · sent {} · received {} · delivered {}",
+                            "Tunnel: {} · sent {} · received {}",
                             if session.stats.connected.load(Ordering::Relaxed) {
                                 "host connected"
                             } else if session.stats.join_failed.load(Ordering::Relaxed) {
@@ -1189,49 +1119,10 @@ impl WorkshopState {
                             },
                             session.stats.sent.load(Ordering::Relaxed),
                             session.stats.received.load(Ordering::Relaxed),
-                            session.stats.delivered.load(Ordering::Relaxed)
                         ));
-                        if session.stats.join_failed.load(Ordering::Relaxed)
-                            && !session.stats.connected.load(Ordering::Relaxed)
-                        {
-                            ui.small(
-                                "The host did not answer. Their network may block inbound UDP \
-                                 (CGNAT, or no port forward); ask them to check the network \
-                                 status shown while hosting.",
-                            );
-                        }
-                        if let Ok(flow) = session.stats.last_sent_lan_udp.lock() {
+                        if let Ok(flow) = session.stats.last_beacon_relayed.lock() {
                             if !flow.is_empty() {
-                                ui.small(format!("Rocket League LAN UDP out: {flow}"));
-                            } else {
-                                ui.small("Rocket League LAN UDP out: not observed");
-                            }
-                        }
-                        if let Ok(flow) = session.stats.last_received_lan_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Rocket League LAN UDP in: {flow}"));
-                            } else {
-                                ui.small("Rocket League LAN UDP in: not observed");
-                            }
-                        }
-                        if let Ok(flow) = session.stats.last_sent_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest TAP UDP out: {flow}"));
-                            }
-                        }
-                        if let Ok(flow) = session.stats.last_received_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest TAP UDP in: {flow}"));
-                            }
-                        }
-                        if let Ok(flow) = session.stats.last_sent_broadcast_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest non-system TAP broadcast out: {flow}"));
-                            }
-                        }
-                        if let Ok(flow) = session.stats.last_received_broadcast_udp.lock() {
-                            if !flow.is_empty() {
-                                ui.small(format!("Latest non-system TAP broadcast in: {flow}"));
+                                ui.small(format!("Latest: {flow}"));
                             }
                         }
                         if ui.button("Leave").clicked() {
@@ -1242,53 +1133,25 @@ impl WorkshopState {
                             let _ = crate::winutil::clear_rocket_league_multihome();
                             self.multiplayer.status = "Left session.".to_string();
                         }
+                    } else if self.multiplayer.pending_join.is_none() {
+                        ui.small("Complete the setup steps above before joining.");
                     }
                 });
             }
         });
         ui.add_space(10.0);
-        if !self.multiplayer.binding_status.is_empty() {
-            ui.small(&self.multiplayer.binding_status);
-        }
-        if !self.multiplayer.tap_ready_before_launch
-            && (self.multiplayer.hosted.is_some() || self.multiplayer.joined.is_some())
-        {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "TAP opened after Rocket League launched; restart through Set up TAP & restart Rocket League for LAN discovery.",
-            );
-        }
         ui.label(&self.multiplayer.status);
         if let Some(progress) = &self.multiplayer.setup_progress {
             ui.add(egui::ProgressBar::new(0.5).animate(true).text(progress));
         }
 
-        if prepare_host {
-            self.prepare_multiplayer(rl_path, HOST_ADDRESS, None, tx, ctx);
-        }
-        if prepare_guest {
-            self.prepare_multiplayer(
-                rl_path,
-                FIRST_GUEST_ADDRESS,
-                Some(self.multiplayer.join_pin.clone()),
-                tx,
-                ctx,
-            );
-        }
-        if self.multiplayer.mode == MultiplayerMode::Join
-            && wizard_ready
-            && self.multiplayer.join_after_start
-            && self.multiplayer.joined.is_none()
-            && !setup_in_progress
-        {
-            self.multiplayer.join_after_start = false;
-            join = true;
+        if launch {
+            self.launch_multiplayer(rl_path, tx, ctx);
         }
 
         if close_game {
             self.multiplayer.status =
-                "Closing Rocket League. Set up the Workshop LAN adapter once it has exited."
-                    .to_string();
+                "Closing Rocket League. Start it again once it has exited.".to_string();
             std::thread::spawn(|| {
                 let _ = crate::winutil::kill_rocket_league();
             });
@@ -1316,13 +1179,87 @@ impl WorkshopState {
         if join {
             if !is_admin {
                 self.multiplayer.status = "Run Hebnix as administrator before joining.".to_string();
-                return;
+            } else {
+                self.join_multiplayer(tx, ctx);
             }
-            self.join_multiplayer(rl_path, tx, ctx);
+        }
+        let _ = wizard_ready;
+    }
+
+    /// Spawns (or reuses) the tsnet sidecar and brings the tailnet up. This
+    /// happens as soon as the user picks Host/Join, before Rocket League is
+    /// touched at all, so the multihome address is known up front instead
+    /// of being discovered after a launch-and-detect cycle.
+    fn start_tailnet(&mut self, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
+        if self.multiplayer.tailnet_requested {
+            return;
+        }
+        self.multiplayer.tailnet_requested = true;
+        self.multiplayer.status = "Setting up the private Workshop network...".to_string();
+        let role = match self.multiplayer.mode {
+            MultiplayerMode::Host => "host",
+            MultiplayerMode::Join => "guest",
+        }
+        .to_string();
+        let tx = tx.clone();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Arc<TsnetSidecarHandle>, String> {
+                let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+                let exe_dir = executable.parent().ok_or_else(|| {
+                    "could not locate Hebnix's install folder".to_string()
+                })?;
+                let sidecar_exe = exe_dir.join("hebnix-tsnet-sidecar.exe");
+                if !sidecar_exe.is_file() {
+                    return Err(format!(
+                        "the multiplayer helper is missing ({})",
+                        sidecar_exe.display()
+                    ));
+                }
+                ensure_sidecar_rule(&sidecar_exe)?;
+                let state_dir = crate::config::base_dir()
+                    .join("multiplayer-lan")
+                    .join("tsnet-state");
+                let handle = TsnetSidecarHandle::spawn(&sidecar_exe, &state_dir, tx.clone())?;
+                let key = RoomClient::new(TSNET_CONTROL_URL).request_tsnet_authkey(&role, "")?;
+                let token = multiplayer_client_token();
+                let hostname = format!("hebnix-{}", &token[..token.len().min(8)]);
+                handle.request_up(key.auth_key, hostname, key.control_url)?;
+                Ok(Arc::new(handle))
+            })();
+            let _ = tx.send(AppMsg::WorkshopTailnetStarted { result });
+            repaint.request_repaint();
+        });
+    }
+
+    pub fn finish_tailnet_started(&mut self, result: Result<Arc<TsnetSidecarHandle>, String>) {
+        match result {
+            Ok(sidecar) => {
+                self.multiplayer.sidecar = Some(sidecar);
+                self.multiplayer.status =
+                    "Connected to the private Workshop network.".to_string();
+            }
+            Err(error) => {
+                self.multiplayer.tailnet_requested = false;
+                self.multiplayer.status = format!("Could not set up the Workshop network: {error}");
+            }
         }
     }
 
-    fn join_multiplayer(
+    /// called from AppMsg::TsnetUpResult once the sidecar actually finishes
+    /// authenticating and reports a tailnet address
+    pub fn set_tailnet_ip(&mut self, tailnet_ip: String) {
+        self.multiplayer.tailnet_ip = Some(tailnet_ip);
+        self.multiplayer.status =
+            "Ready on the private Workshop network.".to_string();
+    }
+
+    pub fn tailnet_failed(&mut self, error: String) {
+        self.multiplayer.tailnet_requested = false;
+        self.multiplayer.status = format!("The Workshop network connection failed: {error}");
+    }
+
+    fn launch_multiplayer(
         &mut self,
         rl_path: &str,
         tx: &Sender<AppMsg>,
@@ -1342,111 +1279,41 @@ impl WorkshopState {
                 return;
             }
         };
-        let prepared_tap = self.multiplayer.prepared_tap.take();
-        let pending_join = self.multiplayer.pending_join.take();
-        if prepared_tap.is_none() {
-            self.multiplayer.tap_ready_before_launch = false;
-        }
-        self.multiplayer.setup_progress = Some("Joining the Workshop LAN session...".to_string());
+        let Some(tailnet_ip) = self.multiplayer.tailnet_ip.clone() else {
+            self.multiplayer.status = "The Workshop network is not ready yet.".to_string();
+            return;
+        };
+        self.multiplayer.launching_rocket_league = true;
+        self.multiplayer.setup_progress =
+            Some("Starting Rocket League on the Workshop network...".to_string());
+        let rl_path = rl_path.to_string();
+        let rl_launch = self.rl_launch.clone();
+        let mode = self.multiplayer.mode;
         let pin = self.multiplayer.join_pin.clone();
         let tx = tx.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
-                let client = RoomClient::new("https://api.hebnix.com");
-                let join_request = multiplayer_join_request();
-                let joined = match pending_join {
-                    Some(joined) => joined,
-                    None => client.join_room(&pin, &join_request)?,
+            let result = (|| -> Result<Option<JoinedRoom>, String> {
+                let client = RoomClient::new(ROOM_API_BASE_URL);
+                let joined = if mode == MultiplayerMode::Join {
+                    let joined = client.join_room(&pin, &multiplayer_join_request())?;
+                    let identity =
+                        multiplayer_player_identity(multiplayer_client_token(), tailnet_ip.clone());
+                    let _ = client.update_player(&joined.room.pin, &identity);
+                    ensure_rocket_league_lan_rule(&rocket_league, &joined.room.endpoint.host)?;
+                    Some(joined)
+                } else {
+                    None
                 };
-                if let Some(launched_address) = rocket_league_multihome_address()
-                    && launched_address != joined.assigned_ip
-                {
-                    let _ = client.leave_room(&joined.room.pin, &joined.leave_token);
-                    return Err(format!(
-                        "This player was assigned {}, but Rocket League is using {launched_address}. Restart it through Join & start Rocket League.",
-                        joined.assigned_ip
-                    ));
-                }
-                let tunnel = match prepared_tap {
-                    Some(tunnel) => tunnel,
-                    None => crate::multiplayer_lan::configure_existing(&joined.assigned_ip)
-                        .and_then(|_| crate::multiplayer_lan::TapSession::open())?,
-                };
-                ensure_join_rule_if_needed(
-                    &executable,
-                    &joined.room.endpoint.host,
-                    joined.room.endpoint.port,
-                )?;
-                ensure_rocket_league_lan_rule(&rocket_league, HOST_ADDRESS)?;
-                GuestSession::start(joined, join_request, tunnel)
-            })();
-            let _ = tx.send(AppMsg::WorkshopGuestJoined { result });
-            repaint.request_repaint();
-        });
-    }
-
-    fn prepare_multiplayer(
-        &mut self,
-        rl_path: &str,
-        address: &str,
-        join_pin: Option<String>,
-        tx: &Sender<AppMsg>,
-        ctx: &eframe::egui::Context,
-    ) {
-        self.multiplayer.prepared_tap.take();
-        self.multiplayer.restarting_rocket_league = true;
-        self.multiplayer.setup_progress = Some("Preparing the Workshop LAN adapter...".to_string());
-        let rl_path = rl_path.to_string();
-        let rl_launch = self.rl_launch.clone();
-        let address = address.to_string();
-        let join_pin = join_pin.filter(|pin| pin.len() == 4);
-        let tx = tx.clone();
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let joined = join_pin
-                .as_deref()
-                .map(|pin| {
-                    RoomClient::new("https://api.hebnix.com")
-                        .join_room(pin, &multiplayer_join_request())
-                })
-                .transpose();
-            let joined = match joined {
-                Ok(joined) => joined,
-                Err(error) => {
-                    let _ = tx.send(AppMsg::WorkshopMultiplayerPrepared { result: Err(error) });
-                    repaint.request_repaint();
-                    return;
-                }
-            };
-            let address = joined
-                .as_ref()
-                .map(|joined| joined.assigned_ip.clone())
-                .unwrap_or(address);
-            let cleanup_join = joined.clone();
-            let _ = tx.send(AppMsg::WorkshopMultiplayerProgress(
-                "Opening the Workshop LAN adapter...".to_string(),
-            ));
-            let result = crate::multiplayer_lan::ensure_adapter(&address)
-                .and_then(|_| crate::multiplayer_lan::TapSession::open());
-            let result = result.and_then(|tunnel| {
-                let _ = tx.send(AppMsg::WorkshopMultiplayerProgress(
-                    "Starting Rocket League with the Workshop LAN address...".to_string(),
-                ));
+                let _ = &executable;
                 crate::winutil::restart_rocket_league_multihome(
                     &rl_launch,
                     Path::new(&rl_path),
-                    &address,
-                )
-                .map(|_| (tunnel, joined))
-            });
-            if result.is_err()
-                && let Some(joined) = cleanup_join
-            {
-                let _ = RoomClient::new("https://api.hebnix.com")
-                    .leave_room(&joined.room.pin, &joined.leave_token);
-            }
-            let _ = tx.send(AppMsg::WorkshopMultiplayerPrepared { result });
+                    &tailnet_ip,
+                )?;
+                Ok(joined)
+            })();
+            let _ = tx.send(AppMsg::WorkshopMultiplayerLaunched { result });
             repaint.request_repaint();
         });
     }
@@ -1455,32 +1322,39 @@ impl WorkshopState {
         self.multiplayer.setup_progress = Some(status);
     }
 
-    pub fn finish_multiplayer_prepare(
-        &mut self,
-        result: Result<
-            (
-                crate::multiplayer_lan::TapSession,
-                Option<crate::multiplayer_lan::JoinedRoom>,
-            ),
-            String,
-        >,
-    ) {
+    pub fn finish_multiplayer_launch(&mut self, result: Result<Option<JoinedRoom>, String>) {
         self.multiplayer.setup_progress = None;
         match result {
-            Ok((tunnel, joined)) => {
-                self.multiplayer.prepared_tap = Some(tunnel);
+            Ok(joined) => {
                 self.multiplayer.pending_join = joined;
-                self.multiplayer.tap_ready_before_launch = true;
                 self.multiplayer.status =
-                    "TAP is ready and Rocket League is restarting with its virtual LAN address."
-                        .to_string();
+                    "Rocket League is starting on the Workshop network.".to_string();
             }
             Err(error) => {
-                self.multiplayer.restarting_rocket_league = false;
-                self.multiplayer.join_after_start = false;
-                self.multiplayer.status = format!("Could not set up Workshop LAN: {error}");
+                self.multiplayer.launching_rocket_league = false;
+                self.multiplayer.status = format!("Could not start Rocket League: {error}");
             }
         }
+    }
+
+    fn join_multiplayer(&mut self, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
+        let Some(joined) = self.multiplayer.pending_join.clone() else {
+            self.multiplayer.status = "Join & start Rocket League first.".to_string();
+            return;
+        };
+        let Some(sidecar) = self.multiplayer.sidecar.clone() else {
+            self.multiplayer.status = "The Workshop network is not ready.".to_string();
+            return;
+        };
+        self.multiplayer.setup_progress = Some("Joining the Workshop LAN session...".to_string());
+        let identity = multiplayer_join_request();
+        let tx = tx.clone();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let result = GuestSession::start(joined, identity, sidecar);
+            let _ = tx.send(AppMsg::WorkshopGuestJoined { result });
+            repaint.request_repaint();
+        });
     }
 
     fn start_hosting(&mut self, rl_path: &str, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
@@ -1507,9 +1381,17 @@ impl WorkshopState {
                 return;
             }
         };
+        let Some(tailnet_ip) = self.multiplayer.tailnet_ip.clone() else {
+            self.multiplayer.status = "The Workshop network is not ready.".to_string();
+            return;
+        };
+        let Some(sidecar) = self.multiplayer.sidecar.clone() else {
+            self.multiplayer.status = "The Workshop network is not ready.".to_string();
+            return;
+        };
         let request = CreateRoomRequest {
             host_name: self.multiplayer.host_name.trim().to_string(),
-            port: self.multiplayer.port,
+            port: RL_LAN_PORT,
             map: MapDescriptor {
                 id: map_id.clone(),
                 name: str_of(&map, "name", &target).to_string(),
@@ -1532,87 +1414,64 @@ impl WorkshopState {
                 return;
             }
         };
-        let prepared_tap = self.multiplayer.prepared_tap.take();
         let previous_host = self.multiplayer.saved_host.clone();
-        if prepared_tap.is_none() {
-            self.multiplayer.tap_ready_before_launch = false;
-        }
         self.multiplayer.setup_progress = Some("Creating Workshop LAN session...".to_string());
         let tx = tx.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                ensure_host_rule(&executable, request.port)?;
-                ensure_rocket_league_lan_rule(&rocket_league, GUEST_ADDRESS_RANGE)?;
-                let tunnel = match prepared_tap {
-                    Some(tunnel) => tunnel,
-                    None => crate::multiplayer_lan::configure_existing(HOST_ADDRESS)
-                        .and_then(|_| crate::multiplayer_lan::TapSession::open())?,
-                };
-                let client = RoomClient::new("https://api.hebnix.com");
+                ensure_beacon_relay_rule(&executable)?;
+                // the exact guest tailnet address isn't known until they
+                // join, so this is scoped to headscale's default CGNAT
+                // range rather than a single IP -- narrow this once the
+                // room API can report joined players' addresses up front.
+                ensure_rocket_league_lan_rule(&rocket_league, "100.64.0.0/10")?;
+                let client = RoomClient::new(ROOM_API_BASE_URL);
                 if let Some(previous) = previous_host {
                     let _ = client.close_room(&previous.pin, &previous.host_secret);
                 }
-                HostSession::start(client, request, tunnel)
+                HostSession::start(client, request, sidecar, tailnet_ip)
             })();
             let _ = tx.send(AppMsg::WorkshopHostStarted { result });
             repaint.request_repaint();
         });
     }
 
-    pub fn refresh_wizard_status(&mut self, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
-        if !self.multiplayer.wizard_started || self.multiplayer.wizard_check.in_flight {
+    pub fn refresh_launch_status(&mut self, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
+        if !self.multiplayer.wizard_started
+            || self.multiplayer.multihome_check_in_flight
+            || self.multiplayer.tailnet_ip.is_none()
+        {
             return;
         }
-        let address = match self.multiplayer.mode {
-            MultiplayerMode::Host => HOST_ADDRESS.to_string(),
-            MultiplayerMode::Join => self
-                .multiplayer
-                .pending_join
-                .as_ref()
-                .map(|joined| joined.assigned_ip.clone())
-                .or_else(rocket_league_multihome_address)
-                .unwrap_or_else(|| FIRST_GUEST_ADDRESS.to_string()),
+        let Some(tailnet_ip) = self.multiplayer.tailnet_ip.clone() else {
+            return;
         };
-        self.multiplayer.wizard_check.in_flight = true;
+        self.multiplayer.multihome_check_in_flight = true;
         let tx = tx.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let rl_open = hebnix_sdk::process::is_rocket_league_running();
-            let tap_ready =
-                rl_open && crate::multiplayer_lan::is_configured(&address).unwrap_or(false);
-            if rl_open && tap_ready {
+            if rl_open {
                 std::thread::sleep(MULTIHOME_CHECK_INTERVAL);
             }
             let rl_open = hebnix_sdk::process::is_rocket_league_running();
-            let launch_ready = rl_open && rocket_league_launched_with_multihome(&address);
-            let _ = tx.send(AppMsg::WorkshopWizardCheck {
+            let launch_ready = rl_open && rocket_league_launched_with_multihome(&tailnet_ip);
+            let _ = tx.send(AppMsg::WorkshopLaunchCheck {
                 rl_open,
-                tap_ready,
                 launch_ready,
-                detected_map: None,
             });
             repaint.request_repaint();
         });
     }
 
-    pub fn finish_wizard_check(
-        &mut self,
-        rl_open: bool,
-        tap_ready: bool,
-        launch_ready: bool,
-        detected_map: Option<String>,
-    ) {
-        self.multiplayer.wizard_check.rl_open = rl_open;
-        self.multiplayer.wizard_check.tap_ready = tap_ready;
-        self.multiplayer.wizard_check.launch_ready = launch_ready;
-        if detected_map.is_some() {
-            self.multiplayer.wizard_check.detected_map = detected_map;
-        }
-        self.multiplayer.wizard_check.in_flight = false;
+    pub fn finish_launch_check(&mut self, rl_open: bool, launch_ready: bool) {
+        self.multiplayer.rl_open = rl_open;
+        self.multiplayer.launch_ready = launch_ready;
+        self.multiplayer.multihome_check_in_flight = false;
         if !rl_open || launch_ready {
             self.multiplayer.multihome_check_attempts = 0;
-        } else if tap_ready {
+        } else {
             self.multiplayer.multihome_check_attempts =
                 self.multiplayer.multihome_check_attempts.saturating_add(1);
         }
@@ -1620,17 +1479,15 @@ impl WorkshopState {
 
     pub fn retry_multihome_check(&self) -> bool {
         self.multiplayer.wizard_started
-            && self.multiplayer.wizard_check.rl_open
-            && self.multiplayer.wizard_check.tap_ready
-            && !self.multiplayer.wizard_check.launch_ready
-            && !self.multiplayer.wizard_check.in_flight
+            && self.multiplayer.rl_open
+            && !self.multiplayer.launch_ready
+            && !self.multiplayer.multihome_check_in_flight
             && self.multiplayer.multihome_check_attempts < MULTIHOME_CHECK_MAX_ATTEMPTS
     }
 
     fn waiting_for_multihome_check(&self) -> bool {
-        self.multiplayer.wizard_check.rl_open
-            && self.multiplayer.wizard_check.tap_ready
-            && !self.multiplayer.wizard_check.launch_ready
+        self.multiplayer.rl_open
+            && !self.multiplayer.launch_ready
             && self.multiplayer.multihome_check_attempts < MULTIHOME_CHECK_MAX_ATTEMPTS
     }
 
@@ -1646,12 +1503,12 @@ impl WorkshopState {
             let session = self.multiplayer.joined.as_ref().unwrap();
             let pin = session.joined.room.pin.clone();
             let token = session.joined.leave_token.clone();
+            let tailnet_ip = self.multiplayer.tailnet_ip.clone().unwrap_or_default();
             self.multiplayer.identity_update_in_flight = true;
             let tx = tx.clone();
             std::thread::spawn(move || {
-                let request = multiplayer_player_identity(token);
-                let result =
-                    RoomClient::new("https://api.hebnix.com").update_player(&pin, &request);
+                let request = multiplayer_player_identity(token, tailnet_ip);
+                let result = RoomClient::new(ROOM_API_BASE_URL).update_player(&pin, &request);
                 let _ = tx.send(AppMsg::WorkshopPlayerUpdated { result });
             });
             return;
@@ -1665,8 +1522,7 @@ impl WorkshopState {
                 .map(|name| name.trim_end_matches(".upk").eq_ignore_ascii_case(arena))
                 .unwrap_or_else(|| target.trim_end_matches(".upk").eq_ignore_ascii_case(arena))
         }) {
-            self.multiplayer.wizard_check.detected_map =
-                Some(str_of(&map, "name", &target).to_string());
+            self.multiplayer.detected_map = Some(str_of(&map, "name", &target).to_string());
             self.multiplayer.detected_target = Some(target);
         }
     }
@@ -1694,10 +1550,7 @@ impl WorkshopState {
             Ok(session) => {
                 self.multiplayer.identity_updated = false;
                 self.multiplayer.identity_update_in_flight = false;
-                self.multiplayer.status = format!(
-                    "Joined session {} as {}.",
-                    session.joined.room.pin, session.joined.assigned_ip
-                );
+                self.multiplayer.status = format!("Joined session {}.", session.joined.room.pin);
                 self.multiplayer.joined = Some(session);
             }
             Err(error) => self.multiplayer.status = format!("Could not join session: {error}"),
@@ -1935,50 +1788,68 @@ impl WorkshopState {
         self.execute_search(false);
     }
 
+    /// Rocket League closed. Rather than tearing the session down
+    /// immediately (which would kick everyone out of the room over an
+    /// ordinary crash or restart), this arms a grace window; see
+    /// tick_shutdown_grace for the part that actually tears things down.
     pub fn shutdown_multiplayer(&mut self) {
-        if self.multiplayer.restarting_rocket_league {
+        if self.multiplayer.launching_rocket_league {
+            // this is Hebnix's own close-then-relaunch, not a real exit
             return;
         }
+        let has_session = self.multiplayer.hosted.is_some() || self.multiplayer.joined.is_some();
+        if !has_session || self.multiplayer.shutdown_deadline.is_some() {
+            return;
+        }
+        self.multiplayer.shutdown_deadline =
+            Some(std::time::Instant::now() + crate::multiplayer_lan::CRASH_GRACE_WINDOW);
+        self.multiplayer.status =
+            "Rocket League closed. Keeping the session open in case it comes back...".to_string();
+    }
 
+    /// call periodically (piggybacked on the existing RL-status poll) to
+    /// resolve the crash grace window one way or the other
+    pub fn tick_shutdown_grace(&mut self) {
+        let Some(deadline) = self.multiplayer.shutdown_deadline else {
+            return;
+        };
+        if hebnix_sdk::process::is_rocket_league_running() {
+            self.multiplayer.shutdown_deadline = None;
+            self.multiplayer.status = "Rocket League reconnected.".to_string();
+            return;
+        }
+        if std::time::Instant::now() < deadline {
+            return;
+        }
+        self.multiplayer.shutdown_deadline = None;
         let hosted = self.multiplayer.hosted.take();
         let joined = self.multiplayer.joined.take();
-        let prepared_tap = self.multiplayer.prepared_tap.take();
-        let cleanup_needed = hosted.is_some()
-            || joined.is_some()
-            || prepared_tap.is_some()
-            || self.multiplayer.tap_ready_before_launch;
-
         self.clear_host_state();
         self.multiplayer.pending_join = None;
-        self.multiplayer.tap_ready_before_launch = false;
         self.multiplayer.status =
             "Workshop multiplayer stopped because Rocket League closed.".to_string();
 
         // Stopping a session can wait for a network heartbeat, while firewall
-        // and TAP cleanup launch external commands. This method runs from the
-        // egui message handler, so doing any of that here freezes the whole app
-        // when Rocket League exits. Ordinary (non-multiplayer) exits need no
-        // cleanup at all; tear down real multiplayer state on a worker.
-        if cleanup_needed {
-            std::thread::Builder::new()
-                .name("workshop-shutdown".into())
-                .spawn(move || {
-                    if let Some(mut session) = hosted {
-                        let _ = session.stop();
-                    }
-                    if let Some(mut session) = joined {
-                        let _ = session.leave();
-                    }
-                    drop(prepared_tap);
-                    let _ = crate::winutil::clear_rocket_league_multihome();
-                    let _ = crate::multiplayer_lan::cleanup_system_state();
-                })
-                .ok();
-        }
+        // cleanup launches external commands. This runs from the egui
+        // message handler, so doing any of that here freezes the whole app.
+        std::thread::Builder::new()
+            .name("workshop-shutdown".into())
+            .spawn(move || {
+                if let Some(mut session) = hosted {
+                    let _ = session.stop();
+                }
+                if let Some(mut session) = joined {
+                    let _ = session.leave();
+                }
+                let _ = crate::winutil::clear_rocket_league_multihome();
+                let _ = crate::multiplayer_lan::cleanup_system_state();
+            })
+            .ok();
     }
 
     pub fn rocket_league_reopened(&mut self) {
-        self.multiplayer.restarting_rocket_league = false;
+        self.multiplayer.launching_rocket_league = false;
+        self.multiplayer.shutdown_deadline = None;
     }
 
     pub fn suspend_multiplayer(&mut self) {
@@ -1990,7 +1861,7 @@ impl WorkshopState {
             session.stop();
         }
         self.multiplayer.joined = None;
-        self.multiplayer.prepared_tap.take();
+        self.multiplayer.sidecar = None;
         if !hebnix_sdk::process::is_rocket_league_running() {
             let _ = crate::winutil::clear_rocket_league_multihome();
             let _ = crate::multiplayer_lan::cleanup_system_state();

@@ -1381,8 +1381,9 @@ impl HebnixApp {
                         self.check_web_port();
                     }
                     if rl_state_changed || platform_changed {
-                        self.workshop.refresh_wizard_status(&self.tx, ctx);
+                        self.workshop.refresh_launch_status(&self.tx, ctx);
                     }
+                    self.workshop.tick_shutdown_grace();
                 }
                 AppMsg::AppUpdateFetched { result } => match result {
                     Ok(Some(info)) => {
@@ -1656,8 +1657,11 @@ impl HebnixApp {
                 AppMsg::WorkshopMultiplayerProgress(status) => {
                     self.workshop.set_multiplayer_progress(status);
                 }
-                AppMsg::WorkshopMultiplayerPrepared { result } => {
-                    self.workshop.finish_multiplayer_prepare(result);
+                AppMsg::WorkshopTailnetStarted { result } => {
+                    self.workshop.finish_tailnet_started(result);
+                }
+                AppMsg::WorkshopMultiplayerLaunched { result } => {
+                    self.workshop.finish_multiplayer_launch(result);
                 }
                 AppMsg::WorkshopHostStarted { result } => {
                     self.workshop.finish_hosting(result);
@@ -1671,20 +1675,13 @@ impl HebnixApp {
                 AppMsg::WorkshopHostSessionCheck { result } => {
                     self.workshop.finish_host_session_check(result);
                 }
-                AppMsg::WorkshopWizardCheck {
+                AppMsg::WorkshopLaunchCheck {
                     rl_open,
-                    tap_ready,
                     launch_ready,
-                    detected_map,
                 } => {
-                    self.workshop.finish_wizard_check(
-                        rl_open,
-                        tap_ready,
-                        launch_ready,
-                        detected_map,
-                    );
+                    self.workshop.finish_launch_check(rl_open, launch_ready);
                     if self.workshop.retry_multihome_check() {
-                        self.workshop.refresh_wizard_status(&self.tx, ctx);
+                        self.workshop.refresh_launch_status(&self.tx, ctx);
                     }
                 }
                 AppMsg::PluginFetch { result } => {
@@ -1807,15 +1804,22 @@ impl HebnixApp {
                     self.plugin_mgr.on_ws_close(&slug, &id, &reason);
                     ctx.request_repaint();
                 }
-                // TODO(tsnet multiplayer rework): wire these into
-                // WorkshopMultiplayerState once the sidecar-driven session
-                // flow replaces the TAP/NAT wizard. For now just surface
-                // what's happening in the console so the helper process is
-                // observable while it's being built out.
                 AppMsg::TsnetUpResult { result } => match result {
-                    Ok(ip) => self.console.write(format!("[tsnet] tailnet up, IP {ip}")),
-                    Err(error) => self.console.write(format!("[tsnet] failed to bring the tailnet up: {error}")),
+                    Ok(ip) => {
+                        self.console.write(format!("[tsnet] tailnet up, IP {ip}"));
+                        self.workshop.set_tailnet_ip(ip);
+                        self.workshop.refresh_launch_status(&self.tx, ctx);
+                    }
+                    Err(error) => {
+                        self.console
+                            .write(format!("[tsnet] failed to bring the tailnet up: {error}"));
+                        self.workshop.tailnet_failed(error);
+                    }
                 },
+                // not otherwise consumed yet -- peer-level status/events only
+                // drive the console for now. See the tsnet-multiplayer rework
+                // plan's beacon-relay/firewall-scoping notes for what would
+                // consume a live peer list if this UI panel grows one later.
                 AppMsg::TsnetStatus { state, tailnet_ip, peers } => {
                     self.console.write(format!(
                         "[tsnet] status={state:?} ip={tailnet_ip:?} peers={}",
