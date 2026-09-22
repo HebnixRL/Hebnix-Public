@@ -1625,6 +1625,17 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
         })?,
     )?;
 
+    // wall clock epoch millis, os.time in lua is whole seconds only
+    hebnix.set(
+        "unix_millis",
+        lua.create_function(|_, ()| {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0))
+        })?,
+    )?;
+
     // connected pads (Universal Analog Support)
     hebnix.set(
         "controllers",
