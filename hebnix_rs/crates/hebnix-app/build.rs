@@ -174,13 +174,12 @@ fn copy_runtime_binaries() {
         "rlapi-bridge.exe missing - run rlapi_bridge/build.bat (RLAPI off until then)",
     );
 
-    copy_tree(
-        &manifest_dir
-            .join("src")
-            .join("multiplayer-lan")
-            .join("tap-driver"),
-        &profile_dir.join("tap-driver"),
-        "tap-driver/ missing - Workshop LAN is unavailable",
+    copy_file(
+        &workspace_root
+            .join("sidecar")
+            .join("hebnix-tsnet-sidecar.exe"),
+        &profile_dir,
+        "hebnix-tsnet-sidecar.exe missing from hebnix_rs/sidecar/ - build it (Workshop LAN multiplayer is unavailable without it)",
     );
 }
 
@@ -208,45 +207,6 @@ fn copy_file(
     }
 }
 
-fn copy_tree(
-    src: &Path,
-    dst: &Path,
-    missing_hint: &str,
-) {
-    if !src.is_dir() {
-        println!("cargo:warning=hebnix: {missing_hint}");
-        return;
-    }
-
-    let Ok(entries) = std::fs::read_dir(src) else {
-        return;
-    };
-
-    let _ = std::fs::create_dir_all(dst);
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let destination = dst.join(entry.file_name());
-
-        if path.is_dir() {
-            copy_tree(
-                &path,
-                &destination,
-                missing_hint,
-            );
-        } else if path.is_file() {
-            println!(
-                "cargo:rerun-if-changed={}",
-                path.display()
-            );
-
-            let _ = std::fs::copy(
-                &path,
-                destination,
-            );
-        }
-    }
-}
 
 // target/<profile>/ derived from
 // OUT_DIR = target/<profile>/build/<pkg>/out
