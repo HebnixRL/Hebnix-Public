@@ -174,13 +174,23 @@ fn copy_runtime_binaries() {
         "rlapi-bridge.exe missing - run rlapi_bridge/build.bat (RLAPI off until then)",
     );
 
-    copy_file(
-        &workspace_root
-            .join("sidecar")
-            .join("hebnix-tsnet-sidecar.exe"),
-        &profile_dir,
-        "hebnix-tsnet-sidecar.exe missing from hebnix_rs/sidecar/ - build it (Workshop LAN multiplayer is unavailable without it)",
-    );
+    let sidecar_dir = workspace_root.join("sidecar");
+    for (file_name, missing_hint) in [
+        (
+            "tailscaled.exe",
+            "tailscaled.exe missing from hebnix_rs/sidecar/ - see sidecar/README.md (Workshop LAN multiplayer is unavailable without it)",
+        ),
+        (
+            "tailscale.exe",
+            "tailscale.exe missing from hebnix_rs/sidecar/ - see sidecar/README.md (Workshop LAN multiplayer is unavailable without it)",
+        ),
+        (
+            "wintun.dll",
+            "wintun.dll missing from hebnix_rs/sidecar/ - see sidecar/README.md (Workshop LAN multiplayer is unavailable without it)",
+        ),
+    ] {
+        copy_file(&sidecar_dir.join(file_name), &profile_dir, missing_hint);
+    }
 }
 
 fn copy_file(

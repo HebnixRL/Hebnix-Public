@@ -1209,18 +1209,11 @@ impl WorkshopState {
                 let exe_dir = executable.parent().ok_or_else(|| {
                     "could not locate Hebnix's install folder".to_string()
                 })?;
-                let sidecar_exe = exe_dir.join("hebnix-tsnet-sidecar.exe");
-                if !sidecar_exe.is_file() {
-                    return Err(format!(
-                        "the multiplayer helper is missing ({})",
-                        sidecar_exe.display()
-                    ));
-                }
-                ensure_sidecar_rule(&sidecar_exe)?;
+                ensure_sidecar_rule(&exe_dir.join("tailscaled.exe"))?;
                 let state_dir = crate::config::base_dir()
                     .join("multiplayer-lan")
                     .join("tsnet-state");
-                let handle = TsnetSidecarHandle::spawn(&sidecar_exe, &state_dir, tx.clone())?;
+                let handle = TsnetSidecarHandle::spawn(exe_dir, &state_dir, tx.clone())?;
                 let key = RoomClient::new(TSNET_CONTROL_URL).request_tsnet_authkey(&role, "")?;
                 let token = multiplayer_client_token();
                 let hostname = format!("hebnix-{}", &token[..token.len().min(8)]);
