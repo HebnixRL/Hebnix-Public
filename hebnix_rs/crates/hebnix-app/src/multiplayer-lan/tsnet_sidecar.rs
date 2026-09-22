@@ -119,6 +119,14 @@ pub struct TsnetSidecarHandle {
     control: Arc<Mutex<TcpStream>>,
 }
 
+impl std::fmt::Debug for TsnetSidecarHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TsnetSidecarHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl TsnetSidecarHandle {
     /// Spawns the sidecar binary, waits for its ready handshake, connects the
     /// control socket, and starts background threads forwarding its stdout

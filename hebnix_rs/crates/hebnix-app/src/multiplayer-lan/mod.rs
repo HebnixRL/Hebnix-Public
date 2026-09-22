@@ -1,54 +1,43 @@
+mod beacon;
 mod direct_udp;
 mod firewall;
 mod guest;
 mod hosting;
 mod models;
-mod nat;
 mod room_api;
-mod tap;
 mod tsnet_sidecar;
 
 use std::time::Duration;
 
-pub use direct_udp::{DirectGuest, DirectHost, TunnelStats, record_received_udp, record_sent_udp};
-pub use firewall::{ensure_host_rule, ensure_join_rule_if_needed, ensure_rocket_league_lan_rule};
+pub use direct_udp::TunnelStats;
+pub use firewall::{ensure_beacon_relay_rule, ensure_rocket_league_lan_rule, ensure_sidecar_rule};
 pub use guest::GuestSession;
 pub use hosting::HostSession;
 pub use models::{
     CreateRoomRequest, JoinRoomRequest, JoinedRoom, LeaveRoomRequest, MapDescriptor, Room,
-    RoomCredentials, UpdatePlayerRequest,
+    RoomCredentials, TsnetAuthKey, UpdatePlayerRequest,
 };
 pub use room_api::RoomClient;
-pub use tap::{TapSession, configure_existing, ensure_adapter, is_configured};
 pub use tsnet_sidecar::{PeerInfo, TsState, TsnetSidecarHandle};
 
-pub const VPN_SUBNET: &str = "10.242.77";
-pub const HOST_ADDRESS: &str = "10.242.77.1";
-pub const HOST_ADDRESS_BYTES: [u8; 4] = [10, 242, 77, 1];
-pub const FIRST_GUEST_ADDRESS: &str = "10.242.77.2";
-pub const GUEST_ADDRESS_RANGE: &str = "10.242.77.2-10.242.77.8";
-pub const PACKET_PUMP_INTERVAL: Duration = Duration::from_millis(2);
-pub const SESSION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
+/// Where the headscale coordination server for Workshop LAN lives. Harry
+/// said he'll likely just run headscale on the existing api.hebnix.com box
+/// rather than standing up a separate subdomain, so this points there by
+/// default -- update this one constant if he ends up hosting it elsewhere.
+pub const TSNET_CONTROL_URL: &str = "https://api.hebnix.com";
+pub const ROOM_API_BASE_URL: &str = "https://api.hebnix.com";
 
-pub fn guest_address(slot: u8) -> Result<String, String> {
-    if (2..=8).contains(&slot) {
-        Ok(format!("{VPN_SUBNET}.{slot}"))
-    } else {
-        Err("invalid Workshop LAN player slot".to_string())
-    }
-}
+/// Rocket League's own LAN discovery/game port. The beacon relay listens
+/// here and guests' `-multihome` sockets receive on it too.
+pub const RL_LAN_PORT: u16 = 7777;
+
+pub const PACKET_PUMP_INTERVAL: Duration = Duration::from_millis(50);
+pub const SESSION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
+/// how long a session stays alive after Rocket League exits before Hebnix
+/// tears the room/tailnet down for real -- covers an ordinary crash/restart
+/// without kicking everyone out of the room.
+pub const CRASH_GRACE_WINDOW: Duration = Duration::from_secs(90);
 
 pub fn cleanup_system_state() -> Result<(), String> {
-    let mut errors = Vec::new();
-    if let Err(error) = firewall::remove_rules() {
-        errors.push(error);
-    }
-    if let Err(error) = tap::clear_configuration() {
-        errors.push(error);
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
+    firewall::remove_rules()
 }
