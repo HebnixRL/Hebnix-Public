@@ -64,6 +64,7 @@ const SCENERY_DONORS: &[(&str, &str)] = &[
     ("BG_Woods_Day_P", "Drift Woods (Day) — scenery"),
     ("BG_FNI_Stadium", "Forbidden Temple (Fire & Ice) — scenery"),
 ];
+const NO_BACKGROUND: &str = "__HBNX_NO_BACKGROUND__";
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -119,6 +120,9 @@ impl BackgroundChangerState {
     }
 
     fn display_name(package: &str) -> &str {
+        if package == NO_BACKGROUND {
+            return "No background";
+        }
         ARENAS
             .iter()
             .chain(SCENERY_DONORS.iter())
@@ -173,6 +177,7 @@ impl BackgroundChangerState {
             .installed_donors
             .iter()
             .any(|(package, _)| *package == self.donor)
+            && self.donor != NO_BACKGROUND
         {
             self.donor = self
                 .installed_donors
@@ -202,6 +207,7 @@ impl BackgroundChangerState {
         self.busy = true;
         self.status = match command {
             "apply" => "Applying fog, sky, and background…".to_string(),
+            "remove" => "Removing fog, sky, and background…".to_string(),
             "undo" => "Restoring the original arena…".to_string(),
             _ => "Restoring all original arenas…".to_string(),
         };
@@ -332,6 +338,12 @@ impl BackgroundChangerState {
                         }
                     });
                     ui.separator();
+                    ui.selectable_value(
+                        &mut self.donor,
+                        NO_BACKGROUND.to_string(),
+                        "No background",
+                    );
+                    ui.separator();
                     let query = self.donor_search.trim().to_ascii_lowercase();
                     let mut found = false;
                     for (package, display) in &self.installed_donors {
@@ -351,13 +363,24 @@ impl BackgroundChangerState {
             let valid = !self.busy
                 && !self.host.is_empty()
                 && !self.donor.is_empty()
-                && self.host != self.donor;
+                && (self.donor == NO_BACKGROUND || self.host != self.donor);
             if ui
-                .add_enabled(valid, egui::Button::new("Apply Background"))
+                .add_enabled(
+                    valid,
+                    egui::Button::new(if self.donor == NO_BACKGROUND {
+                        "Remove Background"
+                    } else {
+                        "Apply Background"
+                    }),
+                )
                 .clicked()
             {
                 self.launch(
-                    "apply",
+                    if self.donor == NO_BACKGROUND {
+                        "remove"
+                    } else {
+                        "apply"
+                    },
                     rl_path,
                     Some(self.host.clone()),
                     Some(self.donor.clone()),
@@ -365,7 +388,7 @@ impl BackgroundChangerState {
                     &ctx,
                 );
             }
-            if self.host == self.donor {
+            if self.host == self.donor && self.donor != NO_BACKGROUND {
                 ui.small("Choose two different arenas.");
             }
         });

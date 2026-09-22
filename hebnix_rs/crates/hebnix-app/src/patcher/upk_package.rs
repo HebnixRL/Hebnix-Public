@@ -646,6 +646,37 @@ impl UpkPackage {
         })();
         parsed.unwrap_or((None, offset, false))
     }
+    /// Read the property stream immediately after UObject's net index. Unlike
+    /// the recovery scanner, this never interprets texture pixels as tags.
+    pub(crate) fn serialized_props(&self, e: &ExportEntry) -> Result<(Vec<Prop>, usize), String> {
+        let raw = self
+            .image
+            .get(e.serial_offset..e.serial_offset.saturating_add(e.serial_size))
+            .ok_or("Truncated export")?;
+        let mut at = 4;
+        let mut props = Vec::new();
+        for _ in 0..4096 {
+            let (prop, next, ended) = self.parse_tag(raw, at);
+            if ended {
+                return Ok((props, next));
+            }
+            props.push(prop.ok_or("Invalid serialized property stream")?);
+            if next <= at {
+                return Err("Property stream did not advance".into());
+            }
+            at = next;
+        }
+        Err("Too many serialized properties".into())
+    }
+
+    pub(crate) fn bulk_offset_width(&self) -> usize {
+        if self.header.licensee_version >= 22 {
+            8
+        } else {
+            4
+        }
+    }
+
     pub fn parse_props(&self, e: &ExportEntry) -> Vec<Prop> {
         let Some(raw) = self
             .image

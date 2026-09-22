@@ -1071,17 +1071,18 @@ impl SwapperState {
         for &source_index in visible {
             if let Some(filename) = items[source_index].thumbnail.as_ref() {
                 let cache_key = format!("{}|{}", category.slug(), filename.to_ascii_lowercase());
-                let fallback = fs::read(self.base_dir.join("assets").join("hebnix.png"))
-                    .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec());
                 self.thumbnails.entry(cache_key).or_insert_with(|| {
-                    Some(
-                        crate::cosmetic_thumbnail::extract_png(
-                            &cooked_pc.join(filename),
-                            category.slug(),
-                        )
-                        .unwrap_or(fallback)
-                        .into(),
-                    )
+                    match crate::cosmetic_thumbnail::extract_png(
+                        &cooked_pc.join(filename),
+                        category.slug(),
+                    ) {
+                        Ok(png) => Some(png.into()),
+                        Err(error) => {
+                            let _ =
+                                tx.send(AppMsg::Log(format!("[Thumbnails] {filename}: {error}")));
+                            None
+                        }
+                    }
                 });
             }
         }
@@ -1134,7 +1135,14 @@ impl SwapperState {
                                         let source_label = item_label(category, source);
                                         ui.add(
                                             egui::Image::from_bytes(
-                                                format!("bytes://swapper/{key}"),
+                                                format!(
+                                                    "bytes://swapper/{key}/{:08x}",
+                                                    crc32fast::hash(
+                                                        thumbnail
+                                                            .as_deref()
+                                                            .unwrap_or(&fallback_thumbnail)
+                                                    )
+                                                ),
                                                 thumbnail
                                                     .unwrap_or_else(|| fallback_thumbnail.clone()),
                                             )
