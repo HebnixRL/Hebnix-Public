@@ -693,6 +693,18 @@ local function with_alpha(hex, a)
     return hex:sub(1, 7) .. string.format("%02x", a)
 end
 
+local function opposite(hex)
+    local r = tonumber(hex:sub(2, 3), 16) or 255
+    local g = tonumber(hex:sub(4, 5), 16) or 255
+    local b = tonumber(hex:sub(6, 7), 16) or 255
+    return string.format("#%02x%02x%02x", 255 - r, 255 - g, 255 - b)
+end
+
+local BORDER_OFF = {
+    { -1, -1 }, { 0, -1 }, { 1, -1 }, { -1, 0 },
+    { 1, 0 }, { -1, 1 }, { 0, 1 }, { 1, 1 },
+}
+
 local function scroll_text(draw, s, x, y, size, color, cl, cw)
     s = s or ""
     local tw = hebnix.measure_text(s, size, true)
@@ -809,6 +821,11 @@ function plugin.on_overlay(draw, w, h)
         if not hebnix.get_bool("spotify_overlay_lyrics_auto_color", true) then
             base_color = hebnix.get_string("spotify_overlay_lyrics_color", "#ffffff")
         end
+        local border = hebnix.get_number("spotify_overlay_lyrics_border", 0) * s
+        local border_color = opposite(base_color)
+        if not hebnix.get_bool("spotify_overlay_lyrics_border_auto", true) then
+            border_color = hebnix.get_string("spotify_overlay_lyrics_border_color", "#000000")
+        end
         local anim = hebnix.get_string("spotify_overlay_lyrics_anim", "Slide")
         local p_a = anim == "None" and 1.0 or math.min(1.0, (mono() - S.lyric_t0) / 0.30)
 
@@ -829,7 +846,15 @@ function plugin.on_overlay(draw, w, h)
                 local alpha = r.cur and 1.0 or 0.7
                 if r.cur and anim == "Fade" then alpha = 0.35 + 0.65 * p_a end
                 if r.cur and anim == "Scale" then size = lyr_size * (0.7 + 0.3 * p_a) end
-                draw.text(cx, r.c - size / 2 + shift, l.text,
+                local ty = r.c - size / 2 + shift
+                if border > 0 then
+                    local bcol = with_alpha(border_color, alpha)
+                    for _, o in ipairs(BORDER_OFF) do
+                        draw.text(cx + o[1] * border, ty + o[2] * border, l.text,
+                            { color = bcol, size = size, halign = "center", bold = r.cur })
+                    end
+                end
+                draw.text(cx, ty, l.text,
                     { color = with_alpha(base_color, alpha), size = size,
                         halign = "center", bold = r.cur })
             end
@@ -862,6 +887,9 @@ function plugin.on_settings(ui)
     ui.slider("spotify_overlay_lyrics_offset", "Lyrics sync (ms)", -1500, 1500, 0)
     ui.checkbox("spotify_overlay_lyrics_auto_color", "Auto lyrics colour", true)
     ui.color_picker("spotify_overlay_lyrics_color", "Lyrics colour", "#ffffff")
+    ui.slider("spotify_overlay_lyrics_border", "Lyrics border", 0, 1.5, 0)
+    ui.checkbox("spotify_overlay_lyrics_border_auto", "Auto border colour (opposite)", true)
+    ui.color_picker("spotify_overlay_lyrics_border_color", "Border colour", "#000000")
     ui.space(6)
 end
 
