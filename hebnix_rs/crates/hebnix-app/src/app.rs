@@ -1807,6 +1807,31 @@ impl HebnixApp {
                     self.plugin_mgr.on_ws_close(&slug, &id, &reason);
                     ctx.request_repaint();
                 }
+                // TODO(tsnet multiplayer rework): wire these into
+                // WorkshopMultiplayerState once the sidecar-driven session
+                // flow replaces the TAP/NAT wizard. For now just surface
+                // what's happening in the console so the helper process is
+                // observable while it's being built out.
+                AppMsg::TsnetUpResult { result } => match result {
+                    Ok(ip) => self.console.write(format!("[tsnet] tailnet up, IP {ip}")),
+                    Err(error) => self.console.write(format!("[tsnet] failed to bring the tailnet up: {error}")),
+                },
+                AppMsg::TsnetStatus { state, tailnet_ip, peers } => {
+                    self.console.write(format!(
+                        "[tsnet] status={state:?} ip={tailnet_ip:?} peers={}",
+                        peers.len()
+                    ));
+                }
+                AppMsg::TsnetPeerEvent { online, tailnet_ip } => {
+                    let word = if online { "online" } else { "offline" };
+                    self.console.write(format!("[tsnet] peer {tailnet_ip} {word}"));
+                }
+                AppMsg::TsnetDownResult { ok } => {
+                    self.console.write(format!("[tsnet] tailnet down (ok={ok})"));
+                }
+                AppMsg::TsnetSidecarDisconnected => {
+                    self.console.write("[tsnet] lost connection to the multiplayer helper".to_string());
+                }
             }
         }
     }

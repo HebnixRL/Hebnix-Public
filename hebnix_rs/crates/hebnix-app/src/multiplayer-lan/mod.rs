@@ -6,6 +6,7 @@ mod models;
 mod nat;
 mod room_api;
 mod tap;
+mod tsnet_sidecar;
 
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ pub use models::{
 };
 pub use room_api::RoomClient;
 pub use tap::{TapSession, configure_existing, ensure_adapter, is_configured};
+pub use tsnet_sidecar::{PeerInfo, TsState, TsnetSidecarHandle};
 
 pub const VPN_SUBNET: &str = "10.242.77";
 pub const HOST_ADDRESS: &str = "10.242.77.1";

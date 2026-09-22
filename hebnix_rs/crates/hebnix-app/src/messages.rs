@@ -166,4 +166,22 @@ pub enum AppMsg {
         result: Result<String, String>,
     },
     SendWsCommand(hebnix_sdk::stats::websocket::WsCommand),
+    // result of a "bring the tailnet up" request to the tsnet sidecar
+    TsnetUpResult {
+        result: Result<String, String>,
+    },
+    TsnetStatus {
+        state: crate::multiplayer_lan::TsState,
+        tailnet_ip: Option<String>,
+        peers: Vec<crate::multiplayer_lan::PeerInfo>,
+    },
+    TsnetPeerEvent {
+        online: bool,
+        tailnet_ip: String,
+    },
+    TsnetDownResult {
+        ok: bool,
+    },
+    // the sidecar's control connection dropped (crash, or it exited)
+    TsnetSidecarDisconnected,
 }
