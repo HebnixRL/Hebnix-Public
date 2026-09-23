@@ -5328,12 +5328,16 @@ impl HebnixApp {
                     }
                     ui.separator();
 
-                    if let Err(e) = self.plugin_mgr.render_window(&slug, ui) {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
-                            format!("window error: {e}"),
-                        );
-                    }
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if let Err(e) = self.plugin_mgr.render_window(&slug, ui) {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
+                                    format!("window error: {e}"),
+                                );
+                            }
+                        });
                 });
 
                 if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
