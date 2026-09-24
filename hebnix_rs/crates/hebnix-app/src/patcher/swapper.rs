@@ -1069,11 +1069,11 @@ impl SwapperState {
                 .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec())
                 .into();
         for &source_index in visible {
-            if let Some(filename) = items[source_index].thumbnail.as_ref() {
+            if let Some(filename) = inferred_thumbnail(category, &items[source_index], &cooked_pc) {
                 let cache_key = format!("{}|{}", category.slug(), filename.to_ascii_lowercase());
                 self.thumbnails.entry(cache_key).or_insert_with(|| {
                     match crate::cosmetic_thumbnail::extract_png(
-                        &cooked_pc.join(filename),
+                        &cooked_pc.join(&filename),
                         category.slug(),
                     ) {
                         Ok(png) => Some(png.into()),
@@ -1097,7 +1097,8 @@ impl SwapperState {
                             let source = &items[source_index];
                             let key =
                                 format!("{}|{}", category.slug(), source.upk.to_ascii_lowercase());
-                            let thumbnail = source.thumbnail.as_ref().and_then(|filename| {
+                            let thumbnail = inferred_thumbnail(category, source, &cooked_pc)
+                                .and_then(|filename| {
                                 self.thumbnails
                                     .get(&format!(
                                         "{}|{}",
