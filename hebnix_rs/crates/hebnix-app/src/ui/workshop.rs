@@ -686,7 +686,7 @@ impl WorkshopState {
                 WorkshopView::BackgroundChanger,
                 "Background Changer",
             );
-            ui.selectable_value(&mut self.view, WorkshopView::Multiplayer, "Multiplayer");
+            // ui.selectable_value(&mut self.view, WorkshopView::Multiplayer, "Multiplayer");
         });
         ui.separator();
         if self.view == WorkshopView::Multiplayer {

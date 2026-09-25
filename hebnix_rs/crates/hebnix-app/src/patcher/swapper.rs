@@ -1460,8 +1460,9 @@ impl SwapperState {
         };
         let query = self.spawn_search.get(&category).map(String::as_str).unwrap_or("").to_ascii_lowercase();
         let filtered: Vec<_> = items.iter().enumerate()
-            .filter(|(_index, item)| item.product_id.is_some_and(|id| id > 0)
-                && resolved[*_index].thumbnail.as_ref().is_none_or(|filename| {
+            .filter(|(index, item)| item.product_id.is_some_and(|id| id > 0)
+                && resolved[*index].available
+                && resolved[*index].thumbnail.as_ref().is_some_and(|filename| {
                     !self.failed_thumbnails.contains(&format!("{}|{}", category.slug(), filename.to_ascii_lowercase()))
                 })
                 && (query.is_empty() || item_label(category, item).to_ascii_lowercase().contains(&query)
@@ -1512,7 +1513,7 @@ impl SwapperState {
                                     let mut paint = 0;
                                     if item.paintable {
                                         ui.add_space(6.0);
-                                        ui.label("Colours");
+                                        ui.label("Paint");
                                         let selected = self.spawn_paint.entry((category, item.product_id.unwrap_or_default())).or_insert(0);
                                         egui::ComboBox::from_id_salt(("spawn_paint", category, item.product_id))
                                             .width(ui.available_width())

@@ -489,7 +489,6 @@ pub struct HebnixApp {
     spawner_subtab: SpawnerSubTab,
     spawner_enable_prompt_open: bool,
     spawner_admin_requested: bool,
-    item_spawn_form: crate::item_spawning::ItemSpawnForm,
 
     patcher_ball: crate::ball::PatcherState,
     patcher_boost: crate::boost_patcher::BoostPatcherState,
@@ -867,7 +866,6 @@ impl HebnixApp {
             settings_subtab: SettingsSubTab::Hebnix,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
             spoofer_subtab: SpooferSubTab::Settings,
-            item_spawn_form: crate::item_spawning::ItemSpawnForm::default(),
             patcher_subtab: PatcherSubTab::Ball,
             console: ConsoleState::default(),
             workshop,
@@ -3104,51 +3102,6 @@ impl HebnixApp {
                                     if any_interaction {
                                         self.save_friends();
                                     }
-                                }
-                            });
-                        }
-                        SpooferSubTab::ItemSpawning => {
-                            let was_enabled = self.item_spawner_enabled;
-                            if ui
-                                .checkbox(
-                                    &mut self.item_spawner_enabled,
-                                    "Enable Item Spawning",
-                                )
-                                .changed()
-                            {
-                                match self
-                                    .spoofer_mgr
-                                    .set_item_spawner_enabled(self.item_spawner_enabled)
-                                {
-                                    Ok(()) => {
-                                        self.evaluate_proxies();
-                                        if was_enabled && !self.item_spawner_enabled {
-                                            clear_rl_cache(&self.tx);
-                                            self.console.write(
-                                                "[Item Spawner] Disabled; stopped bridge and cleared Rocket League WebCache.",
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        self.item_spawner_enabled = false;
-                                        self.console.write(format!(
-                                            "[Item Spawner] Could not enable: {error}"
-                                        ));
-                                    }
-                                }
-                            }
-                            ui.add_space(8.0);
-                            ui.add_enabled_ui(self.item_spawner_enabled, |ui| {
-                                if let Some(request) = self.item_spawn_form.render(ui) {
-                                    self.item_spawn_form.status = Some(
-                                        self.spoofer_mgr.spawn_item(&request).map(|_| {
-                                            format!(
-                                                "Queued {} item{} for the live inventory.",
-                                                request.quantity,
-                                                if request.quantity == 1 { "" } else { "s" }
-                                            )
-                                        }),
-                                    );
                                 }
                             });
                         }
