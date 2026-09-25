@@ -25,7 +25,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.1.8";
+pub const APP_VERSION: &str = "2.1.9";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -280,6 +280,18 @@ enum Tab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemsMode {
+    Swapper,
+    Spawner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnerSubTab {
+    Tutorial,
+    Category(crate::swapper::SwapCategory),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PatcherSubTab {
     Ball,
     BoostMeter,
@@ -309,7 +321,6 @@ enum SpooferSubTab {
     Username,
     TitleRank,
     Friends,
-    ItemSpawning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -473,7 +484,11 @@ pub struct HebnixApp {
     spoofer_friends: HashMap<String, FriendSpoofState>,
     friends_search: String,
     item_spawner_enabled: bool,
-    item_spawn_form: crate::item_spawning::ItemSpawnForm,
+    items_mode: ItemsMode,
+    spawn_restart_pending: bool,
+    spawner_subtab: SpawnerSubTab,
+    spawner_enable_prompt_open: bool,
+    spawner_admin_requested: bool,
 
     patcher_ball: crate::ball::PatcherState,
     patcher_boost: crate::boost_patcher::BoostPatcherState,
@@ -813,6 +828,12 @@ impl HebnixApp {
             spoofer_http_proxy = true;
             swapper.set_owned_only(true);
         }
+        let spawner_restart_marker = base_dir.join("enable_item_spawner.pending");
+        let enable_spawner_after_admin = spoofer::is_admin() && spawner_restart_marker.is_file();
+        if enable_spawner_after_admin {
+            let _ = std::fs::remove_file(&spawner_restart_marker);
+            spoofer_master = true;
+        }
         let cert_installed = spoofer::ca::is_current_installed(&base_dir);
         let rl_launch_draft = config.rl_launch.clone();
 
@@ -923,7 +944,11 @@ impl HebnixApp {
             spoofer_friends,
             friends_search: String::new(),
             item_spawner_enabled: false,
-            item_spawn_form: crate::item_spawning::ItemSpawnForm::default(),
+            items_mode: ItemsMode::Swapper,
+            spawn_restart_pending: false,
+            spawner_subtab: SpawnerSubTab::Tutorial,
+            spawner_enable_prompt_open: false,
+            spawner_admin_requested: false,
             patcher_ball,
             patcher_boost,
             patcher_decal,
@@ -947,6 +972,9 @@ impl HebnixApp {
         app.save_friends_internal();
         app.save_ranks_internal();
         app.evaluate_proxies();
+        if enable_spawner_after_admin {
+            app.enable_item_spawner();
+        }
         fetch_catalogs(app.tx.clone(), cc.egui_ctx.clone());
 
         app
@@ -1206,6 +1234,8 @@ impl HebnixApp {
         if !self.spoofer_master {
             if self.item_spawner_enabled {
                 self.item_spawner_enabled = false;
+                self.spawn_restart_pending = false;
+                self.spawner_subtab = SpawnerSubTab::Tutorial;
                 let _ = self.spoofer_mgr.set_item_spawner_enabled(false);
                 clear_rl_cache(&self.tx);
             }
@@ -1318,6 +1348,7 @@ impl HebnixApp {
         self.config.window.height = self.last_size.1;
         self.save_config();
 
+        if self.item_spawner_enabled { self.disable_item_spawner(); }
         self.spoofer_mgr.shutdown();
         self.plugin_mgr.unload_all();
         self.stats.stop();
@@ -1381,6 +1412,7 @@ impl HebnixApp {
                     self.handle_rl_status(rl_open, api_open);
 
                     if launched {
+                        self.spawn_restart_pending = false;
                         self.workshop.rocket_league_reopened();
                         self.check_statsapi_rate();
                         self.check_web_port();
@@ -2471,11 +2503,6 @@ impl HebnixApp {
                                 SpooferSubTab::Friends,
                                 "Friends",
                             );
-                            ui.selectable_value(
-                                &mut self.spoofer_subtab,
-                                SpooferSubTab::ItemSpawning,
-                                "Item Spawning",
-                            );
                         });
                     });
             });
@@ -3056,51 +3083,6 @@ impl HebnixApp {
                                     if any_interaction {
                                         self.save_friends();
                                     }
-                                }
-                            });
-                        }
-                        SpooferSubTab::ItemSpawning => {
-                            let was_enabled = self.item_spawner_enabled;
-                            if ui
-                                .checkbox(
-                                    &mut self.item_spawner_enabled,
-                                    "Enable Item Spawning",
-                                )
-                                .changed()
-                            {
-                                match self
-                                    .spoofer_mgr
-                                    .set_item_spawner_enabled(self.item_spawner_enabled)
-                                {
-                                    Ok(()) => {
-                                        self.evaluate_proxies();
-                                        if was_enabled && !self.item_spawner_enabled {
-                                            clear_rl_cache(&self.tx);
-                                            self.console.write(
-                                                "[Item Spawner] Disabled; stopped bridge and cleared Rocket League WebCache.",
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        self.item_spawner_enabled = false;
-                                        self.console.write(format!(
-                                            "[Item Spawner] Could not enable: {error}"
-                                        ));
-                                    }
-                                }
-                            }
-                            ui.add_space(8.0);
-                            ui.add_enabled_ui(self.item_spawner_enabled, |ui| {
-                                if let Some(request) = self.item_spawn_form.render(ui) {
-                                    self.item_spawn_form.status = Some(
-                                        self.spoofer_mgr.spawn_item(&request).map(|_| {
-                                            format!(
-                                                "Queued {} item{} for the live inventory.",
-                                                request.quantity,
-                                                if request.quantity == 1 { "" } else { "s" }
-                                            )
-                                        }),
-                                    );
                                 }
                             });
                         }
@@ -4142,6 +4124,72 @@ impl HebnixApp {
         }
     }
 
+    fn disable_item_spawner(&mut self) {
+        self.item_spawner_enabled = false;
+        self.spawn_restart_pending = false;
+        self.spawner_subtab = SpawnerSubTab::Tutorial;
+        let _ = self.spoofer_mgr.set_item_spawner_enabled(false);
+        self.evaluate_proxies();
+        crate::spoofer::hosts::flush_dns();
+        clear_rl_cache(&self.tx);
+        self.console.write("[Item Spawner] Disabled and DNS flushed.");
+    }
+
+    fn enable_item_spawner(&mut self) {
+        if hebnix_sdk::process::is_rocket_league_running() {
+            self.console.write("[Item Spawner] Close Rocket League before enabling Item Spawner.");
+            return;
+        }
+        if !spoofer::is_admin() {
+            self.spawner_admin_requested = true;
+            self.admin_prompt_open = true;
+            return;
+        }
+        self.spoofer_master = true;
+        self.save_config();
+        match self.spoofer_mgr.set_item_spawner_enabled(true) {
+            Ok(()) => {
+                self.item_spawner_enabled = true;
+                self.evaluate_proxies();
+                if self.spoofer_mgr.socket_running() {
+                    self.spawn_restart_pending = true;
+                    self.console.write("[Item Spawner] Enabled. Start Rocket League to use Item Spawner.");
+                } else {
+                    self.disable_item_spawner();
+                    self.console.write("[Item Spawner] Could not start the PsyNet proxy. Check the Spoofer settings and certificate.");
+                }
+            }
+            Err(error) => {
+                self.item_spawner_enabled = false;
+                self.console.write(format!("[Item Spawner] Could not enable: {error}"));
+            }
+        }
+    }
+
+    fn render_spawner_enable_prompt(&mut self, ctx: &egui::Context) {
+        if !self.spawner_enable_prompt_open { return; }
+        let mut enable = false;
+        let mut cancel = false;
+        egui::Window::new("Read the Item Spawner tutorial")
+            .collapsible(false).resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Read the Tutorial tab before enabling Item Spawner.");
+                ui.label("Rocket League must be closed first. Item spawning is temporary.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Continue").clicked() { enable = true; }
+                    if ui.button("Cancel").clicked() { cancel = true; }
+                });
+            });
+        if enable {
+            self.spawner_enable_prompt_open = false;
+            self.enable_item_spawner();
+        } else if cancel {
+            self.spawner_enable_prompt_open = false;
+        }
+    }
+
     fn render_admin_prompt(&mut self, ctx: &egui::Context) {
         if !self.admin_prompt_open {
             return;
@@ -4154,7 +4202,9 @@ impl HebnixApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(if self.owned_admin_requested {
+                ui.label(if self.spawner_admin_requested {
+                    "Item Spawner needs Administrator access to update the hosts file. Hebnix will restart as Administrator."
+                } else if self.owned_admin_requested {
                     "Filtering replacements by ownership needs the Hebnix proxy.\n\
                      Hebnix will restart as Administrator, enable the proxy, and build your owned-item catalog."
                 } else {
@@ -4174,6 +4224,9 @@ impl HebnixApp {
         if ok {
             self.admin_prompt_open = false;
             self.spoofer_master = true;
+            if self.spawner_admin_requested {
+                let _ = std::fs::write(self.base_dir.join("enable_item_spawner.pending"), b"1");
+            }
             if self.owned_admin_requested {
                 let _ = std::fs::write(
                     self.base_dir.join("enable_owned_replacements.pending"),
@@ -4186,11 +4239,17 @@ impl HebnixApp {
                 std::process::exit(0);
             }
             self.spoofer_master = false;
+            let _ = std::fs::remove_file(self.base_dir.join("enable_item_spawner.pending"));
+            self.spawner_admin_requested = false;
+            self.disable_item_spawner();
             self.save_config();
             self.console.write("[Spoofer] Couldn't relaunch as admin.");
         } else if cancel {
             self.admin_prompt_open = false;
             self.owned_admin_requested = false;
+            self.spawner_admin_requested = false;
+            self.disable_item_spawner();
+            self.console.write("[Item Spawner] Disabled because Administrator access was declined.");
         }
     }
 
@@ -5363,6 +5422,7 @@ fn install_zip(zip_path: &std::path::Path, plugin_dir: &std::path::Path) -> Resu
 
 impl Drop for HebnixApp {
     fn drop(&mut self) {
+        if self.item_spawner_enabled { self.disable_item_spawner(); }
         // Covers normal eframe shutdown paths that do not go through the
         // explicit tray/window quit handler.
         self.spoofer_mgr.shutdown();
@@ -5506,6 +5566,89 @@ impl eframe::App for HebnixApp {
                     }
                     Tab::Spoofer => self.render_spoofer_tab(ui),
                     Tab::Patcher => {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.items_mode, ItemsMode::Swapper, "Items Swapper");
+                            ui.selectable_value(&mut self.items_mode, ItemsMode::Spawner, "Items Spawner");
+                        });
+                        ui.separator();
+                        if self.items_mode == ItemsMode::Spawner {
+                            ui.horizontal(|ui| {
+                                let mut enabled = self.item_spawner_enabled;
+                                if ui.checkbox(&mut enabled, "Enable Items Spawner").changed() {
+                                    if enabled {
+                                        self.spawner_enable_prompt_open = true;
+                                    } else {
+                                        self.disable_item_spawner();
+                                    }
+                                }
+                                ui.weak("Read Tutorial before enabling.");
+                            });
+                            let cooked_pc = std::path::Path::new(&self.config.settings.rl_path)
+                                .join("TAGame").join("CookedPCConsole");
+                            egui::Panel::left("spawner_categories")
+                                .resizable(false).exact_size(150.0).show(ui, |ui| {
+                                    egui::ScrollArea::vertical().id_salt("spawner_subtabs").show(ui, |ui| {
+                                        ui.selectable_value(&mut self.spawner_subtab, SpawnerSubTab::Tutorial, "Tutorial");
+                                        ui.separator();
+                                        ui.add_enabled_ui(self.item_spawner_enabled && !self.spawn_restart_pending, |ui| {
+                                            for category in crate::swapper::SwapCategory::ALL {
+                                                ui.selectable_value(&mut self.spawner_subtab,
+                                                    SpawnerSubTab::Category(category), category.label());
+                                            }
+                                        });
+                                    });
+                                });
+                            egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
+                                if !self.item_spawner_enabled || self.spawn_restart_pending {
+                                    self.spawner_subtab = SpawnerSubTab::Tutorial;
+                                }
+                                match self.spawner_subtab {
+                                    SpawnerSubTab::Tutorial => {
+                                        ui.heading("Item Spawner Tutorial");
+                                        ui.add_space(8.0);
+                                        ui.label("Rocket League must be closed before you enable the Item Spawner.");
+                                        ui.add_space(8.0);
+                                        ui.label("When you're finished, disable Item Spawner before closing Hebnix, or close Rocket League before closing Hebnix.");
+                                        ui.add_space(8.0);
+                                        ui.label("If you have problems connecting to Epic, open Hebnix while Rocket League is closed, enable Item Spawner and disable it again, then open Rocket League.");
+                                        ui.add_space(8.0);
+                                        ui.label("Spawned items can persist locally or disappear, including mid match.");
+                                        ui.add_space(8.0);
+                                        ui.label("Disabling Item Spawner stops interception but does not edit Rocket League account saves.");
+                                        ui.add_space(8.0);
+                                        if self.spawn_restart_pending {
+                                            ui.add_space(12.0);
+                                            ui.weak("Start Rocket League to use the item categories.");
+                                        }
+                                    }
+                                    SpawnerSubTab::Category(category) => {
+                                        if self.catalogs_loading {
+                                            ui.horizontal(|ui| { ui.spinner(); ui.label("Loading item catalogs..."); });
+                                        }
+                                        if let Some(error) = self.catalogs_error.clone() {
+                                            ui.colored_label(egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
+                                                format!("Catalog download failed: {error}"));
+                                            if ui.button("Reload Catalogs").clicked() { self.reload_catalogs(ctx); }
+                                        }
+                                        if self.catalogs_loaded {
+                                            if let Some((product_id, paint)) = self.swapper.render_spawn_tab(
+                                                ui, category, &cooked_pc, &self.tx) {
+                                                let request = crate::item_spawning::ItemSpawnRequest {
+                                                    product_id, series_id: 1, quality: 0, paint,
+                                                    certification: 0, quantity: 1,
+                                                };
+                                                match self.spoofer_mgr.spawn_item(&request) {
+                                                    Ok(()) => self.console.write(format!(
+                                                        "[Item Spawner] Queued product ID {product_id}.")),
+                                                    Err(error) => self.console.write(format!(
+                                                        "[Item Spawner] Could not spawn {product_id}: {error}")),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        } else {
                         let rl_path = self.config.settings.rl_path.clone();
                         let cooked_pc = std::path::Path::new(&rl_path)
                             .join("TAGame")
@@ -5840,6 +5983,7 @@ impl eframe::App for HebnixApp {
                                 }
                                 }
                             });
+                        }
                     }
                     Tab::Colours => {
                         let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
@@ -5907,6 +6051,7 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
+            self.render_spawner_enable_prompt(ctx);
             self.render_admin_prompt(ctx);
             self.render_item_action_prompt(ctx);
             self.render_owned_proxy_prompt(ctx);
