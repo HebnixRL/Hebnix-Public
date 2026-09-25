@@ -10,3 +10,53 @@ panel_bg  = "#16212C"
 widget_bg = "#1F2E3D"
 text      = "#D6E4F0"
 hyperlink = "#5DADE2"
+weak_text  = "#8BA6B8"
+extreme_bg = "#0B1118"
+faint_bg   = "#1A2936"
+code_bg    = "#0D151D"
+text_edit_bg = "#0B141C"
+selection_text = "#FFFFFF"
+
+# All fields below are optional. They can change global layout and behaviour.
+[style]
+window_corner_radius = 10
+menu_corner_radius = 8
+widget_corner_radius = 6
+window_stroke = "#294B63"
+window_stroke_width = 1.0
+selection_stroke = "#FFFFFF"
+selection_stroke_width = 1.0
+item_spacing_x = 8.0
+item_spacing_y = 6.0
+button_padding_x = 10.0
+button_padding_y = 4.0
+indent = 20.0
+interact_height = 24.0
+slider_width = 120.0
+text_edit_width = 280.0
+animation_time = 0.12
+button_frame = true
+collapsing_header_frame = false
+indent_has_left_vline = true
+striped = true
+slider_trailing_fill = true
+
+# Each widget state can independently override fills, outlines, foregrounds,
+# rounding, and hover/click expansion.
+[widgets.inactive]
+bg_stroke = "#294B63"
+bg_stroke_width = 1.0
+
+[widgets.hovered]
+bg_fill = "#286B94"
+weak_bg_fill = "#286B94"
+fg_stroke = "#FFFFFF"
+corner_radius = 8
+expansion = 1.0
+
+[widgets.active]
+bg_fill = "#2E86C1"
+fg_stroke = "#FFFFFF"
+
+[widgets.open]
+bg_fill = "#245D7D"

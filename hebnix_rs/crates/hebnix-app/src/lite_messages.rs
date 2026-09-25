@@ -76,7 +76,10 @@ pub enum AppMsg {
         bytes: Vec<u8>,
     },
     PluginDownloadDone {
-        result: Result<String, String>,
+        result: Result<(String, String), String>,
+    },
+    ThemeInstallDone {
+        result: Result<(String, String), String>,
     },
     AppUpdateFetched {
         result: Result<Option<crate::update::UpdateInfo>, String>,

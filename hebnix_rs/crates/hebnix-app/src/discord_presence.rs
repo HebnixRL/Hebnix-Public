@@ -5,7 +5,7 @@
 //! stall the UI or the Rocket League monitor.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -131,14 +131,14 @@ fn idle_activity(
     settings: &crate::config::SettingsCfg,
     rocket_league_open: bool,
 ) -> (String, String) {
-    if !rocket_league_open {
-        return (String::new(), String::new());
-    }
     if !settings.discord_game_state {
         return (
             nonempty(&settings.discord_custom_message, "Playing Rocket League"),
             String::new(),
         );
+    }
+    if !rocket_league_open {
+        return (String::new(), String::new());
     }
     ("In Rocket League".to_string(), "Main menu".to_string())
 }
@@ -245,6 +245,7 @@ fn connect() -> io::Result<File> {
             Ok(mut pipe) => {
                 let handshake = serde_json::json!({"v": 1, "client_id": APPLICATION_ID});
                 write_frame(&mut pipe, 0, &handshake)?;
+                read_ready(&mut pipe)?;
                 return Ok(pipe);
             }
             Err(error) => last_error = Some(error),
@@ -252,6 +253,36 @@ fn connect() -> io::Result<File> {
     }
     Err(last_error
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Discord IPC pipe not found")))
+}
+
+fn read_ready(pipe: &mut File) -> io::Result<()> {
+    let mut header = [0_u8; 8];
+    pipe.read_exact(&mut header)?;
+    let opcode = u32::from_le_bytes(header[..4].try_into().expect("four-byte opcode"));
+    let length = u32::from_le_bytes(header[4..].try_into().expect("four-byte length")) as usize;
+    if opcode != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Discord returned unexpected handshake opcode {opcode}"),
+        ));
+    }
+    if length > 64 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Discord handshake response is too large",
+        ));
+    }
+
+    let mut body = vec![0_u8; length];
+    pipe.read_exact(&mut body)?;
+    let response: serde_json::Value = serde_json::from_slice(&body).map_err(io::Error::other)?;
+    if response.get("evt").and_then(serde_json::Value::as_str) != Some("READY") {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("Discord rejected RPC handshake: {response}"),
+        ));
+    }
+    Ok(())
 }
 
 fn send_activity(pipe: &mut File, activity: Option<&Activity>, nonce: &mut u64) -> io::Result<()> {
@@ -635,6 +666,20 @@ mod tests {
 
         assert_eq!(
             idle_activity(&settings, true),
+            ("Developing Hebnix".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn custom_message_is_published_when_hebnix_opens() {
+        let settings = crate::config::SettingsCfg {
+            discord_game_state: false,
+            discord_custom_message: "Developing Hebnix".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            idle_activity(&settings, false),
             ("Developing Hebnix".to_string(), String::new())
         );
     }

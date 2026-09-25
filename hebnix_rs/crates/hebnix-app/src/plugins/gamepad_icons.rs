@@ -13,78 +13,267 @@
 use hebnix_sdk::input::{DInputLayout, HotkeyBind, PsGen};
 
 const XINPUT_ICONS: [(&str, &[u8]); 14] = [
-    ("south", include_bytes!("../../assets/gamepad-icons/xinput/south.svg")),
-    ("east", include_bytes!("../../assets/gamepad-icons/xinput/east.svg")),
-    ("north", include_bytes!("../../assets/gamepad-icons/xinput/north.svg")),
-    ("west", include_bytes!("../../assets/gamepad-icons/xinput/west.svg")),
-    ("lb", include_bytes!("../../assets/gamepad-icons/xinput/lb.svg")),
-    ("rb", include_bytes!("../../assets/gamepad-icons/xinput/rb.svg")),
-    ("ls", include_bytes!("../../assets/gamepad-icons/xinput/ls.svg")),
-    ("rs", include_bytes!("../../assets/gamepad-icons/xinput/rs.svg")),
-    ("start", include_bytes!("../../assets/gamepad-icons/xinput/start.svg")),
-    ("select", include_bytes!("../../assets/gamepad-icons/xinput/select.svg")),
-    ("dpad_up", include_bytes!("../../assets/gamepad-icons/xinput/dpad_up.svg")),
-    ("dpad_down", include_bytes!("../../assets/gamepad-icons/xinput/dpad_down.svg")),
-    ("dpad_left", include_bytes!("../../assets/gamepad-icons/xinput/dpad_left.svg")),
-    ("dpad_right", include_bytes!("../../assets/gamepad-icons/xinput/dpad_right.svg")),
+    (
+        "south",
+        include_bytes!("../../assets/gamepad-icons/xinput/south.svg"),
+    ),
+    (
+        "east",
+        include_bytes!("../../assets/gamepad-icons/xinput/east.svg"),
+    ),
+    (
+        "north",
+        include_bytes!("../../assets/gamepad-icons/xinput/north.svg"),
+    ),
+    (
+        "west",
+        include_bytes!("../../assets/gamepad-icons/xinput/west.svg"),
+    ),
+    (
+        "lb",
+        include_bytes!("../../assets/gamepad-icons/xinput/lb.svg"),
+    ),
+    (
+        "rb",
+        include_bytes!("../../assets/gamepad-icons/xinput/rb.svg"),
+    ),
+    (
+        "ls",
+        include_bytes!("../../assets/gamepad-icons/xinput/ls.svg"),
+    ),
+    (
+        "rs",
+        include_bytes!("../../assets/gamepad-icons/xinput/rs.svg"),
+    ),
+    (
+        "start",
+        include_bytes!("../../assets/gamepad-icons/xinput/start.svg"),
+    ),
+    (
+        "select",
+        include_bytes!("../../assets/gamepad-icons/xinput/select.svg"),
+    ),
+    (
+        "dpad_up",
+        include_bytes!("../../assets/gamepad-icons/xinput/dpad_up.svg"),
+    ),
+    (
+        "dpad_down",
+        include_bytes!("../../assets/gamepad-icons/xinput/dpad_down.svg"),
+    ),
+    (
+        "dpad_left",
+        include_bytes!("../../assets/gamepad-icons/xinput/dpad_left.svg"),
+    ),
+    (
+        "dpad_right",
+        include_bytes!("../../assets/gamepad-icons/xinput/dpad_right.svg"),
+    ),
 ];
 
 const DINPUT_ICONS: [(&str, &[u8]); 17] = [
-    ("south", include_bytes!("../../assets/gamepad-icons/dinput/south.svg")),
-    ("east", include_bytes!("../../assets/gamepad-icons/dinput/east.svg")),
-    ("north", include_bytes!("../../assets/gamepad-icons/dinput/north.svg")),
-    ("west", include_bytes!("../../assets/gamepad-icons/dinput/west.svg")),
-    ("l1", include_bytes!("../../assets/gamepad-icons/dinput/l1.svg")),
-    ("r1", include_bytes!("../../assets/gamepad-icons/dinput/r1.svg")),
-    ("l2", include_bytes!("../../assets/gamepad-icons/dinput/l2.svg")),
-    ("r2", include_bytes!("../../assets/gamepad-icons/dinput/r2.svg")),
-    ("l3", include_bytes!("../../assets/gamepad-icons/dinput/l3.svg")),
-    ("r3", include_bytes!("../../assets/gamepad-icons/dinput/r3.svg")),
-    ("select", include_bytes!("../../assets/gamepad-icons/dinput/select.svg")),
-    ("start", include_bytes!("../../assets/gamepad-icons/dinput/start.svg")),
-    ("mode", include_bytes!("../../assets/gamepad-icons/dinput/mode.svg")),
-    ("dpad_up", include_bytes!("../../assets/gamepad-icons/dinput/dpad_up.svg")),
-    ("dpad_down", include_bytes!("../../assets/gamepad-icons/dinput/dpad_down.svg")),
-    ("dpad_left", include_bytes!("../../assets/gamepad-icons/dinput/dpad_left.svg")),
-    ("dpad_right", include_bytes!("../../assets/gamepad-icons/dinput/dpad_right.svg")),
+    (
+        "south",
+        include_bytes!("../../assets/gamepad-icons/dinput/south.svg"),
+    ),
+    (
+        "east",
+        include_bytes!("../../assets/gamepad-icons/dinput/east.svg"),
+    ),
+    (
+        "north",
+        include_bytes!("../../assets/gamepad-icons/dinput/north.svg"),
+    ),
+    (
+        "west",
+        include_bytes!("../../assets/gamepad-icons/dinput/west.svg"),
+    ),
+    (
+        "l1",
+        include_bytes!("../../assets/gamepad-icons/dinput/l1.svg"),
+    ),
+    (
+        "r1",
+        include_bytes!("../../assets/gamepad-icons/dinput/r1.svg"),
+    ),
+    (
+        "l2",
+        include_bytes!("../../assets/gamepad-icons/dinput/l2.svg"),
+    ),
+    (
+        "r2",
+        include_bytes!("../../assets/gamepad-icons/dinput/r2.svg"),
+    ),
+    (
+        "l3",
+        include_bytes!("../../assets/gamepad-icons/dinput/l3.svg"),
+    ),
+    (
+        "r3",
+        include_bytes!("../../assets/gamepad-icons/dinput/r3.svg"),
+    ),
+    (
+        "select",
+        include_bytes!("../../assets/gamepad-icons/dinput/select.svg"),
+    ),
+    (
+        "start",
+        include_bytes!("../../assets/gamepad-icons/dinput/start.svg"),
+    ),
+    (
+        "mode",
+        include_bytes!("../../assets/gamepad-icons/dinput/mode.svg"),
+    ),
+    (
+        "dpad_up",
+        include_bytes!("../../assets/gamepad-icons/dinput/dpad_up.svg"),
+    ),
+    (
+        "dpad_down",
+        include_bytes!("../../assets/gamepad-icons/dinput/dpad_down.svg"),
+    ),
+    (
+        "dpad_left",
+        include_bytes!("../../assets/gamepad-icons/dinput/dpad_left.svg"),
+    ),
+    (
+        "dpad_right",
+        include_bytes!("../../assets/gamepad-icons/dinput/dpad_right.svg"),
+    ),
 ];
 
 const PS4_ICONS: [(&str, &[u8]); 16] = [
-    ("south", include_bytes!("../../assets/gamepad-icons/playstation4/south.svg")),
-    ("east", include_bytes!("../../assets/gamepad-icons/playstation4/east.svg")),
-    ("north", include_bytes!("../../assets/gamepad-icons/playstation4/north.svg")),
-    ("west", include_bytes!("../../assets/gamepad-icons/playstation4/west.svg")),
-    ("l1", include_bytes!("../../assets/gamepad-icons/playstation4/l1.svg")),
-    ("r1", include_bytes!("../../assets/gamepad-icons/playstation4/r1.svg")),
-    ("l2", include_bytes!("../../assets/gamepad-icons/playstation4/l2.svg")),
-    ("r2", include_bytes!("../../assets/gamepad-icons/playstation4/r2.svg")),
-    ("l3", include_bytes!("../../assets/gamepad-icons/playstation4/l3.svg")),
-    ("r3", include_bytes!("../../assets/gamepad-icons/playstation4/r3.svg")),
-    ("select", include_bytes!("../../assets/gamepad-icons/playstation4/select.svg")),
-    ("start", include_bytes!("../../assets/gamepad-icons/playstation4/start.svg")),
-    ("dpad_up", include_bytes!("../../assets/gamepad-icons/playstation4/dpad_up.svg")),
-    ("dpad_down", include_bytes!("../../assets/gamepad-icons/playstation4/dpad_down.svg")),
-    ("dpad_left", include_bytes!("../../assets/gamepad-icons/playstation4/dpad_left.svg")),
-    ("dpad_right", include_bytes!("../../assets/gamepad-icons/playstation4/dpad_right.svg")),
+    (
+        "south",
+        include_bytes!("../../assets/gamepad-icons/playstation4/south.svg"),
+    ),
+    (
+        "east",
+        include_bytes!("../../assets/gamepad-icons/playstation4/east.svg"),
+    ),
+    (
+        "north",
+        include_bytes!("../../assets/gamepad-icons/playstation4/north.svg"),
+    ),
+    (
+        "west",
+        include_bytes!("../../assets/gamepad-icons/playstation4/west.svg"),
+    ),
+    (
+        "l1",
+        include_bytes!("../../assets/gamepad-icons/playstation4/l1.svg"),
+    ),
+    (
+        "r1",
+        include_bytes!("../../assets/gamepad-icons/playstation4/r1.svg"),
+    ),
+    (
+        "l2",
+        include_bytes!("../../assets/gamepad-icons/playstation4/l2.svg"),
+    ),
+    (
+        "r2",
+        include_bytes!("../../assets/gamepad-icons/playstation4/r2.svg"),
+    ),
+    (
+        "l3",
+        include_bytes!("../../assets/gamepad-icons/playstation4/l3.svg"),
+    ),
+    (
+        "r3",
+        include_bytes!("../../assets/gamepad-icons/playstation4/r3.svg"),
+    ),
+    (
+        "select",
+        include_bytes!("../../assets/gamepad-icons/playstation4/select.svg"),
+    ),
+    (
+        "start",
+        include_bytes!("../../assets/gamepad-icons/playstation4/start.svg"),
+    ),
+    (
+        "dpad_up",
+        include_bytes!("../../assets/gamepad-icons/playstation4/dpad_up.svg"),
+    ),
+    (
+        "dpad_down",
+        include_bytes!("../../assets/gamepad-icons/playstation4/dpad_down.svg"),
+    ),
+    (
+        "dpad_left",
+        include_bytes!("../../assets/gamepad-icons/playstation4/dpad_left.svg"),
+    ),
+    (
+        "dpad_right",
+        include_bytes!("../../assets/gamepad-icons/playstation4/dpad_right.svg"),
+    ),
 ];
 
 const PS5_ICONS: [(&str, &[u8]); 16] = [
-    ("south", include_bytes!("../../assets/gamepad-icons/playstation5/south.svg")),
-    ("east", include_bytes!("../../assets/gamepad-icons/playstation5/east.svg")),
-    ("north", include_bytes!("../../assets/gamepad-icons/playstation5/north.svg")),
-    ("west", include_bytes!("../../assets/gamepad-icons/playstation5/west.svg")),
-    ("l1", include_bytes!("../../assets/gamepad-icons/playstation5/l1.svg")),
-    ("r1", include_bytes!("../../assets/gamepad-icons/playstation5/r1.svg")),
-    ("l2", include_bytes!("../../assets/gamepad-icons/playstation5/l2.svg")),
-    ("r2", include_bytes!("../../assets/gamepad-icons/playstation5/r2.svg")),
-    ("l3", include_bytes!("../../assets/gamepad-icons/playstation5/l3.svg")),
-    ("r3", include_bytes!("../../assets/gamepad-icons/playstation5/r3.svg")),
-    ("select", include_bytes!("../../assets/gamepad-icons/playstation5/select.svg")),
-    ("start", include_bytes!("../../assets/gamepad-icons/playstation5/start.svg")),
-    ("dpad_up", include_bytes!("../../assets/gamepad-icons/playstation5/dpad_up.svg")),
-    ("dpad_down", include_bytes!("../../assets/gamepad-icons/playstation5/dpad_down.svg")),
-    ("dpad_left", include_bytes!("../../assets/gamepad-icons/playstation5/dpad_left.svg")),
-    ("dpad_right", include_bytes!("../../assets/gamepad-icons/playstation5/dpad_right.svg")),
+    (
+        "south",
+        include_bytes!("../../assets/gamepad-icons/playstation5/south.svg"),
+    ),
+    (
+        "east",
+        include_bytes!("../../assets/gamepad-icons/playstation5/east.svg"),
+    ),
+    (
+        "north",
+        include_bytes!("../../assets/gamepad-icons/playstation5/north.svg"),
+    ),
+    (
+        "west",
+        include_bytes!("../../assets/gamepad-icons/playstation5/west.svg"),
+    ),
+    (
+        "l1",
+        include_bytes!("../../assets/gamepad-icons/playstation5/l1.svg"),
+    ),
+    (
+        "r1",
+        include_bytes!("../../assets/gamepad-icons/playstation5/r1.svg"),
+    ),
+    (
+        "l2",
+        include_bytes!("../../assets/gamepad-icons/playstation5/l2.svg"),
+    ),
+    (
+        "r2",
+        include_bytes!("../../assets/gamepad-icons/playstation5/r2.svg"),
+    ),
+    (
+        "l3",
+        include_bytes!("../../assets/gamepad-icons/playstation5/l3.svg"),
+    ),
+    (
+        "r3",
+        include_bytes!("../../assets/gamepad-icons/playstation5/r3.svg"),
+    ),
+    (
+        "select",
+        include_bytes!("../../assets/gamepad-icons/playstation5/select.svg"),
+    ),
+    (
+        "start",
+        include_bytes!("../../assets/gamepad-icons/playstation5/start.svg"),
+    ),
+    (
+        "dpad_up",
+        include_bytes!("../../assets/gamepad-icons/playstation5/dpad_up.svg"),
+    ),
+    (
+        "dpad_down",
+        include_bytes!("../../assets/gamepad-icons/playstation5/dpad_down.svg"),
+    ),
+    (
+        "dpad_left",
+        include_bytes!("../../assets/gamepad-icons/playstation5/dpad_left.svg"),
+    ),
+    (
+        "dpad_right",
+        include_bytes!("../../assets/gamepad-icons/playstation5/dpad_right.svg"),
+    ),
 ];
 
 // old dualsense-only binds stored an index into the pre-dinput DS4_BUTTONS
@@ -125,7 +314,9 @@ fn effective_backend() -> Backend {
 fn dinput_name_for(bind: &HotkeyBind) -> Option<&'static str> {
     match bind.controller_type.as_str() {
         "xinput" => hebnix_sdk::input::xinput_mask_to_dinput_name(bind.controller_button as u16),
-        "dinput" => hebnix_sdk::input::DINPUT_BUTTONS.get(bind.controller_button as usize).copied(),
+        "dinput" => hebnix_sdk::input::DINPUT_BUTTONS
+            .get(bind.controller_button as usize)
+            .copied(),
         "dualsense" => {
             let idx = LEGACY_DS4_ORDER
                 .get(bind.controller_button as usize)

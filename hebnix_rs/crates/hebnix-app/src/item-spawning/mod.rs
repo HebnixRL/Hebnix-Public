@@ -16,24 +16,138 @@ pub struct ItemSpawnRequest {
     pub quantity: usize,
 }
 
+#[derive(Debug)]
+pub struct ItemSpawnForm {
+    product_id: String,
+    series_id: String,
+    quality: usize,
+    paint: usize,
+    certification: usize,
+    quantity: usize,
+    pub status: Option<Result<String, String>>,
+}
+
+impl Default for ItemSpawnForm {
+    fn default() -> Self {
+        Self {
+            product_id: String::new(),
+            series_id: "1".into(),
+            quality: 0,
+            paint: 0,
+            certification: 0,
+            quantity: 1,
+            status: None,
+        }
+    }
+}
+
+impl ItemSpawnForm {
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui) -> Option<ItemSpawnRequest> {
+        use eframe::egui;
+        ui.heading("Item Spawning");
+        ui.label("Enter the item requirements, then send it through the active PsyNet WebSocket.");
+        ui.add_space(12.0);
+        egui::Grid::new("item_spawn_requirements")
+            .num_columns(2)
+            .spacing([16.0, 10.0])
+            .show(ui, |ui| {
+                ui.label("Product ID");
+                ui.text_edit_singleline(&mut self.product_id);
+                ui.end_row();
+                ui.label("Series ID");
+                ui.text_edit_singleline(&mut self.series_id);
+                ui.end_row();
+                ui.label("Quality");
+                egui::ComboBox::from_id_salt("item_quality")
+                    .selected_text(QUALITIES[self.quality])
+                    .show_ui(ui, |ui| {
+                        for (i, name) in QUALITIES.iter().enumerate() {
+                            ui.selectable_value(&mut self.quality, i, *name);
+                        }
+                    });
+                ui.end_row();
+                ui.label("Paint / color");
+                egui::ComboBox::from_id_salt("item_paint")
+                    .selected_text(PAINTS[self.paint])
+                    .show_ui(ui, |ui| {
+                        for (i, name) in PAINTS.iter().enumerate() {
+                            ui.selectable_value(&mut self.paint, i, *name);
+                        }
+                    });
+                ui.end_row();
+                ui.label("Certification");
+                egui::ComboBox::from_id_salt("item_cert")
+                    .selected_text(CERTIFICATIONS[self.certification])
+                    .show_ui(ui, |ui| {
+                        for (i, name) in CERTIFICATIONS.iter().enumerate() {
+                            ui.selectable_value(&mut self.certification, i, *name);
+                        }
+                    });
+                ui.end_row();
+                ui.label("Quantity");
+                ui.add(egui::DragValue::new(&mut self.quantity).range(1..=100));
+                ui.end_row();
+            });
+        ui.add_space(12.0);
+        let clicked = ui
+            .add_enabled(
+                !self.product_id.trim().is_empty(),
+                egui::Button::new("Spawn Item"),
+            )
+            .clicked();
+        if let Some(status) = &self.status {
+            match status {
+                Ok(text) => {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, text);
+                }
+                Err(text) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, text);
+                }
+            }
+        }
+        if !clicked {
+            return None;
+        }
+        let product_id = match self.product_id.trim().parse::<i64>() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                self.status = Some(Err("Product ID must be a positive integer.".into()));
+                return None;
+            }
+        };
+        let series_id = match self.series_id.trim().parse::<i64>() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                self.status = Some(Err("Series ID must be a positive integer.".into()));
+                return None;
+            }
+        };
+        self.status = None;
+        Some(ItemSpawnRequest {
+            product_id,
+            series_id,
+            quality: self.quality,
+            paint: self.paint,
+            certification: self.certification,
+            quantity: self.quantity,
+        })
+    }
+}
+
 pub fn reward_message(request: &ItemSpawnRequest, psy_time: i64) -> Result<(String, Vec<String>), String> {
+
     let mut products = Vec::with_capacity(request.quantity);
     let mut instance_ids = Vec::with_capacity(request.quantity);
     for _ in 0..request.quantity {
         let instance_id = format!("{:032x}", rand::thread_rng().r#gen::<u128>());
         instance_ids.push(instance_id.clone());
-        let mut attributes = vec![serde_json::json!({
-            "Key": "Quality",
-            "Value": request.quality
-        })];
+        let mut attributes = vec![serde_json::json!({"Key":"Quality", "Value":request.quality})];
+
         if request.paint > 0 {
-            attributes.push(serde_json::json!({"Key": "Painted", "Value": request.paint}));
+            attributes.push(serde_json::json!({"Key":"Painted", "Value":request.paint}));
         }
         if request.certification > 0 {
-            attributes.push(serde_json::json!({
-                "Key": "Certified",
-                "Value": request.certification
-            }));
+            attributes.push(serde_json::json!({"Key":"Certified", "Value":request.certification}));
         }
         products.push(serde_json::json!({
             "AddedTimestamp": psy_time,
@@ -43,18 +157,10 @@ pub fn reward_message(request: &ItemSpawnRequest, psy_time: i64) -> Result<(Stri
             "SeriesID": request.series_id,
             "TradeHold": -2,
             "Attributes": attributes
+
         }));
     }
-    let body = serde_json::to_string(&serde_json::json!({
-        "RocketPassInfo": {"TierLevel": 0, "bOwnsPremium": false, "XPMultiplier": 0.0},
-        "ProductData": products,
-        "RewardDrops": [],
-        "ChallengeRewards": [],
-        "CurrencyDrops": [],
-        "Source": "",
-        "MatchGUID": ""
-    }))
-    .map_err(|error| error.to_string())?;
+    let body = serde_json::to_string(&serde_json::json!({"RocketPassInfo":{"TierLevel":0,"bOwnsPremium":false,"XPMultiplier":0.0},"ProductData":products,"RewardDrops":[],"ChallengeRewards":[],"CurrencyDrops":[],"Source":"","MatchGUID":""})).map_err(|e| e.to_string())?;
     let sig = crate::spoofer::rules::psy_response_signature(&psy_time.to_string(), body.as_bytes());
     Ok((format!(
         "PsyService: Reward/RewardResult\r\nPsyServiceVersion: 2\r\nPsyTime: {psy_time}\r\nPsySig: {sig}\r\n\r\n{body}"

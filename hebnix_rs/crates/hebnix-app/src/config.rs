@@ -81,25 +81,17 @@ impl Default for SettingsCfg {
         }
     }
 }
-
+/// How Rocket League actually gets launched/restarted - used by the
+/// Restart Rocket League button and Workshop LAN's Host/Join. The default
+/// preserves the original Steam-vs-Epic path detection for existing configs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RlLaunchMode {
-    /// guess Steam-vs-Epic from rl_path, same as always
     #[default]
     Unconfigured,
-
-    /// a real, owned Steam catalog listing - steam://run supports
-    /// overriding the launch options with an extra argument directly
     SteamNative,
-
-    /// the real Epic Games Launcher install
     EpicDirect,
-
-    /// a Steam non-Steam-shortcut whose target is Heroic
     SteamShortcutToHeroic,
-
-    /// Heroic only, no Steam or Epic Games Launcher involved at all
     HeroicDirect,
 }
 
@@ -107,17 +99,9 @@ pub enum RlLaunchMode {
 #[serde(default)]
 pub struct RlLaunchCfg {
     pub mode: RlLaunchMode,
-
-    /// SteamNative: RL's real Steam appid (252950).
-    /// SteamShortcutToHeroic: the shortcut's computed rungameid.
     pub steam_id: String,
-
-    /// path to the Heroic binary
     pub heroic_binary: String,
-
-    /// Epic catalog app name - "Sugar" for Rocket League
     pub heroic_app_name: String,
-
     pub heroic_runner: String,
 }
 

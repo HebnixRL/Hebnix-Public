@@ -489,6 +489,7 @@ pub struct HebnixApp {
     spawner_subtab: SpawnerSubTab,
     spawner_enable_prompt_open: bool,
     spawner_admin_requested: bool,
+    item_spawn_form: crate::item_spawning::ItemSpawnForm,
 
     patcher_ball: crate::ball::PatcherState,
     patcher_boost: crate::boost_patcher::BoostPatcherState,
@@ -498,6 +499,7 @@ pub struct HebnixApp {
     colour_admin_prompt_open: bool,
     admin_prompt_open: bool,
     item_action_prompt_open: bool,
+    plugin_delete_prompt: Option<String>,
     owned_admin_requested: bool,
     owned_proxy_prompt_open: bool,
     presets: crate::presets::PresetStore,
@@ -865,6 +867,7 @@ impl HebnixApp {
             settings_subtab: SettingsSubTab::Hebnix,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
             spoofer_subtab: SpooferSubTab::Settings,
+            item_spawn_form: crate::item_spawning::ItemSpawnForm::default(),
             patcher_subtab: PatcherSubTab::Ball,
             console: ConsoleState::default(),
             workshop,
@@ -957,6 +960,7 @@ impl HebnixApp {
             colour_admin_prompt_open: false,
             admin_prompt_open: false,
             item_action_prompt_open: false,
+            plugin_delete_prompt: None,
             owned_admin_requested: false,
             owned_proxy_prompt_open: false,
             presets: crate::presets::PresetStore::new(&base_dir.clone()),
@@ -1744,12 +1748,19 @@ impl HebnixApp {
                 AppMsg::PluginDownloadDone { result } => {
                     self.install_modal.downloading_id = None;
                     match result {
-                        Ok(msg) => {
-                            self.console.write(format!("[Console] {msg}"));
+                        Ok((plugin_id, message)) => {
+                            match self
+                                .plugin_mgr
+                                .enable_installed_plugin(&plugin_id, &mut self.config)
+                            {
+                                Ok(()) => self.console.write(format!("[Console] {message}")),
+                                Err(error) => self.console.write(format!(
+                                    "[Console] Plugin was installed but could not be enabled: {error}"
+                                )),
+                            }
                             if !self.install_modal.hebnix_stage {
                                 self.install_modal = InstallModal::default();
                             }
-                            self.plugin_mgr.refresh(&mut self.config, true);
                             self.save_config();
                         }
                         Err(e) => {
@@ -1757,6 +1768,16 @@ impl HebnixApp {
                         }
                     }
                 }
+                AppMsg::ThemeInstallDone { result } => match result {
+                    Ok((name, author)) => {
+                        self.theme_options = theme::list_themes(&self.themes_dir);
+                        self.console
+                            .write(format!("[Console] Installed Theme {name} by {author}"));
+                    }
+                    Err(error) => self
+                        .console
+                        .write(format!("[Console] Theme installation failed: {error}")),
+                },
                 AppMsg::OverlayPost { slug, data } => {
                     if let Some(webview) = &self.webview {
                         if let Err(error) = webview.deliver(&slug, data) {
@@ -3086,6 +3107,51 @@ impl HebnixApp {
                                 }
                             });
                         }
+                        SpooferSubTab::ItemSpawning => {
+                            let was_enabled = self.item_spawner_enabled;
+                            if ui
+                                .checkbox(
+                                    &mut self.item_spawner_enabled,
+                                    "Enable Item Spawning",
+                                )
+                                .changed()
+                            {
+                                match self
+                                    .spoofer_mgr
+                                    .set_item_spawner_enabled(self.item_spawner_enabled)
+                                {
+                                    Ok(()) => {
+                                        self.evaluate_proxies();
+                                        if was_enabled && !self.item_spawner_enabled {
+                                            clear_rl_cache(&self.tx);
+                                            self.console.write(
+                                                "[Item Spawner] Disabled; stopped bridge and cleared Rocket League WebCache.",
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        self.item_spawner_enabled = false;
+                                        self.console.write(format!(
+                                            "[Item Spawner] Could not enable: {error}"
+                                        ));
+                                    }
+                                }
+                            }
+                            ui.add_space(8.0);
+                            ui.add_enabled_ui(self.item_spawner_enabled, |ui| {
+                                if let Some(request) = self.item_spawn_form.render(ui) {
+                                    self.item_spawn_form.status = Some(
+                                        self.spoofer_mgr.spawn_item(&request).map(|_| {
+                                            format!(
+                                                "Queued {} item{} for the live inventory.",
+                                                request.quantity,
+                                                if request.quantity == 1 { "" } else { "s" }
+                                            )
+                                        }),
+                                    );
+                                }
+                            });
+                        }
                         SpooferSubTab::TitleRank => {
                             ui.heading("Rank Spoofing");
                             ui.add_space(8.0);
@@ -3319,6 +3385,17 @@ impl HebnixApp {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
+                                        if ui
+                                            .add(egui::Button::new(
+                                                egui::RichText::new("🗑").color(
+                                                    egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
+                                                ),
+                                            ))
+                                            .on_hover_text("Delete plugin")
+                                            .clicked()
+                                        {
+                                            self.plugin_delete_prompt = Some(plugin.slug.clone());
+                                        }
                                         let has_settings = plugin.has_settings();
                                         if ui
                                             .add_enabled(
@@ -3724,51 +3801,64 @@ impl HebnixApp {
                                 changed = true;
                             }
 
-                            let selected = self.config.settings.discord_show_score as u8
-                                + self.config.settings.discord_show_map as u8
-                                + self.config.settings.discord_show_gamemode as u8;
-                            if ui
-                                .add_enabled(
-                                    !self.config.settings.discord_show_score || selected > 1,
-                                    egui::Checkbox::new(
-                                        &mut self.config.settings.discord_show_score,
-                                        "Show score",
-                                    ),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            let selected = self.config.settings.discord_show_score as u8
-                                + self.config.settings.discord_show_map as u8
-                                + self.config.settings.discord_show_gamemode as u8;
-                            if ui
-                                .add_enabled(
-                                    !self.config.settings.discord_show_map || selected > 1,
-                                    egui::Checkbox::new(
-                                        &mut self.config.settings.discord_show_map,
-                                        "Show map",
-                                    ),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            let selected = self.config.settings.discord_show_score as u8
-                                + self.config.settings.discord_show_map as u8
-                                + self.config.settings.discord_show_gamemode as u8;
-                            if ui
-                                .add_enabled(
-                                    !self.config.settings.discord_show_gamemode || selected > 1,
-                                    egui::Checkbox::new(
-                                        &mut self.config.settings.discord_show_gamemode,
-                                        "Show gamemode",
-                                    ),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
+                            ui.indent("discord_game_state_fields", |ui| {
+                                ui.add_enabled_ui(
+                                    self.config.settings.discord_game_state,
+                                    |ui| {
+                                        let selected =
+                                            self.config.settings.discord_show_score as u8
+                                                + self.config.settings.discord_show_map as u8
+                                                + self.config.settings.discord_show_gamemode as u8;
+                                        if ui
+                                            .add_enabled(
+                                                !self.config.settings.discord_show_score
+                                                    || selected > 1,
+                                                egui::Checkbox::new(
+                                                    &mut self.config.settings.discord_show_score,
+                                                    "Show score",
+                                                ),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        let selected =
+                                            self.config.settings.discord_show_score as u8
+                                                + self.config.settings.discord_show_map as u8
+                                                + self.config.settings.discord_show_gamemode as u8;
+                                        if ui
+                                            .add_enabled(
+                                                !self.config.settings.discord_show_map
+                                                    || selected > 1,
+                                                egui::Checkbox::new(
+                                                    &mut self.config.settings.discord_show_map,
+                                                    "Show map",
+                                                ),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        let selected =
+                                            self.config.settings.discord_show_score as u8
+                                                + self.config.settings.discord_show_map as u8
+                                                + self.config.settings.discord_show_gamemode as u8;
+                                        if ui
+                                            .add_enabled(
+                                                !self.config.settings.discord_show_gamemode
+                                                    || selected > 1,
+                                                egui::Checkbox::new(
+                                                    &mut self.config.settings.discord_show_gamemode,
+                                                    "Show gamemode",
+                                                ),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                    },
+                                );
+                            });
 
                             ui.horizontal(|ui| {
                                 let mut custom = !self.config.settings.discord_game_state;
@@ -4290,6 +4380,46 @@ impl HebnixApp {
         }
     }
 
+    fn render_plugin_delete_prompt(&mut self, ctx: &egui::Context) {
+        let Some(slug) = self.plugin_delete_prompt.clone() else {
+            return;
+        };
+        let plugin_name = self
+            .plugin_mgr
+            .plugins
+            .iter()
+            .find(|plugin| plugin.slug == slug)
+            .map(|plugin| plugin.display_name().to_string())
+            .unwrap_or(slug.clone());
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Delete plugin?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Are you sure you want to delete {plugin_name}?"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Yes").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("No").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            self.plugin_delete_prompt = None;
+            match self.plugin_mgr.delete_plugin(&slug, &mut self.config) {
+                Ok(()) => self.console.write(format!("[Plugins] Deleted {slug}.")),
+                Err(error) => self.console.write(format!("[Plugins] {error}")),
+            }
+            self.save_config();
+        } else if cancel {
+            self.plugin_delete_prompt = None;
+        }
+    }
     fn render_item_action_prompt(&mut self, ctx: &egui::Context) {
         if !self.item_action_prompt_open {
             return;
@@ -4315,6 +4445,7 @@ impl HebnixApp {
             });
 
         if quit_rocket_league {
+            self.item_action_prompt_open = false;
             match winutil::kill_rocket_league() {
                 Ok(()) if !hebnix_sdk::process::is_rocket_league_running() => {
                     self.console
@@ -5060,13 +5191,24 @@ impl HebnixApp {
         });
     }
 
+    fn download_theme(&self, theme_id: &str) {
+        let theme_id = theme_id.to_string();
+        let themes_dir = self.themes_dir.clone();
+        let fonts_dir = self.fonts_dir.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::deep_link::install_theme(&theme_id, &themes_dir, &fonts_dir);
+            let _ = tx.send(AppMsg::ThemeInstallDone { result });
+        });
+    }
     fn download_hebnix_plugin(&mut self, plugin_id: &str) {
         self.install_modal.downloading_id = Some(plugin_id.to_string());
         let plugin_id = plugin_id.to_string();
         let plugin_dir = self.plugin_dir.clone();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result: Result<String, String> = (|| {
+            let result: Result<(String, String), String> = (|| {
+                let (name, author) = crate::deep_link::plugin_identity(&plugin_id)?;
                 let url = format!("https://api.hebnix.com/download/plugin/{plugin_id}");
                 let resp = get_retry(&url, Duration::from_secs(20))?;
                 let mut bytes = Vec::new();
@@ -5077,7 +5219,10 @@ impl HebnixApp {
                 let extract = install_zip(&temp_zip, &plugin_dir);
                 let _ = std::fs::remove_file(&temp_zip);
                 extract?;
-                Ok(format!("Plugin ID {plugin_id} installed."))
+                Ok((
+                    plugin_id.clone(),
+                    format!("{name} by {author} was installed."),
+                ))
             })();
             let _ = tx.send(AppMsg::PluginDownloadDone { result });
         });
@@ -5339,12 +5484,16 @@ impl HebnixApp {
                     }
                     ui.separator();
 
-                    if let Err(e) = self.plugin_mgr.render_window(&slug, ui) {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
-                            format!("window error: {e}"),
-                        );
-                    }
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if let Err(e) = self.plugin_mgr.render_window(&slug, ui) {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
+                                    format!("window error: {e}"),
+                                );
+                            }
+                        });
                 });
 
                 if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
@@ -5438,6 +5587,12 @@ impl eframe::App for HebnixApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        for plugin_id in crate::deep_link::take_pending_plugin_ids(&self.base_dir) {
+            self.download_hebnix_plugin(&plugin_id);
+        }
+        for theme_id in crate::deep_link::take_pending_theme_ids(&self.base_dir) {
+            self.download_theme(&theme_id);
+        }
         self.handle_messages(ctx);
 
         // rl_path can change after startup, no-ops if unchanged
@@ -6054,6 +6209,7 @@ impl eframe::App for HebnixApp {
             self.render_spawner_enable_prompt(ctx);
             self.render_admin_prompt(ctx);
             self.render_item_action_prompt(ctx);
+            self.render_plugin_delete_prompt(ctx);
             self.render_owned_proxy_prompt(ctx);
             self.render_statsapi_notice(ctx);
             self.render_web_port_notice(ctx);

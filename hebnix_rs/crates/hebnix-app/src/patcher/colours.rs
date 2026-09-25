@@ -944,16 +944,27 @@ impl Package {
     }
 
     fn heatseeker_colour_offset(&self) -> Result<usize, String> {
-        let targets: Vec<_> = self.exports.iter().copied().filter(|export| {
-            self.name_of(export.object_name).map(strip_suffix) == Some("Default__Ball_God_TA")
-                && self.class_of(*export).map(strip_suffix) == Some("Ball_God_TA")
-        }).collect();
+        let targets: Vec<_> = self
+            .exports
+            .iter()
+            .copied()
+            .filter(|export| {
+                self.name_of(export.object_name).map(strip_suffix) == Some("Default__Ball_God_TA")
+                    && self.class_of(*export).map(strip_suffix) == Some("Ball_God_TA")
+            })
+            .collect();
         if targets.len() != 1 {
-            return Err(format!("Expected one Heatseeker ball default, found {}", targets.len()));
+            return Err(format!(
+                "Expected one Heatseeker ball default, found {}",
+                targets.len()
+            ));
         }
         let export = targets[0];
-        let props: Vec<_> = self.parse_props(export).into_iter()
-            .filter(|prop| prop.name == "MaxSpeedColor" && prop.size == 16).collect();
+        let props: Vec<_> = self
+            .parse_props(export)
+            .into_iter()
+            .filter(|prop| prop.name == "MaxSpeedColor" && prop.size == 16)
+            .collect();
         if props.len() != 1 {
             return Err("Heatseeker MaxSpeedColor layout is unsupported".into());
         }
@@ -962,19 +973,24 @@ impl Package {
 
     fn apply_heatseeker_colour(&mut self, colour: [u8; 3]) -> Result<(), String> {
         let offset = self.heatseeker_colour_offset()?;
-        // Patch the runtime ball default, not a particle parameter fallback.
-        // Preserve alpha and all normal/team glow properties.
+        // The fourth component is a material parameter, not display alpha.
+        // Preserve it, along with all normal/team glow properties.
         for (index, chunk) in self.chunks.iter().enumerate() {
             if offset < chunk.u_off + chunk.u_size && offset + 12 > chunk.u_off {
                 self.modified_chunks.insert(index);
             }
         }
-        write_rgb(&mut self.image, offset, colour)
+        write_rgb(&mut self.image, offset, colour)?;
+        Ok(())
     }
 
     fn apply_team_colours(&mut self, settings: &ColourSettings) -> Result<(), String> {
         let signatures = [
-            (BLUE_DEFAULT, settings.stadium_blue, settings.hud_colours.then_some(settings.hud_blue)),
+            (
+                BLUE_DEFAULT,
+                settings.stadium_blue,
+                settings.hud_colours.then_some(settings.hud_blue),
+            ),
             (BLUE_COLOUR_BLIND, settings.stadium_blue, None),
             (
                 ORANGE_DEFAULT,
@@ -1982,8 +1998,16 @@ fn heatseeker_max_speed_roundtrip() {
     assert_eq!(&package.image[offset + 12..], &original[offset + 12..]);
     let decoded = Package::load(package.save().unwrap()).unwrap();
     let actual = decoded.heatseeker_colour_offset().unwrap();
-    let expected: Vec<u8> = [0f32, 1f32, 0f32].into_iter().flat_map(f32::to_le_bytes).collect();
+    let expected: Vec<u8> = [0f32, 1f32, 0f32]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
     assert_eq!(&decoded.image[actual..actual + 12], expected.as_slice());
-    assert_eq!(&decoded.image[actual + 12..actual + 16], &original[offset + 12..offset + 16]);
-    println!("MaxSpeedColor saved/reloaded green; all other decoded bytes unchanged before repacking");
+    assert_eq!(
+        &decoded.image[actual + 12..actual + 16],
+        &original[offset + 12..offset + 16]
+    );
+    println!(
+        "MaxSpeedColor saved/reloaded green; all other decoded bytes unchanged before repacking"
+    );
 }

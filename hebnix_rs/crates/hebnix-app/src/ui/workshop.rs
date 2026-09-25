@@ -564,10 +564,6 @@ pub struct WorkshopState {
     view: WorkshopView,
     background_changer: BackgroundChangerState,
     multiplayer: MultiplayerState,
-    /// mirrored from Config.rl_launch by render() each frame, so the
-    /// Workshop LAN -multihome relaunch (deep in prepare_multiplayer, spawned
-    /// on its own thread) knows how to launch Rocket League without every
-    /// intermediate method needing its own copy of the parameter.
     rl_launch: crate::config::RlLaunchCfg,
 }
 
@@ -690,8 +686,7 @@ impl WorkshopState {
                 WorkshopView::BackgroundChanger,
                 "Background Changer",
             );
-            // multiplayer is temporarily hidden for 2.1.7.
-            // ui.selectable_value(&mut self.view, WorkshopView::Multiplayer, "Multiplayer");
+            ui.selectable_value(&mut self.view, WorkshopView::Multiplayer, "Multiplayer");
         });
         ui.separator();
         if self.view == WorkshopView::Multiplayer {
@@ -1102,6 +1097,7 @@ impl WorkshopState {
                         ui.add_space(8.0);
                         ui.strong(format!("Hosting PIN: {pin}"));
                         ui.label("This session refreshes every five minutes.");
+                        ui.small(self.multiplayer.hosted.as_ref().unwrap().reachability.summary());
                         let stats = &self.multiplayer.hosted.as_ref().unwrap().stats;
                         ui.small(format!(
                             "Tunnel: {} · sent {} · received {} · delivered {}",
@@ -1186,6 +1182,8 @@ impl WorkshopState {
                             "Tunnel: {} · sent {} · received {} · delivered {}",
                             if session.stats.connected.load(Ordering::Relaxed) {
                                 "host connected"
+                            } else if session.stats.join_failed.load(Ordering::Relaxed) {
+                                "could not reach host"
                             } else {
                                 "waiting for host"
                             },
@@ -1193,6 +1191,15 @@ impl WorkshopState {
                             session.stats.received.load(Ordering::Relaxed),
                             session.stats.delivered.load(Ordering::Relaxed)
                         ));
+                        if session.stats.join_failed.load(Ordering::Relaxed)
+                            && !session.stats.connected.load(Ordering::Relaxed)
+                        {
+                            ui.small(
+                                "The host did not answer. Their network may block inbound UDP \
+                                 (CGNAT, or no port forward); ask them to check the network \
+                                 status shown while hosting.",
+                            );
+                        }
                         if let Ok(flow) = session.stats.last_sent_lan_udp.lock() {
                             if !flow.is_empty() {
                                 ui.small(format!("Rocket League LAN UDP out: {flow}"));
