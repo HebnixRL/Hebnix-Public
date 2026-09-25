@@ -240,6 +240,71 @@ impl PluginManager {
         }
     }
 
+    /// Discover and enable one freshly installed catalog plugin without
+    /// unloading or reloading any other plugin.
+    pub fn enable_installed_plugin(
+        &mut self,
+        plugin_id: &str,
+        config: &mut Config,
+    ) -> Result<(), String> {
+        let discovered = discover_plugins(&self.plugin_dir)
+            .into_iter()
+            .find(|plugin| plugin.manifest.plugin_id.as_deref() == Some(plugin_id))
+            .ok_or_else(|| format!("Installed plugin ID '{plugin_id}' was not discovered"))?;
+        if let Some(error) = &discovered.error {
+            return Err(format!(
+                "Installed plugin '{}' is invalid: {error}",
+                discovered.slug
+            ));
+        }
+
+        let slug = discovered.slug.clone();
+        if let Some(index) = self.plugins.iter().position(|plugin| {
+            plugin.slug == slug || plugin.manifest.plugin_id.as_deref() == Some(plugin_id)
+        }) {
+            self.plugins[index].slug = slug.clone();
+            self.plugins[index].manifest = discovered.manifest.clone();
+            self.plugins[index].filename = discovered.filename();
+            self.plugins[index].load_error = None;
+        } else {
+            self.plugins.push(LoadedPlugin {
+                slug: slug.clone(),
+                manifest: discovered.manifest.clone(),
+                filename: discovered.filename(),
+                enabled: false,
+                load_error: None,
+                runtime: None,
+            });
+        }
+
+        self.set_enabled(&slug, true, config)
+            .then_some(())
+            .ok_or_else(|| format!("Installed plugin '{slug}' failed to enable"))
+    }
+
+    /// Unload and remove one plugin's own directory.
+    pub fn delete_plugin(&mut self, slug: &str, config: &mut Config) -> Result<(), String> {
+        let index = self
+            .plugins
+            .iter()
+            .position(|plugin| plugin.slug == slug)
+            .ok_or_else(|| format!("Plugin '{slug}' was not found"))?;
+        let path = self.plugin_dir.join(slug);
+        if !path.is_dir() {
+            return Err(format!("Plugin folder {} was not found", path.display()));
+        }
+        let plugin = &mut self.plugins[index];
+        plugin.enabled = false;
+        Self::call_on_unload(plugin);
+        plugin.runtime = None;
+        std::fs::remove_dir_all(&path)
+            .map_err(|error| format!("Could not delete {}: {error}", path.display()))?;
+        self.plugins.remove(index);
+        config.plugins.remove(slug);
+        self.log(format!("[Core] Deleted plugin '{slug}'"));
+        Ok(())
+    }
+
     /// Refresh one plugin after its files were replaced by an auto-update.
     /// Disabled plugins remain disabled; enabled plugins are re-instantiated from disk.
     pub fn reload_updated_plugin(&mut self, slug: &str, was_enabled: bool, config: &mut Config) {

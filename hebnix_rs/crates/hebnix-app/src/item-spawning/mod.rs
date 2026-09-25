@@ -106,8 +106,8 @@ impl ItemSpawnForm {
                 egui::ComboBox::from_id_salt("item_quality")
                     .selected_text(QUALITIES[self.quality])
                     .show_ui(ui, |ui| {
-                        for (index, name) in QUALITIES.iter().enumerate() {
-                            ui.selectable_value(&mut self.quality, index, *name);
+                        for (i, name) in QUALITIES.iter().enumerate() {
+                            ui.selectable_value(&mut self.quality, i, *name);
                         }
                     });
                 ui.end_row();
@@ -115,8 +115,8 @@ impl ItemSpawnForm {
                 egui::ComboBox::from_id_salt("item_paint")
                     .selected_text(PAINTS[self.paint])
                     .show_ui(ui, |ui| {
-                        for (index, name) in PAINTS.iter().enumerate() {
-                            ui.selectable_value(&mut self.paint, index, *name);
+                        for (i, name) in PAINTS.iter().enumerate() {
+                            ui.selectable_value(&mut self.paint, i, *name);
                         }
                     });
                 ui.end_row();
@@ -124,8 +124,8 @@ impl ItemSpawnForm {
                 egui::ComboBox::from_id_salt("item_cert")
                     .selected_text(CERTIFICATIONS[self.certification])
                     .show_ui(ui, |ui| {
-                        for (index, name) in CERTIFICATIONS.iter().enumerate() {
-                            ui.selectable_value(&mut self.certification, index, *name);
+                        for (i, name) in CERTIFICATIONS.iter().enumerate() {
+                            ui.selectable_value(&mut self.certification, i, *name);
                         }
                     });
                 ui.end_row();
@@ -154,14 +154,14 @@ impl ItemSpawnForm {
             return None;
         }
         let product_id = match self.product_id.trim().parse::<i64>() {
-            Ok(value) if value > 0 => value,
+            Ok(v) if v > 0 => v,
             _ => {
                 self.status = Some(Err("Product ID must be a positive integer.".into()));
                 return None;
             }
         };
         let series_id = match self.series_id.trim().parse::<i64>() {
-            Ok(value) if value > 0 => value,
+            Ok(v) if v > 0 => v,
             _ => {
                 self.status = Some(Err("Series ID must be a positive integer.".into()));
                 return None;
@@ -182,39 +182,21 @@ impl ItemSpawnForm {
 pub fn reward_message(request: &ItemSpawnRequest, psy_time: i64) -> Result<String, String> {
     let mut products = Vec::with_capacity(request.quantity);
     for _ in 0..request.quantity {
-        let mut attributes = vec![serde_json::json!({
-            "Key": "Quality",
-            "Value": request.quality
-        })];
+        let mut attributes = vec![serde_json::json!({"Key":"Quality", "Value":request.quality})];
         if request.paint > 0 {
-            attributes.push(serde_json::json!({"Key": "Painted", "Value": request.paint}));
+            attributes.push(serde_json::json!({"Key":"Painted", "Value":request.paint}));
         }
         if request.certification > 0 {
-            attributes.push(serde_json::json!({
-                "Key": "Certified",
-                "Value": request.certification
-            }));
+            attributes.push(serde_json::json!({"Key":"Certified", "Value":request.certification}));
         }
         products.push(serde_json::json!({
-            "AddedTimestamp": psy_time,
-            "UpdatedTimestamp": psy_time,
+            "AddedTimestamp": psy_time, "UpdatedTimestamp": psy_time,
             "InstanceID": format!("{:032x}", rand::thread_rng().r#gen::<u128>()),
-            "ProductID": request.product_id,
-            "SeriesID": request.series_id,
-            "TradeHold": -2,
-            "Attributes": attributes
+            "ProductID": request.product_id, "SeriesID": request.series_id,
+            "TradeHold": -2, "Attributes": attributes
         }));
     }
-    let body = serde_json::to_string(&serde_json::json!({
-        "RocketPassInfo": {"TierLevel": 0, "bOwnsPremium": false, "XPMultiplier": 0.0},
-        "ProductData": products,
-        "RewardDrops": [],
-        "ChallengeRewards": [],
-        "CurrencyDrops": [],
-        "Source": "",
-        "MatchGUID": ""
-    }))
-    .map_err(|error| error.to_string())?;
+    let body = serde_json::to_string(&serde_json::json!({"RocketPassInfo":{"TierLevel":0,"bOwnsPremium":false,"XPMultiplier":0.0},"ProductData":products,"RewardDrops":[],"ChallengeRewards":[],"CurrencyDrops":[],"Source":"","MatchGUID":""})).map_err(|e| e.to_string())?;
     let sig = crate::spoofer::rules::psy_response_signature(&psy_time.to_string(), body.as_bytes());
     Ok(format!(
         "PsyService: Reward/RewardResult\r\nPsyServiceVersion: 2\r\nPsyTime: {psy_time}\r\nPsySig: {sig}\r\n\r\n{body}"

@@ -1,3 +1,4 @@
+use super::nat::{self, HostReachability};
 use super::tap::{arp_announcement, arp_reply_for_local, mac_address};
 use super::{
     CreateRoomRequest, DirectHost, HOST_ADDRESS_BYTES, PACKET_PUMP_INTERVAL, RoomClient,
@@ -12,6 +13,8 @@ use std::thread::{self, JoinHandle};
 pub struct HostSession {
     pub credentials: RoomCredentials,
     pub stats: Arc<TunnelStats>,
+    /// how guests can reach the tunnel port (UPnP / STUN / CGNAT findings)
+    pub reachability: HostReachability,
     client: RoomClient,
     stop_sender: Sender<()>,
     worker: Option<JoinHandle<()>>,
@@ -26,12 +29,16 @@ impl std::fmt::Debug for HostSession {
 impl HostSession {
     pub fn start(
         client: RoomClient,
-        request: CreateRoomRequest,
+        mut request: CreateRoomRequest,
         tunnel: TapSession,
     ) -> Result<Self, String> {
         let tunnel_port = request.port;
         let tunnel_pin = format!("pending-{tunnel_port}");
         let udp_tunnel = DirectHost::bind(tunnel_port, tunnel_pin, "")?;
+        // publish the port guests can actually reach, which differs from the
+        // local one when a router mapping or the NAT changed it
+        let (reachability, mut keepalive) = nat::establish(udp_tunnel.socket(), tunnel_port);
+        request.port = reachability.public_port;
         let (room, credentials) = client.create_room(&request)?;
         let local_mac = mac_address()?;
         let (stop_sender, stop_receiver) = mpsc::channel();
@@ -71,6 +78,7 @@ impl HostSession {
                         }
                     }
                 }
+                keepalive.tick(udp.socket());
                 if std::time::Instant::now() >= next_heartbeat {
                     let _ = refresh_client.heartbeat(&pin, &host_secret);
                     next_heartbeat += SESSION_HEARTBEAT_INTERVAL;
@@ -81,6 +89,7 @@ impl HostSession {
         Ok(Self {
             credentials,
             stats,
+            reachability,
             client,
             stop_sender,
             worker: Some(worker),
@@ -298,9 +307,9 @@ mod tests {
     #[test]
     fn rewrites_the_physical_lan_endpoint_to_the_tap_host() {
         let payload = unreal_ansi_string("192.168.0.119:7777");
-        let (_, _, replacement) = find_unreal_lan_endpoint(&payload, "192.10.192.1")
+        let (_, _, replacement) = find_unreal_lan_endpoint(&payload, "10.242.77.1")
             .expect("the LAN endpoint should be found");
-        assert_eq!(replacement, unreal_ansi_string("192.10.192.1:7777"));
+        assert_eq!(replacement, unreal_ansi_string("10.242.77.1:7777"));
     }
     #[test]
     fn rewrites_binary_and_equal_length_lan_endpoints() {
@@ -310,8 +319,8 @@ mod tests {
         let mut text = b"172.31.64.1:7777".to_vec();
         assert!(replace_equal_length_ascii_endpoint(
             &mut text,
-            "192.10.192.1"
+            "10.242.77.1"
         ));
-        assert_eq!(text, b"192.10.192.1:7777");
+        assert_eq!(text, b"10.242.77.1:7777");
     }
 }

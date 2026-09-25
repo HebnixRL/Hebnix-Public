@@ -500,19 +500,8 @@ impl Rule for RankRule {
         // Only the HTTP PsyNet RPC response contains PerConURL.  Never MITM
         // ws.rlpp.psynet.gg: that is a long-lived websocket and must be
         // tunnelled until the PerCon URL points it at the local bridge.
-        let has_spoofs = self
-            .spoofs
-            .lock()
-            .map(|spoofs| !spoofs.is_empty())
-            .unwrap_or(false);
-        let bridge_enabled = self
-            .bridge_enabled
-            .as_ref()
-            .map(|enabled| enabled.load(Ordering::Relaxed))
-            .unwrap_or(false);
-        (has_spoofs || bridge_enabled)
-            && (host.eq_ignore_ascii_case("api.rlpp.psynet.gg")
-                || host.eq_ignore_ascii_case("config.psynet.gg"))
+        host.eq_ignore_ascii_case("api.rlpp.psynet.gg")
+            || host.eq_ignore_ascii_case("config.psynet.gg")
     }
 
     fn strip_request_headers(&self) -> &[&str] {

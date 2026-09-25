@@ -365,11 +365,15 @@ impl SpooferManager {
             self.http_active.store(false, Ordering::Relaxed);
             return Err(error);
         }
+        self.start_skill_bridge()?;
         Ok(())
     }
 
     pub fn stop_http(&self) {
         self.http_active.store(false, Ordering::Relaxed);
+        if !self.socket_active.load(Ordering::Relaxed) {
+            self.stop_skill_bridge();
+        }
         self.stop_reverse_if_unused();
         self.maybe_stop_crl();
     }
@@ -403,9 +407,7 @@ impl SpooferManager {
             self.socket_active.store(false, Ordering::Relaxed);
             return Err(error);
         }
-        if self.item_spawner_enabled.load(Ordering::Relaxed) {
-            self.start_skill_bridge()?;
-        }
+        self.start_skill_bridge()?;
         Ok(())
     }
 
@@ -413,13 +415,10 @@ impl SpooferManager {
         &self,
         request: &crate::item_spawning::ItemSpawnRequest,
     ) -> Result<(), String> {
-        if !self.item_spawner_enabled.load(Ordering::Relaxed) {
-            return Err("Enable Item Spawning first".into());
-        }
         self.start_skill_bridge()?;
         let psy_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
+            .map_err(|e| e.to_string())?
             .as_secs() as i64;
         let message = crate::item_spawning::reward_message(request, psy_time)?;
         let slot = self
