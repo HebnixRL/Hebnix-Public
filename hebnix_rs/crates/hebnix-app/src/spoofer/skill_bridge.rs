@@ -1,4 +1,4 @@
-//! Local PsyNet websocket bridge used by rank spoofing.
+//! Local PsyNet websocket bridge used by rank spoofing and item spawning.
 //!
 //! The config response is rewritten to point PerConURL/PerConURLv2 here. The
 //! bridge forwards every websocket frame to the real service and rewrites only

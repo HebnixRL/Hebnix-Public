@@ -187,6 +187,7 @@ pub struct SpooferManager {
     socket_active: AtomicBool,
     title_settings: Arc<Mutex<TitleSettings>>,
     skill_bridge: Mutex<Option<SkillBridge>>,
+    item_spawner_enabled: Arc<AtomicBool>,
     crl: Mutex<Option<crl::CrlServer>>,
 }
 
@@ -252,6 +253,7 @@ impl SpooferManager {
             socket_active: AtomicBool::new(false),
             title_settings: Arc::new(Mutex::new(TitleSettings::default())),
             skill_bridge: Mutex::new(None),
+            item_spawner_enabled: Arc::new(AtomicBool::new(false)),
             crl: Mutex::new(None),
         }
     }
@@ -291,8 +293,25 @@ impl SpooferManager {
                 let _ = std::fs::write(self.base_dir.join("rank_spoofer_status.log"), &detail);
                 let _ = self.tx.send(AppMsg::Log(detail));
             }
-        } else {
+        } else if !self.item_spawner_enabled.load(Ordering::Relaxed) {
             self.stop_skill_bridge();
+        }
+    }
+
+    pub fn set_item_spawner_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.item_spawner_enabled.store(enabled, Ordering::SeqCst);
+        if enabled {
+            self.start_skill_bridge()
+        } else {
+            let ranks_active = self
+                .spoofed_ranks
+                .lock()
+                .map(|ranks| !ranks.is_empty())
+                .unwrap_or(false);
+            if !ranks_active {
+                self.stop_skill_bridge();
+            }
+            Ok(())
         }
     }
 
@@ -451,9 +470,10 @@ impl SpooferManager {
                 self.base_dir.join("owned_products.json"),
             )),
             Box::new(TitleRule::new(Arc::clone(&self.title_settings))),
-            Box::new(crate::spoofer::rules::RankRule::new(Arc::clone(
-                &self.spoofed_ranks,
-            ))),
+            Box::new(crate::spoofer::rules::RankRule::with_bridge_signal(
+                Arc::clone(&self.spoofed_ranks),
+                Arc::clone(&self.item_spawner_enabled),
+            )),
         ]);
         self.ensure_crl(&ca);
         let proxy = SocketProxy::start(ca, rules, self.tx.clone(), real_ips)?;

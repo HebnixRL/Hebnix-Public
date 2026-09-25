@@ -489,19 +489,17 @@ pub struct HebnixApp {
 }
 
 fn clear_rl_cache(tx: &Sender<AppMsg>) {
-    let Ok(user_profile) = std::env::var("USERPROFILE") else {
-        return;
-    };
-    let cache_dir =
-        std::path::Path::new(&user_profile).join(r"Documents\My Games\Rocket League\TAGame\Cache");
-
-    if cache_dir.is_dir() {
-        if let Err(e) = std::fs::remove_dir_all(&cache_dir) {
-            let _ = tx.send(AppMsg::Log(format!("[Spoofer] cant clear cache: {e}")));
-            return;
+    match winutil::clear_rocket_league_web_cache() {
+        Ok(()) => {
+            let _ = tx.send(AppMsg::Log(
+                "[Spoofer] cleared Rocket League WebCache".into(),
+            ));
         }
-        let _ = std::fs::create_dir_all(&cache_dir);
-        let _ = tx.send(AppMsg::Log("[Spoofer] cleared Rocket League cache".into()));
+        Err(error) => {
+            let _ = tx.send(AppMsg::Log(format!(
+                "[Spoofer] could not clear Rocket League WebCache: {error}"
+            )));
+        }
     }
 }
 
@@ -925,6 +923,8 @@ impl HebnixApp {
             spoofer_friends_enabled,
             spoofer_friends,
             friends_search: String::new(),
+            item_spawner_enabled: false,
+            item_spawn_form: crate::item_spawning::ItemSpawnForm::default(),
             patcher_ball,
             patcher_boost,
             patcher_decal,
@@ -1206,6 +1206,11 @@ impl HebnixApp {
         let cache_cleared = false;
 
         if !self.spoofer_master {
+            if self.item_spawner_enabled {
+                self.item_spawner_enabled = false;
+                let _ = self.spoofer_mgr.set_item_spawner_enabled(false);
+                clear_rl_cache(&self.tx);
+            }
             if self.spoofer_mgr.socket_running() {
                 self.spoofer_mgr.stop_socket();
                 clear_rl_cache(&self.tx);
@@ -1220,6 +1225,7 @@ impl HebnixApp {
             && (self.spoofer_username_enabled
                 || self.spoofer_friends_enabled
                 || self.spoofer_rank_enabled
+                || self.item_spawner_enabled
                 || self.swapper.owned_only());
         if needs_http && !self.spoofer_mgr.http_running() {
             if let Err(e) = self.spoofer_mgr.start_http() {
@@ -1236,8 +1242,9 @@ impl HebnixApp {
         // Rank spoofing uses the same hosts-backed config.psynet.gg reverse
         // proxy as the C# implementation. PsyNet bypasses Windows' HTTP proxy
         // on current clients, so this must not depend on the Title toggle.
-        let needs_socket =
-            (self.spoofer_socket_proxy && self.spoofer_title_enabled) || self.spoofer_rank_enabled;
+        let needs_socket = (self.spoofer_socket_proxy && self.spoofer_title_enabled)
+            || self.spoofer_rank_enabled
+            || self.item_spawner_enabled;
         if needs_socket && !self.spoofer_mgr.socket_running() {
             if let Err(e) = self.spoofer_mgr.start_socket() {
                 self.console
@@ -2705,6 +2712,16 @@ impl HebnixApp {
                                         .checkbox(&mut self.spoofer_title_enabled, "Title:    ")
                                         .changed()
                                     {
+                                        if !self.spoofer_title_enabled {
+                                            match winutil::clear_rocket_league_web_cache() {
+                                                Ok(()) => self.console.write(
+                                                    "[Spoofer] Cleared Rocket League WebCache.",
+                                                ),
+                                                Err(error) => self.console.write(format!(
+                                                    "[Spoofer] Could not clear Rocket League WebCache: {error}"
+                                                )),
+                                            }
+                                        }
                                         title_changed = true;
                                         self.evaluate_proxies();
                                     }

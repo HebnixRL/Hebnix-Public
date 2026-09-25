@@ -185,8 +185,28 @@ fn shorten_for_card(text: &str) -> String {
     }
 }
 
-fn item_label(_category: SwapCategory, item: &SwapItem) -> String {
-    item.name.clone()
+fn normalized_label(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn item_label(category: SwapCategory, item: &SwapItem) -> String {
+    if category != SwapCategory::Skins {
+        return item.name.clone();
+    }
+
+    let car_name = item.car_name.as_deref().unwrap_or("Unknown car");
+    let decal_already_names_car = item
+        .name
+        .split_once(':')
+        .is_some_and(|(prefix, _)| normalized_label(prefix) == normalized_label(car_name));
+    if decal_already_names_car {
+        item.name.clone()
+    } else {
+        format!("{car_name} · {}", item.name)
+    }
 }
 
 pub struct SwapperState {
@@ -196,6 +216,7 @@ pub struct SwapperState {
     target_index: HashMap<String, usize>,
     target_search: HashMap<String, String>,
     selected_car: Option<String>,
+    match_swapped_item: bool,
     car_search: String,
     search_input: HashMap<SwapCategory, String>,
     page: HashMap<SwapCategory, usize>,
@@ -214,6 +235,7 @@ impl SwapperState {
             target_index: HashMap::new(),
             target_search: HashMap::new(),
             selected_car: None,
+            match_swapped_item: true,
             car_search: String::new(),
             search_input: HashMap::new(),
             page: HashMap::new(),
@@ -273,12 +295,12 @@ impl SwapperState {
             if let Some(cars) = root.get("cars").and_then(Value::as_object) {
                 for (car_name, car) in cars {
                     if let Some(skins) = car.get("skins").and_then(Value::as_array) {
-                        let display_name = skins
-                            .iter()
-                            .filter_map(|skin| skin.get("name").and_then(Value::as_str))
-                            .find_map(|name| name.split_once(':').map(|(car, _)| car.trim()))
-                            .map(str::to_string)
-                            .unwrap_or_else(|| prettify_car_key(car_name));
+                        // The `skins` array can include universal decals whose display name
+                        // names another body (for example, OCTANE contains "Hakkaa:
+                        // Glitched"). Inferring the body from the first `Car: Decal` entry
+                        // therefore mislabeled, and effectively hid, OCTANE. The object key
+                        // is the catalog's authoritative body identifier.
+                        let display_name = prettify_car_key(car_name);
                         let car_product_id =
                             body_ids.get(&display_name.to_ascii_lowercase()).copied();
                         for skin in skins {
@@ -964,6 +986,13 @@ impl SwapperState {
                             }
                         }
                     });
+                if ui
+                    .checkbox(&mut self.match_swapped_item, "Match Selected Car")
+                    .on_hover_text("Limit replacement decals to the selected car")
+                    .changed()
+                {
+                    self.page.insert(category, 0);
+                }
             });
             if self.selected_car != previous_car {
                 self.page.insert(category, 0);
@@ -1040,19 +1069,20 @@ impl SwapperState {
                 .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec())
                 .into();
         for &source_index in visible {
-            if let Some(filename) = items[source_index].thumbnail.as_ref() {
+            if let Some(filename) = inferred_thumbnail(category, &items[source_index], &cooked_pc) {
                 let cache_key = format!("{}|{}", category.slug(), filename.to_ascii_lowercase());
-                let fallback = fs::read(self.base_dir.join("assets").join("hebnix.png"))
-                    .unwrap_or_else(|_| include_bytes!("../../assets/hebnix.png").to_vec());
                 self.thumbnails.entry(cache_key).or_insert_with(|| {
-                    Some(
-                        crate::cosmetic_thumbnail::extract_png(
-                            &cooked_pc.join(filename),
-                            category.slug(),
-                        )
-                        .unwrap_or(fallback)
-                        .into(),
-                    )
+                    match crate::cosmetic_thumbnail::extract_png(
+                        &cooked_pc.join(&filename),
+                        category.slug(),
+                    ) {
+                        Ok(png) => Some(png.into()),
+                        Err(error) => {
+                            let _ =
+                                tx.send(AppMsg::Log(format!("[Thumbnails] {filename}: {error}")));
+                            None
+                        }
+                    }
                 });
             }
         }
@@ -1067,7 +1097,8 @@ impl SwapperState {
                             let source = &items[source_index];
                             let key =
                                 format!("{}|{}", category.slug(), source.upk.to_ascii_lowercase());
-                            let thumbnail = source.thumbnail.as_ref().and_then(|filename| {
+                            let thumbnail = inferred_thumbnail(category, source, &cooked_pc)
+                                .and_then(|filename| {
                                 self.thumbnails
                                     .get(&format!(
                                         "{}|{}",
@@ -1078,9 +1109,11 @@ impl SwapperState {
                             });
                             let target_index = self.target_index.entry(key.clone()).or_insert(0);
                             let selected_car = self.selected_car.clone();
+                            let match_swapped_item = self.match_swapped_item;
                             let target_allowed = |target: &SwapItem| {
                                 swap_compatible(category, source, target)
                                     && (category != SwapCategory::Skins
+                                        || !match_swapped_item
                                         || selected_car.as_ref().is_some_and(|car| {
                                             target.car_key.as_ref() == Some(car)
                                         }))
@@ -1103,7 +1136,14 @@ impl SwapperState {
                                         let source_label = item_label(category, source);
                                         ui.add(
                                             egui::Image::from_bytes(
-                                                format!("bytes://swapper/{key}"),
+                                                format!(
+                                                    "bytes://swapper/{key}/{:08x}",
+                                                    crc32fast::hash(
+                                                        thumbnail
+                                                            .as_deref()
+                                                            .unwrap_or(&fallback_thumbnail)
+                                                    )
+                                                ),
                                                 thumbnail
                                                     .unwrap_or_else(|| fallback_thumbnail.clone()),
                                             )
