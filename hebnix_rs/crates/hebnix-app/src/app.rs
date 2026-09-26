@@ -453,6 +453,7 @@ pub struct HebnixApp {
     update_downloading: bool,
     update_error: Option<String>,
     changelog_popup: Option<crate::update::ChangelogEntry>,
+    epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     rl_launch_setup_open: bool,
     rl_launch_draft: crate::config::RlLaunchCfg,
@@ -915,6 +916,7 @@ impl HebnixApp {
             update_downloading: false,
             update_error: None,
             changelog_popup: None,
+            epic_repair: Default::default(),
             launch_path_notice: false,
             rl_launch_setup_open: false,
             rl_launch_draft,
@@ -3935,6 +3937,10 @@ impl HebnixApp {
                                     .size(11.0)
                                     .color(egui::Color32::GRAY),
                             );
+                            ui.add_space(8.0);
+                            if ui.add_enabled(!self.epic_repair.running, egui::Button::new("Fix Epic Connection")).clicked() {
+                                self.epic_repair.begin(ui.ctx());
+                            }
                         }
                     }
                 });
@@ -6169,6 +6175,7 @@ impl eframe::App for HebnixApp {
             self.render_fullscreen_notice(ctx);
             self.render_launch_path_notice(ctx);
             self.render_changelog_popup(ctx);
+            self.epic_repair.show(ctx);
             self.render_update_modal(ctx);
             self.render_install_modal(ctx);
             self.render_rl_launch_setup(ctx);

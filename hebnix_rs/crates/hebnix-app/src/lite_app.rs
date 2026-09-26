@@ -128,6 +128,7 @@ pub struct LiteApp {
     update_downloading: bool,
     update_error: Option<String>,
     changelog_popup: Option<crate::update::ChangelogEntry>,
+    epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     quitting: bool,
     plugin_delete_prompt: Option<String>,
@@ -325,6 +326,7 @@ impl LiteApp {
             update_downloading: false,
             update_error: None,
             changelog_popup: None,
+            epic_repair: Default::default(),
             launch_path_notice: false,
             quitting: false,
             plugin_delete_prompt: None,
@@ -2170,6 +2172,10 @@ impl LiteApp {
             }
         });
         ui.weak("Warns when PacketSendRate is not 20.");
+        ui.add_space(8.0);
+        if ui.add_enabled(!self.epic_repair.running, egui::Button::new("Fix Epic Connection")).clicked() {
+            self.epic_repair.begin(ui.ctx());
+        }
     }
 
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
@@ -2734,6 +2740,7 @@ impl eframe::App for LiteApp {
         self.render_notices(&ctx);
         self.render_launch_path_notice(&ctx);
         self.render_changelog_popup(&ctx);
+        self.epic_repair.show(&ctx);
         ctx.request_repaint_after(
             if self.last_rl_open
                 && (self.plugin_mgr.has_tick_plugins()

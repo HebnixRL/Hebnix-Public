@@ -19,6 +19,7 @@ mod decal_patcher {
     pub use crate::patcher::decal_patcher::*;
 }
 mod deep_link;
+mod epic_connection;
 mod discord_presence;
 mod dpi_fix;
 mod hotkey;

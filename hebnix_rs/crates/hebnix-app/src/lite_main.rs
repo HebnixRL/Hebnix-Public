@@ -2,6 +2,7 @@
 
 mod config;
 mod deep_link;
+mod epic_connection;
 mod discord_presence;
 mod dpi_fix;
 mod hotkey;
