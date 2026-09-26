@@ -586,12 +586,13 @@ fn clear_epic_multihome() -> Result<(), String> {
         for line in &mut lines {
             if let Some((key, value)) = line.split_once('=') {
                 if key.ends_with(":Sugar_AdditionalCommands") {
+                    // tailnet IPs aren't a fixed subnet Hebnix can pattern-match
+                    // (headscale assigns them dynamically), so strip any
+                    // -multihome argument outright -- Hebnix is the only thing
+                    // that ever sets one.
                     let remaining = value
                         .split_whitespace()
-                        .filter(|argument| {
-                            !argument.starts_with("-multihome=10.242.77.")
-                                && !argument.starts_with("-multihome=192.10.192.")
-                        })
+                        .filter(|argument| !argument.starts_with("-multihome="))
                         .collect::<Vec<_>>()
                         .join(" ");
                     if remaining != value {

@@ -7,8 +7,21 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const LAN_PORTS: &str = "7777-7778,14000-14010";
 const PROFILES: &str = "private,public";
 
-pub fn ensure_host_rule(executable: &Path, port: u16) -> Result<(), String> {
-    let inbound = format!("{RULE_PREFIX} v2 tunnel host inbound UDP {port}");
+/// Tailscale doesn't guarantee a fixed outbound port the way the old
+/// UPnP/STUN tunnel did, so this is scoped by executable (tailscaled.exe)
+/// only rather than a port number. tailscaled also manages its own WFP
+/// firewall rules internally; this is defense in depth on top of that.
+pub fn ensure_sidecar_rule(executable: &Path) -> Result<(), String> {
+    let outbound = format!("{RULE_PREFIX} v3 tailscaled outbound UDP");
+    ensure_udp_rule(&outbound, executable, "out", None, None, None)
+}
+
+/// lets Hebnix's own beacon-relay socket (see beacon.rs) send/receive on
+/// Rocket League's LAN port -- separate from the rule below, which is
+/// scoped to RocketLeague.exe rather than Hebnix's own binary.
+pub fn ensure_beacon_relay_rule(executable: &Path) -> Result<(), String> {
+    let port = super::RL_LAN_PORT.to_string();
+    let inbound = format!("{RULE_PREFIX} v3 beacon relay inbound UDP {port}");
     ensure_udp_rule(
         &inbound,
         executable,
@@ -17,50 +30,19 @@ pub fn ensure_host_rule(executable: &Path, port: u16) -> Result<(), String> {
         None,
         None,
     )?;
-    if outbound_is_blocked()? {
-        let outbound = format!("{RULE_PREFIX} v2 tunnel host outbound UDP {port}");
-        ensure_udp_rule(
-            &outbound,
-            executable,
-            "out",
-            Some(&format!("localport={port}")),
-            None,
-            None,
-        )?;
-    }
-    Ok(())
-}
-
-pub fn ensure_join_rule_if_needed(
-    executable: &Path,
-    host_ip: &str,
-    host_port: u16,
-) -> Result<(), String> {
-    let inbound = format!("{RULE_PREFIX} v2 tunnel guest inbound UDP {host_ip}:{host_port}");
+    let outbound = format!("{RULE_PREFIX} v3 beacon relay outbound UDP {port}");
     ensure_udp_rule(
-        &inbound,
+        &outbound,
         executable,
-        "in",
+        "out",
+        Some(&format!("localport={port}")),
         None,
-        Some(&format!("remoteport={host_port}")),
-        Some(host_ip),
-    )?;
-    if outbound_is_blocked()? {
-        let outbound = format!("{RULE_PREFIX} v2 tunnel guest outbound UDP {host_ip}:{host_port}");
-        ensure_udp_rule(
-            &outbound,
-            executable,
-            "out",
-            None,
-            Some(&format!("remoteport={host_port}")),
-            Some(host_ip),
-        )?;
-    }
-    Ok(())
+        None,
+    )
 }
 
 pub fn ensure_rocket_league_lan_rule(executable: &Path, remote_ip: &str) -> Result<(), String> {
-    let inbound = format!("{RULE_PREFIX} v2 Rocket League LAN inbound from {remote_ip}");
+    let inbound = format!("{RULE_PREFIX} v3 Rocket League LAN inbound from {remote_ip}");
     ensure_udp_rule(
         &inbound,
         executable,
@@ -70,7 +52,7 @@ pub fn ensure_rocket_league_lan_rule(executable: &Path, remote_ip: &str) -> Resu
         Some(remote_ip),
     )?;
     if outbound_is_blocked()? {
-        let outbound = format!("{RULE_PREFIX} v2 Rocket League LAN outbound to {remote_ip}");
+        let outbound = format!("{RULE_PREFIX} v3 Rocket League LAN outbound to {remote_ip}");
         ensure_udp_rule(
             &outbound,
             executable,
