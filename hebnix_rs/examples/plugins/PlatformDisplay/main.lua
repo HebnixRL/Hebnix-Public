@@ -28,6 +28,8 @@ local TOURNAMENT_PLAYLIST = 34
 
 local STYLES = { "Square", "Circle", "Full" }
 local STYLE_DIRS = { Square = "square", Circle = "circle", Full = "full" }
+-- registered by PfpOverlayV2 while it's loaded; icons use Square then
+local PFP_OVERLAY_CVAR = "pfp_overlay_active"
 
 local ICON_UNKNOWN = 0
 local ICON_STEAM = 1
@@ -302,6 +304,17 @@ local function last_layout_readout()
         .. (last_layout.watching and " (spectating)" or "")
 end
 
+local function pfp_overlay_loaded()
+    if not (hebnix.cvar and hebnix.cvar.get) then return false end
+    local _, status = hebnix.cvar.get(PFP_OVERLAY_CVAR)
+    return status ~= "not_registered"
+end
+
+local function icon_style()
+    if pfp_overlay_loaded() then return "Square" end
+    return hebnix.get_string("platform_display_style", "Square")
+end
+
 function plugin.on_load()
     clear_players()
 end
@@ -388,7 +401,7 @@ function plugin.on_overlay(draw, w, h)
         opacity = 1.0 - elapsed / FADE_SECONDS
     end
 
-    local style = hebnix.get_string("platform_display_style", "Square")
+    local style = icon_style()
     local dir = STYLE_DIRS[style] or STYLE_DIRS.Square
     local hide_steam = hebnix.get_bool("platform_display_hide_steam", false)
     local hide_self = hebnix.get_bool("platform_display_hide_self", false)
@@ -453,6 +466,9 @@ end
 function plugin.on_settings(ui)
     ui.heading("Icons")
     ui.combo_box("platform_display_style", "Style", STYLES)
+    if pfp_overlay_loaded() then
+        ui.label("Square while Rocket Profiles is loaded.")
+    end
     ui.checkbox("platform_display_show_ghosts", "Show players who left, dimmed", true)
     ui.checkbox("platform_display_hide_steam", "Hide the Steam icon", false)
     ui.checkbox("platform_display_hide_self", "Hide my own icon", false)
