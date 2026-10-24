@@ -32,7 +32,42 @@ pub fn base_dir() -> PathBuf {
     dir
 }
 
+/// portable.txt next to the exe keeps Hebnix data in the exe folder, unless
+/// it has a `portable=false` line (then it only holds options).
 fn portable_base_dir() -> Option<PathBuf> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    dir.join("portable.txt").exists().then_some(dir)
+    let path = portable_txt()?;
+    if !path.exists() || portable_value("portable").is_some_and(|value| !truthy(&value)) {
+        return None;
+    }
+    path.parent().map(PathBuf::from)
+}
+
+fn portable_txt() -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join("portable.txt"))
+}
+
+/// the value of `name` in portable.txt: `name=value`, or "true" for a bare
+/// `name` line (case-insensitive). Other lines are ignored, so the file can
+/// keep its note.
+fn portable_value(name: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(portable_txt()?).ok()?;
+    contents.lines().find_map(|line| {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        match line.split_once('=') {
+            Some((key, value)) if key.trim().eq_ignore_ascii_case(name) => {
+                Some(value.trim().to_string())
+            }
+            None if line.eq_ignore_ascii_case(name) => Some("true".to_string()),
+            _ => None,
+        }
+    })
+}
+
+fn truthy(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+}
+
+/// true if portable.txt next to the exe has a line `name` or `name=true`.
+pub fn portable_option(name: &str) -> bool {
+    portable_value(name).is_some_and(|value| truthy(&value))
 }

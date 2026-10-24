@@ -2185,7 +2185,17 @@ impl HebnixApp {
                     Ok(Some(info)) => {
                         self.console
                             .write(format!("[Core] Update available: v{}", info.version));
-                        self.update_info = Some(info);
+                        if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
+                            self.console.write(
+                                "[Core] skip_update_lock is set in portable.txt, not locking for the update.",
+                            );
+                        } else {
+                            self.update_info = Some(info);
+                            // show the update once; after that it can be hidden or closed
+                            if self.hidden {
+                                self.set_hidden(ctx, false);
+                            }
+                        }
                     }
                     Ok(None) => {
                         self.console
@@ -2381,9 +2391,7 @@ impl HebnixApp {
                 }
                 AppMsg::TrayQuit => {
                     tracing::info!("handling tray quit on UI thread");
-                    if self.update_info.is_none() {
-                        self.force_quit(ctx);
-                    }
+                    self.force_quit(ctx);
                 }
                 AppMsg::HotkeyCaptured(name) => {
                     self.capturing_hotkey = false;
@@ -6530,9 +6538,7 @@ impl eframe::App for HebnixApp {
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
-            if self.update_info.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            } else if self.config.settings.close_to_tray {
+            if self.config.settings.close_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.set_hidden(ctx, true);
             } else {
@@ -6541,9 +6547,6 @@ impl eframe::App for HebnixApp {
         }
 
         if self.update_info.is_some() {
-            if self.hidden {
-                self.set_hidden(ctx, false);
-            }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.disable();
                 ui.centered_and_justified(|ui| {
