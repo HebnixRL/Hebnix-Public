@@ -2,7 +2,8 @@ name: Release
 
 # Tagged releases for every platform, published as ONE GitHub release.
 # Push a `v*` tag matching the version in hebnix_rs/Cargo.toml (e.g. `v2.2.7`),
-# or run manually with an existing tag.
+# or run manually with an existing tag. A tag with a suffix (`v2.2.7-test`) is a
+# dry run: published as a prerelease, and the pacman repo is left alone.
 #
 # Assets:
 #   - Windows: hebnix / hebnix-lite, installed and portable zips
@@ -42,6 +43,7 @@ jobs:
     outputs:
       tag: ${{ steps.v.outputs.tag }}
       version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,10 +54,15 @@ jobs:
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
+          # a `-suffix` tag (v2.2.7-test) is a dry run: prerelease, no pacman repo publish
+          BASE="${VERSION%%-*}"
+          PRE=false
+          [ "$BASE" != "$VERSION" ] && PRE=true
           CARGO="$(sed -n 's/^version = "\(.*\)"$/\1/p' hebnix_rs/Cargo.toml | head -1)"
-          [ "$VERSION" = "$CARGO" ] || { echo "tag $TAG does not match hebnix_rs/Cargo.toml version $CARGO"; exit 1; }
+          [ "$BASE" = "$CARGO" ] || { echo "tag $TAG does not match hebnix_rs/Cargo.toml version $CARGO"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
 
   windows:
     needs: meta
@@ -286,8 +293,8 @@ jobs:
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           name: Hebnix ${{ needs.meta.outputs.tag }}
-          prerelease: false
-          make_latest: true
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.meta.outputs.prerelease != 'true' }}
           generate_release_notes: true
           files: assets/*
           fail_on_unmatched_files: true
@@ -298,6 +305,7 @@ jobs:
   # skips with a warning if they are not set.
   pacman-repo:
     needs: [meta, publish]
+    if: needs.meta.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     env:
