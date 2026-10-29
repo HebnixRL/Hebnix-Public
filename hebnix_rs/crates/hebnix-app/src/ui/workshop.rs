@@ -1071,7 +1071,7 @@ impl WorkshopState {
         self.rl_launch = rl_launch.clone();
         let ctx = ui.ctx().clone();
 
-        if crate::theme::presentation(&ctx).is_some() {
+        if crate::theme::presentation(&ctx).is_some_and(|p| p.layout.show_page_heading) {
             ui.heading(t("tab-workshop"));
             ui.add_space(8.0);
         }
@@ -1329,7 +1329,7 @@ impl WorkshopState {
         if !self.multiplayer.wizard_started {
             ui.add_space(56.0);
             ui.vertical_centered(|ui| {
-                ui.heading(t("multiplayer-workshop-multiplayer"));
+                crate::theme::page_heading(ui, t("multiplayer-workshop-multiplayer"));
                 ui.label(t("multiplayer-connect-intro"));
                 ui.add_space(12.0);
                 if ui

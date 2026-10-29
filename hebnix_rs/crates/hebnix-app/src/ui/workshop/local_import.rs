@@ -713,7 +713,7 @@ impl ImportWizard {
         runtime_dir: &Path,
     ) -> Option<LocalMap> {
         let mut imported = None;
-        ui.heading(t("render-import-a-map"));
+        crate::theme::page_heading(ui, t("render-import-a-map"));
         ui.label(t("render-add-a-map-that-isn-t"));
         ui.add_space(8.0);
         match self.step {

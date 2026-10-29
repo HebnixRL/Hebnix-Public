@@ -2161,7 +2161,7 @@ impl LiteApp {
                 .id_salt("lite_hebnix_settings_content")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.heading(match self.hebnix_settings_tab {
+                    crate::theme::page_heading(ui, match self.hebnix_settings_tab {
                         HebnixSettingsTab::Interface => t("settings-heading-interface"),
                         HebnixSettingsTab::Directories => t("settings-heading-directories"),
                         HebnixSettingsTab::Discord => t("settings-heading-discord"),
@@ -2631,7 +2631,7 @@ impl LiteApp {
                 .id_salt("lite_plugin_settings_view")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.heading(t_args("plugin-settings-display-name-configuration", &[("display_name", display_name.to_string().into())]));
+                    crate::theme::page_heading(ui, t_args("plugin-settings-display-name-configuration", &[("display_name", display_name.to_string().into())]));
                     ui.add_space(8.0);
                     if let Err(error) = self.plugin_mgr.render_settings(&selected, ui) {
                         self.console.write(format!(
@@ -2645,7 +2645,7 @@ impl LiteApp {
     fn render_about(&self, ui: &mut egui::Ui) {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.heading(t("about-hebnix-lite"));
+            crate::theme::page_heading(ui, t("about-hebnix-lite"));
             ui.add_space(10.0);
             ui.label(t_args("about-version-app-version-a-safe-eac-2", &[("version", APP_VERSION.to_string().into()), ("hotkey", (self.config.settings.hotkey.to_uppercase()).to_string().into())]));
             ui.separator();

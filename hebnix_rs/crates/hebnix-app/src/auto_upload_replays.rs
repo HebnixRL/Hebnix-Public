@@ -329,7 +329,7 @@ impl AutoUploadReplays {
         replace_file(&temporary, &self.base_dir.join(QUEUE_FILE))
     }
     pub fn show_status(&self, ui: &mut egui::Ui) {
-        ui.heading("Replays");
+        crate::theme::page_heading(ui, "Replays");
         ui.label("Saves and uploads completed games automatically using the live history bridge.");
         ui.small("Checks run after match-end and match-left events while Rocket League is open.");
         ui.add_space(8.0);

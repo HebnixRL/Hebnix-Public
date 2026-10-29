@@ -17,6 +17,7 @@ pub mod dcomp;
 pub mod gdi;
 pub mod gif;
 mod layer;
+mod mouse_input;
 pub mod native;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -32,11 +33,10 @@ use windows::Win32::Graphics::DirectComposition::{
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, HHOOK,
-    HWND_TOPMOST, IsWindowVisible, MSLLHOOKSTRUCT, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx, WH_MOUSE_LL,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, HWND_TOPMOST,
+    IsWindowVisible, MSLLHOOKSTRUCT, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SetWindowPos, ShowWindow, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{Interface, PCWSTR, Result};
 
@@ -50,7 +50,6 @@ static WEBVIEW_OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 static NATIVE_OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 static ALLOW_DRAW_ON_HEBNIX_FOCUS: AtomicBool = AtomicBool::new(true);
 static WEBVIEW_CLICKABLE: AtomicBool = AtomicBool::new(false);
-static WEBVIEW_MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
 static WEBVIEW_MOUSE_CAPTURED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn register_hwnd(hwnd: HWND) {
@@ -78,28 +77,13 @@ pub fn set_allow_draw_on_hebnix_focus(allow: bool) {
 }
 
 pub fn set_webview_clickable(clickable: bool) {
-    WEBVIEW_CLICKABLE.store(clickable, Ordering::Relaxed);
-    if clickable {
-        if WEBVIEW_MOUSE_HOOK.load(Ordering::Relaxed) == 0 {
-            unsafe {
-                if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), None, 0) {
-                    WEBVIEW_MOUSE_HOOK.store(hook.0 as isize, Ordering::Relaxed);
-                }
-            }
-        }
-    } else {
+    let changed = WEBVIEW_CLICKABLE.swap(clickable, Ordering::Relaxed) != clickable;
+    if !clickable {
         WEBVIEW_MOUSE_CAPTURED.store(false, Ordering::Relaxed);
         crate::webview::host::clear_pointer_hit();
-        remove_webview_mouse_hook();
     }
-}
-
-fn remove_webview_mouse_hook() {
-    let raw = WEBVIEW_MOUSE_HOOK.swap(0, Ordering::Relaxed);
-    if raw != 0 {
-        unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(raw as *mut _));
-        }
+    if changed {
+        mouse_input::update_hook();
     }
 }
 pub fn webview_clickable() -> bool {
@@ -352,7 +336,8 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         unsafe {
-            remove_webview_mouse_hook();
+            set_webview_clickable(false);
+            WEBVIEW_OVERLAY_HWND.store(0, Ordering::Relaxed);
             let _ = DestroyWindow(self.hwnd);
         }
     }
@@ -379,14 +364,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                 let is_up = matches!(msg, 0x0202 | 0x0205 | 0x0208);
                 let should_forward = is_move || pointer_hit || captured;
 
-                if should_forward
-                    && crate::webview::host::forward_mouse_screen_message(
-                        hwnd,
-                        msg,
-                        info.pt,
-                        info.mouseData,
-                    )
-                {
+                if should_forward && mouse_input::post_input(hwnd, msg, info.pt, info.mouseData) {
                     if is_down && pointer_hit {
                         WEBVIEW_MOUSE_CAPTURED.store(true, Ordering::Relaxed);
                     }
@@ -411,6 +389,9 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if mouse_input::dispatch(hwnd, msg, wparam, lparam) {
+        return LRESULT(0);
+    }
     const WM_NCHITTEST: u32 = 0x0084;
     const HTTRANSPARENT: isize = -1;
     if msg == WM_NCHITTEST {

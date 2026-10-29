@@ -1928,7 +1928,7 @@ impl SwapperState {
             self.walkthrough_target = None;
         }
         ui.horizontal_top(|ui| {
-            ui.heading(category.label());
+            crate::theme::page_heading(ui, category.label());
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),

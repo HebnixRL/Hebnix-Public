@@ -349,7 +349,7 @@ impl State {
             }
         }
         let mut changed = false;
-        ui.heading(t("speed-patch-title"));
+        crate::theme::page_heading(ui, t("speed-patch-title"));
         ui.weak(t("speed-patch-description"));
         ui.add_space(8.0);
         changed |= ui

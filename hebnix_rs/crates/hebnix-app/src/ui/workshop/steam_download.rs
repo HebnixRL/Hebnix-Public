@@ -698,7 +698,7 @@ impl SteamDownloader {
             .get_or_insert_with(|| load_settings(runtime_dir));
         let busy = self.busy.load(Ordering::Relaxed);
 
-        ui.heading(t("render-download-from-the-steam-workshop"));
+        crate::theme::page_heading(ui, t("render-download-from-the-steam-workshop"));
         ui.label(t("render-paste-a-rocket-league-workshop-link"));
         ui.add_space(6.0);
         ui.horizontal(|ui| {

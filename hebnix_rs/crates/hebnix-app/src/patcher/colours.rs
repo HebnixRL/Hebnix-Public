@@ -179,7 +179,7 @@ impl ColoursState {
             .id_salt("colours_page")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading(t("tab-colours"));
+                crate::theme::page_heading(ui, t("tab-colours"));
                 ui.label(t("render-stadium-hud-and-garage-palette-colours"));
                 ui.add_space(12.0);
 

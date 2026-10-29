@@ -60,7 +60,7 @@ impl HebnixApp {
         let mut completed = false;
         let mut chosen_name = None;
 
-        ui.heading("Name");
+        crate::theme::page_heading(ui, "Name");
         ui.weak("Choose your display name");
         ui.add_space(spacing.y * 2.0);
 

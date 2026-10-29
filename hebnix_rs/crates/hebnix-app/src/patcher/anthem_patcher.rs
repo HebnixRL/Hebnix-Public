@@ -729,7 +729,7 @@ impl AnthemPatcherState {
     }
     fn render_list(&mut self, ui: &mut egui::Ui, cooked: &Path, owned_ids: &HashSet<i64>) {
         let ctx = ui.ctx().clone();
-        ui.heading("Anthem Patcher");
+        crate::theme::page_heading(ui, "Anthem Patcher");
         ui.weak("Select an anthem to import audio and choose its playback sections.");
         ui.horizontal_wrapped(|ui| {
             if ui

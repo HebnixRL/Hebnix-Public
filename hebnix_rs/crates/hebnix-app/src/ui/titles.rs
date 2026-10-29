@@ -355,7 +355,7 @@ impl HebnixApp {
             .drafts
             .retain(|(key, _)| key.is_none_or(|i| i < self.spoofer_titles.len()));
         self.title_patcher.poll();
-        ui.heading("Titles");
+        crate::theme::page_heading(ui, "Titles");
         self.owned_inventory.show(ui);
         let mut changed = !self.spoofer_title_enabled;
         self.spoofer_title_enabled = true;

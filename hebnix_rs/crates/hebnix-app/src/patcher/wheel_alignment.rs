@@ -489,7 +489,7 @@ impl WheelAlignmentState {
                 }
             }
         }
-        ui.heading(t("app-wheel-alignment"));
+        crate::theme::page_heading(ui, t("app-wheel-alignment"));
         if self.edited_root.as_deref() != Some(cooked) {
             self.refresh_edited(cooked);
         }
