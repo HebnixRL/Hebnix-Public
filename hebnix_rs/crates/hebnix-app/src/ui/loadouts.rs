@@ -3,7 +3,7 @@ use eframe::egui;
 
 use crate::i18n::t;
 use crate::item_cleanup::{apply_loadout_edit, loadout_export, loadout_names};
-use hebnix_sdk::save_file::loadout_code;
+use hebnix_sdk::save_file::{bakkes_code, loadout_code};
 use hebnix_sdk::save_file::loadout_edit::Edit;
 
 #[derive(Default)]
@@ -13,6 +13,8 @@ pub struct LoadoutsPanel {
     import_text: String,
     renaming: Option<(usize, String)>,
     message: String,
+    bakkes_text: String,
+    bakkes: Option<Result<bakkes_code::Code, String>>,
 }
 
 enum Pending {
@@ -64,7 +66,8 @@ impl LoadoutsPanel {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// Returns true when `bakkes_enabled` changed.
+    pub fn show(&mut self, ui: &mut egui::Ui, bakkes_enabled: &mut bool) -> bool {
         if !self.loaded {
             self.loaded = true;
             self.reload();
@@ -136,5 +139,53 @@ impl LoadoutsPanel {
         if !self.message.is_empty() {
             ui.label(&self.message);
         }
+
+        ui.separator();
+        let changed = ui
+            .checkbox(bakkes_enabled, t("loadouts-bakkes-toggle"))
+            .changed();
+        if *bakkes_enabled {
+            self.show_bakkes(ui);
+        }
+        changed
+    }
+
+    fn show_bakkes(&mut self, ui: &mut egui::Ui) {
+        ui.label(t("loadouts-bakkes-hint"));
+        ui.text_edit_singleline(&mut self.bakkes_text);
+        if ui.button(t("loadouts-bakkes-read")).clicked() {
+            self.bakkes = Some(bakkes_code::decode(&self.bakkes_text));
+        }
+        match &self.bakkes {
+            Some(Ok(code)) => {
+                ui.strong(t("loadouts-bakkes-blue"));
+                show_team(ui, &code.blue);
+                match &code.orange {
+                    Some(orange) => {
+                        ui.strong(t("loadouts-bakkes-orange"));
+                        show_team(ui, orange);
+                    }
+                    None => {
+                        ui.weak(t("loadouts-bakkes-same"));
+                    }
+                }
+            }
+            Some(Err(error)) => {
+                ui.label(error);
+            }
+            None => {}
+        }
+    }
+}
+
+fn show_team(ui: &mut egui::Ui, team: &bakkes_code::Team) {
+    for item in &team.items {
+        ui.label(format!(
+            "slot {}: product {} paint {}",
+            item.slot, item.product_id, item.paint
+        ));
+    }
+    if let Some((primary, secondary)) = team.colors {
+        ui.label(format!("colors {primary:?} / {secondary:?}"));
     }
 }

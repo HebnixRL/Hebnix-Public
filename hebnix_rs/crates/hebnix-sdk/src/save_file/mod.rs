@@ -2,6 +2,7 @@
 //! with typed accessors on top via SaveData.
 
 pub mod accessors;
+pub mod bakkes_code;
 pub mod binary_parser;
 pub mod binary_serializer;
 pub mod configuration;

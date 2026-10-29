@@ -358,6 +358,8 @@ pub struct Config {
     pub rl_launch: RlLaunchCfg,
     pub patcher: PatcherCfg,
     pub speed_patch: SpeedPatchCfg,
+    /// experimental: parse BakkesMod item mod codes in the Loadouts tab
+    pub experimental_bakkes_codes: bool,
     pub replay_upload: ReplayUploadCfg,
     pub action_button: ActionButtonCfg,
     /// enabled state keyed by plugin slug

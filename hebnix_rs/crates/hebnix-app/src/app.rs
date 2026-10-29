@@ -7298,7 +7298,11 @@ impl HebnixApp {
                         PatcherSubTab::Presets => {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
                         }
-                        PatcherSubTab::Loadouts => self.loadouts.show(ui),
+                        PatcherSubTab::Loadouts => {
+                            if self.loadouts.show(ui, &mut self.config.experimental_bakkes_codes) {
+                                self.save_config();
+                            }
+                        }
                         }
                     });
                 } else if self.items_mode == ItemsMode::Recolour {
