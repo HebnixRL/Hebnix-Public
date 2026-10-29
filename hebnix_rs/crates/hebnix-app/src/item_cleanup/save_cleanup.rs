@@ -1,5 +1,6 @@
 //! Closed-game save cleanup. Preflight every file before installing any change.
-use hebnix_sdk::save_file::item_cleanup::{CleanupPlan, plan_cleanup};
+use hebnix_sdk::save_file::item_cleanup::plan_cleanup;
+use hebnix_sdk::save_file::loadout_edit;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -154,7 +155,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 struct Prepared {
     path: PathBuf,
     before: Vec<u8>,
-    plan: CleanupPlan,
+    after: Vec<u8>,
     backup: PathBuf,
     temp: PathBuf,
 }
@@ -164,33 +165,33 @@ impl Drop for Prepared {
     }
 }
 
+/// Plans each save with `planner` (`None` = unchanged), then backs up and installs the
+/// changed ones. `tag` names the backups. Returns how many saves changed.
 fn execute(
     paths: &[PathBuf],
-    targets: &BTreeSet<String>,
-    generation: u64,
+    tag: &str,
     mut check: impl FnMut() -> Result<(), String>,
-    mut planner: impl FnMut(&[u8], &BTreeSet<String>) -> Result<CleanupPlan, String>,
-) -> Result<String, String> {
+    mut planner: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>, String>,
+) -> Result<usize, String> {
     check()?;
     let mut prepared = Vec::new();
     for path in paths {
         regular(path)?;
         let before = std::fs::read(path).map_err(|e| e.to_string())?;
-        let plan = planner(&before, targets).map_err(|e| format!("{}: {e}", path.display()))?;
-        if !plan.report.changed() {
+        let Some(after) = planner(&before).map_err(|e| format!("{}: {e}", path.display()))? else {
             continue;
-        }
-        let token = format!("{generation}-{:032x}", rand::random::<u128>());
+        };
+        let token = format!("{tag}-{:032x}", rand::random::<u128>());
         let name = path
             .file_name()
             .ok_or("invalid save filename")?
             .to_string_lossy();
-        let backup = path.with_file_name(format!("{name}.hebnix-clear-{token}.bak"));
-        let temp = path.with_file_name(format!("{name}.hebnix-clear-{token}.tmp"));
+        let backup = path.with_file_name(format!("{name}.hebnix-{token}.bak"));
+        let temp = path.with_file_name(format!("{name}.hebnix-{token}.tmp"));
         prepared.push(Prepared {
             path: path.clone(),
             before,
-            plan,
+            after,
             backup,
             temp,
         });
@@ -200,15 +201,13 @@ fn execute(
     for p in &prepared {
         check()?;
         write_new(&p.backup, &p.before)?;
-        write_new(&p.temp, &p.plan.bytes)?;
+        write_new(&p.temp, &p.after)?;
         if std::fs::read(&p.backup).map_err(|e| e.to_string())? != p.before
-            || std::fs::read(&p.temp).map_err(|e| e.to_string())? != p.plan.bytes
+            || std::fs::read(&p.temp).map_err(|e| e.to_string())? != p.after
         {
             return Err("save backup/staging verification failed".into());
         }
     }
-    let mut instances = 0;
-    let mut slots = 0;
     for p in &prepared {
         check()?;
         regular(&p.path)?;
@@ -231,18 +230,13 @@ use std::os::windows::fs::OpenOptionsExt;
         check()?;
         drop(_lock);
         super::store::replace(&p.temp, &p.path)?;
-        if std::fs::read(&p.path).map_err(|e| e.to_string())? != p.plan.bytes {
+        if std::fs::read(&p.path).map_err(|e| e.to_string())? != p.after {
             return Err("Installed save verification failed; recovery backup retained".into());
         }
         check()?;
-        instances += p.plan.report.inventory_instances;
-        slots += p.plan.report.equipped_slots;
     }
     check()?;
-    Ok(format!(
-        "Cleaned {} files for the most recently saved account ({instances} inventory entries, {slots} equipped slots, including rotating copies). Original saves backed up beside each changed file.",
-        prepared.len()
-    ))
+    Ok(prepared.len())
 }
 pub fn clear_saved_instances(
     targets: &BTreeSet<String>,
@@ -258,5 +252,46 @@ pub fn clear_saved_instances(
             "No Rocket League account saves found; cannot verify saved-item cleanup".into(),
         );
     }
-    execute(&paths, targets, generation, require_closed, plan_cleanup)
+    let (mut instances, mut slots) = (0, 0);
+    let changed = execute(&paths, &format!("clear-{generation}"), require_closed, |raw| {
+        let plan = plan_cleanup(raw, targets)?;
+        instances += plan.report.inventory_instances;
+        slots += plan.report.equipped_slots;
+        Ok(plan.report.changed().then_some(plan.bytes))
+    })?;
+    Ok(format!(
+        "Cleaned {changed} files for the most recently saved account ({instances} inventory entries, {slots} equipped slots, including rotating copies). Original saves backed up beside each changed file."
+    ))
+}
+
+/// The account save that loadout presets are read from and written to. Rotating
+/// copies (`<account>_N.save`) are left alone; their preset positions can differ.
+fn main_save() -> Result<PathBuf, String> {
+    discover()?
+        .into_iter()
+        .find(|p| p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| !s.contains('_')))
+        .ok_or_else(|| "No Rocket League account save found".into())
+}
+
+pub fn loadout_export(position: usize) -> Result<String, String> {
+    let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
+    loadout_edit::export(&raw, position)
+}
+
+pub fn apply_loadout_edit(edit: &loadout_edit::Edit) -> Result<String, String> {
+    require_closed()?;
+    let path = main_save()?;
+    let changed = execute(&[path.clone()], "loadout", require_closed, |raw| {
+        loadout_edit::plan(raw, edit)
+    })?;
+    Ok(if changed == 1 {
+        format!("Saved preset change to {}. Original save backed up beside it.", path.display())
+    } else {
+        "No change needed.".into()
+    })
+}
+
+pub fn loadout_names() -> Result<Vec<String>, String> {
+    let save = hebnix_sdk::save_file::load(&main_save()?, false).map_err(|e| e.to_string())?;
+    Ok(save.loadout_sets().into_iter().map(|set| set.name).collect())
 }

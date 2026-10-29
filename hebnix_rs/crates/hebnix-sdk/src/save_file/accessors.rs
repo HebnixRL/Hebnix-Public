@@ -589,9 +589,21 @@ impl SaveData {
         Some(self.parse_loadout_set(set_obj))
     }
 
+    /// Follows the profile's `LoadoutSets` refs, so unlinked (deleted) sets stay hidden.
     pub fn loadout_sets(&self) -> Vec<LoadoutSet> {
-        get_objects(&self.objects, "TAGame.LoadoutSet_TA")
+        let Some(profile) = get_object(&self.objects, "TAGame.ProfileLoadoutSave_TA") else {
+            return get_objects(&self.objects, "TAGame.LoadoutSet_TA")
+                .into_iter()
+                .map(|set| self.parse_loadout_set(set))
+                .collect();
+        };
+        profile
+            .get("LoadoutSets")
+            .and_then(|v| v.as_array())
             .into_iter()
+            .flatten()
+            .filter_map(|r| resolve_ref(&self.objects, r.as_i64()?))
+            .filter(|set| set["__type"] == "TAGame.LoadoutSet_TA")
             .map(|set| self.parse_loadout_set(set))
             .collect()
     }

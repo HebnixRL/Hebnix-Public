@@ -8,6 +8,8 @@ pub mod configuration;
 pub mod crypto;
 pub mod file_io;
 pub mod item_cleanup;
+pub mod loadout_code;
+pub mod loadout_edit;
 pub mod models;
 
 pub use accessors::SaveData;
