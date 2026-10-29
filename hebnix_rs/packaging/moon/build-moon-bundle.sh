@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 BIN_NAME="hebnix"
-CARGO_BIN="hebnix-app"
+CARGO_BIN="hebnix"
 SIDECAR_NAME="hebnix-tc"
 BINARY=""
 SIDECAR=""
