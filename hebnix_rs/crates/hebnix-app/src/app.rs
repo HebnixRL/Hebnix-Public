@@ -6848,6 +6848,8 @@ impl HebnixApp {
         match self.tab {
             Tab::Console => self.render_console_tab(ui),
             Tab::Workshop => {
+        let join_rl_path = self.config.settings.rl_path.clone();
+        self.workshop.render_join_prompt(ctx, &join_rl_path);
                 let rl_path = self.config.settings.rl_path.clone();
                 let rl_launch = self.config.rl_launch.clone();
                 let tx = self.tx.clone();

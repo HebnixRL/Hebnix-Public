@@ -941,6 +941,10 @@ pub struct WorkshopState {
     ingame_menu: InGameMenuState,
     /// connection state the LAN host file was last set for
     lan_synced: Option<bool>,
+    /// last failed join read from the game log, polled while the tab is open
+    join_mismatch: Option<hebnix_sdk::log::JoinMismatch>,
+    join_polled: Option<std::time::Instant>,
+    join_mismatch_dismissed: Option<hebnix_sdk::log::JoinMismatch>,
     import_wizard: ImportWizard,
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
@@ -986,6 +990,9 @@ impl WorkshopState {
             menu_map: MenuMapState::default(),
             ingame_menu: InGameMenuState::default(),
             lan_synced: None,
+            join_mismatch: None,
+            join_polled: None,
+            join_mismatch_dismissed: None,
             import_wizard: ImportWizard::default(),
             steam_downloader: SteamDownloader::default(),
             archive_browser: ArchiveBrowser::default(),
@@ -1889,6 +1896,68 @@ impl WorkshopState {
     /// the same slot. every player has to replace the same in-game map, so
     /// this flags a peer's map that sits in a different slot on your side.
     /// players are a collapsed list so it stays usable with lots of them.
+    /// Centered popup, on any tab, offering the hosted map of the player the
+    /// game just failed to join.
+    pub fn render_join_prompt(&mut self, ctx: &egui::Context, rl_path: &str) {
+        let Some(session) = &self.multiplayer.relay else {
+            return;
+        };
+        if self.join_polled.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
+            self.join_polled = Some(std::time::Instant::now());
+            self.join_mismatch = hebnix_sdk::log::join_mismatch(None);
+        }
+        ctx.request_repaint_after(Duration::from_secs(5));
+        let Some(failed) = self.join_mismatch.clone() else {
+            return;
+        };
+        if self.join_mismatch_dismissed.as_ref() == Some(&failed) {
+            return;
+        }
+        let Some((offer, map)) = session.peer_offers().into_iter().find_map(|offer| {
+            let map = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT)?.clone();
+            (offer.ip.to_string() == failed.ip).then_some((offer, map))
+        }) else {
+            return;
+        };
+        let workshop = crate::patcher::workshop_menu::workshop_dir(
+            &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
+        );
+        if workshop.join(crate::patcher::workshop_menu::map_dir_name(&map.id)).is_dir() {
+            return;
+        }
+        let busy = self.multiplayer.map_install_busy.load(Ordering::Relaxed);
+        let mut download = false;
+        let mut dismiss = false;
+        egui::Window::new(t("join-mismatch-title"))
+            .id(egui::Id::new("join-mismatch"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(t_args("join-mismatch", &[("name", offer.label().into())]));
+                ui.strong(&map.name);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    download = ui
+                        .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
+                        .clicked();
+                    dismiss = ui.button(t("join-mismatch-dismiss")).clicked();
+                });
+            });
+        if download || dismiss {
+            self.join_mismatch_dismissed = Some(failed);
+        }
+        if download {
+            let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map };
+            let request = (target, offer.ip, true);
+            if self.multiplayer.peer_warning_accepted {
+                self.install_peer_map(request.0, request.1, request.2, rl_path, ctx);
+            } else {
+                self.multiplayer.pending_peer_install = Some(request);
+            }
+        }
+    }
+
     fn render_maps_in_use(
         &mut self,
         ui: &mut egui::Ui,
