@@ -1,13 +1,12 @@
 name: Release
 
-# Tagged releases for every platform, published as ONE GitHub release.
+# Tagged Linux releases (Windows builds are not published here; see build.yml).
 # Push a `v*` tag (e.g. `v2.2.7`), or run manually with an existing tag. The tag
 # is the version: packaging/stamp-version.sh writes it into the Cargo.toml files
 # and APP_VERSION at build time. A tag with a suffix (`v2.2.7-test`) is a
 # dry run: published as a prerelease, and the pacman repo is left alone.
 #
 # Assets:
-#   - Windows: hebnix / hebnix-lite, installed and portable zips
 #   - Linux (Ubuntu/glibc): tarball, AppImage (+ .zsync), .moon bundle
 #   - Linux (Arch-built): tarball + .moon bundle, for the hebnix-linux-bin AUR
 #     package. A dynamically-linked binary needs the build host's library
@@ -65,65 +64,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
-
-  windows:
-    needs: meta
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.meta.outputs.tag }}
-
-      # the tag is the single source of truth for the version
-      - name: Stamp version
-        shell: bash
-        run: bash hebnix_rs/packaging/stamp-version.sh ${{ needs.meta.outputs.base }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: hebnix_rs -> target
-
-      - name: check translations
-        run: cargo test -p hebnix-app i18n
-        working-directory: hebnix_rs
-
-      - name: build hebnix
-        run: cargo build --release --bin hebnix
-        working-directory: hebnix_rs
-
-      - name: build hebnix-lite
-        run: cargo build --release --bin hebnix-lite --features lite
-        working-directory: hebnix_rs
-
-      - name: package
-        shell: pwsh
-        run: |
-          $v = '${{ needs.meta.outputs.version }}'
-          $release = 'hebnix_rs\target\release'
-          # portable variants drop a portable.txt so the app keeps data in the exe folder
-          $marker = 'keep hebnix data in this folder instead of %AppData%\Hebnix'
-          $variants = @(
-            @{ name = "hebnix-$v-windows-x86_64";               exe = 'hebnix';      portable = $false },
-            @{ name = "hebnix-$v-windows-x86_64-portable";      exe = 'hebnix';      portable = $true  },
-            @{ name = "hebnix-lite-$v-windows-x86_64";          exe = 'hebnix-lite'; portable = $false },
-            @{ name = "hebnix-lite-$v-windows-x86_64-portable"; exe = 'hebnix-lite'; portable = $true  }
-          )
-          foreach ($var in $variants) {
-            $dir = "stage\$($var.name)"
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            Copy-Item "$release\$($var.exe).exe" $dir
-            if ($var.portable) { Set-Content "$dir\portable.txt" $marker }
-            Compress-Archive -Path "$dir\*" -DestinationPath "$($var.name).zip"
-          }
-          Get-ChildItem *.zip | Select-Object Name, Length
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-windows
-          path: "*.zip"
-          if-no-files-found: error
 
   linux:
     needs: meta
@@ -290,7 +230,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [meta, windows, linux, linux-arch]
+    needs: [meta, linux, linux-arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
