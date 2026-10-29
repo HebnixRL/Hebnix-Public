@@ -24,6 +24,7 @@ use crate::multiplayer_lan::{
 mod archive;
 mod banner_image;
 mod background_changer;
+mod ingame_menu;
 mod menu_map;
 mod local_import;
 #[cfg(target_os = "windows")]
@@ -33,6 +34,7 @@ mod steam_download;
 mod steam_download;
 use archive::ArchiveBrowser;
 use background_changer::BackgroundChangerState;
+use ingame_menu::InGameMenuState;
 use menu_map::MenuMapState;
 use steam_download::SteamDownloader;
 
@@ -175,6 +177,10 @@ pub const TARGET_MAPS: [(&str, &str); 4] = [
     ("Roadblock", "Labs_Octagon_B2B_02_P.upk"),
     ("Hourglass", "Labs_PillarGlass_P.upk"),
 ];
+
+/// Map-to-replace entry that copies the map into Hebnix's workshop folder for
+/// the in-game Workshop menu instead of replacing a map.
+pub const WORKSHOP_TARGET: &str = "Workshop folder";
 
 fn target_filename(target: &str) -> Option<&'static str> {
     TARGET_MAPS
@@ -353,6 +359,9 @@ impl MapManager {
         }
 
         let cooked_pc_dir = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if target_name == WORKSHOP_TARGET {
+            return self.install_to_workshop_folder(map_data, &cached_map_path, &cooked_pc_dir);
+        }
         let mods_dir = cooked_pc_dir.join(WORKSHOP_MODS_DIR_NAME);
         std::fs::create_dir_all(&mods_dir).map_err(|e| e.to_string())?;
 
@@ -370,6 +379,36 @@ impl MapManager {
         self.save_active_maps();
         self.save_install_state(rl_path);
         Ok(())
+    }
+
+    /// One folder per map, named by its id, holding the map as a .udk (the
+    /// only extensions the Workshop menu loads) and its details.
+    fn install_to_workshop_folder(
+        &self,
+        map_data: &Value,
+        cached: &Path,
+        cooked: &Path,
+    ) -> Result<(), String> {
+        let id = id_of(map_data);
+        let folder = crate::patcher::workshop_menu::workshop_dir(cooked)
+            .join(crate::patcher::workshop_menu::map_dir_name(&id));
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let name = str_of(map_data, "name", &id);
+        let file: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let file = if file.is_empty() { id.clone() } else { file };
+        std::fs::copy(cached, folder.join(format!("{file}.udk"))).map_err(|e| e.to_string())?;
+        let banner = str_of(map_data, "banner_path", "");
+        let meta = serde_json::json!({
+            "title": name,
+            "author": str_of(map_data, "author", ""),
+            "description": str_of(map_data, "description", str_of(map_data, "short_description", "")),
+            "preview_url": if banner.is_empty() { String::new() } else { banner_url_and_cache_rel(banner).0 },
+        });
+        std::fs::write(folder.join(ingame_menu::META), meta.to_string())
+            .map_err(|e| e.to_string())
     }
 
     /// Rocket League only notices mod files that existed when it started.
@@ -747,6 +786,7 @@ enum WorkshopView {
     Import,
     BackgroundChanger,
     MenuMap,
+    InGameMenu,
     Multiplayer,
 }
 
@@ -879,6 +919,7 @@ pub struct WorkshopState {
     view: WorkshopView,
     background_changer: BackgroundChangerState,
     menu_map: MenuMapState,
+    ingame_menu: InGameMenuState,
     import_wizard: ImportWizard,
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
@@ -887,6 +928,8 @@ pub struct WorkshopState {
     /// the "P2P File Sharing" system setting. read by the map sync server
     /// each time a player asks for a file, so it applies straight away.
     share_files: Arc<AtomicBool>,
+    /// the folder workshop maps go to for the attached install, set each frame
+    workshop_maps: PathBuf,
 }
 
 impl WorkshopState {
@@ -920,12 +963,14 @@ impl WorkshopState {
             view: WorkshopView::Browse,
             background_changer: BackgroundChangerState::default(),
             menu_map: MenuMapState::default(),
+            ingame_menu: InGameMenuState::default(),
             import_wizard: ImportWizard::default(),
             steam_downloader: SteamDownloader::default(),
             archive_browser: ArchiveBrowser::default(),
             multiplayer,
             rl_launch: crate::config::RlLaunchCfg::default(),
             share_files: Arc::new(AtomicBool::new(true)),
+            workshop_maps: PathBuf::new(),
         }
     }
 
@@ -1073,6 +1118,9 @@ impl WorkshopState {
         tx: &Sender<AppMsg>,
     ) {
         self.rl_launch = rl_launch.clone();
+        self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
+            &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
+        );
         let ctx = ui.ctx().clone();
 
         if crate::theme::presentation(&ctx).is_some() {
@@ -1092,6 +1140,11 @@ impl WorkshopState {
                 t("render-background-changer"),
             );
             ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+            ui.selectable_value(
+                &mut self.view,
+                WorkshopView::InGameMenu,
+                "In-game menu (experimental)",
+            );
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Multiplayer,
@@ -1136,6 +1189,10 @@ impl WorkshopState {
             self.background_changer.render(ui, rl_path, tx);
             return;
         }
+        if self.view == WorkshopView::InGameMenu {
+            self.ingame_menu.render(ui, rl_path, tx);
+            return;
+        }
         if self.view == WorkshopView::MenuMap {
             let custom = self.cached_maps();
             self.menu_map.render(ui, rl_path, &custom, tx);
@@ -1166,7 +1223,7 @@ impl WorkshopState {
             egui::ComboBox::from_id_salt("target_map")
                 .selected_text(self.target.clone())
                 .show_ui(ui, |ui| {
-                    for (name, _) in TARGET_MAPS {
+                    for name in TARGET_MAPS.map(|(name, _)| name).into_iter().chain([WORKSHOP_TARGET]) {
                         if ui
                             .selectable_value(&mut self.target, name.to_string(), name)
                             .changed()
@@ -2207,7 +2264,7 @@ impl WorkshopState {
         let author = str_of(map_data, "author", "Unknown").to_string();
         let banner = str_of(map_data, "banner_path", "").to_string();
 
-        let active_targets = self.manager.get_active_targets_for_map(&map_id);
+        let active_targets = self.active_targets(&map_id);
         let is_active_on_current = active_targets.contains(&self.target);
         let is_cached = self.manager.is_cached(&map_id);
         let is_busy = self.busy.contains(&map_id);
@@ -2352,6 +2409,16 @@ impl WorkshopState {
         result
     }
 
+    /// The targets a map is loaded on, the workshop folder included.
+    fn active_targets(&self, map_id: &str) -> Vec<String> {
+        let mut targets = self.manager.get_active_targets_for_map(map_id);
+        let dir = crate::patcher::workshop_menu::map_dir_name(map_id);
+        if !map_id.is_empty() && self.workshop_maps.join(dir).is_dir() {
+            targets.push(WORKSHOP_TARGET.to_string());
+        }
+        targets
+    }
+
     fn handle_action(
         &mut self,
         map_idx: usize,
@@ -2364,6 +2431,18 @@ impl WorkshopState {
         let map_id = id_of(&map_data);
 
         match action {
+            CardAction::Unload if self.target == WORKSHOP_TARGET => {
+                let dir = crate::patcher::workshop_menu::map_dir_name(&map_id);
+                let result = std::fs::remove_dir_all(self.workshop_maps.join(dir))
+                    .map_err(|e| format!("Could not remove the map (is it loaded in game?): {e}"))
+                    .and_then(|()| {
+                        ingame_menu::refresh(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"))
+                    });
+                if let Err(e) = result {
+                    let _ = tx.send(AppMsg::Log(format!("[Workshop] {e}")));
+                }
+                self.execute_search(false);
+            }
             CardAction::Unload => match self.manager.unload_active_map(&self.target, rl_path) {
                 Ok(()) => self.execute_search(false),
                 Err(e) => {
@@ -2382,9 +2461,19 @@ impl WorkshopState {
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
                     let result = manager.install_map(&map_data, &target, &rl_path);
+                    let cooked = Path::new(&rl_path).join("TAGame").join("CookedPCConsole");
+                    // the in-game Workshop menu lists that folder, so update it
+                    let listed = match (&result, target == WORKSHOP_TARGET) {
+                        (Ok(()), true) => match ingame_menu::refresh(&cooked) {
+                            Ok(Some(count)) => format!(" The in-game Workshop list now has {count} maps."),
+                            Ok(None) => " Enable the in-game Workshop menu to see it in game.".to_string(),
+                            Err(e) => format!(" Could not update the in-game list: {e}"),
+                        },
+                        _ => String::new(),
+                    };
                     let msg = match &result {
                         Ok(()) => format!(
-                            "[Workshop] Installed '{}' to {target}.",
+                            "[Workshop] Installed '{}' to {target}.{listed}",
                             str_of(&map_data, "name", "map")
                         ),
                         Err(e) => format!("[Workshop] Map Install Error: {e}"),
@@ -2761,7 +2850,7 @@ impl WorkshopState {
     }
     fn themed_map_actions(&mut self, ui: &mut egui::Ui, idx: usize, metrics: Option<&ThemedTileMetrics>) -> Option<CardAction> {
         let id = id_of(&self.catalog[idx]);
-        let active = self.manager.get_active_targets_for_map(&id).contains(&self.target);
+        let active = self.active_targets(&id).contains(&self.target);
         let cached = self.manager.is_cached(&id);
         let busy = self.busy.contains(&id);
         let label = if busy { t("tab-working") } else if active { format!("Unload {}",self.target) }

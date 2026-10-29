@@ -212,6 +212,7 @@ pub fn write_item_vdf(
     field("appid", "252950");
     field("publishedfileid", published_file_id);
     field("title", &map.name);
+    field("author", &map.author);
     field("description", &map.description);
     field("previewfile", &preview);
     text.push_str("}\n");
@@ -418,6 +419,7 @@ pub fn looks_like_package(path: &Path) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VdfItem {
     pub title: String,
+    pub author: String,
     pub description: String,
     pub preview_file: String,
     pub content_folder: String,
@@ -538,6 +540,7 @@ pub fn parse_workshop_vdf(text: &str) -> Result<VdfItem, String> {
         .unwrap_or(&root);
     let parsed = VdfItem {
         title: find_value(item, "title"),
+        author: find_value(item, "author"),
         description: find_value(item, "description"),
         preview_file: find_value(item, "previewfile"),
         content_folder: find_value(item, "contentfolder"),

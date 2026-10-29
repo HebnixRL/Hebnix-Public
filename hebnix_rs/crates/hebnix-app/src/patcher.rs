@@ -19,6 +19,7 @@ pub mod decal_variant;
 pub mod heatseeker;
 pub mod item_name;
 pub mod menu_map;
+pub mod workshop_menu;
 pub mod painted_swap;
 pub mod patch_core;
 pub mod rl_font;

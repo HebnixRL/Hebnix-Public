@@ -1086,11 +1086,12 @@ impl UpkPackage {
             })
             .or_else(|| list.first().copied())
     }
-    pub fn rename_name(&mut self, index: usize, new_name: &str) -> Result<(), String> {
-        let old = self.names.get(index).ok_or("Invalid name index")?;
-        if old.len() != new_name.len() || !new_name.is_ascii() {
-            return Err(format!("Name length must remain {} bytes", old.len()));
-        }
+    /// Image offset of an ANSI name entry's characters.
+    pub fn name_string_offset(&self, index: usize) -> Result<usize, String> {
+        Ok(self.header.name_offset + self.name_entry(index)? + 4)
+    }
+
+    fn name_entry(&self, index: usize) -> Result<usize, String> {
         let mut pos = 0usize;
         for _ in 0..index {
             let len = read_i32(&self.decrypted_header, pos)?;
@@ -1104,6 +1105,15 @@ impl UpkPackage {
         if read_i32(&self.decrypted_header, pos)? < 0 {
             return Err("Unicode name entries are unsupported".into());
         }
+        Ok(pos)
+    }
+
+    pub fn rename_name(&mut self, index: usize, new_name: &str) -> Result<(), String> {
+        let old = self.names.get(index).ok_or("Invalid name index")?;
+        if old.len() != new_name.len() || !new_name.is_ascii() {
+            return Err(format!("Name length must remain {} bytes", old.len()));
+        }
+        let pos = self.name_entry(index)?;
         self.decrypted_header[pos + 4..pos + 4 + new_name.len()]
             .copy_from_slice(new_name.as_bytes());
         let abs = self.header.name_offset + pos + 4;

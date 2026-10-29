@@ -8,6 +8,8 @@ mod name;
 mod spoofer_controls;
 #[path = "ui/titles.rs"]
 mod titles;
+#[path = "ui/menu_textures.rs"]
+mod menu_textures;
 #[cfg(test)]
 #[path = "ui/titles_tests.rs"]
 mod titles_tests;
@@ -422,6 +424,7 @@ enum SpooferSubTab {
     Titles,
     TitleRank,
     Friends,
+    MenuTextures,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,6 +588,7 @@ pub struct HebnixApp {
     spoofer_title_glow: bool,
     spoofer_title_glow_color: [u8; 3],
     title_editor: titles::TitleEditorState,
+    menu_textures: menu_textures::MenuTextureState,
     spoofer_title_target: Option<String>,
     spoofer_titles: Vec<TitleSpoofSettings>,
     spoofer_title_filter: String,
@@ -1076,6 +1080,7 @@ impl HebnixApp {
             spoofer_title_glow,
             spoofer_title_glow_color: spoofer_title_glow_color.unwrap_or(spoofer_title_color),
             title_editor,
+            menu_textures: Default::default(),
             spoofer_title_target,
             spoofer_titles,
             spoofer_title_filter: String::new(),
@@ -3464,6 +3469,11 @@ impl HebnixApp {
                                 t("spoofer-friends"),
                             );
                         });
+                        ui.selectable_value(
+                            &mut self.spoofer_subtab,
+                            SpooferSubTab::MenuTextures,
+                            "Menus (experimental)",
+                        );
                     });
             });
 
@@ -3475,6 +3485,10 @@ impl HebnixApp {
                     return;
                 }
                 self.title_editor.leave_page();
+                if self.spoofer_subtab == SpooferSubTab::MenuTextures {
+                    self.render_menu_textures_page(ui);
+                    return;
+                }
                 if self.spoofer_subtab == SpooferSubTab::Username {
                     self.render_name_page(ui);
                     return;
@@ -3485,6 +3499,7 @@ impl HebnixApp {
                     .show(ui, |ui| match self.spoofer_subtab {
                         SpooferSubTab::Username => unreachable!("Name uses its own centered scroll area"),
                         SpooferSubTab::Titles => unreachable!("Titles uses its own scrolling columns"),
+                        SpooferSubTab::MenuTextures => unreachable!("Menu textures use their own scroll area"),
                         SpooferSubTab::Friends => {
                             ui.heading(t("spoofer-friend-spoofing"));
                             ui.add_space(8.0);
