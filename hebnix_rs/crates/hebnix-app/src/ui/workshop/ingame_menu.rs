@@ -34,16 +34,23 @@ pub struct InGameMenuState {
     lan: LanHost,
 }
 
+/// Hebnix's own flags, as URL options after the settings. The game ignores them.
+const ALWAYS: &str = "?HbxAlways";
+const NO_AUTO: &str = "?HbxNoAuto";
+
 const BOTS: [&str; 5] = ["BotsNone", "BotsEasy", "BotsMedium", "BotsHard", "BotsUnfair"];
 /// Options after the game tags, as Rocket Plugin hosts with.
 const LISTEN: &str = "?Playtest?NumPublicConnections=10?NumOpenPublicConnections=10?Lan?Listen";
 
-/// LAN hosting from the Workshop menu. The host file is the only copy of the
-/// settings: it exists while hosting is on and is parsed back on start.
+/// LAN hosting from the Workshop menu. The host file (or its parked copy while
+/// hosting is off) is the only copy of the settings and is parsed back on start.
+/// Hosting is on when `always` is ticked, or `auto` is ticked and Hebnix is
+/// connected to the multiplayer network.
 #[derive(Default)]
 struct LanHost {
     loaded: bool,
-    on: bool,
+    always: bool,
+    auto: bool,
     team_size: usize,
     bots: usize,
     /// other mutator tags, comma separated, e.g. 10Minutes,Ball_BasketBall
@@ -53,9 +60,9 @@ struct LanHost {
 impl LanHost {
     fn load(&mut self, cooked: &Path) {
         self.loaded = true;
-        let text = fs::read_to_string(workshop_menu::host_path(cooked));
-        self.on = text.is_ok();
-        let text = text.unwrap_or_default();
+        let text = workshop_menu::read_host(cooked).unwrap_or_default();
+        self.always = text.contains(ALWAYS);
+        self.auto = !text.contains(NO_AUTO);
         let tags = text.split('?').next().unwrap_or_default();
         (self.team_size, self.bots) = (3, 0);
         let mut extra = Vec::new();
@@ -80,8 +87,25 @@ impl LanHost {
             .collect();
         tags.push(BOTS[self.bots].to_string());
         tags.push(format!("PlayerCount{}", self.team_size * 2));
-        format!("{}{LISTEN}", tags.join(","))
+        let flags = [(self.always, ALWAYS), (!self.auto, NO_AUTO)];
+        let flags: String = flags.iter().filter(|(set, _)| *set).map(|(_, flag)| *flag).collect();
+        format!("{}{LISTEN}{flags}", tags.join(","))
     }
+
+    /// Write the settings and switch the host file on or off to match.
+    fn sync(&self, cooked: &Path, connected: bool) -> Result<(), String> {
+        workshop_menu::store_host(cooked, &self.file_text(), self.always || (self.auto && connected))
+    }
+}
+
+/// Switch LAN hosting for a connection change, whichever tab is showing.
+pub fn sync_lan(cooked: &Path, connected: bool) {
+    if !cooked.is_dir() {
+        return;
+    }
+    let mut lan = LanHost::default();
+    lan.load(cooked);
+    let _ = lan.sync(cooked, connected);
 }
 
 fn extension(path: &Path) -> String {
@@ -275,7 +299,7 @@ impl InGameMenuState {
         }
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, tx: &Sender<AppMsg>) {
+    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, connected: bool, tx: &Sender<AppMsg>) {
         let ctx = ui.ctx().clone();
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         let backups = cooked.join("Backups");
@@ -374,8 +398,11 @@ impl InGameMenuState {
              browser and need the same map. Works while the game runs.",
         );
         let lan = &mut self.lan;
-        let mut changed = ui.checkbox(&mut lan.on, "Host LAN match when I pick a map").changed();
-        ui.add_enabled_ui(lan.on, |ui| {
+        let mut changed = ui.checkbox(&mut lan.always, "Always host a LAN match when I pick a map").changed();
+        changed |= ui
+            .checkbox(&mut lan.auto, "Host a LAN match while connected to Hebnix multiplayer")
+            .changed();
+        ui.add_enabled_ui(lan.always || lan.auto, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Team size");
                 egui::ComboBox::from_id_salt("workshop_lan_team_size")
@@ -403,8 +430,7 @@ impl InGameMenuState {
             });
         });
         if changed {
-            let text = lan.on.then(|| lan.file_text());
-            if let Err(e) = workshop_menu::set_host(&cooked, text.as_deref()) {
+            if let Err(e) = lan.sync(&cooked, connected) {
                 self.status = e;
             }
         }
@@ -419,13 +445,22 @@ mod tests {
     fn lan_host_file_round_trips() {
         let cooked = std::env::temp_dir().join("hebnix_lan_host_test").join("TAGame").join("CookedPCConsole");
         std::fs::create_dir_all(&cooked).unwrap();
-        let host = super::LanHost { team_size: 2, bots: 3, extra: "10Minutes, Ball_Puck?Lan".into(), ..Default::default() };
-        let text = host.file_text();
-        assert_eq!(text, format!("10Minutes,Ball_PuckLan,BotsHard,PlayerCount4{}", super::LISTEN));
-        crate::patcher::workshop_menu::set_host(&cooked, Some(&text)).unwrap();
+        let host = super::LanHost { team_size: 2, bots: 3, extra: "10Minutes, Ball_Puck?Lan".into(), auto: true, ..Default::default() };
+        assert_eq!(host.file_text(), format!("10Minutes,Ball_PuckLan,BotsHard,PlayerCount4{}", super::LISTEN));
+        // auto hosting follows the connection; the settings survive being parked
+        host.sync(&cooked, false).unwrap();
+        assert!(!crate::patcher::workshop_menu::host_path(&cooked).exists());
+        host.sync(&cooked, true).unwrap();
+        assert!(crate::patcher::workshop_menu::host_path(&cooked).exists());
+        host.sync(&cooked, false).unwrap();
         let mut back = super::LanHost::default();
         back.load(&cooked);
-        assert!(back.on && back.team_size == 2 && back.bots == 3 && back.extra == "10Minutes,Ball_PuckLan");
+        assert!(back.auto && !back.always && back.team_size == 2 && back.bots == 3 && back.extra == "10Minutes,Ball_PuckLan");
+        let off = super::LanHost { auto: false, always: true, ..Default::default() };
+        off.sync(&cooked, false).unwrap();
+        back.load(&cooked);
+        assert!(!back.auto && back.always);
+        assert!(crate::patcher::workshop_menu::host_path(&cooked).exists());
         crate::patcher::workshop_menu::set_host(&cooked, None).unwrap();
         let _ = std::fs::remove_dir_all(cooked.parent().unwrap().parent().unwrap());
     }

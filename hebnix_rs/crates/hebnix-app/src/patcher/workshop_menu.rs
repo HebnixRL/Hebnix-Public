@@ -48,9 +48,11 @@ pub fn workshop_dir(cooked: &Path) -> PathBuf {
         .unwrap_or_else(|| maps_folder(cooked))
 }
 
+pub const MAP_DIR_PREFIX: &str = "hebnix_";
+
 /// A Hebnix map's folder name, apart from Steam's numeric item folders.
 pub fn map_dir_name(id: &str) -> String {
-    format!("hebnix_{id}")
+    format!("{MAP_DIR_PREFIX}{id}")
 }
 
 /// The folder the menu was enabled with, or None while it is disabled.
@@ -496,11 +498,34 @@ pub fn set_host(cooked: &Path, tags: Option<&str>) -> Result<(), String> {
     let path = host_path(cooked);
     match tags {
         Some(tags) => fs::write(&path, tags).map_err(|e| format!("Could not write {}: {e}", path.display())),
-        None => match fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-            _ => Ok(()),
-        },
+        None => remove_if_present(&path),
     }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// Where the host settings wait while LAN hosting is off, so Hebnix keeps them.
+fn parked_path(cooked: &Path) -> PathBuf {
+    host_path(cooked).with_extension("off")
+}
+
+/// The saved host settings, whether hosting is on or off.
+pub fn read_host(cooked: &Path) -> Option<String> {
+    fs::read_to_string(host_path(cooked)).or_else(|_| fs::read_to_string(parked_path(cooked))).ok()
+}
+
+/// Save the host settings and turn hosting on (the game reads the file) or off
+/// (parked beside it).
+pub fn store_host(cooked: &Path, text: &str, on: bool) -> Result<(), String> {
+    let (live, parked) = (host_path(cooked), parked_path(cooked));
+    let (write, other) = if on { (live, parked) } else { (parked, live) };
+    fs::write(&write, text).map_err(|e| format!("Could not write {}: {e}", write.display()))?;
+    remove_if_present(&other)
 }
 
 /// GFxData_Workshop_TA.LoadWorkshopMap, which travels to the picked map with
@@ -791,6 +816,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
     write_list(cooked, &[])?;
     let _ = fs::remove_file(list_path(cooked));
     let _ = fs::remove_file(host_path(cooked));
+    let _ = fs::remove_file(parked_path(cooked));
     let _ = fs::remove_dir_all(cooked.join(OLD_PREVIEWS));
     let _ = fs::remove_file(backups.join(ENABLED));
     Ok("Workshop menu restored".into())
