@@ -1,8 +1,9 @@
 name: Release
 
 # Tagged releases for every platform, published as ONE GitHub release.
-# Push a `v*` tag matching the version in hebnix_rs/Cargo.toml (e.g. `v2.2.7`),
-# or run manually with an existing tag. A tag with a suffix (`v2.2.7-test`) is a
+# Push a `v*` tag (e.g. `v2.2.7`), or run manually with an existing tag. The tag
+# is the version: packaging/stamp-version.sh writes it into the Cargo.toml files
+# and APP_VERSION at build time. A tag with a suffix (`v2.2.7-test`) is a
 # dry run: published as a prerelease, and the pacman repo is left alone.
 #
 # Assets:
@@ -44,12 +45,13 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       version: ${{ steps.v.outputs.version }}
       prerelease: ${{ steps.v.outputs.prerelease }}
+      base: ${{ steps.v.outputs.base }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Resolve version and check it matches Cargo.toml
+      - name: Resolve version from the tag
         id: v
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
@@ -58,11 +60,11 @@ jobs:
           BASE="${VERSION%%-*}"
           PRE=false
           [ "$BASE" != "$VERSION" ] && PRE=true
-          CARGO="$(sed -n 's/^version = "\(.*\)"$/\1/p' hebnix_rs/Cargo.toml | head -1)"
-          [ "$BASE" = "$CARGO" ] || { echo "tag $TAG does not match hebnix_rs/Cargo.toml version $CARGO"; exit 1; }
+          [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag $TAG is not vX.Y.Z[-suffix]"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
   windows:
     needs: meta
@@ -71,6 +73,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.meta.outputs.tag }}
+
+      # the tag is the single source of truth for the version
+      - name: Stamp version
+        shell: bash
+        run: bash hebnix_rs/packaging/stamp-version.sh ${{ needs.meta.outputs.base }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -125,6 +132,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.meta.outputs.tag }}
+
+      # the tag is the single source of truth for the version
+      - name: Stamp version
+        shell: bash
+        run: bash hebnix_rs/packaging/stamp-version.sh ${{ needs.meta.outputs.base }}
 
       - name: Install system dependencies
         uses: ./.github/actions/install-linux-deps
@@ -216,6 +228,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.meta.outputs.tag }}
+
+      # the tag is the single source of truth for the version
+      - name: Stamp version
+        shell: bash
+        run: bash hebnix_rs/packaging/stamp-version.sh ${{ needs.meta.outputs.base }}
 
       - name: Build release
         run: |
