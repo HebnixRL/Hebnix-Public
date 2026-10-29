@@ -1,0 +1,10 @@
+loadouts-title = Loadouts
+loadouts-description = Loadout presets in your account save. Copy a code to share it, paste one below to add it as a new preset.
+loadouts-empty = No loadout presets found in the account save.
+loadouts-copy-code = Copy code
+loadouts-copied = Code copied to clipboard.
+loadouts-rename = Rename
+loadouts-save-name = Save name
+loadouts-delete = Delete
+loadouts-import-hint = Paste one or more codes, one per line:
+loadouts-import = Import
