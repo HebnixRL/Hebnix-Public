@@ -1663,7 +1663,7 @@ impl HebnixApp {
         ctx: &egui::Context,
     ) {
         self.process_preset_operations(cooked_pc, backups_dir, ctx);
-        ui.heading(t("presets-presets"));
+        crate::theme::page_heading(ui, t("presets-presets"));
         ui.label(t("presets-save-and-restore-named-collections-of"));
         ui.horizontal(|ui| {
             ui.label(t("presets-name"));
@@ -3489,7 +3489,7 @@ impl HebnixApp {
                         SpooferSubTab::Username => unreachable!("Name uses its own centered scroll area"),
                         SpooferSubTab::Titles => unreachable!("Titles uses its own scrolling columns"),
                         SpooferSubTab::Friends => {
-                            ui.heading(t("spoofer-friend-spoofing"));
+                            crate::theme::page_heading(ui, t("spoofer-friend-spoofing"));
                             ui.add_space(8.0);
 
                             ui.scope(|ui| {
@@ -3619,7 +3619,7 @@ impl HebnixApp {
                             });
                         }
                         SpooferSubTab::TitleRank => {
-                            ui.heading(t("spoofer-rank-spoofing"));
+                            crate::theme::page_heading(ui, t("spoofer-rank-spoofing"));
                             ui.add_space(8.0);
 
                             ui.weak(spoofer::WEBSOCKET_UNAVAILABLE);
@@ -4236,7 +4236,7 @@ impl HebnixApp {
                     .id_salt("hebnix_settings_view")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.heading(match self.hebnix_settings_tab {
+                        crate::theme::page_heading(ui, match self.hebnix_settings_tab {
                             HebnixSettingsTab::Interface => t("settings-heading-interface"),
                             HebnixSettingsTab::Directories => t("settings-heading-directories"),
                             HebnixSettingsTab::Discord => t("settings-heading-discord"),
@@ -5115,7 +5115,7 @@ impl HebnixApp {
                     .id_salt("plugin_settings_view")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.heading(t_args(
+                        crate::theme::page_heading(ui, t_args(
                             "plugin-settings-display-name-configuration",
                             &[("display_name", display_name.to_string().into())],
                         ));
@@ -5132,7 +5132,7 @@ impl HebnixApp {
     fn render_about_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.heading(t("about-hebnix"));
+            crate::theme::page_heading(ui, t("about-hebnix"));
             ui.add_space(10.0);
             ui.label(t_args(
                 "about-version-app-version-a-safe-eac",
@@ -7050,7 +7050,7 @@ impl HebnixApp {
                                 .id_salt("active_items")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
-                            ui.heading(t("app-active-items"));
+                            crate::theme::page_heading(ui, t("app-active-items"));
                             let swap_count = self.swapper.active_count(&backups_dir);
                             let active_count = swap_count
                                 + usize::from(self.patcher_ball.active_ball.is_some())
@@ -7304,7 +7304,7 @@ impl HebnixApp {
                         }
                     });
                 } else if self.items_mode == ItemsMode::Recolour {
-                    ui.heading(t("app-items-recolour"));
+                    crate::theme::page_heading(ui, t("app-items-recolour"));
                     self.owned_inventory.show_with_actions(ui, |ui| {
                         self.swapper.render_recolour_controls(ui, &self.tx);
                     });

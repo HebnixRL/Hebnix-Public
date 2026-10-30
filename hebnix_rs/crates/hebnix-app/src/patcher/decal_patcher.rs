@@ -4263,7 +4263,7 @@ impl DecalPatcherState {
         // show the desktop through the entire app while a decal was running.
         let decal_tab_rect = ui.available_rect_before_wrap();
 
-        ui.heading(t("app-decal-patcher"));
+        crate::theme::page_heading(ui, t("app-decal-patcher"));
         ui.add_space(4.0);
 
         let key_ok = self.validate_key_file().is_ok();

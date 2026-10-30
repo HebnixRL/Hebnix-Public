@@ -142,7 +142,7 @@ impl SwapperState {
             self.thumbnail_editor.status = None;
             self.thumbnail_editor.reload(backups);
         }
-        ui.heading(t("thumbnail-patcher-title"));
+        crate::theme::page_heading(ui, t("thumbnail-patcher-title"));
         ui.weak(t("thumbnail-patcher-description"));
         if let Some(status) = &self.thumbnail_editor.status {
             match status {

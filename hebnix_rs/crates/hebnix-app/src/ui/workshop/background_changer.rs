@@ -433,7 +433,7 @@ impl BackgroundChangerState {
             self.refresh(rl_path);
         }
         let ctx = ui.ctx().clone();
-        ui.heading(t("render-background-changer"));
+        crate::theme::page_heading(ui, t("render-background-changer"));
         ui.label(t("render-keep-an-arena-s-gameplay-and"));
         ui.small(t("render-approved-sources-are-filtered-to-keep"));
         if let Ok(path) = crate::patcher::background_merger::custom_backgrounds_dir() {

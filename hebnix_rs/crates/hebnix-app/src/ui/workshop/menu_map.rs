@@ -317,7 +317,7 @@ impl MenuMapState {
         self.ensure_loaded(rl_path, ui.ctx());
         self.poll_scan();
         let loading = self.scan.is_some();
-        ui.heading(t("menu-map-title"));
+        crate::theme::page_heading(ui, t("menu-map-title"));
         ui.label(t("menu-map-description"));
         ui.small(t("menu-map-close-game"));
         ui.add_space(12.0);

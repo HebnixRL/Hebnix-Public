@@ -353,7 +353,7 @@ impl SwapperState {
             self.name_editor.page = 0;
             self.name_editor.begin(ui, cooked, backups, None);
         }
-        ui.heading(t("item-name-title"));
+        crate::theme::page_heading(ui, t("item-name-title"));
         ui.weak(t("item-name-description"));
         if self.name_editor.pending.is_some() {
             ui.horizontal(|ui| {
