@@ -22,6 +22,7 @@ mod theme;
 mod toast;
 mod tray;
 mod update;
+mod maintenance;
 mod ui_work;
 mod ui {
     pub mod console;
@@ -142,6 +143,8 @@ fn main() -> eframe::Result {
     if let Err(error) = recovery_tasks::cleanup_websocket_once(&base_dir) {
         tracing::warn!("WebSocket proxy cleanup: {error}");
     }
+    let shortcut_base = base_dir.clone();
+    std::thread::spawn(move || maintenance::first_launch_shortcut(&shortcut_base));
     // after the instance guard, so only one copy prompts
     webview::runtime::ensure_present();
     let config = config::Config::load(&base_dir);

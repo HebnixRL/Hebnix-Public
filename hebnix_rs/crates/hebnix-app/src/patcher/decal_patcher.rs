@@ -2435,6 +2435,22 @@ fn restore_all_decal_files(
     Ok(package_count + tfc_count)
 }
 
+pub(crate) fn restore_for_uninstall(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let mut targets = Vec::new();
+    let mut has_regions = false;
+    for entry in fs::read_dir(backups).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(target) = name.strip_suffix(".upk.bak") {
+            targets.push(format!("{target}.upk"));
+        }
+        has_regions |= name.ends_with("_tfc.bin") || name.ends_with("_APPENDLEN.txt");
+    }
+    if !targets.is_empty() { restore_all_decal_files(&targets, cooked, backups)?; }
+    else if has_regions { return Err("Texture recovery data has no matching package backup. Verify Rocket League files before uninstalling.".into()); }
+    Ok(())
+}
+
 fn decal_catalog_id(value: Option<&Value>) -> Option<i32> {
     value.and_then(|value| {
         value
@@ -3671,6 +3687,7 @@ impl DecalPatcherState {
         owned_inventory: &mut crate::owned_inventory::OwnedInventory,
     ) {
         self.handle_op_result(tx, config);
+        ui.heading(t("nav-decals"));
         owned_inventory.show_with_actions(ui, |ui| {
             let label = "Show only owned items";
             let width = ui.spacing().icon_width
@@ -3707,7 +3724,7 @@ impl DecalPatcherState {
         let busy = self.processing_target.is_some();
         let key_ok = self.validate_key_file().is_ok();
 
-        crate::ui::browser::header(ui, t("app-decal-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-decals"), |ui| {
             if ui.button(t("btn-refresh")).clicked() {
                 if self.source == PatchSource::Catalog {
                     self.catalog.refresh(ctx);
@@ -4263,7 +4280,7 @@ impl DecalPatcherState {
         // show the desktop through the entire app while a decal was running.
         let decal_tab_rect = ui.available_rect_before_wrap();
 
-        ui.heading(t("app-decal-patcher"));
+        ui.heading(t("nav-decals"));
         ui.add_space(4.0);
 
         let key_ok = self.validate_key_file().is_ok();

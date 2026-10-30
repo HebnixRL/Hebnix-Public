@@ -55,14 +55,14 @@ impl SwapCategory {
     pub fn label(self) -> String {
         match self {
             Self::Antennas => t("label-antennas"),
-            Self::Anthems => t("label-anthems"),
-            Self::Borders => t("label-borders"),
-            Self::Bodies => t("label-bodies"),
+            Self::Anthems => t("studio-player-anthems"),
+            Self::Borders => t("nav-avatar-borders"),
+            Self::Bodies => t("nav-car-bodies"),
             Self::Boosts => t("label-boosts"),
-            Self::Engines => t("label-engines"),
-            Self::Goals => t("label-goals"),
-            Self::Finishes => t("label-finishes"),
-            Self::Banners => t("label-banners"),
+            Self::Engines => t("nav-engine-sounds"),
+            Self::Goals => t("nav-goal-explosions"),
+            Self::Finishes => t("nav-paint-finishes"),
+            Self::Banners => t("nav-player-banners"),
             Self::Skins => t("label-decals"),
             Self::Toppers => t("label-toppers"),
             Self::Trails => t("label-trails"),
@@ -442,6 +442,8 @@ pub struct SwapperState {
 }
 
 impl SwapperState {
+    pub(crate) fn busy(&self) -> bool { self.name_editor.busy() || self.thumbnail_editor.busy() }
+
     pub fn new(base_dir: &Path) -> Self {
         let (thumbnail_jobs, jobs) = unbounded::<(String, PathBuf, String, egui::Context)>();
         let (results, thumbnail_results) = unbounded();
@@ -1230,30 +1232,33 @@ impl SwapperState {
         }
     }
 
-    pub fn render_recolour_controls(&mut self, ui: &mut egui::Ui, tx: &Sender<AppMsg>) {
+    pub fn render_recolour_categories(&mut self, ui: &mut egui::Ui) {
         let before = self.recolour_category;
-        egui::ComboBox::from_id_salt("recolour_category")
-            .selected_text(self.recolour_category.label())
-            .show_ui(ui, |ui| {
-                for category in SwapCategory::ALL
-                    .into_iter()
-                    .filter(|c| c.supports_recolour())
-                {
-                    ui.selectable_value(&mut self.recolour_category, category, category.label());
-                }
-            });
+        for category in SwapCategory::ALL
+            .into_iter()
+            .filter(|c| c.supports_recolour())
+        {
+            ui.selectable_value(&mut self.recolour_category, category, category.label());
+        }
+        if before != self.recolour_category {
+            self.recolour_selected = None;
+            self.recolour_status = None;
+            self.recolour_page = 0;
+        }
+    }
+
+    pub fn render_recolour_controls(&mut self, ui: &mut egui::Ui, tx: &Sender<AppMsg>) {
         if ui.button(t("app-reload-catalogs")).clicked() {
             let _ = tx.send(AppMsg::ReloadCatalogs);
         }
         let filter_changed = ui
-            .checkbox(&mut self.recolour_show_applied, t("recolour-show-recoloured"))
+            .checkbox(
+                &mut self.recolour_show_applied,
+                t("recolour-show-recoloured"),
+            )
             .on_hover_text(t("recolour-show-recoloured-hint"))
             .changed();
-        if before != self.recolour_category {
-            self.recolour_selected = None;
-            self.recolour_status = None;
-        }
-        if before != self.recolour_category || filter_changed {
+        if filter_changed {
             self.recolour_page = 0;
         }
     }
@@ -1985,6 +1990,39 @@ impl SwapperState {
         tx: &Sender<AppMsg>,
         owned_ids: &HashSet<i64>,
     ) -> bool {
+        self.render_tab_with_inventory(ui, category, cooked_pc, backups_dir, tx, owned_ids, None)
+    }
+
+    pub fn render_owned_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        backups_dir: &Path,
+        tx: &Sender<AppMsg>,
+        inventory: &mut crate::owned_inventory::OwnedInventory,
+    ) -> bool {
+        self.render_tab_with_inventory(
+            ui,
+            category,
+            cooked_pc,
+            backups_dir,
+            tx,
+            &HashSet::new(),
+            Some(inventory),
+        )
+    }
+
+    fn render_tab_with_inventory(
+        &mut self,
+        ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        backups_dir: &Path,
+        tx: &Sender<AppMsg>,
+        owned_ids: &HashSet<i64>,
+        inventory: Option<&mut crate::owned_inventory::OwnedInventory>,
+    ) -> bool {
         let mut owned_filter_requested = false;
         self.load_active(backups_dir);
         self.collect_thumbnails();
@@ -2050,6 +2088,11 @@ impl SwapperState {
                 },
             );
         });
+        let owned_snapshot = inventory.map(|inventory| {
+            inventory.show(ui);
+            inventory.ids.clone()
+        });
+        let owned_ids = owned_snapshot.as_ref().unwrap_or(owned_ids);
         ui.weak(t(&format!("items-browser-subtitle-{}", category.slug())));
         ui.add_space(8.0);
         let selecting_target =
@@ -2108,11 +2151,12 @@ impl SwapperState {
                 }
             }
             egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
+                .fill(egui::Color32::from_white_alpha(24))
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.vertical_centered(|ui| {
                         ui.strong(if self.walkthrough_step == WalkthroughStep::SelectSource {
                             t("tab-walkthrough-find-item")
                         } else {

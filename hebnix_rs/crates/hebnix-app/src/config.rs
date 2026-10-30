@@ -41,6 +41,9 @@ pub struct SettingsCfg {
     pub language: String,
     /// Main tab selected when Hebnix starts.
     pub default_tab: String,
+    /// One-time migration to the Home dashboard; later startup choices persist.
+    #[serde(default)]
+    pub home_default_migrated: bool,
     /// main window bg opacity (0.5-1.0)
     pub window_opacity: f32,
     pub start_in_tray: bool,
@@ -80,7 +83,8 @@ impl Default for SettingsCfg {
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
             language: crate::i18n::AUTO.to_string(),
-            default_tab: "Console".to_string(),
+            default_tab: "Home".to_string(),
+            home_default_migrated: true,
             window_opacity: 0.96,
             start_in_tray: false,
             close_to_tray: false,

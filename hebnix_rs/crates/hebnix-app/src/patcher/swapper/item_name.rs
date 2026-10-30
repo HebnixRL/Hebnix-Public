@@ -232,6 +232,8 @@ fn category(section: &str) -> Option<SwapCategory> {
 }
 
 impl State {
+    pub(super) fn busy(&self) -> bool { self.pending.is_some() }
+
     fn original(&self, section: &str, field: &str) -> String {
         self.originals
             .get(&(section.into(), field.into()))
@@ -314,6 +316,29 @@ impl SwapperState {
         backups: &Path,
         owned_ids: &HashSet<i64>,
     ) {
+        ui.heading(t("nav-item-names"));
+        self.render_item_names_content(ui, cooked, backups, owned_ids);
+    }
+
+    pub fn render_owned_item_names(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        backups: &Path,
+        inventory: &mut crate::owned_inventory::OwnedInventory,
+    ) {
+        ui.heading(t("nav-item-names"));
+        inventory.show(ui);
+        self.render_item_names_content(ui, cooked, backups, &inventory.ids);
+    }
+
+    fn render_item_names_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        backups: &Path,
+        owned_ids: &HashSet<i64>,
+    ) {
         self.collect_thumbnails();
         if let Some(rx) = &self.name_editor.pending {
             match rx.try_recv() {
@@ -353,7 +378,6 @@ impl SwapperState {
             self.name_editor.page = 0;
             self.name_editor.begin(ui, cooked, backups, None);
         }
-        ui.heading(t("item-name-title"));
         ui.weak(t("item-name-description"));
         if self.name_editor.pending.is_some() {
             ui.horizontal(|ui| {

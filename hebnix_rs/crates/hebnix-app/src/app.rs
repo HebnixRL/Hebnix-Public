@@ -1,4 +1,9 @@
 // crates/hebnix-app/src/app.rs
+#[path = "ui/home.rs"]
+mod home;
+#[cfg(test)]
+#[path = "ui/navigation_tests.rs"]
+mod navigation_tests;
 #[cfg(test)]
 #[path = "ui/sidebar_tests.rs"]
 mod sidebar_tests;
@@ -39,7 +44,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.2.6";
+pub const APP_VERSION: &str = "2.3.0";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -303,11 +308,12 @@ struct FriendSpoofState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Home,
     Console,
     Workshop,
     Spoofer,
+    Items,
     Patcher,
-    Colours,
     Settings,
     Plugins,
     Replays,
@@ -315,26 +321,28 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 9] = [
-        Self::Console,
+    const ALL: [Self; 10] = [
+        Self::Home,
         Self::Workshop,
-        Self::Spoofer,
-        Self::Colours,
+        Self::Items,
         Self::Patcher,
-        Self::Settings,
-        Self::Plugins,
+        Self::Spoofer,
         Self::Replays,
+        Self::Plugins,
+        Self::Settings,
+        Self::Console,
         Self::About,
     ];
 
     /// translated tab name for the UI
     fn label(self) -> String {
         match self {
+            Self::Home => t("home-title"),
             Self::Console => t("tab-console"),
             Self::Workshop => t("tab-workshop"),
-            Self::Spoofer => t("tab-spoofer"),
-            Self::Patcher => t("tab-patcher"),
-            Self::Colours => t("tab-colours"),
+            Self::Spoofer => t("nav-player"),
+            Self::Items => t("tab-patcher"),
+            Self::Patcher => t("nav-upk-studio"),
             Self::Settings => t("tab-settings"),
             Self::Plugins => t("tab-plugins"),
             Self::Replays => t("tab-replays"),
@@ -346,11 +354,12 @@ impl Tab {
     /// Legacy names are handled by `from_config_key` so existing configs keep working.
     fn config_key(self) -> &'static str {
         match self {
+            Self::Home => "Home",
             Self::Console => "Console",
             Self::Workshop => "Maps",
             Self::Spoofer => "Spoofer",
-            Self::Patcher => "Items",
-            Self::Colours => "Colours",
+            Self::Items => "Items",
+            Self::Patcher => "UPK Studio",
             Self::Settings => "Settings",
             Self::Plugins => "Plugins",
             Self::Replays => "Replays",
@@ -359,6 +368,13 @@ impl Tab {
     }
 
     fn from_config_key(key: &str) -> Self {
+        // Keep saved defaults from earlier navigation layouts working.
+        match key {
+            "Colours" | "UPK Studio" | "Patcher" => return Self::Patcher,
+            "Workshop" => return Self::Workshop,
+            "Player" | "Customisation" => return Self::Spoofer,
+            _ => {}
+        }
         // Preserve the saved default from before Experimental became Replays.
         if key == "Experimental" {
             return Self::Replays;
@@ -366,7 +382,7 @@ impl Tab {
         Self::ALL
             .into_iter()
             .find(|tab| tab.config_key() == key)
-            .unwrap_or(Self::Console)
+            .unwrap_or(Self::Home)
     }
 }
 
@@ -375,10 +391,47 @@ enum ItemsMode {
     Swapper,
     Recolour,
     Patching,
-    Spawner,
     SpeedPatch,
     WheelAlignment,
     BallAppearance,
+    GameColours,
+    ArenaBackgrounds,
+    MenuBackground,
+    ItemNames,
+    Manage,
+    ItemsActive,
+    Presets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StudioSection {
+    Tools,
+    CustomAssets,
+    Appearance,
+    Menus,
+    Active,
+}
+
+impl ItemsMode {
+    fn section(self) -> Option<StudioSection> {
+        Some(match self {
+            Self::Swapper | Self::Recolour | Self::ItemsActive | Self::Presets => return None,
+            Self::SpeedPatch => StudioSection::Tools,
+            Self::Patching | Self::ItemNames => StudioSection::CustomAssets,
+            Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds => StudioSection::Appearance,
+            Self::MenuBackground => StudioSection::Menus,
+            Self::Manage => StudioSection::Active,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemsSubTab {
+    Swapper,
+    Colours,
+    Active,
+    Presets,
+    Loadouts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,11 +442,9 @@ enum PatcherSubTab {
     Car,
     Anthem,
     Thumbnail,
-    ItemName,
     Swapper(crate::swapper::SwapCategory),
     Active,
     Presets,
-    Loadouts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,9 +454,10 @@ enum ReplaysSubTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsSubTab {
-    Hebnix,
-    Plugin,
+enum PluginsSubTab {
+    Installed,
+    Browse,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +540,7 @@ pub struct HebnixApp {
     control_rx: Receiver<AppMsg>,
 
     stats: Arc<StatsClient>,
+    home: home::HomeState,
     ws_stats: Arc<hebnix_sdk::stats::websocket::WsStatsClient>,
     stats_tx: crossbeam_channel::Sender<hebnix_sdk::stats::StatsEvent>,
     monitor: Monitor,
@@ -499,11 +552,12 @@ pub struct HebnixApp {
     _secretsequence: crate::veryimportantfile::SecretSequenceListener,
 
     tab: Tab,
-    settings_subtab: SettingsSubTab,
+    plugins_subtab: PluginsSubTab,
     hebnix_settings_tab: HebnixSettingsTab,
     spoofer_subtab: SpooferSubTab,
     patcher_subtab: PatcherSubTab,
     swapper_subtab: PatcherSubTab,
+    items_subtab: ItemsSubTab,
     replays_subtab: ReplaysSubTab,
     replay_timeline: crate::replay_timeline::ReplayTimeline,
     speed_patch: crate::speed_patch::State,
@@ -564,6 +618,9 @@ pub struct HebnixApp {
     update_info: Option<crate::update::UpdateInfo>,
     update_downloading: bool,
     update_error: Option<String>,
+    update_progress: crate::update::SharedProgress,
+    maintenance: crate::maintenance::UninstallUi,
+    maintenance_running: bool,
     changelog_popup: Option<crate::update::ChangelogEntry>,
     notification_popup: Option<crate::notifications::Notification>,
     epic_repair: crate::epic_connection::RepairState,
@@ -636,6 +693,10 @@ impl HebnixApp {
         let _ = std::fs::create_dir_all(&plugin_dir);
 
         let mut config = Config::load(&base_dir);
+        if !config.settings.home_default_migrated {
+            config.settings.default_tab = "Home".to_string();
+            config.settings.home_default_migrated = true;
+        }
 
         let error_file = base_dir.join("theme_errors.txt");
         match theme::apply_theme(
@@ -678,7 +739,7 @@ impl HebnixApp {
         std::thread::Builder::new()
             .name("update-checker".into())
             .spawn(move || {
-                if let Ok(info) = crate::update::fetch_info(APP_VERSION) {
+                if let Ok(info) = crate::update::fetch_info(APP_VERSION, false) {
                     let _ = tx_update.send(AppMsg::AppUpdateFetched {
                         result: Ok(info.update),
                     });
@@ -970,6 +1031,11 @@ impl HebnixApp {
         let cert_installed = spoofer::ca::is_current_installed(&base_dir);
         let rl_launch_draft = config.rl_launch.clone();
         let default_tab = Tab::from_config_key(&config.settings.default_tab);
+        let default_items_mode = if config.settings.default_tab == "Colours" {
+            ItemsMode::GameColours
+        } else {
+            ItemsMode::Patching
+        };
 
         let discord_presence =
             crate::discord_presence::DiscordPresence::start(config.settings.discord_rich_presence);
@@ -989,6 +1055,7 @@ impl HebnixApp {
             rx,
             control_rx,
             stats,
+            home: home::HomeState::default(),
             ws_stats: Arc::clone(&ws_stats),
             stats_tx,
             monitor,
@@ -999,12 +1066,13 @@ impl HebnixApp {
             hotkey,
             _secretsequence: secretsequence,
             tab: default_tab,
-            settings_subtab: SettingsSubTab::Hebnix,
+            plugins_subtab: PluginsSubTab::Installed,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
             spoofer_subtab: SpooferSubTab::Username,
-            patcher_subtab: PatcherSubTab::Ball,
-            swapper_subtab: PatcherSubTab::Swapper(crate::swapper::SwapCategory::ALL[0]),
-            replays_subtab: ReplaysSubTab::AutoUploadReplays,
+            patcher_subtab: PatcherSubTab::Car,
+            swapper_subtab: PatcherSubTab::Swapper(crate::swapper::SwapCategory::Bodies),
+            items_subtab: ItemsSubTab::Swapper,
+            replays_subtab: ReplaysSubTab::ReplayTimeline,
             replay_timeline: crate::replay_timeline::ReplayTimeline::new(&base_dir, &cc.egui_ctx),
             speed_patch: crate::speed_patch::State::default(),
             console: ConsoleState::default(),
@@ -1057,6 +1125,9 @@ impl HebnixApp {
             update_info: None,
             update_downloading: false,
             update_error: None,
+            update_progress: Default::default(),
+            maintenance: Default::default(),
+            maintenance_running: false,
             changelog_popup: None,
             notification_popup: None,
             epic_repair: Default::default(),
@@ -1095,7 +1166,7 @@ impl HebnixApp {
             spoofer_friends,
             friends_search: String::new(),
             item_clear_error: None,
-            items_mode: ItemsMode::Swapper,
+            items_mode: default_items_mode,
             patcher_ball,
             patcher_boost,
             patcher_decal,
@@ -1119,6 +1190,17 @@ impl HebnixApp {
         app.plugin_mgr.shared.borrow_mut().is_gui_open = !hidden;
         app.refresh_stats_api_viewer();
         app.check_web_port();
+
+        let item_status = app.spoofer_mgr.item_status();
+        if item_status.active > 0 || item_status.legacy > 0 {
+            match app.spoofer_mgr.begin_item_clear() {
+                Ok(()) => app.check_item_clear(),
+                Err(error) => app.console.write(format!("[Items] Could not remove tracked items: {error}")),
+            }
+        } else if item_status.clearing {
+            // Finish a removal interrupted after its item counts reached zero.
+            app.check_item_clear();
+        }
 
         app.save_friends_internal();
         app.save_ranks_internal();
@@ -1690,7 +1772,7 @@ impl HebnixApp {
         ctx: &egui::Context,
     ) {
         self.process_preset_operations(cooked_pc, backups_dir, ctx);
-        ui.heading(t("presets-presets"));
+        ui.heading(t("studio-swap-presets"));
         ui.label(t("presets-save-and-restore-named-collections-of"));
         ui.horizontal(|ui| {
             ui.label(t("presets-name"));
@@ -2365,6 +2447,34 @@ impl HebnixApp {
                         self.notification_popup = Some(notification);
                     }
                 }
+                AppMsg::AppUpdateReady { staged } => {
+                    match crate::maintenance::launch_update(&staged, &self.base_dir) {
+                        Ok(()) => { self.spoofer_mgr.shutdown(); self.force_quit(ctx); }
+                        Err(error) => {
+                            let _ = std::fs::remove_file(staged);
+                            self.update_downloading = false;
+                            self.update_error = Some(error);
+                        }
+                    }
+                }
+                AppMsg::MaintenanceFinished { result } => {
+                    self.maintenance_running = false;
+                    match result {
+                        Ok(()) => {
+                            if self.maintenance.restore_game {
+                                self.config.patcher.active_ball = None;
+                                self.config.patcher.active_boost = None;
+                                self.config.patcher.active_decals.clear();
+                                self.config.patcher.active_cars.clear();
+                                self.config.patcher.active_anthems.clear();
+                            }
+                            if self.maintenance.certificate { self.disable_certificate_features(); }
+                            self.spoofer_mgr.shutdown();
+                            self.force_quit(ctx);
+                        }
+                        Err(error) => { self.maintenance.error = Some(error); }
+                    }
+                }
                 AppMsg::AppUpdateFailed { error } => {
                     self.update_downloading = false;
                     self.update_error = Some(error);
@@ -2646,7 +2756,7 @@ impl HebnixApp {
                                     "[Console] Plugin was installed but could not be enabled: {error}"
                                 )),
                             }
-                            if !self.install_modal.hebnix_stage {
+                            if !self.install_modal.hebnix_stage && self.plugins_subtab != PluginsSubTab::Browse {
                                 self.install_modal = InstallModal::default();
                             }
                             self.save_config();
@@ -2779,6 +2889,7 @@ impl HebnixApp {
     }
 
     fn handle_game_event(&mut self, event: hebnix_sdk::stats::StatsEvent, ctx: &egui::Context) {
+        self.home.event(&event);
         let replay_event = self.replay_timeline.is_replay_event(&event);
         self.replay_timeline.event(&event, &self.ws_stats);
         self.sync_proxy_consumers();
@@ -2860,6 +2971,9 @@ impl HebnixApp {
     }
 
     fn handle_rl_status(&mut self, rl_open: bool, api_open: bool) {
+        if !rl_open || !api_open {
+            self.home = home::HomeState::default();
+        }
         self.last_rl_open = rl_open;
         self.last_api_open = api_open;
         let is_ready = rl_open && api_open;
@@ -3469,34 +3583,37 @@ impl HebnixApp {
         if self.spoofer_subtab == SpooferSubTab::TitleRank {
             self.spoofer_subtab = SpooferSubTab::Username;
         }
-        theme::secondary_navigation(ui, "spoofer_settings_list")
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("spoofer_settings_names")
-                    .show(ui, |ui| {
-                        ui.selectable_value(
-                                &mut self.spoofer_subtab,
-                                SpooferSubTab::Username,
-                                "Name",
-                            );
-                        ui.selectable_value(&mut self.spoofer_subtab, SpooferSubTab::Titles, "Titles");
-                        ui.scope(|ui| {
-                            ui.add_enabled_ui(false, |ui| {
-                                ui.selectable_value(
-                                    &mut self.spoofer_subtab,
-                                    SpooferSubTab::TitleRank,
-                                    t("spoofer-rank"),
-                                )
-                                .on_disabled_hover_text("Rank spoofing is currently unavailable.");
-                            });
+        theme::secondary_navigation(ui, "spoofer_settings_list").show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("spoofer_settings_names")
+                .show(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.spoofer_subtab,
+                        SpooferSubTab::Username,
+                        t("nav-player-name"),
+                    );
+                    ui.selectable_value(
+                        &mut self.spoofer_subtab,
+                        SpooferSubTab::Titles,
+                        t("nav-titles"),
+                    );
+                    ui.scope(|ui| {
+                        ui.add_enabled_ui(false, |ui| {
                             ui.selectable_value(
                                 &mut self.spoofer_subtab,
-                                SpooferSubTab::Friends,
-                                t("spoofer-friends"),
-                            );
+                                SpooferSubTab::TitleRank,
+                                t("spoofer-rank"),
+                            )
+                            .on_disabled_hover_text("Rank spoofing is currently unavailable.");
                         });
+                        ui.selectable_value(
+                            &mut self.spoofer_subtab,
+                            SpooferSubTab::Friends,
+                            t("spoofer-friends"),
+                        );
                     });
-            });
+                });
+        });
 
         egui::CentralPanel::default()
             .frame(crate::i18n::layout::subtab_content_frame())
@@ -3514,10 +3631,14 @@ impl HebnixApp {
                     .id_salt("spoofer_settings_view")
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.spoofer_subtab {
-                        SpooferSubTab::Username => unreachable!("Name uses its own centered scroll area"),
-                        SpooferSubTab::Titles => unreachable!("Titles uses its own scrolling columns"),
+                        SpooferSubTab::Username => {
+                            unreachable!("Name uses its own centered scroll area")
+                        }
+                        SpooferSubTab::Titles => {
+                            unreachable!("Titles uses its own scrolling columns")
+                        }
                         SpooferSubTab::Friends => {
-                            ui.heading(t("spoofer-friend-spoofing"));
+                            ui.heading(t("spoofer-friends"));
                             ui.add_space(8.0);
 
                             ui.scope(|ui| {
@@ -3598,9 +3719,9 @@ impl HebnixApp {
 
                                 if discovered.is_empty() && friends_vec.is_empty() {
                                     ui.label(
-                                        egui::RichText::new(
-                                            t("spoofer-start-rocket-league-to-populate-friends"),
-                                        )
+                                        egui::RichText::new(t(
+                                            "spoofer-start-rocket-league-to-populate-friends",
+                                        ))
                                         .color(egui::Color32::GRAY),
                                     );
                                 } else {
@@ -3672,7 +3793,11 @@ impl HebnixApp {
                                         ui,
                                         |ui| {
                                             for &(id, fallback_name) in RANK_SPOOF_PLAYLISTS {
-                                                let name = hebnix_sdk::utils::playlists::known_name(i64::from(id)).unwrap_or(fallback_name);
+                                                let name =
+                                                    hebnix_sdk::utils::playlists::known_name(
+                                                        i64::from(id),
+                                                    )
+                                                    .unwrap_or(fallback_name);
                                                 let state = self.spoofer_ranks.entry(id).or_insert(
                                                     RankSpoofState {
                                                         enabled: false,
@@ -3822,6 +3947,43 @@ impl HebnixApp {
     }
 
     fn render_plugins_tab(&mut self, ui: &mut egui::Ui) {
+        let before = self.plugins_subtab;
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(
+                &mut self.plugins_subtab,
+                PluginsSubTab::Installed,
+                t("nav-installed"),
+            );
+            ui.selectable_value(
+                &mut self.plugins_subtab,
+                PluginsSubTab::Browse,
+                t("nav-browse"),
+            );
+            ui.selectable_value(
+                &mut self.plugins_subtab,
+                PluginsSubTab::Settings,
+                t("settings-subtab-plugin"),
+            );
+        });
+        ui.separator();
+        if before != self.plugins_subtab
+            && self.plugins_subtab == PluginsSubTab::Browse
+            && self.install_modal.catalog.is_empty()
+            && !self.install_modal.fetching
+        {
+            self.fetch_hebnix_plugin();
+        }
+        match self.plugins_subtab {
+            PluginsSubTab::Installed => self.render_installed_plugins(ui),
+            PluginsSubTab::Browse => {
+                let mut close = false;
+                self.render_hebnix_install(ui, &mut close);
+            }
+            PluginsSubTab::Settings => self.render_plugin_settings(ui),
+        }
+    }
+
+    fn render_installed_plugins(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button(t("action-open-plugins-folder")).clicked() {
                 let _ = open::that(&self.plugin_dir);
@@ -3949,8 +4111,8 @@ impl HebnixApp {
 
         if let Some(slug) = open_settings {
             self.selected_settings_plugin = Some(slug);
-            self.tab = Tab::Settings;
-            self.settings_subtab = SettingsSubTab::Plugin;
+            self.tab = Tab::Plugins;
+            self.plugins_subtab = PluginsSubTab::Settings;
         }
     }
 
@@ -4201,24 +4363,7 @@ impl HebnixApp {
     }
 
     fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(
-                &mut self.settings_subtab,
-                SettingsSubTab::Hebnix,
-                t("settings-subtab-hebnix"),
-            );
-            ui.selectable_value(
-                &mut self.settings_subtab,
-                SettingsSubTab::Plugin,
-                t("settings-subtab-plugin"),
-            );
-        });
-        ui.separator();
-
-        match self.settings_subtab {
-            SettingsSubTab::Hebnix => self.render_hebnix_settings(ui),
-            SettingsSubTab::Plugin => self.render_plugin_settings(ui),
-        }
+        self.render_hebnix_settings(ui);
     }
 
     fn render_hebnix_settings(&mut self, ui: &mut egui::Ui) {
@@ -4232,12 +4377,12 @@ impl HebnixApp {
                         ui.selectable_value(
                             &mut self.hebnix_settings_tab,
                             HebnixSettingsTab::Interface,
-                            t("settings-nav-interface"),
+                            t("nav-settings-appearance"),
                         );
                         ui.selectable_value(
                             &mut self.hebnix_settings_tab,
                             HebnixSettingsTab::Directories,
-                            t("settings-nav-directories"),
+                            t("nav-files-folders"),
                         );
                         ui.selectable_value(
                             &mut self.hebnix_settings_tab,
@@ -4265,8 +4410,8 @@ impl HebnixApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.heading(match self.hebnix_settings_tab {
-                            HebnixSettingsTab::Interface => t("settings-heading-interface"),
-                            HebnixSettingsTab::Directories => t("settings-heading-directories"),
+                            HebnixSettingsTab::Interface => t("nav-settings-appearance"),
+                            HebnixSettingsTab::Directories => t("nav-files-folders"),
                             HebnixSettingsTab::Discord => t("settings-heading-discord"),
                             HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
                             HebnixSettingsTab::System => t("settings-heading-system"),
@@ -5102,6 +5247,7 @@ impl HebnixApp {
                 ui.add_space(8.0);
                 if ui.button(t("plugin-settings-go")).clicked() {
                     self.tab = Tab::Plugins;
+                    self.plugins_subtab = PluginsSubTab::Installed;
                 }
             });
             return;
@@ -5158,6 +5304,50 @@ impl HebnixApp {
     }
 
     fn render_about_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.maintenance.tab, false, t("maintenance-about"));
+            ui.selectable_value(&mut self.maintenance.tab, true, t("maintenance-tab"));
+        });
+        if self.maintenance.tab {
+            if self.maintenance.render(ui, true, &self.base_dir) {
+                if self.patcher_ball.processing_target.is_some()
+                    || self.patcher_boost.processing_target.is_some()
+                    || self.patcher_decal.processing_target.is_some()
+                    || self.patcher_anthem.busy() || self.colours.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy()
+                    || self.title_patcher.busy() || self.swapper.busy()
+                    || self.workshop.maintenance_busy()
+                    || crate::replay_history_patch::busy()
+                {
+                    self.maintenance.error = Some(t("maintenance-finish-patches"));
+                    return;
+                }
+                if hebnix_sdk::process::is_rocket_league_running() {
+                    self.maintenance.error = Some(t("maintenance-close-game"));
+                    return;
+                }
+                self.save_config();
+                self.spoofer_mgr.shutdown();
+                let options = self.maintenance.clone();
+                let base = self.base_dir.clone();
+                let game = std::path::PathBuf::from(&self.config.settings.rl_path);
+                let tx = self.tx.clone();
+                let ctx = ui.ctx().clone();
+                self.maintenance_running = true;
+                std::thread::spawn(move || {
+                    let result = (|| -> Result<(), String> {
+                        if options.restore_game { crate::patcher::uninstall::restore(&base, &game)?; }
+                        if options.certificate { crate::maintenance::remove_certificate()?; }
+                        #[cfg(windows)]
+                        if options.application || options.certificate { crate::recovery_tasks::uninstall_legacy()?; }
+                        crate::maintenance::launch_uninstall(&base, &options)
+                    })();
+                    let _ = tx.send(AppMsg::MaintenanceFinished { result });
+                    ctx.request_repaint();
+                });
+            }
+            return;
+        }
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
             ui.heading(t("about-hebnix"));
@@ -5606,7 +5796,7 @@ impl HebnixApp {
 
                 if self.update_downloading {
                     ui.add_enabled(false, egui::Button::new(t("update-downloading")));
-                    ui.spinner();
+                    crate::update::render_progress(ui, &self.update_progress);
                 } else if ui
                     .add(
                         egui::Button::new(t("update-button"))
@@ -5617,16 +5807,17 @@ impl HebnixApp {
                     self.update_downloading = true;
                     self.update_error = None;
                     let setup_url = info.setup_url;
-                    let base_dir = self.base_dir.clone();
+                    let progress = self.update_progress.clone();
+                    *progress.lock().unwrap() = Default::default();
                     let tx = self.tx.clone();
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
-                        if let Err(error) =
-                            crate::update::download_and_install_update(&setup_url, &base_dir)
-                        {
-                            let _ = tx.send(AppMsg::AppUpdateFailed { error });
-                            ctx.request_repaint();
-                        }
+                        let message = match crate::update::download_update(&setup_url, &progress) {
+                            Ok(staged) => AppMsg::AppUpdateReady { staged },
+                            Err(error) => AppMsg::AppUpdateFailed { error },
+                        };
+                        let _ = tx.send(message);
+                        ctx.request_repaint();
                     });
                 }
             });
@@ -5900,13 +6091,6 @@ impl HebnixApp {
         let ctx = ui.ctx().clone();
 
         ui.horizontal(|ui| {
-            if ui.button(t("hebnix-install-back")).clicked() {
-                self.install_modal.hebnix_stage = false;
-                self.install_modal.catalog.clear();
-                self.install_modal.error = None;
-                self.install_modal.search_query.clear();
-                self.install_modal.current_page = 0;
-            }
             if ui.button(t("btn-refresh")).clicked() {
                 self.fetch_hebnix_plugin();
             }
@@ -6004,7 +6188,7 @@ impl HebnixApp {
 
         egui::ScrollArea::vertical()
             .id_salt("plugin_catalog_scroll")
-            .max_height(ui.available_height() - 35.0)
+            .max_height((ui.available_height() - 35.0).max(0.0))
             .show(ui, |ui| {
                 if total_items == 0 {
                     ui.add_space(20.0);
@@ -6142,42 +6326,60 @@ impl HebnixApp {
                     ui.add_space(4.0);
                 }
             });
-        ui.add_space(8.0);
+        let display_page = if total_pages == 0 {
+            0
+        } else {
+            self.install_modal.current_page + 1
+        };
+        let page_label = t_args(
+            "hebnix-install-page-display-page-of-total-pages",
+            &[
+                ("display_page", display_page.to_string().into()),
+                ("total_pages", total_pages.to_string().into()),
+            ],
+        );
+        let prev_label = t("hebnix-install-prev");
+        let next_label = t("hebnix-install-next");
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let controls_width: f32 = [&prev_label, &page_label, &next_label]
+            .iter()
+            .map(|label| ui.painter().layout_no_wrap(
+                (*label).clone(), font.clone(), ui.visuals().text_color(),
+            ).size().x)
+            .sum::<f32>()
+            + 4.0 * ui.spacing().button_padding.x
+            + 2.0 * ui.spacing().item_spacing.x;
+        let footer_height = ui.spacing().interact_size.y;
+        ui.add_space((ui.available_height() - footer_height).max(0.0));
         ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        self.install_modal.current_page + 1 < total_pages,
-                        egui::Button::new(t("hebnix-install-next")),
-                    )
-                    .clicked()
-                {
-                    self.install_modal.current_page += 1;
-                }
+            ui.add_space(((ui.available_width() - controls_width) / 2.0).max(0.0));
+            ui.allocate_ui_with_layout(
+                egui::vec2(controls_width, footer_height),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .add_enabled(
+                            self.install_modal.current_page + 1 < total_pages,
+                            egui::Button::new(next_label),
+                        )
+                        .clicked()
+                    {
+                        self.install_modal.current_page += 1;
+                    }
 
-                let display_page = if total_pages == 0 {
-                    0
-                } else {
-                    self.install_modal.current_page + 1
-                };
-                ui.label(t_args(
-                    "hebnix-install-page-display-page-of-total-pages",
-                    &[
-                        ("display_page", display_page.to_string().into()),
-                        ("total_pages", total_pages.to_string().into()),
-                    ],
-                ));
+                    ui.label(page_label);
 
-                if ui
-                    .add_enabled(
-                        self.install_modal.current_page > 0,
-                        egui::Button::new(t("hebnix-install-prev")),
-                    )
-                    .clicked()
-                {
-                    self.install_modal.current_page -= 1;
-                }
-            });
+                    if ui
+                        .add_enabled(
+                            self.install_modal.current_page > 0,
+                            egui::Button::new(prev_label),
+                        )
+                        .clicked()
+                    {
+                        self.install_modal.current_page -= 1;
+                    }
+                },
+            );
         });
 
         match action {
@@ -6645,6 +6847,7 @@ impl Drop for HebnixApp {
 
 impl eframe::App for HebnixApp {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        crate::maintenance::acknowledge_update();
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
                 crate::watchdog::finish_live_handoff();
@@ -6717,6 +6920,16 @@ impl eframe::App for HebnixApp {
             }
         }
 
+        if self.maintenance_running {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| { ui.spinner(); ui.label(t("maintenance-working")); });
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+
         if self.update_info.is_some() {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.disable();
@@ -6736,19 +6949,16 @@ impl eframe::App for HebnixApp {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    // same order as the original hardcoded bar
-                    for tab in [
-                        Tab::Console,
-                        Tab::Workshop,
-                        Tab::Spoofer,
-                        Tab::Colours,
-                        Tab::Patcher,
-                        Tab::Settings,
-                        Tab::Plugins,
-                        Tab::Replays,
-                        Tab::About,
-                    ] {
-                        ui.selectable_value(&mut self.tab, tab, tab.label());
+                    for tab in Tab::ALL {
+                        if tab == Tab::Home {
+                            if ui.add(egui::Button::image(egui::Image::new(egui::include_image!("../assets/navigation/home.svg"))
+                                .fit_to_exact_size(egui::vec2(18.0, 18.0)).tint(ui.visuals().text_color()))
+                                .selected(self.tab == tab)).on_hover_text(tab.label()).clicked() {
+                                self.tab = tab;
+                            }
+                        } else {
+                            ui.selectable_value(&mut self.tab, tab, tab.label());
+                        }
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -6852,152 +7062,233 @@ impl eframe::App for HebnixApp {
 }
 
 impl HebnixApp {
-    fn render_current_page(&mut self, ui: &mut egui::Ui) {
-        self.patcher_anthem.poll(&mut self.config, &self.tx);
-        if self.tab != Tab::Patcher || self.items_mode != ItemsMode::Patching || self.patcher_subtab != PatcherSubTab::Anthem {
-            self.patcher_anthem.leave_page();
-        }
-        if self.tab != Tab::Spoofer || self.spoofer_subtab != SpooferSubTab::Titles {
-            self.title_editor.leave_page();
-        }
-        let ctx = &ui.ctx().clone();
-        match self.tab {
-            Tab::Console => self.render_console_tab(ui),
-            Tab::Workshop => {
-                let rl_path = self.config.settings.rl_path.clone();
-                let rl_launch = self.config.rl_launch.clone();
-                let tx = self.tx.clone();
-                self.workshop.render(ui, &rl_path, &rl_launch, &tx);
+    fn render_items_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for (value, key) in [
+                (ItemsSubTab::Swapper, "nav-swapper"),
+                (ItemsSubTab::Colours, "nav-colours"),
+                (ItemsSubTab::Active, "nav-active"),
+                (ItemsSubTab::Presets, "presets-presets"),
+                (ItemsSubTab::Loadouts, "loadouts-title"),
+            ] {
+                ui.selectable_value(&mut self.items_subtab, value, t(key));
             }
-            Tab::Spoofer => self.render_spoofer_tab(ui),
-            Tab::Patcher => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::Swapper, t("app-items-swapper"));
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::Recolour, t("app-items-recolour"));
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::Patching, t("app-items-patching"));
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::Spawner, t("app-items-spawner"));
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::SpeedPatch, t("app-speed-patch"));
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::WheelAlignment, t("app-wheel-alignment"));
-                    ui.selectable_value(&mut self.items_mode, ItemsMode::BallAppearance, t("app-ball-appearance"));
+        });
+        ui.separator();
+        if matches!(
+            self.items_subtab,
+            ItemsSubTab::Swapper | ItemsSubTab::Colours
+        ) {
+            theme::secondary_navigation(ui, "items_categories").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("items_category_pages")
+                    .show(ui, |ui| {
+                        if self.items_subtab == ItemsSubTab::Colours {
+                            self.swapper.render_recolour_categories(ui);
+                        } else {
+                            for category in crate::swapper::SwapCategory::ALL {
+                                ui.selectable_value(
+                                    &mut self.swapper_subtab,
+                                    PatcherSubTab::Swapper(category),
+                                    category.label(),
+                                );
+                            }
+                        }
+                    });
+            });
+        }
+        if self.items_subtab == ItemsSubTab::Loadouts {
+            self.loadouts.show(ui, &self.swapper, &mut self.presets);
+            return;
+        }
+        let mode = match self.items_subtab {
+            ItemsSubTab::Swapper => ItemsMode::Swapper,
+            ItemsSubTab::Colours => ItemsMode::Recolour,
+            ItemsSubTab::Active => ItemsMode::ItemsActive,
+            ItemsSubTab::Presets => ItemsMode::Presets,
+            ItemsSubTab::Loadouts => unreachable!("Loadouts has its own editor"),
+        };
+        self.render_editor_content(ui, mode);
+    }
+
+    fn render_upk_studio(&mut self, ui: &mut egui::Ui) {
+        let mut section = self.items_mode.section().expect("studio page");
+        let previous = section;
+        ui.horizontal_wrapped(|ui| {
+            for (value, key) in [
+                (StudioSection::CustomAssets, "studio-custom-assets"),
+                (StudioSection::Appearance, "studio-appearance"),
+                (StudioSection::Menus, "studio-menus"),
+                (StudioSection::Tools, "studio-tools"),
+                (StudioSection::Active, "nav-active"),
+            ] {
+                ui.selectable_value(&mut section, value, t(key));
+            }
+        });
+        if section != previous {
+            self.items_mode = match section {
+                StudioSection::CustomAssets => ItemsMode::Patching,
+                StudioSection::Appearance => ItemsMode::GameColours,
+                StudioSection::Menus => ItemsMode::MenuBackground,
+                StudioSection::Tools => ItemsMode::SpeedPatch,
+                StudioSection::Active => ItemsMode::Manage,
+            };
+        }
+        ui.separator();
+        if section != StudioSection::Active {
+            theme::secondary_navigation(ui, "studio_navigation").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("studio_pages")
+                    .show(ui, |ui| match section {
+                        StudioSection::CustomAssets => {
+                            for (value, key) in [
+                                (PatcherSubTab::Car, "nav-car-models"),
+                                (PatcherSubTab::Decal, "nav-decals"),
+                                (PatcherSubTab::Anthem, "studio-player-anthems"),
+                                (PatcherSubTab::Ball, "nav-ball-textures"),
+                                (PatcherSubTab::BoostMeter, "nav-boost-meter"),
+                                (PatcherSubTab::Thumbnail, "nav-item-thumbnails"),
+                            ] {
+                                let selected = self.items_mode == ItemsMode::Patching
+                                    && self.patcher_subtab == value;
+                                if ui.selectable_label(selected, t(key)).clicked() {
+                                    self.items_mode = ItemsMode::Patching;
+                                    self.patcher_subtab = value;
+                                }
+                            }
+                            ui.selectable_value(
+                                &mut self.items_mode,
+                                ItemsMode::ItemNames,
+                                t("nav-item-names"),
+                            );
+                        }
+                        StudioSection::Appearance => {
+                            for (value, key) in [
+                                (ItemsMode::GameColours, "nav-game-colours"),
+                                (ItemsMode::BallAppearance, "nav-ball-shape"),
+                                (ItemsMode::WheelAlignment, "app-wheel-alignment"),
+                                (ItemsMode::ArenaBackgrounds, "nav-arena-backgrounds"),
+                            ] {
+                                ui.selectable_value(&mut self.items_mode, value, t(key));
+                            }
+                        }
+                        StudioSection::Menus => {
+                            for (value, key) in [
+                                (ItemsMode::MenuBackground, "nav-menu-background"),
+                            ] {
+                                ui.selectable_value(&mut self.items_mode, value, t(key));
+                            }
+                        }
+                        StudioSection::Tools => {
+                            ui.selectable_value(
+                                &mut self.items_mode,
+                                ItemsMode::SpeedPatch,
+                                t("app-speed-patch"),
+                            );
+                        }
+                        StudioSection::Active => unreachable!(),
+                    });
+            });
+        }
+        self.render_editor_content(ui, self.items_mode);
+    }
+
+    fn render_active_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked_pc: &std::path::Path,
+        backups_dir: &std::path::Path,
+    ) {
+        egui::ScrollArea::vertical()
+            .id_salt("active_item_swaps")
+            .show(ui, |ui| {
+                ui.heading(t("nav-active"));
+                let count = self.swapper.active_count(backups_dir);
+                ui.horizontal(|ui| {
+                    ui.label(t_n("items-active-changes", count as i64));
+                    if ui
+                        .add_enabled(count > 0, egui::Button::new(t("app-restore-all")))
+                        .clicked()
+                    {
+                        match self
+                            .swapper
+                            .restore_all_active(cooked_pc, backups_dir, &self.tx)
+                        {
+                            Ok(count) => self
+                                .console
+                                .write(format!("[Items] Restored {count} item changes.")),
+                            Err(error) => self
+                                .console
+                                .write(format!("[Items] Restore failed: {error}")),
+                        }
+                    }
                 });
                 ui.separator();
-                let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
-                    .join("TAGame")
-                    .join("CookedPCConsole");
-                let backups_dir = cooked_pc.join("Backups");
-                if self.items_mode == ItemsMode::Spawner {
-                    let status = self.spoofer_mgr.item_status();
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{} items; {} legacy tracked IDs", status.active, status.legacy));
-                        if ui.add_enabled(!status.clearing, egui::Button::new("Remove Items")).clicked() {
-                            match self.spoofer_mgr.begin_item_clear() {
-                                Ok(()) => self.check_item_clear(),
-                                Err(error) => self.item_clear_error = Some(error),
-                            }
-                        }
-                    });
-                    if let Some(error) = &self.item_clear_error { ui.label(error); }
-                } else if matches!(self.items_mode, ItemsMode::Swapper | ItemsMode::Patching) {
-                let patching = self.items_mode == ItemsMode::Patching;
-                let selected_subtab = if patching {
-                    &mut self.patcher_subtab
-                } else {
-                    &mut self.swapper_subtab
-                };
-                theme::secondary_navigation(ui, "patcher_settings_list")
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt(("patcher_subtabs", patching))
-                            .show(ui, |ui| {
-                                if patching {
-                                    ui.selectable_value(selected_subtab, PatcherSubTab::Anthem, "Anthem Patcher");
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Ball,
-                                        t("app-ball-patcher"),
-                                    );
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::BoostMeter,
-                                        t("app-boost-patcher"),
-                                    );
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Car,
-                                        t("app-car-patcher"),
-                                    );
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Decal,
-                                        t("app-decal-patcher"),
-                                    );
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Thumbnail,
-                                        t("thumbnail-patcher-title"),
-                                    );
-                                    ui.selectable_value(selected_subtab, PatcherSubTab::ItemName, t("item-name-title"));
-                                } else {
-                                    for category in crate::swapper::SwapCategory::ALL {
-                                        ui.selectable_value(
-                                            selected_subtab,
-                                            PatcherSubTab::Swapper(category),
-                                            category.label(),
-                                        );
-                                    }
-                                    ui.separator();
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Active,
-                                        t("app-active"),
-                                    );
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Presets,
-                                        t("presets-presets"),
-                                    );
-                                    ui.selectable_value(
-                                        selected_subtab,
-                                        PatcherSubTab::Loadouts,
-                                        t("loadouts-title"),
-                                    );
-                                }
-                            });
-                    });
-                let selected_subtab = *selected_subtab;
+                if count == 0 {
+                    ui.weak(t("app-no-patches-or-swaps-are-active"));
+                }
+                self.swapper
+                    .render_active_swaps(ui, cooked_pc, backups_dir, &self.tx);
+            });
+    }
 
-                egui::CentralPanel::default()
-                    .frame(crate::i18n::layout::subtab_content_frame())
-                    .show(ui, |ui| {
-                        let catalog_required = matches!(
-                            selected_subtab,
-                            PatcherSubTab::Decal
-                                | PatcherSubTab::Car
-                                | PatcherSubTab::Anthem
-                                | PatcherSubTab::Swapper(_)
+    fn render_editor_content(&mut self, ui: &mut egui::Ui, mode: ItemsMode) {
+        let ctx = &ui.ctx().clone();
+        let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
+            .join("TAGame")
+            .join("CookedPCConsole");
+        let backups_dir = cooked_pc.join("Backups");
+        egui::CentralPanel::default()
+            .frame(crate::i18n::layout::subtab_content_frame())
+            .show(ui, |ui| {
+                if matches!(
+                    mode,
+                    ItemsMode::Swapper
+                        | ItemsMode::Patching
+                        | ItemsMode::Manage
+                        | ItemsMode::Presets
+                ) {
+                    let selected_subtab = if mode == ItemsMode::Patching {
+                        self.patcher_subtab
+                    } else if mode == ItemsMode::Manage {
+                        PatcherSubTab::Active
+                    } else if mode == ItemsMode::Presets {
+                        PatcherSubTab::Presets
+                    } else {
+                        self.swapper_subtab
+                    };
+                    let catalog_required = matches!(
+                        selected_subtab,
+                        PatcherSubTab::Decal
+                            | PatcherSubTab::Car
+                            | PatcherSubTab::Anthem
+                            | PatcherSubTab::Swapper(_)
+                    );
+                    if self.catalogs_loading {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(t("app-loading-item-catalogs"));
+                        });
+                        ui.add_space(8.0);
+                    }
+                    if let Some(error) = self.catalogs_error.clone() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
+                            t_args(
+                                "app-catalog-download-failed-error",
+                                &[("error", error.to_string().into())],
+                            ),
                         );
-                        if self.catalogs_loading {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(t("app-loading-item-catalogs"));
-                            });
-                            ui.add_space(8.0);
+                        if ui.button(t("app-reload-catalogs")).clicked() {
+                            self.reload_catalogs(ctx);
                         }
-                        if let Some(error) = self.catalogs_error.clone() {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
-                                t_args("app-catalog-download-failed-error", &[("error", error.to_string().into())]),
-                            );
-                            if ui.button(t("app-reload-catalogs")).clicked() {
-                                self.reload_catalogs(ctx);
-                            }
-                            ui.add_space(8.0);
-                        }
-                        if catalog_required && !self.catalogs_loaded {
-                            return;
-                        }
+                        ui.add_space(8.0);
+                    }
+                    if catalog_required && !self.catalogs_loaded {
+                        return;
+                    }
 
-                        match selected_subtab {
+                    match selected_subtab {
                         PatcherSubTab::Ball => {
                             self.patcher_ball.render_ball_tab(
                                 ui,
@@ -7041,67 +7332,148 @@ impl HebnixApp {
                             );
                         }
                         PatcherSubTab::Anthem => {
+                            ui.heading(t("studio-player-anthems"));
                             self.owned_inventory.show(ui);
-                            self.patcher_anthem.render_tab(ui, &cooked_pc, &self.tx, &mut self.config, &self.owned_inventory.ids);
+                            self.patcher_anthem.render_tab(
+                                ui,
+                                &cooked_pc,
+                                &self.tx,
+                                &mut self.config,
+                                &self.owned_inventory.ids,
+                            );
                         }
                         PatcherSubTab::Swapper(category) => {
-                            self.owned_inventory.show(ui);
-                            let owned_ids = &self.owned_inventory.ids;
                             self.swapper.speed_enabled = self.config.speed_patch.items_page;
-                            self.swapper.render_tab(
+                            self.swapper.render_owned_tab(
                                 ui,
                                 category,
                                 &cooked_pc,
                                 &backups_dir,
                                 &self.tx,
-                                owned_ids,
+                                &mut self.owned_inventory,
                             );
                         }
                         PatcherSubTab::Thumbnail => {
-                            self.owned_inventory.show(ui);
-                            self.swapper.render_thumbnail_patcher(ui, &cooked_pc, &backups_dir, &self.owned_inventory.ids);
-                        }
-                        PatcherSubTab::ItemName => {
-                            self.owned_inventory.show(ui);
-                            self.swapper.render_item_names(ui, &cooked_pc, &backups_dir, &self.owned_inventory.ids);
+                            self.swapper.render_owned_thumbnail_patcher(
+                                ui,
+                                &cooked_pc,
+                                &backups_dir,
+                                &mut self.owned_inventory,
+                            );
                         }
                         PatcherSubTab::Active => {
-                            self.patcher_ball.poll_ops(
-                                &self.tx,
-                                ctx,
-                                &mut self.config,
-                            );
+                            self.patcher_ball.poll_ops(&self.tx, ctx, &mut self.config);
                             self.patcher_boost.poll_ops(&self.tx, &mut self.config);
                             self.patcher_decal
                                 .handle_op_result(&self.tx, &mut self.config);
                             egui::ScrollArea::vertical()
-                                .id_salt("active_items")
+                                .id_salt("active_upk_studio")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
-                            ui.heading(t("app-active-items"));
-                            let swap_count = self.swapper.active_count(&backups_dir);
-                            let active_count = swap_count
-                                + usize::from(self.patcher_ball.active_ball.is_some())
-                                + usize::from(self.patcher_boost.active_boost.is_some())
-                                + self.patcher_decal.active_decals.len()
-                                + self.patcher_car.active_cars.len()
-                                + self.patcher_anthem.active_anthems.len();
-                            ui.horizontal(|ui| {
-                                ui.label(t_n("items-active-changes", active_count as i64));
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .add_enabled(
-                                                active_count > 0,
-                                                egui::Button::new(t("app-restore-all")),
+                                    ui.heading(t("nav-active"));
+                                    let active_count =
+                                        usize::from(self.patcher_ball.active_ball.is_some())
+                                            + usize::from(
+                                                self.patcher_boost.active_boost.is_some(),
                                             )
-                                            .clicked()
-                                        {
-                                            if !self.patcher_anthem.active_anthems.is_empty() {
-                                                self.patcher_anthem.restore_all(&cooked_pc, ctx);
+                                            + self.patcher_decal.active_decals.len()
+                                            + self.patcher_car.active_cars.len()
+                                            + self.patcher_anthem.active_anthems.len();
+                                    ui.horizontal(|ui| {
+                                        ui.label(t_n("items-active-changes", active_count as i64));
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add_enabled(
+                                                        active_count > 0,
+                                                        egui::Button::new(t("app-restore-all")),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    if !self
+                                                        .patcher_anthem
+                                                        .active_anthems
+                                                        .is_empty()
+                                                    {
+                                                        self.patcher_anthem
+                                                            .restore_all(&cooked_pc, ctx);
+                                                    }
+                                                    if self.patcher_ball.active_ball.is_some() {
+                                                        self.patcher_ball.begin_restore(
+                                                            &cooked_pc,
+                                                            &backups_dir,
+                                                            &self.tx,
+                                                            ctx,
+                                                        );
+                                                    }
+                                                    if self.patcher_boost.active_boost.is_some() {
+                                                        self.patcher_boost.begin_restore(
+                                                            &cooked_pc,
+                                                            &backups_dir,
+                                                            &self.tx,
+                                                            ctx,
+                                                        );
+                                                    }
+                                                    if !self.patcher_decal.active_decals.is_empty()
+                                                    {
+                                                        let _ =
+                                                            self.patcher_decal.restore_all_decals(
+                                                                &cooked_pc,
+                                                                &backups_dir,
+                                                                &self.tx,
+                                                                ctx,
+                                                            );
+                                                    }
+                                                    if !self.patcher_car.active_cars.is_empty() {
+                                                        if let Err(error) =
+                                                            self.patcher_car.restore_all(
+                                                                &cooked_pc,
+                                                                &backups_dir,
+                                                                &self.tx,
+                                                                &mut self.config,
+                                                            )
+                                                        {
+                                                            let _ =
+                                                                self.tx.send(AppMsg::Log(format!(
+                                                                    "[Cars] Restore failed: {error}"
+                                                                )));
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.separator();
+                                    if active_count == 0 {
+                                        ui.vertical_centered(|ui| {
+                                            ui.weak(t("app-no-patches-or-swaps-are-active"))
+                                        });
+                                    }
+
+                                    let active_ball = self.patcher_ball.active_ball.clone();
+                                    if let Some(name) = active_ball {
+                                        let image = self
+                                            .patcher_ball
+                                            .balls
+                                            .iter()
+                                            .find(|item| item.name == name)
+                                            .and_then(|item| item.image_bytes.clone());
+                                        ui.horizontal(|ui| {
+                                            if let Some(image) = image {
+                                                ui.add(
+                                                    egui::Image::from_bytes(
+                                                        format!("bytes://active/ball/{name}"),
+                                                        image,
+                                                    )
+                                                    .fit_to_exact_size(egui::vec2(90.0, 58.0)),
+                                                );
                                             }
-                                            if self.patcher_ball.active_ball.is_some() {
+                                            ui.vertical(|ui| {
+                                                ui.strong(&name);
+                                                ui.weak(t("app-replaced-the-default-ball"));
+                                            });
+                                            if ui.button(t("app-restore")).clicked() {
                                                 self.patcher_ball.begin_restore(
                                                     &cooked_pc,
                                                     &backups_dir,
@@ -7109,116 +7481,38 @@ impl HebnixApp {
                                                     ctx,
                                                 );
                                             }
-                                            if self.patcher_boost.active_boost.is_some() {
-                                                self.patcher_boost.begin_restore(
-                                                    &cooked_pc,
-                                                    &backups_dir,
-                                                    &self.tx,
-                                                    ctx,
-                                                );
-                                            }
-                                            if !self.patcher_decal.active_decals.is_empty() {
-                                                let _ = self.patcher_decal.restore_all_decals(
-                                                    &cooked_pc,
-                                                    &backups_dir,
-                                                    &self.tx,
-                                                    ctx,
-                                                );
-                                            }
-                                            if !self.patcher_car.active_cars.is_empty() {
-                                                if let Err(error) = self.patcher_car.restore_all(
-                                                    &cooked_pc,
-                                                    &backups_dir,
-                                                    &self.tx,
-                                                    &mut self.config,
-                                                ) {
-                                                    let _ = self.tx.send(AppMsg::Log(format!(
-                                                        "[Cars] Restore failed: {error}"
-                                                    )));
-                                                }
-                                            }
-                                            match self.swapper.restore_all_active(
-                                                &cooked_pc,
-                                                &backups_dir,
-                                                &self.tx,
-                                            ) {
-                                                Ok(count) if count > 0 => {
-                                                    let _ = self.tx.send(AppMsg::Log(format!(
-                                                        "[Swapper] {}",
-                                                        t_n("console-swapper-restored", count as i64)
-                                                    )));
-                                                }
-                                                Err(error) => {
-                                                    let _ = self.tx.send(AppMsg::Log(format!(
-                                                        "[Swapper] Error: {error}"
-                                                    )));
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    },
-                                );
-                            });
-                            ui.separator();
-                            if active_count == 0 {
-                                ui.vertical_centered(|ui| ui.weak(t("app-no-patches-or-swaps-are-active")));
-                            }
-
-                            let active_ball = self.patcher_ball.active_ball.clone();
-                            if let Some(name) = active_ball {
-                                let image = self
-                                    .patcher_ball
-                                    .balls
-                                    .iter()
-                                    .find(|item| item.name == name)
-                                    .and_then(|item| item.image_bytes.clone());
-                                ui.horizontal(|ui| {
-                                    if let Some(image) = image {
-                                        ui.add(egui::Image::from_bytes(
-                                            format!("bytes://active/ball/{name}"), image,
-                                        ).fit_to_exact_size(egui::vec2(90.0, 58.0)));
+                                        });
                                     }
-                                    ui.vertical(|ui| {
-                                        ui.strong(&name);
-                                        ui.weak(t("app-replaced-the-default-ball"));
-                                    });
-                                    if ui.button(t("app-restore")).clicked() {
-                                        self.patcher_ball.begin_restore(
-                                            &cooked_pc, &backups_dir, &self.tx, ctx,
-                                        );
-                                    }
-                                });
-                            }
-                            let active_boost = self.patcher_boost.active_boost.clone();
-                            if let Some(name) = active_boost {
-                                let images = self
-                                    .patcher_boost
-                                    .boosts
-                                    .iter()
-                                    .find(|item| item.name == name)
-                                    .map(|item| {
-                                        (
-                                            item.background_image.clone(),
-                                            item.fill_image.clone(),
-                                            item.glow_image.clone(),
-                                            item.tint_image.clone(),
-                                        )
-                                    });
-                                ui.horizontal(|ui| {
-                                    if let Some((background, fill, glow, tint)) = images {
-                                        let size = egui::vec2(90.0, 58.0);
-                                        let (rect, _) = ui.allocate_exact_size(
-                                            size,
-                                            egui::Sense::hover(),
-                                        );
-                                        for (layer, image) in [
-                                            ("background", background),
-                                            ("fill", fill),
-                                            ("glow", glow),
-                                            ("tint", tint),
-                                        ] {
-                                            if let Some(image) = image {
-                                                ui.put(
+                                    let active_boost = self.patcher_boost.active_boost.clone();
+                                    if let Some(name) = active_boost {
+                                        let images = self
+                                            .patcher_boost
+                                            .boosts
+                                            .iter()
+                                            .find(|item| item.name == name)
+                                            .map(|item| {
+                                                (
+                                                    item.background_image.clone(),
+                                                    item.fill_image.clone(),
+                                                    item.glow_image.clone(),
+                                                    item.tint_image.clone(),
+                                                )
+                                            });
+                                        ui.horizontal(|ui| {
+                                            if let Some((background, fill, glow, tint)) = images {
+                                                let size = egui::vec2(90.0, 58.0);
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    size,
+                                                    egui::Sense::hover(),
+                                                );
+                                                for (layer, image) in [
+                                                    ("background", background),
+                                                    ("fill", fill),
+                                                    ("glow", glow),
+                                                    ("tint", tint),
+                                                ] {
+                                                    if let Some(image) = image {
+                                                        ui.put(
                                                     rect,
                                                     egui::Image::from_bytes(
                                                         format!(
@@ -7228,118 +7522,156 @@ impl HebnixApp {
                                                     )
                                                     .fit_to_exact_size(size),
                                                 );
+                                                    }
+                                                }
                                             }
-                                        }
+                                            ui.vertical(|ui| {
+                                                ui.strong(&name);
+                                                ui.weak(t("app-replaced-the-default-boost-meter"));
+                                            });
+                                            if ui.button(t("app-restore")).clicked() {
+                                                self.patcher_boost.begin_restore(
+                                                    &cooked_pc,
+                                                    &backups_dir,
+                                                    &self.tx,
+                                                    ctx,
+                                                );
+                                            }
+                                        });
                                     }
-                                    ui.vertical(|ui| {
-                                        ui.strong(&name);
-                                        ui.weak(t("app-replaced-the-default-boost-meter"));
-                                    });
-                                    if ui.button(t("app-restore")).clicked() {
-                                        self.patcher_boost.begin_restore(
-                                            &cooked_pc, &backups_dir, &self.tx, ctx,
+                                    let active_decals = self
+                                        .patcher_decal
+                                        .active_decals
+                                        .iter()
+                                        .map(|(target, name)| (target.clone(), name.clone()))
+                                        .collect::<Vec<_>>();
+                                    let mut restore_decal = None;
+                                    for (target, name) in active_decals {
+                                        let target_label =
+                                            self.patcher_decal.target_display_name(&target);
+                                        let image = self
+                                            .patcher_decal
+                                            .decals
+                                            .iter()
+                                            .find(|item| item.name == name)
+                                            .and_then(|item| item.preview_image.clone());
+                                        ui.horizontal(|ui| {
+                                            if let Some(image) = image {
+                                                ui.add(
+                                                    egui::Image::from_bytes(
+                                                        format!("bytes://active/decal/{target}"),
+                                                        image,
+                                                    )
+                                                    .fit_to_exact_size(egui::vec2(90.0, 58.0)),
+                                                );
+                                            }
+                                            ui.vertical(|ui| {
+                                                ui.strong(&name);
+                                                ui.weak(t_args(
+                                                    "app-replaced-target-label",
+                                                    &[(
+                                                        "target_label",
+                                                        target_label.to_string().into(),
+                                                    )],
+                                                ));
+                                            });
+                                            if ui.button(t("app-restore")).clicked() {
+                                                restore_decal =
+                                                    target.split_once('|').map(|(car, skin)| {
+                                                        (car.to_string(), skin.to_string())
+                                                    });
+                                            }
+                                        });
+                                    }
+                                    if let Some((car, skin)) = restore_decal {
+                                        let _ = self.patcher_decal.restore_decal_from_skin(
+                                            &car,
+                                            &skin,
+                                            &cooked_pc,
+                                            &backups_dir,
+                                            &self.tx,
+                                            ctx,
                                         );
                                     }
-                                });
-                            }
-                            let active_decals = self
-                                .patcher_decal
-                                .active_decals
-                                .iter()
-                                .map(|(target, name)| (target.clone(), name.clone()))
-                                .collect::<Vec<_>>();
-                            let mut restore_decal = None;
-                            for (target, name) in active_decals {
-                                let target_label = self
-                                    .patcher_decal
-                                    .target_display_name(&target);
-                                let image = self.patcher_decal.decals.iter()
-                                    .find(|item| item.name == name)
-                                    .and_then(|item| item.preview_image.clone());
-                                ui.horizontal(|ui| {
-                                    if let Some(image) = image {
-                                        ui.add(egui::Image::from_bytes(
-                                            format!("bytes://active/decal/{target}"), image,
-                                        ).fit_to_exact_size(egui::vec2(90.0, 58.0)));
+                                    let active_cars = self
+                                        .patcher_car
+                                        .active_cars
+                                        .iter()
+                                        .map(|(target, name)| (target.clone(), name.clone()))
+                                        .collect::<Vec<_>>();
+                                    let mut restore_car = None;
+                                    for (target, name) in active_cars {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.strong(&name);
+                                                ui.weak(t_args(
+                                                    "app-replaced-target-for-its-bodyid-car",
+                                                    &[("target", target.to_string().into())],
+                                                ));
+                                            });
+                                            if ui.button(t("app-restore")).clicked() {
+                                                restore_car = Some(target.clone());
+                                            }
+                                        });
                                     }
-                                    ui.vertical(|ui| {
-                                        ui.strong(&name);
-                                        ui.weak(t_args("app-replaced-target-label", &[("target_label", target_label.to_string().into())]));
-                                    });
-                                    if ui.button(t("app-restore")).clicked() {
-                                        restore_decal = target.split_once('|')
-                                            .map(|(car, skin)| (car.to_string(), skin.to_string()));
+                                    if let Some(target) = restore_car {
+                                        if let Err(error) = self.patcher_car.restore(
+                                            &target,
+                                            &cooked_pc,
+                                            &backups_dir,
+                                            &self.tx,
+                                            &mut self.config,
+                                        ) {
+                                            let _ = self.tx.send(AppMsg::Log(format!(
+                                                "[Cars] Restore failed: {error}"
+                                            )));
+                                        }
                                     }
-                                });
-                            }
-                            if let Some((car, skin)) = restore_decal {
-                                let _ = self.patcher_decal.restore_decal_from_skin(
-                                    &car, &skin, &cooked_pc, &backups_dir, &self.tx, ctx,
-                                );
-                            }
-                            let active_cars = self
-                                .patcher_car
-                                .active_cars
-                                .iter()
-                                .map(|(target, name)| (target.clone(), name.clone()))
-                                .collect::<Vec<_>>();
-                            let mut restore_car = None;
-                            for (target, name) in active_cars {
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.strong(&name);
-                                        ui.weak(t_args("app-replaced-target-for-its-bodyid-car", &[("target", target.to_string().into())]));
-                                    });
-                                    if ui.button(t("app-restore")).clicked() {
-                                        restore_car = Some(target.clone());
+                                    let active_anthems = self.patcher_anthem.active_anthems.clone();
+                                    for (key, name) in active_anthems {
+                                        ui.horizontal(|ui| {
+                                            ui.strong(name);
+                                            ui.weak("Patched anthem audio");
+                                            if ui.button(t("app-restore")).clicked() {
+                                                self.patcher_anthem
+                                                    .update_enabled(key, false, &cooked_pc, ctx);
+                                            }
+                                        });
                                     }
-                                });
-                            }
-                            if let Some(target) = restore_car {
-                                if let Err(error) = self.patcher_car.restore(
-                                    &target,
-                                    &cooked_pc,
-                                    &backups_dir,
-                                    &self.tx,
-                                    &mut self.config,
-                                ) {
-                                    let _ = self.tx.send(AppMsg::Log(format!(
-                                        "[Cars] Restore failed: {error}"
-                                    )));
-                                }
-                            }
-                            let active_anthems = self.patcher_anthem.active_anthems.clone();
-                            for (key, name) in active_anthems {
-                                ui.horizontal(|ui| {
-                                    ui.strong(name);
-                                    ui.weak("Patched anthem audio");
-                                    if ui.button(t("app-restore")).clicked() {
-                                        self.patcher_anthem.update_enabled(key, false, &cooked_pc, ctx);
-                                    }
-                                });
-                            }
-                            self.swapper.render_active_swaps(
-                                ui, &cooked_pc, &backups_dir, &self.tx,
-                            );
                                 });
                         }
                         PatcherSubTab::Presets => {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
                         }
-                        PatcherSubTab::Loadouts => {
-                            self.loadouts.show(ui, &self.swapper, &mut self.presets);
-                        }
-                        }
-                    });
-                } else if self.items_mode == ItemsMode::Recolour {
-                    ui.heading(t("app-items-recolour"));
+                    }
+                } else if mode == ItemsMode::ItemsActive {
+                    self.render_active_items(ui, &cooked_pc, &backups_dir);
+                } else if mode == ItemsMode::ItemNames {
+                    self.swapper.render_owned_item_names(
+                        ui,
+                        &cooked_pc,
+                        &backups_dir,
+                        &mut self.owned_inventory,
+                    );
+                } else if mode == ItemsMode::Recolour {
+                    ui.heading(t("nav-item-colours"));
                     self.owned_inventory.show_with_actions(ui, |ui| {
                         self.swapper.render_recolour_controls(ui, &self.tx);
                     });
-                    if self.catalogs_loading { ui.spinner(); }
-                    if let Some(error) = &self.catalogs_error { ui.label(error); }
-                    self.swapper.render_recolour(ui, &cooked_pc, &backups_dir, &self.tx, &self.owned_inventory.ids);
-                } else if self.items_mode == ItemsMode::SpeedPatch {
+                    if self.catalogs_loading {
+                        ui.spinner();
+                    }
+                    if let Some(error) = &self.catalogs_error {
+                        ui.label(error);
+                    }
+                    self.swapper.render_recolour(
+                        ui,
+                        &cooked_pc,
+                        &backups_dir,
+                        &self.tx,
+                        &self.owned_inventory.ids,
+                    );
+                } else if mode == ItemsMode::SpeedPatch {
                     egui::ScrollArea::vertical()
                         .id_salt("items_speed_patch")
                         .show(ui, |ui| {
@@ -7353,78 +7685,112 @@ impl HebnixApp {
                                 self.save_config();
                             }
                         });
-                } else if self.items_mode == ItemsMode::WheelAlignment {
-                    if self.catalogs_loading { ui.spinner(); }
-                    if let Some(error) = &self.catalogs_error { ui.label(error); }
+                } else if mode == ItemsMode::WheelAlignment {
+                    if self.catalogs_loading {
+                        ui.spinner();
+                    }
+                    if let Some(error) = &self.catalogs_error {
+                        ui.label(error);
+                    }
                     self.wheel_alignment.render(ui, &cooked_pc);
-                } else if self.items_mode == ItemsMode::BallAppearance {
+                } else if mode == ItemsMode::BallAppearance {
                     self.colours.poll();
-                    if let Some(action) =
-                        self.colours.render_ball_appearance(ui, &backups_dir)
-                    {
+                    if let Some(action) = self.colours.render_ball_appearance(ui, &backups_dir) {
                         if crate::messages::block_item_action_if_game_running(&self.tx) {
-                            self.console.write(
-                                "[Colours] Close Rocket League before changing game files.",
-                            );
+                            self.console
+                                .write("[Colours] Close Rocket League before changing game files.");
                         } else if !spoofer::is_admin()
                             && crate::patcher::colours::needs_admin(&cooked_pc)
                         {
                             self.colour_admin_prompt_open = true;
                         } else {
-                            self.colours.begin(
-                                action,
-                                &cooked_pc,
-                                &backups_dir,
-                                &self.tx,
-                                ctx,
-                            );
+                            self.colours
+                                .begin(action, &cooked_pc, &backups_dir, &self.tx, ctx);
                         }
                     }
-                }
-            }
-            Tab::Colours => {
-                let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
-                    .join("TAGame")
-                    .join("CookedPCConsole");
-                let backups_dir = cooked_pc.join("Backups");
-                self.colours.poll();
-                if let Some(action) = self.colours.render(ui, &backups_dir) {
-                    if crate::messages::block_item_action_if_game_running(&self.tx) {
-                        self.console.write(
-                            "[Colours] Close Rocket League before changing game files.",
-                        );
-                    } else if !spoofer::is_admin()
-                        && crate::patcher::colours::needs_admin(&cooked_pc)
-                    {
-                        self.colour_admin_prompt_open = true;
-                    } else {
-                        self.colours.begin(
-                            action,
-                            &cooked_pc,
-                            &backups_dir,
-                            &self.tx,
-                            ctx,
-                        );
+                } else if mode == ItemsMode::GameColours {
+                    self.colours.poll();
+                    if let Some(action) = self.colours.render(ui, &backups_dir) {
+                        if crate::messages::block_item_action_if_game_running(&self.tx) {
+                            self.console
+                                .write("[Colours] Close Rocket League before changing game files.");
+                        } else if !spoofer::is_admin()
+                            && crate::patcher::colours::needs_admin(&cooked_pc)
+                        {
+                            self.colour_admin_prompt_open = true;
+                        } else {
+                            self.colours
+                                .begin(action, &cooked_pc, &backups_dir, &self.tx, ctx);
+                        }
                     }
-                }
-            }
 
+                } else {
+                    let page = match mode {
+                        ItemsMode::ArenaBackgrounds => {
+                            crate::ui::workshop::StudioMapPage::ArenaBackgrounds
+                        }
+                        ItemsMode::MenuBackground => {
+                            crate::ui::workshop::StudioMapPage::MenuBackground
+                        }
+                        _ => unreachable!("studio mode has an editor"),
+                    };
+                    self.workshop.render_studio_page(
+                        page,
+                        ui,
+                        &self.config.settings.rl_path,
+                        &self.config.rl_launch,
+                        &self.tx,
+                    );
+                }
+            });
+    }
+
+    fn render_current_page(&mut self, ui: &mut egui::Ui) {
+        self.patcher_anthem.poll(&mut self.config, &self.tx);
+        if self.tab != Tab::Patcher
+            || self.items_mode != ItemsMode::Patching
+            || self.patcher_subtab != PatcherSubTab::Anthem
+        {
+            self.patcher_anthem.leave_page();
+        }
+        if self.tab != Tab::Spoofer || self.spoofer_subtab != SpooferSubTab::Titles {
+            self.title_editor.leave_page();
+        }
+        match self.tab {
+            Tab::Home => self.render_home(ui),
+            Tab::Console => self.render_console_tab(ui),
+            Tab::Workshop => {
+                let rl_path = self.config.settings.rl_path.clone();
+                let rl_launch = self.config.rl_launch.clone();
+                let tx = self.tx.clone();
+                self.workshop.render(ui, &rl_path, &rl_launch, &tx);
+            }
+            Tab::Spoofer => self.render_spoofer_tab(ui),
+            Tab::Items => self.render_items_tab(ui),
+            Tab::Patcher => self.render_upk_studio(ui),
             Tab::Settings => self.render_settings_tab(ui),
             Tab::Plugins => self.render_plugins_tab(ui),
             Tab::Replays => {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.selectable_value(
+                        &mut self.replays_subtab,
+                        ReplaysSubTab::ReplayTimeline,
+                        t("nav-replay-library"),
+                    );
                     ui.selectable_value(
                         &mut self.replays_subtab,
                         ReplaysSubTab::AutoUploadReplays,
-                        t("app-automatically-upload-replays"),
+                        t("nav-auto-upload"),
                     );
-                    ui.selectable_value(&mut self.replays_subtab, ReplaysSubTab::ReplayTimeline, "Replay Timeline");
                 });
                 ui.separator();
                 match self.replays_subtab {
                     ReplaysSubTab::ReplayTimeline => {
                         let folder = crate::auto_upload_replays::configured_replay_directory(
-                            &self.config.replay_upload, std::path::Path::new(&self.config.settings.rl_path), &self.config.rl_launch);
+                            &self.config.replay_upload,
+                            std::path::Path::new(&self.config.settings.rl_path),
+                            &self.config.rl_launch,
+                        );
                         self.replay_timeline.show(ui, folder, &self.ws_stats);
                     }
                     ReplaysSubTab::AutoUploadReplays => {
@@ -7443,9 +7809,6 @@ impl HebnixApp {
             Tab::About => self.render_about_tab(ui),
         }
     }
-}
-
-impl HebnixApp {
     fn render_themed_navigation(&mut self, ui: &mut egui::Ui, p: &theme::Presentation, vertical: bool) {
         let tabs = Tab::ALL;
         let labels: Vec<String> = tabs.iter().map(|tab| tab.label()).collect();
@@ -7496,7 +7859,7 @@ impl HebnixApp {
                 });
             }
             theme::ShellPart::Content => {
-                if p.layout.show_page_heading && self.tab != Tab::Workshop { ui.heading(self.tab.label()); ui.add_space(8.0); }
+                if p.layout.show_page_heading && !matches!(self.tab, Tab::Workshop | Tab::Home) { ui.heading(self.tab.label()); ui.add_space(8.0); }
                 self.render_current_page(ui);
             }
         });

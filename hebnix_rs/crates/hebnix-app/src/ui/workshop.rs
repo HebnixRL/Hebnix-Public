@@ -745,9 +745,14 @@ pub enum ImageState {
 enum WorkshopView {
     Browse,
     Import,
-    BackgroundChanger,
-    MenuMap,
     Multiplayer,
+}
+
+/// Game asset editors hosted by UPK Studio rather than the map browser.
+#[derive(Clone, Copy)]
+pub enum StudioMapPage {
+    ArenaBackgrounds,
+    MenuBackground,
 }
 
 struct MultiplayerState {
@@ -890,6 +895,8 @@ pub struct WorkshopState {
 }
 
 impl WorkshopState {
+    pub(crate) fn maintenance_busy(&self) -> bool { self.background_changer.busy() }
+
     pub fn new(base_dir: &Path) -> Self {
         let manager = MapManager::new(base_dir);
         let saved_host = std::fs::read(manager.runtime_dir.join("multiplayer_host.json"))
@@ -1064,6 +1071,28 @@ impl WorkshopState {
         );
     }
 
+    pub fn open_import(&mut self) {
+        self.view = WorkshopView::Import;
+    }
+
+    pub fn render_studio_page(
+        &mut self,
+        page: StudioMapPage,
+        ui: &mut egui::Ui,
+        rl_path: &str,
+        rl_launch: &crate::config::RlLaunchCfg,
+        tx: &Sender<AppMsg>,
+    ) {
+        self.rl_launch = rl_launch.clone();
+        match page {
+            StudioMapPage::ArenaBackgrounds => self.background_changer.render(ui, rl_path, tx),
+            StudioMapPage::MenuBackground => {
+                let custom = self.cached_maps();
+                self.menu_map.render(ui, rl_path, &custom, tx);
+            }
+        }
+    }
+
     /// render the tab. rl_path and rl_launch come from the app config.
     pub fn render(
         &mut self,
@@ -1079,19 +1108,13 @@ impl WorkshopState {
             ui.heading(t("tab-workshop"));
             ui.add_space(8.0);
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Browse,
                 t("render-browse-maps"),
             );
-            ui.selectable_value(&mut self.view, WorkshopView::Import, t("render-import-map"));
-            ui.selectable_value(
-                &mut self.view,
-                WorkshopView::BackgroundChanger,
-                t("render-background-changer"),
-            );
-            ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+            ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Multiplayer,
@@ -1132,16 +1155,6 @@ impl WorkshopState {
             self.render_multiplayer(ui, rl_path, tx, &ctx);
             return;
         }
-        if self.view == WorkshopView::BackgroundChanger {
-            self.background_changer.render(ui, rl_path, tx);
-            return;
-        }
-        if self.view == WorkshopView::MenuMap {
-            let custom = self.cached_maps();
-            self.menu_map.render(ui, rl_path, &custom, tx);
-            return;
-        }
-
         // The shared browser controls leave the map card renderers intact.
         if crate::ui::browser::search(ui, &mut self.search, t("ball-name-or-author")) {
             self.execute_search(true);
