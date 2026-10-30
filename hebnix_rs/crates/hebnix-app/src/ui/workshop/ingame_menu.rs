@@ -442,6 +442,11 @@ impl InGameMenuState {
                 if !lan.extra.is_empty() {
                     ui.label(format!("Other tags kept: {}", lan.extra));
                 }
+                if ui.button("Reset to defaults").clicked() {
+                    lan.picks = vec![0; SETTINGS.len()];
+                    lan.extra.clear();
+                    changed = true;
+                }
             });
         });
         if changed {
