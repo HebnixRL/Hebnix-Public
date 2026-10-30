@@ -78,6 +78,7 @@ mod patch_core {
     pub use crate::patcher::patch_core::*;
 }
 mod plugins;
+mod profile_pictures;
 mod presets;
 #[cfg(target_os = "windows")]
 mod rl_launch;

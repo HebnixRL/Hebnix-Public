@@ -29,6 +29,7 @@ pub mod thumbnail_patcher;
 pub mod swapper;
 pub mod upk_keys;
 pub mod upk_package;
+pub mod profile_pictures;
 pub mod wheel_alignment;
 pub mod uninstall;
 
