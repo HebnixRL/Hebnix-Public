@@ -4,6 +4,7 @@ version = "2.2.6"
 edition = "2024"
 
 [dependencies]
+base64 = "0.21"
 hmac = "0.12"
 sha1 = "0.10"
 md-5 = "0.10"

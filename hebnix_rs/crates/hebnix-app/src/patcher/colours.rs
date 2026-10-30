@@ -127,6 +127,8 @@ pub struct ColoursState {
 }
 
 impl ColoursState {
+    pub(crate) fn busy(&self) -> bool { self.busy }
+
     pub fn new() -> Self {
         Self {
             settings: ColourSettings::default(),
@@ -179,7 +181,7 @@ impl ColoursState {
             .id_salt("colours_page")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading(t("tab-colours"));
+                ui.heading(t("nav-game-colours"));
                 ui.label(t("render-stadium-hud-and-garage-palette-colours"));
                 ui.add_space(12.0);
 
@@ -315,7 +317,7 @@ impl ColoursState {
             .id_salt("ball_appearance_page")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading(t("app-ball-appearance"));
+                ui.heading(t("nav-ball-shape"));
                 ui.label(t("ball-appearance-change-the-ball-s-shape-locally"));
                 ui.weak(t(
                     "ball-appearance-experimental-visual-swap-collision-and-p",
@@ -818,6 +820,17 @@ fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
     let _ = fs::remove_file(temp);
     crate::patcher::workshop_menu::reapply(cooked_pc, backups_dir)?;
     save_state(backups_dir, &ColourSettings::default())
+}
+
+pub(crate) fn restore_for_uninstall(cooked: &Path, backups: &Path) -> Result<(), String> {
+    if backups.join("colours-build.sha256").is_file() && backups.join(BACKUP_NAME).is_file() {
+        let saved = fs::read_to_string(backups.join("colours-build.sha256")).map_err(|e| e.to_string())?;
+        if saved.trim() != super::backup_guard::build_id(cooked)? {
+            return Err("Colour backups belong to an older game build. Verify game files before uninstalling.".into());
+        }
+        restore(cooked, backups)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

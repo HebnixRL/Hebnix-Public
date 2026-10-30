@@ -190,6 +190,91 @@ fn non_negative(value: i32, name: &str) -> Result<usize, String> {
 fn non_negative_i64(value: i64, name: &str) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("Invalid negative or oversized {name}: {value}"))
 }
+fn renamed_name_table(
+    header: &[u8],
+    count: usize,
+    replacements: &[(usize, String)],
+) -> Result<(Vec<u8>, usize), String> {
+    let mut edits = HashMap::new();
+    for (index, name) in replacements {
+        if *index >= count
+            || name.is_empty()
+            || !name.is_ascii()
+            || name.as_bytes().contains(&0)
+            || edits.insert(*index, name).is_some()
+        {
+            return Err("Invalid or duplicate name-table edit".into());
+        }
+    }
+    let mut reader = Cursor::new(header);
+    let mut table = Vec::new();
+    for index in 0..count {
+        let start = reader.pos;
+        let length = reader.i32()?;
+        let stored = if length > 0 {
+            length as usize
+        } else if length < 0 {
+            length.checked_neg().ok_or("Name size overflow")? as usize * 2
+        } else {
+            return Err("Empty serialized name".into());
+        };
+        let value = reader.take(stored)?;
+        let flags = reader.take(8)?;
+        if let Some(name) = edits.get(&index) {
+            if length <= 0 || value.last() != Some(&0) {
+                return Err("Edited names must use ASCII framing".into());
+            }
+            let new_length = i32::try_from(name.len() + 1).map_err(|_| "Name too large")?;
+            table.extend(new_length.to_le_bytes());
+            table.extend(name.as_bytes());
+            table.push(0);
+            table.extend(flags);
+        } else {
+            table.extend(&header[start..reader.pos]);
+        }
+    }
+    if table.len() != reader.pos {
+        return Err("Combined name-table size must remain unchanged".into());
+    }
+    Ok((table, reader.pos))
+}
+
+#[cfg(test)]
+mod name_table_tests {
+    use super::*;
+    fn table() -> Vec<u8> {
+        let mut b = Vec::new();
+        for (name, flags) in [("Alpha", 17u64), ("Bravo", 23u64)] {
+            b.extend((name.len() as i32 + 1).to_le_bytes());
+            b.extend(name.as_bytes());
+            b.push(0);
+            b.extend(flags.to_le_bytes());
+        }
+        b
+    }
+    #[test]
+    fn balanced_renames_preserve_framing_flags_and_indices() {
+        let original = table();
+        let (changed, end) =
+            renamed_name_table(&original, 2, &[(0, "Longer".into()), (1, "Four".into())]).unwrap();
+        assert_eq!(end, original.len());
+        assert_eq!(changed.len(), original.len());
+        let mut reader = Cursor::new(&changed);
+        assert_eq!(reader.fstring().unwrap(), "Longer");
+        assert_eq!(reader.i64().unwrap(), 17);
+        assert_eq!(reader.fstring().unwrap(), "Four");
+        assert_eq!(reader.i64().unwrap(), 23);
+    }
+    #[test]
+    fn rejects_growth_and_duplicate_edits_before_mutation() {
+        let original = table();
+        assert!(renamed_name_table(&original, 2, &[(0, "Longer".into())]).is_err());
+        assert!(
+            renamed_name_table(&original, 2, &[(0, "Alpha".into()), (0, "Alpha".into())]).is_err()
+        );
+    }
+}
+
 pub fn read_i32(data: &[u8], offset: usize) -> Result<i32, String> {
     Ok(i32::from_le_bytes(
         data.get(offset..offset + 4)
@@ -1119,6 +1204,25 @@ impl UpkPackage {
         let abs = self.header.name_offset + pos + 4;
         self.image[abs..abs + new_name.len()].copy_from_slice(new_name.as_bytes());
         self.names[index] = new_name.into();
+        self.header_dirty = true;
+        Ok(())
+    }
+    /// Rename selected ASCII entries while preserving the total serialized name
+    /// table size. Callers must establish that repurposed names are unused.
+    /// No indices or following package offsets move; donor entries may shrink
+    /// to balance a longer replacement elsewhere in the table.
+    pub fn rename_names_same_size(
+        &mut self,
+        replacements: &[(usize, String)],
+    ) -> Result<(), String> {
+        let (table, end) =
+            renamed_name_table(&self.decrypted_header, self.names.len(), replacements)?;
+        self.decrypted_header[..end].copy_from_slice(&table);
+        let start = self.header.name_offset;
+        self.image[start..start + end].copy_from_slice(&table);
+        for (index, name) in replacements {
+            self.names[*index] = name.clone();
+        }
         self.header_dirty = true;
         Ok(())
     }

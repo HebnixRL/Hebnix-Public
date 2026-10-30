@@ -13,6 +13,9 @@ use std::{
 };
 
 const FOOTER: u32 = 0x82f93d67;
+const WORKSHOP_SECTION: &str = "PlayMenuV4";
+const WORKSHOP_FIELD: &str = "WorkshopDescription";
+const WORKSHOP_DESCRIPTION: &str = "Play custom maps imported from Hebnix";
 
 #[derive(Clone, Debug)]
 pub(crate) struct Label {
@@ -169,15 +172,18 @@ fn parse(bytes: &[u8]) -> Result<(Vec<Label>, usize), String> {
             .next()
             .is_some_and(|s| s.to_ascii_lowercase().starts_with("products."))
             && file.to_ascii_lowercase().contains("\\tagame\\");
+        let menu = file.to_ascii_lowercase().ends_with("\\tagame.int");
         for _ in 0..r.count()? {
             let section = r.string()?;
             for _ in 0..r.count()? {
                 let key = r.string()?;
                 let start = r.at;
                 let name = r.string()?;
-                if products
+                if (products
                     && (key == "Label"
-                        || (key == "Artist" && section.to_ascii_lowercase().starts_with("anthem_")))
+                        || (key == "Artist"
+                            && section.to_ascii_lowercase().starts_with("anthem_"))))
+                    || (menu && section == WORKSHOP_SECTION && key == WORKSHOP_FIELD)
                 {
                     labels.push(Label {
                         section: section.clone(),
@@ -240,7 +246,7 @@ pub(crate) fn catalog(
     backups: &Path,
     file: &str,
 ) -> Result<(Vec<Label>, Manifest), String> {
-    let manifest = load(backups, file)?;
+    let mut manifest = load(backups, file)?;
     let live = fs::read(cooked.join(file)).map_err(|e| e.to_string())?;
     let original = if manifest.patches.is_empty() {
         live
@@ -249,7 +255,13 @@ pub(crate) fn catalog(
         snapshot(backups, file, &manifest)?
     };
     let (plain, _) = decode(&original)?;
-    Ok((parse(&plain)?.0, manifest))
+    let labels = parse(&plain)?
+        .0
+        .into_iter()
+        .filter(|l| l.field != WORKSHOP_FIELD)
+        .collect();
+    manifest.patches.retain(|p| p.field != WORKSHOP_FIELD);
+    Ok((labels, manifest))
 }
 
 fn check_live(live: &[u8], manifest: &Manifest) -> Result<(), String> {
@@ -340,13 +352,6 @@ pub(crate) fn rename(
     section: &str,
     changes: Option<&[(&str, &str)]>,
 ) -> Result<(), String> {
-    if hebnix_sdk::process::is_rocket_league_running() {
-        return Err(
-            "Close Rocket League before changing item names; start it again to load the names."
-                .into(),
-        );
-    }
-    let dir = directory(backups, file)?;
     if let Some(changes) = changes {
         let mut fields = std::collections::HashSet::new();
         for (field, name) in changes {
@@ -361,6 +366,34 @@ pub(crate) fn rename(
             }
         }
     }
+    edit(cooked, backups, file, section, changes)
+}
+
+/// Share the localization snapshot with item renames so either feature can
+/// be restored without overwriting the other's changes.
+pub(crate) fn workshop_description(cooked: &Path, backups: &Path, on: bool) -> Result<(), String> {
+    edit(
+        cooked,
+        backups,
+        "Coalesced_INT.bin",
+        WORKSHOP_SECTION,
+        on.then_some(&[(WORKSHOP_FIELD, WORKSHOP_DESCRIPTION)][..]),
+    )
+}
+
+fn edit(
+    cooked: &Path,
+    backups: &Path,
+    file: &str,
+    section: &str,
+    changes: Option<&[(&str, &str)]>,
+) -> Result<(), String> {
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err(
+            "Close Rocket League before changing localization; restart it to load the text.".into(),
+        );
+    }
+    let dir = directory(backups, file)?;
     backup_guard::check_install(cooked, backups)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let lock = dir.join("editing.lock");
@@ -383,9 +416,10 @@ pub(crate) fn rename(
     let labels = parse(&plain)?.0;
     let was_empty = manifest.patches.is_empty();
     manifest.patches.retain(|p| {
-        !section.is_empty()
-            && (p.section != section
-                || changes.is_some_and(|c| !c.iter().any(|(field, _)| p.field == *field)))
+        (section.is_empty() && p.field == WORKSHOP_FIELD)
+            || (!section.is_empty()
+                && (p.section != section
+                    || changes.is_some_and(|c| !c.iter().any(|(field, _)| p.field == *field))))
     });
     if let Some(changes) = changes {
         for (field, name) in changes {
@@ -448,7 +482,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> Vec<u8> {
-        let mut out = 1i32.to_le_bytes().to_vec();
+        let mut out = 2i32.to_le_bytes().to_vec();
         out.extend(wide("..\\..\\TAGame\\Localization\\INT\\Products.int"));
         let sections = [
             ("Body_MuscleCar", vec![("Label", "Dominus")]),
@@ -470,6 +504,12 @@ mod tests {
                 out.extend(wide(v));
             }
         }
+        out.extend(wide("..\\..\\TAGame\\Localization\\INT\\TAGame.int"));
+        out.extend(1i32.to_le_bytes());
+        out.extend(wide(WORKSHOP_SECTION));
+        out.extend(1i32.to_le_bytes());
+        out.extend(wide(WORKSHOP_FIELD));
+        out.extend(wide("Try out custom maps created in Steam Workshop"));
         out.extend(FOOTER.to_le_bytes());
         out.resize(out.len().div_ceil(16) * 16, 0);
         crypt(&out, &upk_keys::DEFAULT_UPK_KEY, true).unwrap()
@@ -514,6 +554,69 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn workshop_roundtrip(bytes: &[u8]) {
+        let install = Install::new(bytes);
+        let set = |on| workshop_description(&install.cooked, &install.backups, on).unwrap();
+        // Disabling older builds, which never changed the description, is safe.
+        set(false);
+        set(true);
+        set(true);
+        assert_eq!(
+            install
+                .labels()
+                .iter()
+                .find(|l| l.field == WORKSHOP_FIELD)
+                .unwrap()
+                .name,
+            WORKSHOP_DESCRIPTION
+        );
+        install
+            .edit("Body_Octane", Some(&[("Label", "Custom Octane")]))
+            .unwrap();
+        let (labels, manifest) =
+            catalog(&install.cooked, &install.backups, "Coalesced_INT.bin").unwrap();
+        assert!(labels.iter().all(|l| l.field != WORKSHOP_FIELD));
+        assert!(manifest.patches.iter().all(|p| p.field != WORKSHOP_FIELD));
+        set(false);
+        assert_eq!(
+            install
+                .labels()
+                .iter()
+                .find(|l| l.section == "Body_Octane")
+                .unwrap()
+                .name,
+            "Custom Octane"
+        );
+        set(true);
+        install.edit("", None).unwrap();
+        assert_eq!(
+            install
+                .labels()
+                .iter()
+                .find(|l| l.field == WORKSHOP_FIELD)
+                .unwrap()
+                .name,
+            WORKSHOP_DESCRIPTION
+        );
+        set(false);
+        set(false);
+        assert_eq!(
+            fs::read(install.cooked.join("Coalesced_INT.bin")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn workshop_description_and_item_names_restore_independently() {
+        workshop_roundtrip(&fixture());
+    }
+
+    #[test]
+    #[ignore = "requires HEBNIX_ITEM_NAME_SOURCE; only edits a temporary copy"]
+    fn installed_workshop_description_roundtrip() {
+        workshop_roundtrip(&fs::read(std::env::var("HEBNIX_ITEM_NAME_SOURCE").unwrap()).unwrap());
     }
 
     #[test]

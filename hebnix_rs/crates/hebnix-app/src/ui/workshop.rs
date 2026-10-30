@@ -808,10 +808,15 @@ pub enum ImageState {
 enum WorkshopView {
     Browse,
     Import,
-    BackgroundChanger,
     MenuMap,
     InGameMenu,
     Multiplayer,
+}
+
+/// Game asset editors hosted by UPK Studio rather than the map browser.
+#[derive(Clone, Copy)]
+pub enum StudioMapPage {
+    ArenaBackgrounds,
 }
 
 struct MultiplayerState {
@@ -963,6 +968,8 @@ pub struct WorkshopState {
 }
 
 impl WorkshopState {
+    pub(crate) fn maintenance_busy(&self) -> bool { self.background_changer.busy() }
+
     pub fn new(base_dir: &Path) -> Self {
         let manager = MapManager::new(base_dir);
         let saved_host = std::fs::read(manager.runtime_dir.join("multiplayer_host.json"))
@@ -1143,6 +1150,24 @@ impl WorkshopState {
         );
     }
 
+    pub fn open_import(&mut self) {
+        self.view = WorkshopView::Import;
+    }
+
+    pub fn render_studio_page(
+        &mut self,
+        page: StudioMapPage,
+        ui: &mut egui::Ui,
+        rl_path: &str,
+        rl_launch: &crate::config::RlLaunchCfg,
+        tx: &Sender<AppMsg>,
+    ) {
+        self.rl_launch = rl_launch.clone();
+        match page {
+            StudioMapPage::ArenaBackgrounds => self.background_changer.render(ui, rl_path, tx),
+        }
+    }
+
     /// render the tab. rl_path and rl_launch come from the app config.
     pub fn render(
         &mut self,
@@ -1166,18 +1191,13 @@ impl WorkshopState {
             ui.heading(t("tab-workshop"));
             ui.add_space(8.0);
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Browse,
                 t("render-browse-maps"),
             );
-            ui.selectable_value(&mut self.view, WorkshopView::Import, t("render-import-map"));
-            ui.selectable_value(
-                &mut self.view,
-                WorkshopView::BackgroundChanger,
-                t("render-background-changer"),
-            );
+            ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
             ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
             ui.selectable_value(
                 &mut self.view,
@@ -1222,10 +1242,6 @@ impl WorkshopState {
         }
         if self.view == WorkshopView::Multiplayer {
             self.render_multiplayer(ui, rl_path, tx, &ctx);
-            return;
-        }
-        if self.view == WorkshopView::BackgroundChanger {
-            self.background_changer.render(ui, rl_path, tx);
             return;
         }
         if self.view == WorkshopView::InGameMenu {
@@ -1870,7 +1886,6 @@ impl WorkshopState {
                             local: is_local_map_id(&id),
                             author: str_of(data, "author", "").to_string(),
                             description: str_of(data, "short_description", "").to_string(),
-                            file: String::new(),
                             id,
                         })
                     })
@@ -2146,7 +2161,6 @@ impl WorkshopState {
                     "name": map.name,
                     "author": if map.author.is_empty() { "Unknown" } else { map.author.as_str() },
                     "short_description": map.description,
-                    "file": map.file,
                     "local": map.local,
                 })
             });

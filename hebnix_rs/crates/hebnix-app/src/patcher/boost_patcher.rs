@@ -1606,7 +1606,7 @@ impl BoostPatcherState {
             }
         }
 
-        crate::ui::browser::header(ui, t("tab-boost-meter-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-boost-meter"), |ui| {
             if ui.button(t("btn-refresh")).clicked() {
                 if self.source == PatchSource::Catalog {
                     self.catalog.refresh(ctx);

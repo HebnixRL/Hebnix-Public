@@ -2648,6 +2648,7 @@ name = "hebnix-sdk"
 version = "2.2.6"
 dependencies = [
  "aes",
+ "base64 0.21.7",
  "crossbeam-channel",
  "dirs",
  "evdev",

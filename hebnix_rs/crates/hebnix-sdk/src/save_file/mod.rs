@@ -2,12 +2,15 @@
 //! with typed accessors on top via SaveData.
 
 pub mod accessors;
+pub mod bakkes_code;
 pub mod binary_parser;
 pub mod binary_serializer;
 pub mod configuration;
 pub mod crypto;
 pub mod file_io;
 pub mod item_cleanup;
+pub mod loadout_code;
+pub mod loadout_edit;
 pub mod models;
 
 pub use accessors::SaveData;

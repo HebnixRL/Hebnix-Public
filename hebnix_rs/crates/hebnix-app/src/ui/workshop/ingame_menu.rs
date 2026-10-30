@@ -243,10 +243,9 @@ fn from_steam(maps: &mut [WorkshopMap], cooked: &Path) {
 /// The picked folder's maps, then those in Hebnix's own workshop folder.
 fn all_maps(folder: &Path, cooked: &Path) -> Vec<WorkshopMap> {
     let mut maps = scan(folder);
-    for fallback in [workshop_menu::mods_folder(cooked), workshop_menu::maps_folder(cooked)] {
-        if fallback != folder {
-            maps.extend(scan(&fallback));
-        }
+    let fallback = workshop_menu::maps_folder(cooked);
+    if fallback.as_path() != folder {
+        maps.extend(scan(&fallback));
     }
     maps
 }

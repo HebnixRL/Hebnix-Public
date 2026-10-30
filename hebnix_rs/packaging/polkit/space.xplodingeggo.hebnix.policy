@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Lets the local, active user run Hebnix's hosts-file helper
+  (pkexec /usr/bin/hebnix with the priv-hosts argument) without a password. The
+  spoofer adds its redirects when Rocket League starts and removes them when
+  it exits, which otherwise means an authentication prompt every time.
+
+  The helper only adds or removes Hebnix's own 127.0.0.1 lines for
+  api.epicgames.dev and config.psynet.gg, and refuses any other host.
+  Everything else Hebnix runs through pkexec (installing or removing its
+  proxy certificate) still asks for a password.
+
+  Only matches the packaged path /usr/bin/hebnix.
+-->
+<policyconfig>
+  <vendor>Hebnix for Linux</vendor>
+  <vendor_url>https://github.com/xplodingeggo/hebnix-linux</vendor_url>
+
+  <action id="space.xplodingeggo.hebnix.hosts">
+    <description>Point Rocket League's account and config hosts at Hebnix</description>
+    <message>Hebnix wants to update its redirects in /etc/hosts</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/hebnix</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">--priv-hosts</annotate>
+  </action>
+</policyconfig>

@@ -262,6 +262,19 @@ enum TransactionAction {
     RevertAndForget,
 }
 
+pub(crate) fn restore_for_uninstall(cooked: &Path) -> Result<(), String> {
+    let root = cooked.join("Backups/WheelAlignment");
+    if !root.exists() { return Ok(()); }
+    for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().join("alignment.json").is_file() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            transaction(cooked, &file, Settings::default(), TransactionAction::RevertAndForget)?;
+        }
+    }
+    Ok(())
+}
+
 fn transaction(
     cooked: &Path,
     file: &str,
@@ -425,6 +438,8 @@ pub struct WheelAlignmentState {
     edited_root: Option<PathBuf>,
 }
 impl WheelAlignmentState {
+    pub(crate) fn busy(&self) -> bool { self.receiver.is_some() }
+
     fn refresh_edited(&mut self, cooked: &Path) {
         self.edited.clear();
         if let Ok(entries) = fs::read_dir(cooked.join("Backups").join("WheelAlignment")) {
