@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 type Result<T> = std::result::Result<T, String>;
-const MAX_SAVE: usize = 64 * 1024 * 1024;
+pub(super) const MAX_SAVE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CleanupReport {
@@ -29,7 +29,7 @@ pub struct CleanupPlan {
     pub report: CleanupReport,
 }
 
-fn u32_at(data: &[u8], at: usize) -> Result<u32> {
+pub(super) fn u32_at(data: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(
         data.get(at..at.checked_add(4).ok_or("offset overflow")?)
             .ok_or("truncated save")?
@@ -37,7 +37,7 @@ fn u32_at(data: &[u8], at: usize) -> Result<u32> {
             .unwrap(),
     ))
 }
-fn text(data: &[u8], at: usize) -> Result<(String, usize)> {
+pub(super) fn text(data: &[u8], at: usize) -> Result<(String, usize)> {
     let n = u32_at(data, at)? as i32;
     if n <= 0 || n > 1024 {
         return Err("unsupported property/type name encoding".into());
@@ -55,14 +55,16 @@ fn text(data: &[u8], at: usize) -> Result<(String, usize)> {
     ))
 }
 #[derive(Clone)]
-struct Field {
-    name: String,
-    tag: String,
-    len_at: usize,
-    payload: Range<usize>,
-    struct_type: Option<String>,
+pub(super) struct Field {
+    pub(super) name: String,
+    pub(super) tag: String,
+    /// where the property starts (its name)
+    pub(super) head: usize,
+    pub(super) len_at: usize,
+    pub(super) payload: Range<usize>,
+    pub(super) struct_type: Option<String>,
 }
-fn fields(data: &[u8]) -> Result<(Vec<Field>, usize)> {
+pub(super) fn fields(data: &[u8]) -> Result<(Vec<Field>, usize)> {
     let mut out = Vec::new();
     let mut at = 0;
     loop {
@@ -72,7 +74,9 @@ fn fields(data: &[u8]) -> Result<(Vec<Field>, usize)> {
         }
         let (tag, next) = text(data, next)?;
         let len = u32_at(data, next)? as usize;
-        if len > MAX_SAVE || u32_at(data, next + 4)? != 0 {
+        // Object arrays are repeated ObjectProperty entries with an array index.
+        let index = u32_at(data, next + 4)?;
+        if len > MAX_SAVE || (index != 0 && tag != "ObjectProperty") {
             return Err("unsupported property length/index".into());
         }
         let mut start = next + 8;
@@ -102,6 +106,7 @@ fn fields(data: &[u8]) -> Result<(Vec<Field>, usize)> {
         out.push(Field {
             name,
             tag,
+            head: at,
             len_at: next,
             payload: start..end,
             struct_type,
@@ -112,14 +117,14 @@ fn fields(data: &[u8]) -> Result<(Vec<Field>, usize)> {
         at = end;
     }
 }
-fn field<'a>(list: &'a [Field], name: &str, tag: &str) -> Result<&'a Field> {
+pub(super) fn field<'a>(list: &'a [Field], name: &str, tag: &str) -> Result<&'a Field> {
     let matches: Vec<_> = list.iter().filter(|f| f.name == name).collect();
     if matches.len() != 1 || matches[0].tag != tag {
         return Err(format!("missing/ambiguous {name} {tag}"));
     }
     Ok(matches[0])
 }
-fn instance(data: &[u8]) -> Result<(String, usize, Vec<Range<usize>>)> {
+pub(super) fn instance(data: &[u8]) -> Result<(String, usize, Vec<Range<usize>>)> {
     let (props, end) = fields(data)?;
     let mut upper = 0u64;
     let mut lower = 0u64;
@@ -143,7 +148,7 @@ fn instance(data: &[u8]) -> Result<(String, usize, Vec<Range<usize>>)> {
     }
     Ok((format!("{upper:016x}{lower:016x}"), end, spans))
 }
-fn zero_instance(data: &mut [u8]) -> Result<()> {
+pub(super) fn zero_instance(data: &mut [u8]) -> Result<()> {
     let (_, end, spans) = instance(data)?;
     if end != data.len() {
         return Err("unexpected instance tail".into());
@@ -153,7 +158,7 @@ fn zero_instance(data: &mut [u8]) -> Result<()> {
     }
     Ok(())
 }
-fn id_array(data: &[u8]) -> Result<Vec<(String, Range<usize>)>> {
+pub(super) fn id_array(data: &[u8]) -> Result<Vec<(String, Range<usize>)>> {
     let count = u32_at(data, 0)? as usize;
     if count > 100_000 || count > data.len() / 9 {
         return Err("invalid instance array count".into());
@@ -170,14 +175,14 @@ fn id_array(data: &[u8]) -> Result<Vec<(String, Range<usize>)>> {
     }
     Ok(entries)
 }
-fn int_array(data: &[u8]) -> Result<Vec<u32>> {
+pub(super) fn int_array(data: &[u8]) -> Result<Vec<u32>> {
     let count = u32_at(data, 0)? as usize;
     if count > 100_000 || count.checked_mul(4).and_then(|n| n.checked_add(4)) != Some(data.len()) {
         return Err("integer array length mismatch".into());
     }
     (0..count).map(|i| u32_at(data, 4 + i * 4)).collect()
 }
-fn replace_field(data: &mut Vec<u8>, f: &Field, payload: &[u8]) {
+pub(super) fn replace_field(data: &mut Vec<u8>, f: &Field, payload: &[u8]) {
     data[f.len_at..f.len_at + 4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     data.splice(f.payload.clone(), payload.iter().copied());
 }
@@ -204,19 +209,19 @@ fn filter_ids(data: &mut Vec<u8>, name: &str, targets: &BTreeSet<String>) -> Res
     replace_field(data, f, &payload);
     Ok(removed)
 }
-struct Object {
-    kind: String,
-    index: u32,
-    bytes: Vec<u8>,
+pub(super) struct Object {
+    pub(super) kind: String,
+    pub(super) index: u32,
+    pub(super) bytes: Vec<u8>,
 }
-struct Document {
-    header: Vec<u8>,
-    root: Vec<u8>,
-    objects: Vec<Object>,
-    tail: Vec<u8>,
+pub(super) struct Document {
+    pub(super) header: Vec<u8>,
+    pub(super) root: Vec<u8>,
+    pub(super) objects: Vec<Object>,
+    pub(super) tail: Vec<u8>,
 }
 impl Document {
-    fn read(raw: &[u8]) -> Result<Self> {
+    pub(super) fn read(raw: &[u8]) -> Result<Self> {
         if raw.len() > MAX_SAVE {
             return Err("save exceeds supported size".into());
         }
@@ -305,7 +310,7 @@ impl Document {
             tail: raw[8 + len..].to_vec(),
         })
     }
-    fn encode(&self) -> Result<Vec<u8>> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>> {
         use super::binary_serializer::write_ue3;
         let mut dec = self.header.clone();
         dec.extend_from_slice(&u32::MAX.to_le_bytes());

@@ -393,6 +393,7 @@ enum PatcherSubTab {
     Swapper(crate::swapper::SwapCategory),
     Active,
     Presets,
+    Loadouts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,6 +618,7 @@ pub struct HebnixApp {
     item_action_prompt_open: bool,
     plugin_delete_prompt: Option<String>,
     presets: crate::presets::PresetStore,
+    loadouts: crate::ui::loadouts::LoadoutsPanel,
 }
 
 impl HebnixApp {
@@ -1107,6 +1109,7 @@ impl HebnixApp {
             item_action_prompt_open: false,
             plugin_delete_prompt: None,
             presets: crate::presets::PresetStore::new(&base_dir.clone()),
+            loadouts: Default::default(),
         };
 
         if hidden {
@@ -6925,6 +6928,11 @@ impl HebnixApp {
                                         PatcherSubTab::Presets,
                                         t("presets-presets"),
                                     );
+                                    ui.selectable_value(
+                                        selected_subtab,
+                                        PatcherSubTab::Loadouts,
+                                        t("loadouts-title"),
+                                    );
                                 }
                             });
                     });
@@ -7289,6 +7297,9 @@ impl HebnixApp {
                         }
                         PatcherSubTab::Presets => {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
+                        }
+                        PatcherSubTab::Loadouts => {
+                            self.loadouts.show(ui);
                         }
                         }
                     });
