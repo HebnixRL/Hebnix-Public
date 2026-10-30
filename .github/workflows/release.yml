@@ -1,0 +1,314 @@
+name: Release
+
+# Tagged Linux releases (Windows builds are not published here; see build.yml).
+# Push a `v*` tag (e.g. `v2.2.7`), or run manually with an existing tag. The tag
+# is the version: packaging/stamp-version.sh writes it into the Cargo.toml files
+# and APP_VERSION at build time. A tag with a suffix (`v2.2.7-test`) is a
+# dry run: published as a prerelease, and the pacman repo is left alone.
+#
+# Assets:
+#   - Linux (Ubuntu/glibc): tarball, AppImage (+ .zsync), .moon bundle
+#   - Linux (Arch-built): tarball + .moon bundle, for the hebnix-linux-bin AUR
+#     package. A dynamically-linked binary needs the build host's library
+#     sonames to match the run host's (Ubuntu's libxdo.so.3 vs Arch's
+#     libxdo.so.4), so Arch gets its own build.
+#   - SHA256SUMS.txt
+#
+# Each build job uploads artifacts; only the final `publish` job touches the
+# release, so the jobs can't race to create it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+# Baked in at build time (see hebnix-sdk/build.rs and hebnix-app/build.rs).
+# Without HEBNIX_REQ_KEY the build sends no token; without HEBNIX_DIRECTORY_KEY
+# Workshop multiplayer can't find other players.
+env:
+  HEBNIX_REQ_KEY: ${{ secrets.HEBNIX_REQ_KEY }}
+  HEBNIX_DIRECTORY_KEY: ${{ secrets.HEBNIX_DIRECTORY_KEY }}
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      base: ${{ steps.v.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve version from the tag
+        id: v
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          # a `-suffix` tag (v2.2.7-test) is a dry run: prerelease, no pacman repo publish
+          BASE="${VERSION%%-*}"
+          PRE=false
+          [ "$BASE" != "$VERSION" ] && PRE=true
+          [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag $TAG is not vX.Y.Z[-suffix]"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      # the tag is the single source of truth for the version
+      - name: Stamp version
+        shell: bash
+        run: bash hebnix_rs/packaging/stamp-version.sh ${{ needs.meta.outputs.base }}
+
+      - name: Install system dependencies
+        uses: ./.github/actions/install-linux-deps
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Go (multiplayer sidecar)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: hebnix_rs/sidecar/hebnix-tc/go.mod
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hebnix_rs -> target
+
+      - name: check translations
+        run: cargo test -p hebnix-app i18n
+        working-directory: hebnix_rs
+
+      - name: Build release
+        run: make release
+        working-directory: hebnix_rs
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          cd hebnix_rs
+          NAME="hebnix-${{ needs.meta.outputs.version }}-linux-x86_64"
+          STAGE="$(mktemp -d)/$NAME"
+          install -Dm755 target/release/hebnix "$STAGE/bin/hebnix"
+          install -Dm755 sidecar/hebnix-tc/hebnix-tc "$STAGE/lib/hebnix/hebnix-tc"
+          install -Dm644 packaging/hebnix.desktop "$STAGE/share/applications/hebnix.desktop"
+          install -Dm644 crates/hebnix-app/assets/hebnix.png \
+            "$STAGE/share/icons/hicolor/256x256/apps/hebnix.png"
+          install -Dm644 ../README.md "$STAGE/share/doc/hebnix/README.md"
+          install -Dm644 ../LICENSE.md "$STAGE/share/licenses/hebnix-linux-bin/LICENSE"
+          install -Dm644 packaging/udev/60-hebnix-uinput.rules \
+            "$STAGE/lib/udev/rules.d/60-hebnix-uinput.rules"
+          install -Dm644 packaging/modules-load.d/hebnix-uinput.conf \
+            "$STAGE/lib/modules-load.d/hebnix-uinput.conf"
+          install -Dm644 packaging/polkit/space.xplodingeggo.hebnix.policy \
+            "$STAGE/share/polkit-1/actions/space.xplodingeggo.hebnix.policy"
+          tar -C "$(dirname "$STAGE")" -czf "$GITHUB_WORKSPACE/$NAME.tar.gz" "$NAME"
+
+      - name: Build AppImage
+        run: |
+          set -euo pipefail
+          cd hebnix_rs
+          bash packaging/appimage/build-appimage.sh \
+            --binary target/release/hebnix \
+            --output "$GITHUB_WORKSPACE/Hebnix-${{ needs.meta.outputs.version }}-x86_64.AppImage" \
+            --update-info "gh-releases-zsync|${{ github.repository_owner }}|Hebnix-Public|latest|Hebnix-*x86_64.AppImage.zsync"
+
+      # Packed from the tarball above, so the bundle holds exactly the shipped binary.
+      - name: Package .moon bundle
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          cd hebnix_rs
+          bash packaging/moon/build-moon-bundle.sh \
+            --from "$GITHUB_WORKSPACE/hebnix-$V-linux-x86_64.tar.gz" \
+            --version "$V" \
+            --output "$GITHUB_WORKSPACE/hebnix-$V-linux-x86_64.moon"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: |
+            hebnix-*-linux-x86_64.tar.gz
+            hebnix-*-linux-x86_64.moon
+            Hebnix-*.AppImage
+            Hebnix-*.AppImage.zsync
+          if-no-files-found: error
+
+  # Built inside an Arch container so the binary links against Arch's own
+  # library sonames; this is the tarball hebnix-linux-bin's PKGBUILD downloads.
+  linux-arch:
+    needs: meta
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install git + build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git rust go pkgconf \
+            gtk3 libayatana-appindicator wayland libxkbcommon systemd-libs \
+            alsa-lib openssl xdotool webkit2gtk-4.1 libsoup3 gtk-layer-shell \
+            libxcb libcap
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      # the tag is the single source of truth for the version
+      - name: Stamp version
+        shell: bash
+        run: bash hebnix_rs/packaging/stamp-version.sh ${{ needs.meta.outputs.base }}
+
+      - name: Build release
+        run: |
+          # the checkout belongs to another user in the container; without
+          # this git refuses it and go build fails to stamp VCS info
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd hebnix_rs
+          make release
+
+      - name: Verify libxdo soname
+        run: |
+          set -euo pipefail
+          NEEDED="$(readelf -d hebnix_rs/target/release/hebnix | grep -oP 'libxdo\.so\.\d+')"
+          ARCH_SONAME="$(basename "$(readlink -f /usr/lib/libxdo.so)")"
+          echo "binary needs: $NEEDED, Arch xdotool provides: $ARCH_SONAME"
+          [ "$NEEDED" = "$ARCH_SONAME" ]
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          cd hebnix_rs
+          NAME="hebnix-${{ needs.meta.outputs.version }}-linux-x86_64-arch"
+          STAGE="$(mktemp -d)/$NAME"
+          install -Dm755 target/release/hebnix "$STAGE/bin/hebnix"
+          install -Dm755 sidecar/hebnix-tc/hebnix-tc "$STAGE/lib/hebnix/hebnix-tc"
+          install -Dm644 packaging/hebnix.desktop "$STAGE/share/applications/hebnix.desktop"
+          install -Dm644 crates/hebnix-app/assets/hebnix.png \
+            "$STAGE/share/icons/hicolor/256x256/apps/hebnix.png"
+          install -Dm644 ../README.md "$STAGE/share/doc/hebnix/README.md"
+          install -Dm644 ../LICENSE.md "$STAGE/share/licenses/hebnix-linux-bin/LICENSE"
+          install -Dm644 packaging/udev/60-hebnix-uinput.rules \
+            "$STAGE/lib/udev/rules.d/60-hebnix-uinput.rules"
+          install -Dm644 packaging/modules-load.d/hebnix-uinput.conf \
+            "$STAGE/lib/modules-load.d/hebnix-uinput.conf"
+          install -Dm644 packaging/polkit/space.xplodingeggo.hebnix.policy \
+            "$STAGE/share/polkit-1/actions/space.xplodingeggo.hebnix.policy"
+          tar -C "$(dirname "$STAGE")" -czf "$GITHUB_WORKSPACE/$NAME.tar.gz" "$NAME"
+
+      - name: Package .moon bundle (arch)
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          cd hebnix_rs
+          bash packaging/moon/build-moon-bundle.sh \
+            --from "$GITHUB_WORKSPACE/hebnix-$V-linux-x86_64-arch.tar.gz" \
+            --version "$V" \
+            --output "$GITHUB_WORKSPACE/hebnix-$V-linux-x86_64-arch.moon"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arch
+          path: |
+            hebnix-*-linux-x86_64-arch.tar.gz
+            hebnix-*-linux-x86_64-arch.moon
+          if-no-files-found: error
+
+  publish:
+    needs: [meta, linux, linux-arch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: assets
+        run: |
+          ls -l
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag }}
+          name: Hebnix ${{ needs.meta.outputs.tag }}
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.meta.outputs.prerelease != 'true' }}
+          generate_release_notes: true
+          files: assets/*
+          fail_on_unmatched_files: true
+
+  # Builds hebnix-linux-bin from the Arch tarball just published and pushes it
+  # to the custom pacman repo on Cloudflare R2 (repo.xplodingeggo.space).
+  # Needs repo secrets R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY;
+  # skips with a warning if they are not set.
+  pacman-repo:
+    needs: [meta, publish]
+    if: needs.meta.outputs.prerelease != 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Check R2 credentials
+        id: creds
+        run: |
+          if [ -z "$R2_ACCOUNT_ID" ] || [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
+            echo "::warning::R2_* secrets not set, skipping pacman repo publish"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install tooling
+        if: steps.creds.outputs.run == 'true'
+        run: pacman -Syu --noconfirm --needed git pacman-contrib python-boto3 sudo
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.run == 'true'
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        if: steps.creds.outputs.run == 'true'
+        with:
+          name: release-linux-arch
+          path: arch-assets
+
+      - name: Build hebnix-linux-bin
+        if: steps.creds.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          V="${{ needs.meta.outputs.version }}"
+          SHA="$(sha256sum "arch-assets/hebnix-$V-linux-x86_64-arch.tar.gz" | cut -d' ' -f1)"
+          # makepkg refuses to run as root
+          useradd -m builder
+          cp -r hebnix_rs/packaging/arch/hebnix-linux-bin /home/builder/pkg
+          sed -i "s/^pkgver=.*/pkgver=$V/; s/^pkgrel=.*/pkgrel=1/; s/^sha256sums=.*/sha256sums=('$SHA')/" /home/builder/pkg/PKGBUILD
+          chown -R builder /home/builder/pkg
+          sudo -u builder bash -c 'cd ~/pkg && makepkg --noconfirm --nodeps'
+          mkdir -p out && cp /home/builder/pkg/*.pkg.tar.zst out/
+
+      - name: Publish to R2
+        if: steps.creds.outputs.run == 'true'
+        run: python3 hebnix_rs/packaging/repo/publish-r2-repo.py --packages-dir out

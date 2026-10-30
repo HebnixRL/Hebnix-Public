@@ -1,0 +1,61 @@
+# Maintainer: xplodingeggo <bugs@notmyproblem.cum>
+pkgname=hebnix-linux-bin
+# Downloads the Arch-built tarball from .github/workflows/release.yml's
+# linux-arch job (hebnix-$pkgver-linux-x86_64-arch.tar.gz) -- NOT the plain
+# glibc tarball, which is built on Ubuntu and links libxdo.so.3 instead of the
+# libxdo.so.4 Arch provides. The release workflow bumps pkgver and sha256sums
+# and publishes the built package to the pacman repo on R2.
+pkgver=2.2.6
+pkgrel=1
+pkgdesc="Rocket League overlay, stats tracker and item-changer for Linux (Hyprland/wlroots), prebuilt upstream binary"
+arch=('x86_64')
+url="https://github.com/HebnixRL/Hebnix-Public"
+# See LICENSE.md in the repository root.
+license=('LicenseRef-Hebnix')
+depends=(
+	'gtk3'
+	'systemd-libs'
+	'alsa-lib'
+	'openssl'
+	'xdotool'
+	'webkit2gtk-4.1'
+	'gtk-layer-shell'
+	# dlopen'd at runtime (wayland-client/xkbcommon-dl/tray-icon), not in
+	# the binary's ELF NEEDED list -- see hebnix-linux's PKGBUILD for the
+	# full explanation. Kept deliberately despite namcap's
+	# "may not be needed" warning.
+	'wayland'
+	'libxkbcommon'
+	'libayatana-appindicator'
+)
+optdepends=(
+	'kdotool: window focus tracking on KDE/Plasma (AUR)'
+	'picom: compositing manager for the in-game overlay on i3 and other X11 window managers without one'
+	'kscreen: kscreen-doctor, used for monitor info on KDE/Plasma'
+	'tailscale: Workshop LAN multiplayer (Hebnix runs its own separate tailscaled)'
+	'dotnet-runtime: downloading Steam Workshop maps in the Import Map tab'
+)
+provides=('hebnix')
+conflicts=('hebnix-linux')
+install=hebnix.install
+source=("https://github.com/HebnixRL/Hebnix-Public/releases/download/v$pkgver/hebnix-$pkgver-linux-$CARCH-arch.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+	cd "hebnix-$pkgver-linux-$CARCH-arch"
+	install -Dm755 bin/hebnix "$pkgdir/usr/bin/hebnix"
+	install -Dm755 lib/hebnix/hebnix-tc "$pkgdir/usr/lib/hebnix/hebnix-tc"
+	install -Dm644 share/applications/hebnix.desktop \
+		"$pkgdir/usr/share/applications/hebnix.desktop"
+	install -Dm644 share/icons/hicolor/256x256/apps/hebnix.png \
+		"$pkgdir/usr/share/icons/hicolor/256x256/apps/hebnix.png"
+	install -Dm644 share/doc/hebnix/README.md "$pkgdir/usr/share/doc/hebnix/README.md"
+	install -Dm644 lib/udev/rules.d/60-hebnix-uinput.rules \
+		"$pkgdir/usr/lib/udev/rules.d/60-hebnix-uinput.rules"
+	install -Dm644 lib/modules-load.d/hebnix-uinput.conf \
+		"$pkgdir/usr/lib/modules-load.d/hebnix-uinput.conf"
+	install -Dm644 share/polkit-1/actions/space.xplodingeggo.hebnix.policy \
+		"$pkgdir/usr/share/polkit-1/actions/space.xplodingeggo.hebnix.policy"
+	install -Dm644 share/licenses/hebnix-linux-bin/LICENSE \
+		"$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

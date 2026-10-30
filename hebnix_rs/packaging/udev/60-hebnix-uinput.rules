@@ -1,0 +1,13 @@
+# Grants the 'input' group read-write access to /dev/uinput, which Hebnix
+# uses (via evdev's uinput::VirtualDevice) to send synthetic keyboard input
+# for chat-send plugins (e.g. quick-chat). Optional: without this, those
+# specific plugin features silently no-op -- everything else works fine.
+#
+# Reading /dev/input/event* (hotkeys, controller/bind state) already works
+# out of the box via systemd's own default udev rules; only /dev/uinput
+# (writing synthetic input) needs this extra rule.
+#
+# Being in the 'input' group is still required and can't be done by a
+# package install script -- run `sudo usermod -aG input $USER` and log out
+# and back in (or reboot) once.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

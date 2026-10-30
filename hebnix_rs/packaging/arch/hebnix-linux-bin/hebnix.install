@@ -1,0 +1,24 @@
+post_install() {
+	# Hebnix needs no file capabilities any more (Workshop multiplayer runs
+	# over tailcat, the spoofer proxy uses an unprivileged port). Installing
+	# the new binary drops any an older version set.
+
+	cat <<'EOF'
+==> Hebnix installed. To run: hebnix
+
+==> Optional, for hotkeys/binds/controller reading and chat-send plugins
+    (e.g. quick-chat) that send synthetic input:
+      sudo usermod -aG input "$USER"
+    then log out and back in (or reboot) for it to take effect.
+    A udev rule + uinput module config are already installed by this
+    package; only group membership needs a one-time manual step.
+
+==> Config, plugins and themes live in $XDG_CONFIG_HOME/hebnix
+    (~/.config/hebnix by default) and are managed by Hebnix itself --
+    untouched by installing, upgrading, or removing this package.
+EOF
+}
+
+post_upgrade() {
+	post_install
+}
