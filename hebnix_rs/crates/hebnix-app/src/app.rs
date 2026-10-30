@@ -1434,6 +1434,18 @@ impl HebnixApp {
         self.patcher_boost.poll_ops(&self.tx, &mut self.config);
         self.patcher_decal
             .handle_op_result(&self.tx, &mut self.config);
+        self.colours.poll();
+        if !self.colours.is_busy()
+            && let Some(cars) = self.presets.pending_cars.take()
+        {
+            self.colours.begin(
+                crate::patcher::colours::ColourAction::ApplyCars(cars),
+                cooked_pc,
+                backups_dir,
+                &self.tx,
+                ctx,
+            );
+        }
         if self.patcher_ball.processing_target.is_none()
             && self.patcher_ball.active_ball.is_none()
             && let Some(name) = self.presets.pending_ball.take()
@@ -1514,6 +1526,7 @@ impl HebnixApp {
         self.presets.pending_ball = None;
         self.presets.pending_boost = None;
         self.presets.pending_decals.clear();
+        self.presets.pending_cars = None;
         let swap_report = self
             .swapper
             .apply_preset_swaps(&preset.swaps, cooked_pc, backups_dir);
@@ -1582,6 +1595,20 @@ impl HebnixApp {
                 ) {
                     messages.push(error);
                 } else {
+                    queued += 1;
+                }
+            }
+            if let Some(cars) = patches
+                .and_then(|p| p.get("car_colours"))
+                .filter(|v| !v.is_null())
+                .and_then(|v| serde_json::from_value::<crate::patcher::colours::CarColours>(v.clone()).ok())
+            {
+                if !spoofer::is_admin()
+                    && crate::patcher::colours::needs_admin(cooked_pc)
+                {
+                    messages.push("Car colours need administrator rights; apply them from the Colours tab".into());
+                } else {
+                    self.presets.pending_cars = Some(cars);
                     queued += 1;
                 }
             }
@@ -1683,6 +1710,7 @@ impl HebnixApp {
                         "boost": self.patcher_boost.active_boost,
                         "decals": self.patcher_decal.active_decals,
                         "cars": self.patcher_car.active_cars,
+                        "car_colours": self.colours.settings.car_colours_patch(),
                     })
                 } else {
                     serde_json::Value::Null
@@ -7299,7 +7327,7 @@ impl HebnixApp {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
                         }
                         PatcherSubTab::Loadouts => {
-                            self.loadouts.show(ui);
+                            self.loadouts.show(ui, &self.swapper, &mut self.presets);
                         }
                         }
                     });

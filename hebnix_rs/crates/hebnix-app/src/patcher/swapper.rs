@@ -217,6 +217,32 @@ impl ActiveSwap {
     }
 }
 
+/// One BakkesMod item: the swap category, the product equipped in the stock loadout,
+/// the BakkesMod product to show instead, and its paint (0 = none).
+pub struct SwapPick {
+    pub category: SwapCategory,
+    pub stock_product: i64,
+    pub product: i64,
+    pub paint: u8,
+}
+
+/// BakkesMod equip slot to swap category. Body is not applied by BakkesMod, and the
+/// finish slots have no swap category here, so those return `None`.
+pub fn category_for_equip_slot(slot: u8) -> Option<SwapCategory> {
+    Some(match slot {
+        1 => SwapCategory::Skins,
+        2 => SwapCategory::Wheels,
+        3 => SwapCategory::Boosts,
+        4 => SwapCategory::Antennas,
+        5 => SwapCategory::Toppers,
+        13 => SwapCategory::Engines,
+        14 => SwapCategory::Trails,
+        15 => SwapCategory::Goals,
+        18 => SwapCategory::Anthems,
+        _ => return None,
+    })
+}
+
 #[derive(Default)]
 pub struct PresetApplyReport {
     pub applied: usize,
@@ -1441,6 +1467,48 @@ impl SwapperState {
     pub fn active_count(&mut self, backups_dir: &Path) -> usize {
         self.load_active(backups_dir);
         self.active.len()
+    }
+
+    /// Swap entries for a preset: each pick shows `product` where `stock_product` is equipped.
+    /// Returns the entries and the reasons picks were skipped.
+    pub fn bakkes_preset_swaps(&self, picks: &[SwapPick]) -> (Vec<Value>, Vec<String>) {
+        let mut swaps = Vec::new();
+        let mut skipped = Vec::new();
+        for pick in picks {
+            let Some(items) = self.catalogs.get(&pick.category) else {
+                skipped.push(format!("{}: catalog unavailable", pick.category.slug()));
+                continue;
+            };
+            let find = |id: i64| items.iter().find(|item| item.product_id == Some(id));
+            let (Some(source), Some(target)) = (find(pick.stock_product), find(pick.product)) else {
+                skipped.push(format!(
+                    "{}: product {} or stock {} is not in the catalog",
+                    pick.category.slug(),
+                    pick.product,
+                    pick.stock_product
+                ));
+                continue;
+            };
+            let paint = match pick.paint {
+                0 => SwapPaint::Default,
+                paint => SwapPaint::Preset(paint),
+            };
+            let swap = ActiveSwap {
+                category: pick.category.slug().to_string(),
+                source_name: source.name.clone(),
+                source_upk: source.upk.clone(),
+                target_name: target.name.clone(),
+                target_upk: target.upk.clone(),
+                target_bnk: None,
+                paint,
+                target_thumbnail: None,
+                source_asset: source.path.clone(),
+                target_asset: target.path.clone(),
+                asset_override: false,
+            };
+            swaps.push(serde_json::to_value(swap).expect("swap serializes"));
+        }
+        (swaps, skipped)
     }
 
     pub fn apply_preset_swaps(
