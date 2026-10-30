@@ -96,7 +96,7 @@ impl BrowserFixture {
             |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     if self.recolour {
-                        ui.heading(t("app-items-recolour"));
+                        ui.heading(t("nav-item-colours"));
                         ui.horizontal_wrapped(|ui| {
                             self.state.render_recolour_controls(ui, &tx);
                         });
@@ -636,5 +636,124 @@ fn items_browser_export_previews() {
                 )))
                 .unwrap();
         }
+    }
+}
+
+#[test]
+fn recolour_category_tabs_exclude_audio_and_reset_item_selection() {
+    for theme in ["Dark", "Ocean"] {
+        let mut fixture = BrowserFixture::new(theme, SwapCategory::Bodies, false, 834.0);
+        fixture.state.recolour_selected = Some("previous-item".into());
+        fixture.state.recolour_status = Some(Err("previous-error".into()));
+        fixture.state.recolour_page = 2;
+        let frame = |fixture: &mut BrowserFixture, events| {
+            fixture.ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(834.0, 700.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    crate::theme::secondary_navigation(ui, "recolour_categories_test").show(
+                        ui,
+                        |ui| {
+                            fixture.state.render_recolour_categories(ui);
+                        },
+                    );
+                    egui::CentralPanel::default().show(ui, |_| {});
+                },
+            )
+        };
+        frame(&mut fixture, vec![]);
+        let output = frame(&mut fixture, vec![]);
+        let rendered = texts(&output);
+        for category in SwapCategory::ALL {
+            assert_eq!(
+                rendered
+                    .iter()
+                    .any(|(_, text, _)| text == &category.label()),
+                category.supports_recolour()
+            );
+        }
+        let pos = rendered
+            .iter()
+            .find(|(_, text, _)| text == &SwapCategory::Wheels.label())
+            .unwrap()
+            .0
+            .center();
+        frame(
+            &mut fixture,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        frame(
+            &mut fixture,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        );
+        assert_eq!(fixture.state.recolour_category, SwapCategory::Wheels);
+        assert_eq!(fixture.state.recolour_page, 0);
+        assert!(fixture.state.recolour_selected.is_none());
+        assert!(fixture.state.recolour_status.is_none());
+    }
+}
+
+#[test]
+fn owned_save_selector_is_below_the_swapper_title() {
+    for theme in ["Dark", "Ocean"] {
+        let mut fixture = BrowserFixture::new(theme, SwapCategory::Bodies, false, 1034.0);
+        let mut inventory = crate::owned_inventory::OwnedInventory::empty_for_ui_tests();
+        inventory.ids = fixture.owned_ids.clone();
+        let (tx, _rx) = unbounded();
+        let output = fixture.ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1034.0, 700.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    fixture.state.render_owned_tab(
+                        ui,
+                        SwapCategory::Bodies,
+                        &fixture.root,
+                        &fixture.root.join("Backups"),
+                        &tx,
+                        &mut inventory,
+                    );
+                });
+            },
+        );
+        let rendered = texts(&output);
+        let heading = rendered
+            .iter()
+            .find(|(_, text, _)| text == &SwapCategory::Bodies.label())
+            .unwrap()
+            .0;
+        let selector = rendered
+            .iter()
+            .find(|(_, text, _)| text == "Owned items from save:")
+            .unwrap()
+            .0;
+        assert!(
+            heading.bottom() <= selector.top(),
+            "Inventory selector must follow the page title"
+        );
     }
 }

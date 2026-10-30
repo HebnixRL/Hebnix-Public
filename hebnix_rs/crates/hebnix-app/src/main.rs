@@ -78,6 +78,7 @@ mod patch_core {
     pub use crate::patcher::patch_core::*;
 }
 mod plugins;
+mod profile_pictures;
 mod presets;
 #[cfg(target_os = "windows")]
 mod rl_launch;
@@ -109,6 +110,7 @@ mod tray;
 mod ui;
 mod ui_work;
 mod update;
+mod maintenance;
 mod upk_keys {
     pub use crate::patcher::upk_keys::*;
 }
@@ -367,6 +369,8 @@ fn main() -> eframe::Result {
         winutil::focus_existing_instance();
         return Ok(());
     };
+    let shortcut_base = base_dir.clone();
+    std::thread::spawn(move || maintenance::first_launch_shortcut(&shortcut_base));
     tracing::info!("startup single-instance guard acquired");
 
     spoofer::restore_if_crashed(&base_dir);

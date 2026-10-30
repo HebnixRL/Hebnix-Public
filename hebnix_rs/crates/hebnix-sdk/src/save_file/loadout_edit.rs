@@ -49,6 +49,11 @@ pub fn plan(raw: &[u8], edit: &Edit) -> Result<Option<Vec<u8>>, String> {
 
 /// Read-only: the preset at `position` as a share code.
 pub fn export(raw: &[u8], position: usize) -> Result<String, String> {
+    super::loadout_code::encode(&export_preset(raw, position)?)
+}
+
+/// Read-only: the preset at `position`, parsed from the save.
+pub fn export_preset(raw: &[u8], position: usize) -> Result<Preset, String> {
     let doc = Document::read(raw)?;
     let set_index = set_refs(&doc)?
         .get(position)
@@ -117,7 +122,7 @@ pub fn export(raw: &[u8], position: usize) -> Result<String, String> {
         }
         preset.teams[t] = team;
     }
-    super::loadout_code::encode(&preset)
+    Ok(preset)
 }
 
 fn rename(doc: &mut Document, position: usize, name: &str) -> Result<bool, String> {

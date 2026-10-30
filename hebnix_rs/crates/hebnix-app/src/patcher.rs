@@ -19,6 +19,7 @@ pub mod decal_variant;
 pub mod heatseeker;
 pub mod item_name;
 pub mod menu_map;
+pub mod workshop_menu;
 pub mod painted_swap;
 pub mod patch_core;
 pub mod rl_font;
@@ -29,7 +30,9 @@ pub mod thumbnail_patcher;
 pub mod swapper;
 pub mod upk_keys;
 pub mod upk_package;
+pub mod profile_pictures;
 pub mod wheel_alignment;
+pub mod uninstall;
 
 use crate::config::PatchSource;
 use crate::i18n::t;

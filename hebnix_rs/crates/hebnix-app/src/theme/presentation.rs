@@ -506,11 +506,14 @@ impl Presentation {
         // Let egui measure the complete button, including theme padding and
         // strokes. A guessed text width used as a maximum clips the labels.
         let text = egui::RichText::new(label).color(color(&n.text));
-        let button = if n.icons {
+        let button = if key == "Home" {
+            egui::Button::image(navigation_icon(key).fit_to_exact_size(egui::vec2(18.0,18.0))
+                .tint(color(&n.text)))
+        } else if n.icons {
             egui::Button::image_and_text(navigation_icon(key).fit_to_exact_size(egui::vec2(16.0,16.0))
                 .tint(color(&n.text)), text)
         } else { egui::Button::new(text) };
-        ui.add(
+        let response = ui.add(
             button
                 .fill(fill)
                 .corner_radius(n.corner_radius)
@@ -521,7 +524,8 @@ impl Presentation {
                 } else {
                     egui::TextWrapMode::Extend
                 }),
-        )
+        );
+        if key == "Home" { response.on_hover_text(label) } else { response }
     }
     pub fn brand(&self, ui: &mut egui::Ui) {
         // Keep the header text-only. Theme icons belong to navigation controls.
@@ -538,17 +542,42 @@ impl Presentation {
         &self,
         available: &'a [(&'a str, &'a str)],
     ) -> Vec<(&'a str, &'a str)> {
+        // Existing bundled v2 themes used this default order. Let those themes
+        // adopt the current navigation while preserving custom page ordering.
+        let legacy_order = [
+            "Console", "Maps", "Spoofer", "Colours", "Items", "Plugins", "Replays", "Settings", "About",
+        ];
+        if self.layout.navigation_order.iter().map(String::as_str).eq(legacy_order) {
+            return available.to_vec();
+        }
         let mut result = Vec::new();
+        if let Some(&home) = available.iter().find(|(id, _)| *id == "Home") {
+            result.push(home);
+        }
         for name in &self.layout.navigation_order {
             if let Some(&page) = available.iter().find(|(id, _)| *id == name) {
                 if !result.contains(&page) {
                     result.push(page);
+                    if page.0 == "Items"
+                        && !self.layout.navigation_order.iter().any(|key| key == "UPK Studio")
+                    {
+                        if let Some(&studio) = available.iter().find(|(id, _)| *id == "UPK Studio") {
+                            result.push(studio);
+                        }
+                    }
                 }
             }
         }
         for &page in available {
             if !result.contains(&page) {
                 result.push(page);
+            }
+        }
+        if let Some(console) = result.iter().position(|(id, _)| *id == "Console") {
+            if result.iter().any(|(id, _)| *id == "Settings") {
+                let page = result.remove(console);
+                let settings = result.iter().position(|(id, _)| *id == "Settings").unwrap();
+                result.insert(settings + 1, page);
             }
         }
         result
@@ -561,11 +590,12 @@ pub fn color(value: &str) -> Color32 {
 // Images, rather than Unicode glyphs, work with every selected theme font.
 fn navigation_icon(key: &str) -> egui::Image<'static> {
     let source = match key {
+        "Home" => egui::include_image!("../../assets/navigation/home.svg"),
         "Console" => egui::include_image!("../../assets/navigation/console.svg"),
         "Workshop" | "Maps" => egui::include_image!("../../assets/navigation/workshop.svg"),
         "Spoofer" => egui::include_image!("../../assets/navigation/spoofer.svg"),
         "Colours" => egui::include_image!("../../assets/navigation/colours.svg"),
-        "Items" => egui::include_image!("../../assets/navigation/items.svg"),
+        "Items" | "UPK Studio" => egui::include_image!("../../assets/navigation/items.svg"),
         "Plugins" => egui::include_image!("../../assets/navigation/plugins.svg"),
         "Replays" => egui::include_image!("../../assets/navigation/replays.svg"),
         "Settings" => egui::include_image!("../../assets/navigation/settings.svg"),
@@ -828,7 +858,59 @@ mod tests {
             p.ordered_pages(&[("Console", "Console"), ("Settings", "Settings")]),
             vec![("Settings", "Settings"), ("Console", "Console")]
         );
+        p.layout.navigation_order = vec!["Console".into(), "Plugins".into(), "Settings".into()];
+        assert_eq!(
+            p.ordered_pages(&[("Console", "Console"), ("Settings", "Settings"), ("Plugins", "Plugins")]),
+            vec![("Plugins", "Plugins"), ("Settings", "Settings"), ("Console", "Console")]
+        );
+        assert_eq!(
+            p.ordered_pages(&[("Maps", "Maps"), ("Home", "Home"), ("Settings", "Settings")]),
+            vec![("Home", "Home"), ("Settings", "Settings"), ("Maps", "Maps")]
+        );
     }
+    #[test]
+    fn older_custom_theme_keeps_items_next_to_the_new_studio_page() {
+        let mut p = Presentation {
+            layout: ThemeLayout::default(),
+            components: ThemeComponents::default(),
+            pages: ThemePages::default(),
+            background: None,
+        };
+        p.layout.navigation_order = vec!["Console".into(), "Items".into(), "Maps".into()];
+        let pages = [
+            ("Maps", "Maps"),
+            ("Items", "Items"),
+            ("UPK Studio", "UPK Studio"),
+            ("Console", "Console"),
+        ];
+        assert_eq!(
+            p.ordered_pages(&pages),
+            vec![pages[3], pages[1], pages[2], pages[0]]
+        );
+    }
+
+    #[test]
+    fn legacy_theme_navigation_adopts_the_studio_layout() {
+        let mut p = Presentation {
+            layout: ThemeLayout::default(),
+            components: ThemeComponents::default(),
+            pages: ThemePages::default(),
+            background: None,
+        };
+        p.layout.navigation_order = [
+            "Console", "Maps", "Spoofer", "Colours", "Items", "Plugins", "Replays", "Settings", "About",
+        ]
+        .map(String::from)
+        .to_vec();
+        let pages = [
+            ("Maps", "Maps"),
+            ("Items", "UPK Studio"),
+            ("Spoofer", "Player"),
+            ("Console", "Console"),
+        ];
+        assert_eq!(p.ordered_pages(&pages), pages.to_vec());
+    }
+
     #[test]
     #[ignore = "v2 example themes were never committed"]
     fn switching_through_v2_restores_each_legacy_theme_style() {

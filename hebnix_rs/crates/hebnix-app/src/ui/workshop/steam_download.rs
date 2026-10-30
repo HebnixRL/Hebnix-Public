@@ -398,7 +398,7 @@ pub(super) fn read_item_info(dir: &Path) -> Option<ItemInfo> {
 
 type Log<'a> = &'a (dyn Fn(&str) + Sync);
 
-fn fetch_details(wid: &str) -> Result<WorkshopDetails, String> {
+pub(super) fn fetch_details(wid: &str) -> Result<WorkshopDetails, String> {
     let response = ureq::post(STEAM_DETAILS_URL)
         .timeout(Duration::from_secs(15))
         .send_form(&[("itemcount", "1"), ("publishedfileids[0]", wid)])

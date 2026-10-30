@@ -444,6 +444,8 @@ fn apply(
 }
 
 impl AnthemPatcherState {
+    pub(crate) fn busy(&self) -> bool { self.receiver.is_some() }
+
     pub fn new(base: &Path, config: &Config) -> Self {
         let (thumbnail_jobs, jobs) =
             crossbeam_channel::unbounded::<(String, PathBuf, egui::Context)>();
@@ -740,7 +742,6 @@ impl AnthemPatcherState {
     }
     fn render_list(&mut self, ui: &mut egui::Ui, cooked: &Path, owned_ids: &HashSet<i64>) {
         let ctx = ui.ctx().clone();
-        ui.heading("Anthem Patcher");
         ui.weak("Select an anthem to import audio and choose its playback sections.");
         ui.horizontal_wrapped(|ui| {
             if ui
