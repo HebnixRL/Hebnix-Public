@@ -1,6 +1,7 @@
 //! Closed-game save cleanup. Preflight every file before installing any change.
+use hebnix_sdk::save_file::bakkes_code;
 use hebnix_sdk::save_file::item_cleanup::plan_cleanup;
-use hebnix_sdk::save_file::loadout_edit;
+use hebnix_sdk::save_file::{loadout_code, loadout_edit};
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -264,18 +265,38 @@ pub fn clear_saved_instances(
     ))
 }
 
-/// The account save that loadout presets are read from and written to. Rotating
-/// copies (`<account>_N.save`) are left alone; their preset positions can differ.
+/// The account save that loadout presets are read from and written to. Uses the same
+/// account discovery as the owned-items view. Rotating copies (`<account>_N.save`)
+/// are only used when the base save is missing; their preset positions can differ.
 fn main_save() -> Result<PathBuf, String> {
-    discover()?
-        .into_iter()
-        .find(|p| p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| !s.contains('_')))
-        .ok_or_else(|| "No Rocket League account save found".into())
+    let accounts = hebnix_sdk::save_file::find_save_accounts(None);
+    let account = accounts
+        .first()
+        .ok_or("No Rocket League account save found")?;
+    let stem = account
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.split('_').next())
+        .unwrap_or_default();
+    let base = account.path.with_file_name(format!("{stem}.save"));
+    Ok(if base.is_file() { base } else { account.path.clone() })
 }
 
 pub fn loadout_export(position: usize) -> Result<String, String> {
     let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
     loadout_edit::export(&raw, position)
+}
+
+pub fn loadout_preset(position: usize) -> Result<loadout_code::Preset, String> {
+    let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
+    loadout_edit::export_preset(&raw, position)
+}
+
+pub fn loadout_export_bakkes(position: usize) -> Result<String, String> {
+    let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
+    let preset = loadout_edit::export_preset(&raw, position)?;
+    bakkes_code::encode(&bakkes_code::from_preset(&preset)?)
 }
 
 pub fn apply_loadout_edit(edit: &loadout_edit::Edit) -> Result<String, String> {
