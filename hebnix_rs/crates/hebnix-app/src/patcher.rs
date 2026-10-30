@@ -30,6 +30,7 @@ pub mod swapper;
 pub mod upk_keys;
 pub mod upk_package;
 pub mod wheel_alignment;
+pub mod uninstall;
 
 use crate::config::PatchSource;
 use crate::i18n::t;

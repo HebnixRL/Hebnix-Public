@@ -328,6 +328,8 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn busy(&self) -> bool { self.running }
+
     /// Returns true when the saved settings changed.
     pub fn render(
         &mut self,
@@ -349,7 +351,7 @@ impl State {
             }
         }
         let mut changed = false;
-        ui.heading(t("speed-patch-title"));
+        ui.heading(t("app-speed-patch"));
         ui.weak(t("speed-patch-description"));
         ui.add_space(8.0);
         changed |= ui

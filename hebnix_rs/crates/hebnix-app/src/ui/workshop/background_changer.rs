@@ -115,6 +115,8 @@ impl Default for BackgroundChangerState {
 }
 
 impl BackgroundChangerState {
+    pub(super) fn busy(&self) -> bool { self.busy }
+
     fn cooked_dir(rl_path: &str) -> PathBuf {
         Path::new(rl_path).join("TAGame").join("CookedPCConsole")
     }
@@ -433,7 +435,7 @@ impl BackgroundChangerState {
             self.refresh(rl_path);
         }
         let ctx = ui.ctx().clone();
-        ui.heading(t("render-background-changer"));
+        ui.heading(t("nav-arena-backgrounds"));
         ui.label(t("render-keep-an-arena-s-gameplay-and"));
         ui.small(t("render-approved-sources-are-filtered-to-keep"));
         if let Ok(path) = crate::patcher::background_merger::custom_backgrounds_dir() {

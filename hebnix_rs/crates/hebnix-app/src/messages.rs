@@ -166,6 +166,8 @@ pub enum AppMsg {
     ChangelogFetched {
         result: Result<Option<crate::update::ChangelogEntry>, String>,
     },
+    AppUpdateReady { staged: std::path::PathBuf },
+    MaintenanceFinished { result: Result<(), String> },
     AppUpdateFailed {
         error: String,
     },

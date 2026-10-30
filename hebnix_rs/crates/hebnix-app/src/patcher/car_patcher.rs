@@ -638,7 +638,7 @@ impl CarPatcherState {
         tx: &Sender<AppMsg>,
         config: &mut Config,
     ) {
-        crate::ui::browser::header(ui, t("app-car-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-car-models"), |ui| {
             if ui
                 .add_enabled(
                     !self.active_cars.is_empty(),
