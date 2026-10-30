@@ -1,5 +1,6 @@
 //! Experimental page that turns on Rocket League's own Workshop menu on the
 //! Epic build and fills it with maps from a local folder.
+use super::lan_mutators::{self, SETTINGS};
 use super::local_import::parse_workshop_vdf;
 use super::steam_download::fetch_details;
 use crate::messages::AppMsg;
@@ -53,7 +54,9 @@ struct LanHost {
     auto: bool,
     team_size: usize,
     bots: usize,
-    /// other mutator tags, comma separated, e.g. 10Minutes,Ball_BasketBall
+    /// chosen option of each game setting in `lan_mutators::SETTINGS`
+    picks: Vec<usize>,
+    /// tags no setting claims, comma separated, kept as written
     extra: String,
 }
 
@@ -65,25 +68,25 @@ impl LanHost {
         self.auto = !text.contains(NO_AUTO);
         let tags = text.split('?').next().unwrap_or_default();
         (self.team_size, self.bots) = (3, 0);
-        let mut extra = Vec::new();
+        let mut rest = Vec::new();
         for tag in tags.split(',').map(str::trim).filter(|t| !t.is_empty()) {
             if let Some(n) = tag.strip_prefix("PlayerCount").and_then(|n| n.parse::<usize>().ok()) {
                 self.team_size = (n / 2).clamp(1, 4);
             } else if let Some(i) = BOTS.iter().position(|b| *b == tag) {
                 self.bots = i;
             } else {
-                extra.push(tag);
+                rest.push(tag);
             }
         }
+        let (picks, extra) = lan_mutators::parse(rest.into_iter());
+        self.picks = picks;
         self.extra = extra.join(",");
     }
 
     fn file_text(&self) -> String {
-        let mut tags: Vec<String> = self
-            .extra
-            .split(',')
-            .map(|t| t.trim().replace('?', ""))
-            .filter(|t| !t.is_empty())
+        let mut tags: Vec<String> = lan_mutators::tags(&self.picks)
+            .map(str::to_string)
+            .chain(self.extra.split(',').map(|t| t.trim().replace('?', "")).filter(|t| !t.is_empty()))
             .collect();
         tags.push(BOTS[self.bots].to_string());
         tags.push(format!("PlayerCount{}", self.team_size * 2));
@@ -240,9 +243,10 @@ fn from_steam(maps: &mut [WorkshopMap], cooked: &Path) {
 /// The picked folder's maps, then those in Hebnix's own workshop folder.
 fn all_maps(folder: &Path, cooked: &Path) -> Vec<WorkshopMap> {
     let mut maps = scan(folder);
-    let fallback = workshop_menu::maps_folder(cooked);
-    if fallback != folder {
-        maps.extend(scan(&fallback));
+    for fallback in [workshop_menu::mods_folder(cooked), workshop_menu::maps_folder(cooked)] {
+        if fallback != folder {
+            maps.extend(scan(&fallback));
+        }
     }
     maps
 }
@@ -421,12 +425,23 @@ impl InGameMenuState {
                         }
                     });
             });
-            ui.horizontal(|ui| {
-                ui.label("Mutator tags");
-                changed |= ui
-                    .add(egui::TextEdit::singleline(&mut lan.extra).hint_text("10Minutes,Max3,Ball_BasketBall"))
-                    .on_hover_text("Rocket League game tags, comma separated, as Rocket Plugin writes them")
-                    .lost_focus();
+            ui.collapsing("Game settings", |ui| {
+                egui::Grid::new("workshop_lan_settings").num_columns(2).show(ui, |ui| {
+                    for (i, setting) in SETTINGS.iter().enumerate() {
+                        ui.label(setting.label);
+                        egui::ComboBox::from_id_salt(("workshop_lan_setting", i))
+                            .selected_text(setting.options[lan.picks[i]].0)
+                            .show_ui(ui, |ui| {
+                                for (j, (label, _)) in setting.options.iter().enumerate() {
+                                    changed |= ui.selectable_value(&mut lan.picks[i], j, *label).changed();
+                                }
+                            });
+                        ui.end_row();
+                    }
+                });
+                if !lan.extra.is_empty() {
+                    ui.label(format!("Other tags kept: {}", lan.extra));
+                }
             });
         });
         if changed {
@@ -445,8 +460,9 @@ mod tests {
     fn lan_host_file_round_trips() {
         let cooked = std::env::temp_dir().join("hebnix_lan_host_test").join("TAGame").join("CookedPCConsole");
         std::fs::create_dir_all(&cooked).unwrap();
-        let host = super::LanHost { team_size: 2, bots: 3, extra: "10Minutes, Ball_Puck?Lan".into(), auto: true, ..Default::default() };
-        assert_eq!(host.file_text(), format!("10Minutes,Ball_PuckLan,BotsHard,PlayerCount4{}", super::LISTEN));
+        let (picks, extra) = super::lan_mutators::parse("10Minutes,Ball_Puck,Lan".split(','));
+        let host = super::LanHost { team_size: 2, bots: 3, picks, extra: extra.join(","), auto: true, ..Default::default() };
+        assert_eq!(host.file_text(), format!("10Minutes,Ball_Puck,Lan,BotsHard,PlayerCount4{}", super::LISTEN));
         // auto hosting follows the connection; the settings survive being parked
         host.sync(&cooked, false).unwrap();
         assert!(!crate::patcher::workshop_menu::host_path(&cooked).exists());
@@ -455,7 +471,8 @@ mod tests {
         host.sync(&cooked, false).unwrap();
         let mut back = super::LanHost::default();
         back.load(&cooked);
-        assert!(back.auto && !back.always && back.team_size == 2 && back.bots == 3 && back.extra == "10Minutes,Ball_PuckLan");
+        assert!(back.auto && !back.always && back.team_size == 2 && back.bots == 3 && back.extra == "Lan");
+        assert_eq!(back.picks, host.picks);
         let off = super::LanHost { auto: false, always: true, ..Default::default() };
         off.sync(&cooked, false).unwrap();
         back.load(&cooked);

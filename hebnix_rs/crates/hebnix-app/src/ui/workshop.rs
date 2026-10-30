@@ -26,6 +26,7 @@ mod banner_image;
 mod background_changer;
 mod hosted;
 mod ingame_menu;
+mod lan_mutators;
 mod menu_map;
 mod local_import;
 #[cfg(target_os = "windows")]
@@ -396,10 +397,14 @@ impl MapManager {
             .join(crate::patcher::workshop_menu::map_dir_name(&id));
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let name = str_of(map_data, "name", &id);
-        let file: String = name
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
+        // the game matches a join by file name, so keep the host's when known
+        let file = match str_of(map_data, "file", "") {
+            "" => name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect(),
+            file => file.to_string(),
+        };
         let file = if file.is_empty() { id.clone() } else { file };
         std::fs::copy(cached, folder.join(format!("{file}.udk"))).map_err(|e| e.to_string())?;
         let banner = str_of(map_data, "banner_path", "");
@@ -1865,6 +1870,7 @@ impl WorkshopState {
                             local: is_local_map_id(&id),
                             author: str_of(data, "author", "").to_string(),
                             description: str_of(data, "short_description", "").to_string(),
+                            file: String::new(),
                             id,
                         })
                     })
@@ -2140,6 +2146,7 @@ impl WorkshopState {
                     "name": map.name,
                     "author": if map.author.is_empty() { "Unknown" } else { map.author.as_str() },
                     "short_description": map.description,
+                    "file": map.file,
                     "local": map.local,
                 })
             });
