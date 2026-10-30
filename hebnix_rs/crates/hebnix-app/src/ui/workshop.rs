@@ -24,6 +24,9 @@ use crate::multiplayer_lan::{
 mod archive;
 mod banner_image;
 mod background_changer;
+mod hosted;
+mod ingame_menu;
+mod lan_mutators;
 mod menu_map;
 mod local_import;
 #[cfg(target_os = "windows")]
@@ -33,6 +36,8 @@ mod steam_download;
 mod steam_download;
 use archive::ArchiveBrowser;
 use background_changer::BackgroundChangerState;
+use hosted::{HOSTING_SLOT, HostedMap};
+use ingame_menu::InGameMenuState;
 use menu_map::MenuMapState;
 use steam_download::SteamDownloader;
 
@@ -175,6 +180,10 @@ pub const TARGET_MAPS: [(&str, &str); 4] = [
     ("Roadblock", "Labs_Octagon_B2B_02_P.upk"),
     ("Hourglass", "Labs_PillarGlass_P.upk"),
 ];
+
+/// Map-to-replace entry that copies the map into Hebnix's workshop folder for
+/// the in-game Workshop menu instead of replacing a map.
+pub const WORKSHOP_TARGET: &str = "Workshop folder";
 
 fn target_filename(target: &str) -> Option<&'static str> {
     TARGET_MAPS
@@ -353,6 +362,9 @@ impl MapManager {
         }
 
         let cooked_pc_dir = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if target_name == WORKSHOP_TARGET {
+            return self.install_to_workshop_folder(map_data, &cached_map_path, &cooked_pc_dir);
+        }
         let mods_dir = cooked_pc_dir.join(WORKSHOP_MODS_DIR_NAME);
         std::fs::create_dir_all(&mods_dir).map_err(|e| e.to_string())?;
 
@@ -370,6 +382,40 @@ impl MapManager {
         self.save_active_maps();
         self.save_install_state(rl_path);
         Ok(())
+    }
+
+    /// One folder per map, named by its id, holding the map as a .udk (the
+    /// only extensions the Workshop menu loads) and its details.
+    fn install_to_workshop_folder(
+        &self,
+        map_data: &Value,
+        cached: &Path,
+        cooked: &Path,
+    ) -> Result<(), String> {
+        let id = id_of(map_data);
+        let folder = crate::patcher::workshop_menu::workshop_dir(cooked)
+            .join(crate::patcher::workshop_menu::map_dir_name(&id));
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let name = str_of(map_data, "name", &id);
+        // the game matches a join by file name, so keep the host's when known
+        let file = match str_of(map_data, "file", "") {
+            "" => name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect(),
+            file => file.to_string(),
+        };
+        let file = if file.is_empty() { id.clone() } else { file };
+        std::fs::copy(cached, folder.join(format!("{file}.udk"))).map_err(|e| e.to_string())?;
+        let banner = str_of(map_data, "banner_path", "");
+        let meta = serde_json::json!({
+            "title": name,
+            "author": str_of(map_data, "author", ""),
+            "description": str_of(map_data, "description", str_of(map_data, "short_description", "")),
+            "preview_url": if banner.is_empty() { String::new() } else { banner_url_and_cache_rel(banner).0 },
+        });
+        std::fs::write(folder.join(ingame_menu::META), meta.to_string())
+            .map_err(|e| e.to_string())
     }
 
     /// Rocket League only notices mod files that existed when it started.
@@ -546,9 +592,26 @@ fn render_player_maps(
     ui: &mut egui::Ui,
     offer: &PeerOffer,
     mine: &serde_json::Map<String, Value>,
+    workshop: &Path,
     busy: bool,
     install: &mut Option<(SlotMap, IpAddr, bool)>,
 ) {
+    if let Some(map) = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT) {
+        let have = workshop.join(crate::patcher::workshop_menu::map_dir_name(&map.id)).is_dir();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
+            if have {
+                ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
+            } else if ui
+                .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
+                .clicked()
+            {
+                // from the peer: it may be a Steam or hand-made map the cdn lacks
+                let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map.clone() };
+                *install = Some((target, offer.ip, true));
+            }
+        });
+    }
     let maps: Vec<&SlotMap> = offer
         .maps
         .iter()
@@ -745,6 +808,8 @@ pub enum ImageState {
 enum WorkshopView {
     Browse,
     Import,
+    MenuMap,
+    InGameMenu,
     Multiplayer,
 }
 
@@ -752,7 +817,6 @@ enum WorkshopView {
 #[derive(Clone, Copy)]
 pub enum StudioMapPage {
     ArenaBackgrounds,
-    MenuBackground,
 }
 
 struct MultiplayerState {
@@ -884,6 +948,13 @@ pub struct WorkshopState {
     view: WorkshopView,
     background_changer: BackgroundChangerState,
     menu_map: MenuMapState,
+    ingame_menu: InGameMenuState,
+    /// connection state the LAN host file was last set for
+    lan_synced: Option<bool>,
+    /// last failed join read from the game log, polled while the tab is open
+    join_mismatch: Option<hebnix_sdk::log::JoinMismatch>,
+    join_polled: Option<std::time::Instant>,
+    join_mismatch_dismissed: Option<hebnix_sdk::log::JoinMismatch>,
     import_wizard: ImportWizard,
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
@@ -892,6 +963,8 @@ pub struct WorkshopState {
     /// the "P2P File Sharing" system setting. read by the map sync server
     /// each time a player asks for a file, so it applies straight away.
     share_files: Arc<AtomicBool>,
+    /// the folder workshop maps go to for the attached install, set each frame
+    workshop_maps: PathBuf,
 }
 
 impl WorkshopState {
@@ -927,12 +1000,18 @@ impl WorkshopState {
             view: WorkshopView::Browse,
             background_changer: BackgroundChangerState::default(),
             menu_map: MenuMapState::default(),
+            ingame_menu: InGameMenuState::default(),
+            lan_synced: None,
+            join_mismatch: None,
+            join_polled: None,
+            join_mismatch_dismissed: None,
             import_wizard: ImportWizard::default(),
             steam_downloader: SteamDownloader::default(),
             archive_browser: ArchiveBrowser::default(),
             multiplayer,
             rl_launch: crate::config::RlLaunchCfg::default(),
             share_files: Arc::new(AtomicBool::new(true)),
+            workshop_maps: PathBuf::new(),
         }
     }
 
@@ -1086,10 +1165,6 @@ impl WorkshopState {
         self.rl_launch = rl_launch.clone();
         match page {
             StudioMapPage::ArenaBackgrounds => self.background_changer.render(ui, rl_path, tx),
-            StudioMapPage::MenuBackground => {
-                let custom = self.cached_maps();
-                self.menu_map.render(ui, rl_path, &custom, tx);
-            }
         }
     }
 
@@ -1102,6 +1177,14 @@ impl WorkshopState {
         tx: &Sender<AppMsg>,
     ) {
         self.rl_launch = rl_launch.clone();
+        let connected = self.multiplayer.tunnel_ready;
+        if self.lan_synced != Some(connected) {
+            self.lan_synced = Some(connected);
+            ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
+        }
+        self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
+            &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
+        );
         let ctx = ui.ctx().clone();
 
         if crate::theme::presentation(&ctx).is_some() {
@@ -1115,6 +1198,12 @@ impl WorkshopState {
                 t("render-browse-maps"),
             );
             ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
+            ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+            ui.selectable_value(
+                &mut self.view,
+                WorkshopView::InGameMenu,
+                "In-game menu (experimental)",
+            );
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Multiplayer,
@@ -1155,6 +1244,16 @@ impl WorkshopState {
             self.render_multiplayer(ui, rl_path, tx, &ctx);
             return;
         }
+        if self.view == WorkshopView::InGameMenu {
+            self.ingame_menu.render(ui, rl_path, self.multiplayer.tunnel_ready, tx);
+            return;
+        }
+        if self.view == WorkshopView::MenuMap {
+            let custom = self.cached_maps();
+            self.menu_map.render(ui, rl_path, &custom, tx);
+            return;
+        }
+
         // The shared browser controls leave the map card renderers intact.
         if crate::ui::browser::search(ui, &mut self.search, t("ball-name-or-author")) {
             self.execute_search(true);
@@ -1179,7 +1278,7 @@ impl WorkshopState {
             egui::ComboBox::from_id_salt("target_map")
                 .selected_text(self.target.clone())
                 .show_ui(ui, |ui| {
-                    for (name, _) in TARGET_MAPS {
+                    for name in TARGET_MAPS.map(|(name, _)| name).into_iter().chain([WORKSHOP_TARGET]) {
                         if ui
                             .selectable_value(&mut self.target, name.to_string(), name)
                             .changed()
@@ -1765,6 +1864,7 @@ impl WorkshopState {
         // the in-game name comes from Rocket League's launch log and doesn't
         // change mid-session, so it's only looked up until one is found
         let player_name = Arc::new(Mutex::new(String::new()));
+        let hosted = HostedMap::new(self.manager.cache_dir.clone());
         let map_provider: MapProvider = Arc::new(move || {
             let mut name = player_name.lock().unwrap();
             if name.is_empty() {
@@ -1789,6 +1889,7 @@ impl WorkshopState {
                             id,
                         })
                     })
+                    .chain(hosted.current())
                     .collect(),
             }
         });
@@ -1816,6 +1917,68 @@ impl WorkshopState {
     /// the same slot. every player has to replace the same in-game map, so
     /// this flags a peer's map that sits in a different slot on your side.
     /// players are a collapsed list so it stays usable with lots of them.
+    /// Centered popup, on any tab, offering the hosted map of the player the
+    /// game just failed to join.
+    pub fn render_join_prompt(&mut self, ctx: &egui::Context, rl_path: &str) {
+        let Some(session) = &self.multiplayer.relay else {
+            return;
+        };
+        if self.join_polled.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
+            self.join_polled = Some(std::time::Instant::now());
+            self.join_mismatch = hebnix_sdk::log::join_mismatch(None);
+        }
+        ctx.request_repaint_after(Duration::from_secs(5));
+        let Some(failed) = self.join_mismatch.clone() else {
+            return;
+        };
+        if self.join_mismatch_dismissed.as_ref() == Some(&failed) {
+            return;
+        }
+        let Some((offer, map)) = session.peer_offers().into_iter().find_map(|offer| {
+            let map = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT)?.clone();
+            (offer.ip.to_string() == failed.ip).then_some((offer, map))
+        }) else {
+            return;
+        };
+        let workshop = crate::patcher::workshop_menu::workshop_dir(
+            &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
+        );
+        if workshop.join(crate::patcher::workshop_menu::map_dir_name(&map.id)).is_dir() {
+            return;
+        }
+        let busy = self.multiplayer.map_install_busy.load(Ordering::Relaxed);
+        let mut download = false;
+        let mut dismiss = false;
+        egui::Window::new(t("join-mismatch-title"))
+            .id(egui::Id::new("join-mismatch"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(t_args("join-mismatch", &[("name", offer.label().into())]));
+                ui.strong(&map.name);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    download = ui
+                        .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
+                        .clicked();
+                    dismiss = ui.button(t("join-mismatch-dismiss")).clicked();
+                });
+            });
+        if download || dismiss {
+            self.join_mismatch_dismissed = Some(failed);
+        }
+        if download {
+            let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map };
+            let request = (target, offer.ip, true);
+            if self.multiplayer.peer_warning_accepted {
+                self.install_peer_map(request.0, request.1, request.2, rl_path, ctx);
+            } else {
+                self.multiplayer.pending_peer_install = Some(request);
+            }
+        }
+    }
+
     fn render_maps_in_use(
         &mut self,
         ui: &mut egui::Ui,
@@ -1826,6 +1989,7 @@ impl WorkshopState {
             return;
         };
         let mine = self.manager.active_maps();
+        let workshop = self.workshop_maps.clone();
         let mut offers = session.peer_offers();
         offers.sort_by_key(|offer| offer.label().to_lowercase());
         let busy = self.multiplayer.map_install_busy.load(Ordering::Relaxed);
@@ -1878,7 +2042,7 @@ impl WorkshopState {
                             .id_salt(("workshop_player", offer.ip))
                             .default_open(false)
                             .show(ui, |ui| {
-                                render_player_maps(ui, offer, &mine, busy, install);
+                                render_player_maps(ui, offer, &mine, &workshop, busy, install);
                                 ui.add_space(4.0);
                                 if ui
                                     .button(t("maps-in-use-block-player"))
@@ -2038,7 +2202,11 @@ impl WorkshopState {
                         }
                     }
                 }
-                manager.install_map(&map_data, &map.slot, &rl_path)
+                manager.install_map(&map_data, &map.slot, &rl_path)?;
+                if map.slot == WORKSHOP_TARGET {
+                    ingame_menu::refresh(&Path::new(&rl_path).join("TAGame").join("CookedPCConsole"))?;
+                }
+                Ok::<(), String>(())
             })();
             let text = match outcome {
                 Ok(()) => format!("Installed {} in {}.", map.name, map.slot),
@@ -2220,7 +2388,7 @@ impl WorkshopState {
         let author = str_of(map_data, "author", "Unknown").to_string();
         let banner = str_of(map_data, "banner_path", "").to_string();
 
-        let active_targets = self.manager.get_active_targets_for_map(&map_id);
+        let active_targets = self.active_targets(&map_id);
         let is_active_on_current = active_targets.contains(&self.target);
         let is_cached = self.manager.is_cached(&map_id);
         let is_busy = self.busy.contains(&map_id);
@@ -2365,6 +2533,16 @@ impl WorkshopState {
         result
     }
 
+    /// The targets a map is loaded on, the workshop folder included.
+    fn active_targets(&self, map_id: &str) -> Vec<String> {
+        let mut targets = self.manager.get_active_targets_for_map(map_id);
+        let dir = crate::patcher::workshop_menu::map_dir_name(map_id);
+        if !map_id.is_empty() && self.workshop_maps.join(dir).is_dir() {
+            targets.push(WORKSHOP_TARGET.to_string());
+        }
+        targets
+    }
+
     fn handle_action(
         &mut self,
         map_idx: usize,
@@ -2377,6 +2555,18 @@ impl WorkshopState {
         let map_id = id_of(&map_data);
 
         match action {
+            CardAction::Unload if self.target == WORKSHOP_TARGET => {
+                let dir = crate::patcher::workshop_menu::map_dir_name(&map_id);
+                let result = std::fs::remove_dir_all(self.workshop_maps.join(dir))
+                    .map_err(|e| format!("Could not remove the map (is it loaded in game?): {e}"))
+                    .and_then(|()| {
+                        ingame_menu::refresh(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"))
+                    });
+                if let Err(e) = result {
+                    let _ = tx.send(AppMsg::Log(format!("[Workshop] {e}")));
+                }
+                self.execute_search(false);
+            }
             CardAction::Unload => match self.manager.unload_active_map(&self.target, rl_path) {
                 Ok(()) => self.execute_search(false),
                 Err(e) => {
@@ -2395,9 +2585,19 @@ impl WorkshopState {
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
                     let result = manager.install_map(&map_data, &target, &rl_path);
+                    let cooked = Path::new(&rl_path).join("TAGame").join("CookedPCConsole");
+                    // the in-game Workshop menu lists that folder, so update it
+                    let listed = match (&result, target == WORKSHOP_TARGET) {
+                        (Ok(()), true) => match ingame_menu::refresh(&cooked) {
+                            Ok(Some(count)) => format!(" The in-game Workshop list now has {count} maps."),
+                            Ok(None) => " Enable the in-game Workshop menu to see it in game.".to_string(),
+                            Err(e) => format!(" Could not update the in-game list: {e}"),
+                        },
+                        _ => String::new(),
+                    };
                     let msg = match &result {
                         Ok(()) => format!(
-                            "[Workshop] Installed '{}' to {target}.",
+                            "[Workshop] Installed '{}' to {target}.{listed}",
                             str_of(&map_data, "name", "map")
                         ),
                         Err(e) => format!("[Workshop] Map Install Error: {e}"),
@@ -2774,7 +2974,7 @@ impl WorkshopState {
     }
     fn themed_map_actions(&mut self, ui: &mut egui::Ui, idx: usize, metrics: Option<&ThemedTileMetrics>) -> Option<CardAction> {
         let id = id_of(&self.catalog[idx]);
-        let active = self.manager.get_active_targets_for_map(&id).contains(&self.target);
+        let active = self.active_targets(&id).contains(&self.target);
         let cached = self.manager.is_cached(&id);
         let busy = self.busy.contains(&id);
         let label = if busy { t("tab-working") } else if active { format!("Unload {}",self.target) }

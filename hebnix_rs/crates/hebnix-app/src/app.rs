@@ -13,6 +13,8 @@ mod name;
 mod spoofer_controls;
 #[path = "ui/titles.rs"]
 mod titles;
+#[path = "ui/menu_textures.rs"]
+mod menu_textures;
 #[cfg(test)]
 #[path = "ui/titles_tests.rs"]
 mod titles_tests;
@@ -396,7 +398,6 @@ enum ItemsMode {
     BallAppearance,
     GameColours,
     ArenaBackgrounds,
-    MenuBackground,
     ItemNames,
     Manage,
     ItemsActive,
@@ -408,7 +409,6 @@ enum StudioSection {
     Tools,
     CustomAssets,
     Appearance,
-    Menus,
     Active,
 }
 
@@ -419,7 +419,6 @@ impl ItemsMode {
             Self::SpeedPatch => StudioSection::Tools,
             Self::Patching | Self::ItemNames => StudioSection::CustomAssets,
             Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds => StudioSection::Appearance,
-            Self::MenuBackground => StudioSection::Menus,
             Self::Manage => StudioSection::Active,
         })
     }
@@ -475,6 +474,7 @@ enum SpooferSubTab {
     Titles,
     TitleRank,
     Friends,
+    MenuTextures,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -643,6 +643,7 @@ pub struct HebnixApp {
     spoofer_title_glow: bool,
     spoofer_title_glow_color: [u8; 3],
     title_editor: titles::TitleEditorState,
+    menu_textures: menu_textures::MenuTextureState,
     spoofer_title_target: Option<String>,
     spoofer_titles: Vec<TitleSpoofSettings>,
     spoofer_title_filter: String,
@@ -1149,6 +1150,7 @@ impl HebnixApp {
             spoofer_title_glow,
             spoofer_title_glow_color: spoofer_title_glow_color.unwrap_or(spoofer_title_color),
             title_editor,
+            menu_textures: Default::default(),
             spoofer_title_target,
             spoofer_titles,
             spoofer_title_filter: String::new(),
@@ -3608,6 +3610,11 @@ impl HebnixApp {
                         });
                         ui.selectable_value(
                             &mut self.spoofer_subtab,
+                            SpooferSubTab::MenuTextures,
+                            "Menus (experimental)",
+                        );
+                        ui.selectable_value(
+                            &mut self.spoofer_subtab,
                             SpooferSubTab::Friends,
                             t("spoofer-friends"),
                         );
@@ -3623,6 +3630,10 @@ impl HebnixApp {
                     return;
                 }
                 self.title_editor.leave_page();
+                if self.spoofer_subtab == SpooferSubTab::MenuTextures {
+                    self.render_menu_textures_page(ui);
+                    return;
+                }
                 if self.spoofer_subtab == SpooferSubTab::Username {
                     self.render_name_page(ui);
                     return;
@@ -3636,6 +3647,9 @@ impl HebnixApp {
                         }
                         SpooferSubTab::Titles => {
                             unreachable!("Titles uses its own scrolling columns")
+                        }
+                        SpooferSubTab::MenuTextures => {
+                            unreachable!("Menu textures use their own scroll area")
                         }
                         SpooferSubTab::Friends => {
                             ui.heading(t("spoofer-friends"));
@@ -7118,7 +7132,6 @@ impl HebnixApp {
             for (value, key) in [
                 (StudioSection::CustomAssets, "studio-custom-assets"),
                 (StudioSection::Appearance, "studio-appearance"),
-                (StudioSection::Menus, "studio-menus"),
                 (StudioSection::Tools, "studio-tools"),
                 (StudioSection::Active, "nav-active"),
             ] {
@@ -7129,7 +7142,6 @@ impl HebnixApp {
             self.items_mode = match section {
                 StudioSection::CustomAssets => ItemsMode::Patching,
                 StudioSection::Appearance => ItemsMode::GameColours,
-                StudioSection::Menus => ItemsMode::MenuBackground,
                 StudioSection::Tools => ItemsMode::SpeedPatch,
                 StudioSection::Active => ItemsMode::Manage,
             };
@@ -7168,13 +7180,6 @@ impl HebnixApp {
                                 (ItemsMode::BallAppearance, "nav-ball-shape"),
                                 (ItemsMode::WheelAlignment, "app-wheel-alignment"),
                                 (ItemsMode::ArenaBackgrounds, "nav-arena-backgrounds"),
-                            ] {
-                                ui.selectable_value(&mut self.items_mode, value, t(key));
-                            }
-                        }
-                        StudioSection::Menus => {
-                            for (value, key) in [
-                                (ItemsMode::MenuBackground, "nav-menu-background"),
                             ] {
                                 ui.selectable_value(&mut self.items_mode, value, t(key));
                             }
@@ -7729,9 +7734,6 @@ impl HebnixApp {
                         ItemsMode::ArenaBackgrounds => {
                             crate::ui::workshop::StudioMapPage::ArenaBackgrounds
                         }
-                        ItemsMode::MenuBackground => {
-                            crate::ui::workshop::StudioMapPage::MenuBackground
-                        }
                         _ => unreachable!("studio mode has an editor"),
                     };
                     self.workshop.render_studio_page(
@@ -7760,6 +7762,8 @@ impl HebnixApp {
             Tab::Home => self.render_home(ui),
             Tab::Console => self.render_console_tab(ui),
             Tab::Workshop => {
+                let join_rl_path = self.config.settings.rl_path.clone();
+                self.workshop.render_join_prompt(ui.ctx(), &join_rl_path);
                 let rl_path = self.config.settings.rl_path.clone();
                 let rl_launch = self.config.rl_launch.clone();
                 let tx = self.tx.clone();
