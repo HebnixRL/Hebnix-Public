@@ -8,7 +8,6 @@ loadouts-save-name = Save name
 loadouts-delete = Delete
 loadouts-import-hint = Paste one or more codes, one per line:
 loadouts-import = Import
-loadouts-bakkes-toggle = Experimental: read BakkesMod item mod codes
 loadouts-bakkes-hint = Paste a BakkesMod code (cl_itemmod_code) to see what it contains. It is not added to your save.
 loadouts-bakkes-read = Read code
 loadouts-bakkes-orange = Orange team

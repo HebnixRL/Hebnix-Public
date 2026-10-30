@@ -66,14 +66,16 @@ impl LoadoutsPanel {
         }
     }
 
-    /// Returns true when `bakkes_enabled` changed.
-    pub fn show(&mut self, ui: &mut egui::Ui, bakkes_enabled: &mut bool) -> bool {
+    pub fn show(&mut self, ui: &mut egui::Ui) {
         if !self.loaded {
             self.loaded = true;
             self.reload();
         }
         ui.heading(t("loadouts-title"));
         ui.label(t("loadouts-description"));
+        ui.separator();
+        self.show_bakkes(ui);
+        ui.separator();
         if ui.button(t("btn-refresh")).clicked() {
             self.reload();
         }
@@ -140,14 +142,6 @@ impl LoadoutsPanel {
             ui.label(&self.message);
         }
 
-        ui.separator();
-        let changed = ui
-            .checkbox(bakkes_enabled, t("loadouts-bakkes-toggle"))
-            .changed();
-        if *bakkes_enabled {
-            self.show_bakkes(ui);
-        }
-        changed
     }
 
     fn show_bakkes(&mut self, ui: &mut egui::Ui) {
