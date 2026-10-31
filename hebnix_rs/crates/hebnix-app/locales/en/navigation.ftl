@@ -10,6 +10,7 @@ studio-active-changes = Active Changes
 studio-swap-presets = Swap Presets
 nav-player-name = Player Name
 nav-titles = Titles
+nav-profile-pictures = Profile Pictures
 nav-installed = Installed
 nav-browse = Browse
 nav-auto-upload = Auto Upload
@@ -42,3 +43,6 @@ nav-swapper = Swapper
 nav-colours = Colours
 nav-active = Active
 studio-tools = Tools
+
+plugins-load = Load
+plugins-unload = Unload

@@ -127,7 +127,7 @@ impl TrackerClient {
         let response = match agent.get(&url)
             .set("X-App-Token", &token)
             .set("Accept", "application/json")
-            .set("User-Agent", "Hebnix/2.2.6")
+            .set("User-Agent", concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
             .timeout(self.timeout)
             .call()
         {

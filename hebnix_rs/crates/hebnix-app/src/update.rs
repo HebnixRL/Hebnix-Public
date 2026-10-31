@@ -2,6 +2,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
+const INFO_URL: &str = "https://api.hebnix.com/info";
+
 #[derive(Debug, Clone)]
 pub struct UpdateInfo {
     pub version: String,
@@ -40,7 +42,7 @@ fn is_newer_version(current: &str, remote: &str) -> bool {
 pub fn fetch_info(current_version: &str, lite: bool) -> Result<ApiInfo, String> {
     let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
     let resp = agent
-        .get("https://api.hebnix.com/info")
+        .get(INFO_URL)
         .set(
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -92,6 +94,16 @@ fn parse_info(json: &Value, current_version: &str, lite: bool) -> Result<ApiInfo
                 .unwrap_or_default()
                 .to_string(),
         });
+
+    let setup_url = if setup_url.is_empty() {
+        setup_url
+    } else {
+        url::Url::parse(INFO_URL)
+            .expect("static update API URL")
+            .join(&setup_url)
+            .map_err(|e| format!("Invalid update download URL: {e}"))?
+            .to_string()
+    };
 
     let update = is_newer_version(current_version, &latest_version).then(|| UpdateInfo {
         version: latest_version,
@@ -189,21 +201,22 @@ pub fn render_progress(ui: &mut eframe::egui::Ui, progress: &SharedProgress) {
     });
 }
 
-/// Stage a straight EXE beside the current executable (same volume and portable
-/// root). The caller starts maintenance and performs normal application cleanup.
+/// Download an EXE or ZIP beside the current executable, then stage the matching
+/// edition's validated EXE for the existing maintenance/restart flow.
 pub fn download_update(
     setup_url: &str,
+    lite: bool,
     progress: &SharedProgress,
 ) -> Result<std::path::PathBuf, String> {
     use std::io::{Read, Write};
     if setup_url.is_empty() {
         return Err(
-            "The update service has not supplied a direct EXE URL for this edition of Hebnix."
+            "The update service has not supplied an EXE or ZIP URL for this edition of Hebnix."
                 .into(),
         );
     }
     #[cfg(not(windows))]
-    return Err("Direct EXE updates are available on Windows only.".into());
+    return Err("In-app updates are available on Windows only.".into());
     #[allow(unreachable_code)]
     {
         let url = url::Url::parse(setup_url).map_err(|e| format!("Invalid update URL: {e}"))?;
@@ -212,12 +225,14 @@ pub fn download_update(
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let directory = exe.parent().ok_or("Executable has no parent directory")?;
-        let staged = directory.join(format!(".hebnix-update-{:016x}.exe", rand::random::<u64>()));
+        let id = rand::random::<u64>();
+        let downloaded_file = directory.join(format!(".hebnix-update-{id:016x}.download"));
+        let staged = directory.join(format!(".hebnix-update-{id:016x}.exe"));
         let result = (|| -> Result<(), String> {
             let mut file = std::fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
-                .open(&staged)
+                .open(&downloaded_file)
                 .map_err(|e| format!("Cannot stage the update in {}: {e}", directory.display()))?;
             let response = ureq::AgentBuilder::new()
                 .try_proxy_from_env(false)
@@ -254,16 +269,88 @@ pub fn download_update(
             }
             file.sync_all().map_err(|e| e.to_string())?;
             drop(file);
-            validate_executable(&staged)?;
+            stage_update_payload(&downloaded_file, &staged, lite)?;
             progress.lock().unwrap().ready = true;
             Ok(())
         })();
+        let _ = std::fs::remove_file(&downloaded_file);
         if let Err(error) = result {
             let _ = std::fs::remove_file(&staged);
             return Err(error);
         }
         Ok(staged)
     }
+}
+
+/// Inspect the contents rather than the URL extension (CDNs may use query URLs).
+/// Only the matching EXE is extracted; bundled settings/assets never overwrite
+/// the user's existing data, and archive paths are never used as output paths.
+fn stage_update_payload(downloaded: &Path, staged: &Path, lite: bool) -> Result<(), String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(downloaded).map_err(|e| e.to_string())?;
+    let mut signature = [0u8; 4];
+    let count = file.read(&mut signature).map_err(|e| e.to_string())?;
+    drop(file);
+    if count < 4 || !signature.starts_with(b"PK") {
+        validate_executable(downloaded)?;
+        return std::fs::rename(downloaded, staged).map_err(|e| e.to_string());
+    }
+
+    let file = std::fs::File::open(downloaded).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid update ZIP: {e}"))?;
+    let expected = if lite {
+        "hebnix-lite.exe"
+    } else {
+        "hebnix.exe"
+    };
+    let mut selected = None;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Invalid update ZIP entry: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(path) = entry.enclosed_name() else {
+            continue;
+        };
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(expected))
+        {
+            if selected.replace(index).is_some() {
+                return Err(format!(
+                    "Update ZIP contains multiple copies of {expected}."
+                ));
+            }
+        }
+    }
+    let index = selected.ok_or_else(|| format!("Update ZIP does not contain {expected}."))?;
+    let entry = archive.by_index(index).map_err(|e| e.to_string())?;
+    const MAX_EXE_SIZE: u64 = 512 * 1024 * 1024;
+    let size = entry.size();
+    if size > MAX_EXE_SIZE {
+        return Err("Update executable is too large.".into());
+    }
+    let result = (|| {
+        let mut output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(staged)
+            .map_err(|e| format!("Cannot extract update: {e}"))?;
+        let copied = std::io::copy(&mut entry.take(MAX_EXE_SIZE + 1), &mut output)
+            .map_err(|e| format!("Cannot extract update ZIP: {e}"))?;
+        if copied != size || copied > MAX_EXE_SIZE {
+            return Err("Incomplete update executable in ZIP.".into());
+        }
+        output.sync_all().map_err(|e| e.to_string())?;
+        drop(output);
+        validate_executable(staged)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(staged);
+    }
+    result
 }
 
 /// Reject HTML, ZIPs, truncated files and executables for a different CPU.
@@ -274,7 +361,7 @@ fn validate_executable(path: &Path) -> Result<(), String> {
     file.read_exact(&mut dos)
         .map_err(|_| "Update is not a complete Windows executable")?;
     if &dos[..2] != b"MZ" {
-        return Err("Update is not a Windows EXE (ZIP installers are no longer supported).".into());
+        return Err("Update is not a Windows EXE.".into());
     }
     let offset = u32::from_le_bytes(dos[60..64].try_into().unwrap()) as u64;
     file.seek(SeekFrom::Start(offset))
@@ -372,5 +459,147 @@ mod tests {
         std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
         assert!(validate_executable(&path).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn fake_executable(marker: u8) -> Vec<u8> {
+        let mut bytes = vec![0; 512];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[60..64].copy_from_slice(&64u32.to_le_bytes());
+        bytes[64..68].copy_from_slice(b"PE\0\0");
+        let machine: u16 = if cfg!(target_arch = "aarch64") {
+            0xaa64
+        } else {
+            0x8664
+        };
+        bytes[68..70].copy_from_slice(&machine.to_le_bytes());
+        bytes[70..72].copy_from_slice(&1u16.to_le_bytes());
+        bytes[84..86].copy_from_slice(&112u16.to_le_bytes());
+        bytes[86..88].copy_from_slice(&2u16.to_le_bytes());
+        bytes[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
+        bytes[216..220].copy_from_slice(&20u32.to_le_bytes());
+        bytes[220..224].copy_from_slice(&256u32.to_le_bytes());
+        bytes[256] = marker;
+        bytes
+    }
+
+    struct PayloadFixture(std::path::PathBuf);
+    impl PayloadFixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("hebnix-update-test-{:016x}", rand::random::<u64>()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn zip(&self, entries: &[(&str, &[u8])]) -> std::path::PathBuf {
+            use std::io::Write;
+            let path = self.0.join("payload.download");
+            let mut archive = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            for (name, bytes) in entries {
+                archive
+                    .start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                archive.write_all(bytes).unwrap();
+            }
+            archive.finish().unwrap();
+            path
+        }
+    }
+    impl Drop for PayloadFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn stages_direct_executable_without_requiring_a_url_extension() {
+        let fixture = PayloadFixture::new();
+        let downloaded = fixture.0.join("payload.download");
+        let staged = fixture.0.join("staged.exe");
+        let bytes = fake_executable(7);
+        std::fs::write(&downloaded, &bytes).unwrap();
+        stage_update_payload(&downloaded, &staged, false).unwrap();
+        assert_eq!(std::fs::read(staged).unwrap(), bytes);
+        assert!(!downloaded.exists());
+    }
+
+    #[test]
+    fn extracts_only_the_matching_edition_from_nested_zip() {
+        let full = fake_executable(1);
+        let lite = fake_executable(2);
+        for is_lite in [false, true] {
+            let fixture = PayloadFixture::new();
+            let downloaded = fixture.zip(&[
+                ("release/HEBNIX.EXE", &full),
+                ("release/hebnix-lite.exe", &lite),
+                ("release/config.toml", b"do not overwrite my settings"),
+            ]);
+            let staged = fixture.0.join("staged.exe");
+            stage_update_payload(&downloaded, &staged, is_lite).unwrap();
+            assert_eq!(
+                std::fs::read(staged).unwrap(),
+                if is_lite { &lite } else { &full }.as_slice()
+            );
+            assert!(!fixture.0.join("release").exists());
+            assert!(!fixture.0.join("config.toml").exists());
+        }
+    }
+
+    #[test]
+    fn rejects_missing_ambiguous_unsafe_and_invalid_zip_executables() {
+        let exe = fake_executable(1);
+        for entries in [
+            vec![("hebnix-lite.exe", exe.as_slice())],
+            vec![
+                ("a/hebnix.exe", exe.as_slice()),
+                ("b/hebnix.exe", exe.as_slice()),
+            ],
+            vec![("../hebnix.exe", exe.as_slice())],
+            vec![("hebnix.exe", b"<html>not an exe</html>".as_slice())],
+        ] {
+            let fixture = PayloadFixture::new();
+            let downloaded = fixture.zip(&entries);
+            let staged = fixture.0.join("staged.exe");
+            assert!(stage_update_payload(&downloaded, &staged, false).is_err());
+            assert!(!staged.exists());
+        }
+        let fixture = PayloadFixture::new();
+        let downloaded = fixture.0.join("payload.download");
+        let staged = fixture.0.join("staged.exe");
+        std::fs::write(&downloaded, b"PK\x03\x04truncated archive").unwrap();
+        assert!(stage_update_payload(&downloaded, &staged, false).is_err());
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn current_version_does_not_offer_itself_as_an_update() {
+        let json = serde_json::json!({"latest_version": "2.3.0", "setup_url": "https://example.com/hebnix.zip", "lite_setup_url": "https://example.com/hebnix-lite.exe"});
+        for lite in [false, true] {
+            assert!(parse_info(&json, "2.3.0", lite).unwrap().update.is_none());
+            assert!(parse_info(&json, "2.2.6", lite).unwrap().update.is_some());
+        }
+    }
+    #[test]
+    fn resolves_relative_api_download_urls_for_both_editions() {
+        let json = serde_json::json!({
+            "latest_version": "2.3.1",
+            "setup_url": "/download-hebnix",
+            "lite_setup_url": "/downloads/hebnix-lite.zip"
+        });
+        assert_eq!(
+            parse_info(&json, "2.3.0", false)
+                .unwrap()
+                .update
+                .unwrap()
+                .setup_url,
+            "https://api.hebnix.com/download-hebnix"
+        );
+        assert_eq!(
+            parse_info(&json, "2.3.0", true)
+                .unwrap()
+                .update
+                .unwrap()
+                .setup_url,
+            "https://api.hebnix.com/downloads/hebnix-lite.zip"
+        );
     }
 }

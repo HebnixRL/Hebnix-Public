@@ -27,7 +27,7 @@ pub fn fetch_psynet_config(build_id: &str, lang: &str) -> Value {
 
     let url = config_url(build_id, lang);
     let data: Value = ureq::get(&url)
-        .set("User-Agent", "hebnix/2.2.6")
+        .set("User-Agent", concat!("hebnix/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(15))
         .call()
         .ok()

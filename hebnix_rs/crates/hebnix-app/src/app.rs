@@ -462,6 +462,12 @@ enum PluginsSubTab {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppearanceSubTab {
+    General,
+    Theme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HebnixSettingsTab {
     Interface,
     Directories,
@@ -474,6 +480,7 @@ enum HebnixSettingsTab {
 enum SpooferSubTab {
     Username,
     Titles,
+    ProfilePictures,
     TitleRank,
     Friends,
 }
@@ -555,6 +562,7 @@ pub struct HebnixApp {
     tab: Tab,
     plugins_subtab: PluginsSubTab,
     hebnix_settings_tab: HebnixSettingsTab,
+    appearance_subtab: AppearanceSubTab,
     spoofer_subtab: SpooferSubTab,
     patcher_subtab: PatcherSubTab,
     swapper_subtab: PatcherSubTab,
@@ -644,6 +652,7 @@ pub struct HebnixApp {
     spoofer_title_glow: bool,
     spoofer_title_glow_color: [u8; 3],
     title_editor: titles::TitleEditorState,
+    profile_pictures: crate::profile_pictures::State,
     spoofer_title_target: Option<String>,
     spoofer_titles: Vec<TitleSpoofSettings>,
     spoofer_title_filter: String,
@@ -1069,6 +1078,7 @@ impl HebnixApp {
             tab: default_tab,
             plugins_subtab: PluginsSubTab::Installed,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
+            appearance_subtab: AppearanceSubTab::General,
             spoofer_subtab: SpooferSubTab::Username,
             patcher_subtab: PatcherSubTab::Car,
             swapper_subtab: PatcherSubTab::Swapper(crate::swapper::SwapCategory::Bodies),
@@ -1150,6 +1160,7 @@ impl HebnixApp {
             spoofer_title_glow,
             spoofer_title_glow_color: spoofer_title_glow_color.unwrap_or(spoofer_title_color),
             title_editor,
+            profile_pictures: crate::profile_pictures::State::new(&base_dir),
             spoofer_title_target,
             spoofer_titles,
             spoofer_title_filter: String::new(),
@@ -3570,6 +3581,11 @@ impl HebnixApp {
                         SpooferSubTab::Titles,
                         t("nav-titles"),
                     );
+                    ui.selectable_value(
+                        &mut self.spoofer_subtab,
+                        SpooferSubTab::ProfilePictures,
+                        t("nav-profile-pictures"),
+                    );
                     ui.scope(|ui| {
                         ui.add_enabled_ui(false, |ui| {
                             ui.selectable_value(
@@ -3596,6 +3612,10 @@ impl HebnixApp {
                     return;
                 }
                 self.title_editor.leave_page();
+                if self.spoofer_subtab == SpooferSubTab::ProfilePictures {
+                    self.profile_pictures.show(ui, std::path::Path::new(&self.config.settings.rl_path));
+                    return;
+                }
                 if self.spoofer_subtab == SpooferSubTab::Username {
                     self.render_name_page(ui);
                     return;
@@ -3610,6 +3630,7 @@ impl HebnixApp {
                         SpooferSubTab::Titles => {
                             unreachable!("Titles uses its own scrolling columns")
                         }
+                        SpooferSubTab::ProfilePictures => unreachable!("Profile pictures uses its own page"),
                         SpooferSubTab::Friends => {
                             ui.heading(t("spoofer-friends"));
                             ui.add_space(8.0);
@@ -3961,11 +3982,14 @@ impl HebnixApp {
             if ui.button(t("action-open-plugins-folder")).clicked() {
                 let _ = open::that(&self.plugin_dir);
             }
-            if ui.button(t("plugins-install-plugin")).clicked() {
-                self.install_modal = InstallModal {
-                    open: true,
-                    ..Default::default()
-                };
+            if ui.button(t("install-modal-install-from-zip")).clicked() {
+                let dialog = rfd::FileDialog::new().add_filter(t("install-modal-plugin-archives"), &["zip"]);
+                if let Some(file) = winutil::parent_file_dialog(dialog).pick_file() {
+                    match install_zip(&file, &self.plugin_dir) {
+                        Ok(()) => { self.plugin_mgr.refresh(&mut self.config, true); self.save_config(); }
+                        Err(error) => self.console.write(format!("[Plugins] ZIP installation failed: {error}")),
+                    }
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -4393,12 +4417,69 @@ impl HebnixApp {
 
                         match self.hebnix_settings_tab {
                             HebnixSettingsTab::Interface => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.selectable_value(
+                                        &mut self.appearance_subtab,
+                                        AppearanceSubTab::General,
+                                        t("settings-appearance-general"),
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.appearance_subtab,
+                                        AppearanceSubTab::Theme,
+                                        t("settings-appearance-theme"),
+                                    );
+                                });
+                                ui.separator();
+                                if self.appearance_subtab == AppearanceSubTab::Theme {
+                                    let label_w = label_column_width(ui, &[t("settings-theme-label")]);
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
+                                        let mut selected = self.config.settings.theme.clone();
+                                        let mut changed = false;
+                                        egui::ComboBox::from_id_salt("theme_select")
+                                            .selected_text(selected.clone())
+                                            .width(120.0)
+                                            .show_ui(ui, |ui| {
+                                                for option in self.theme_options.clone() {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut selected,
+                                                            option.clone(),
+                                                            option,
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        changed = true;
+                                                    }
+                                                }
+                                            });
+                                        if changed {
+                                            self.change_theme(&ctx, &selected);
+                                        }
+                                        if ui.button(t("btn-refresh")).clicked() {
+                                            self.theme_options = theme::list_themes(&self.themes_dir);
+                                            let selected = self.config.settings.theme.clone();
+                                            self.change_theme(&ctx, &selected);
+                                            self.console.write(format!(
+                                                "[Console] {}",
+                                                t("console-themes-rescanned")
+                                            ));
+                                        }
+                                        if ui.button(t("btn-open-folder")).clicked() {
+                                            let _ = open::that(&self.themes_dir);
+                                        }
+                                        if ui.button(t("settings-open-fonts-folder")).clicked() {
+                                            let _ = open::that(&self.fonts_dir);
+                                        }
+                                    });
+
+                                    return;
+                                }
                                 let label_w = label_column_width(
                                     ui,
                                     &[
                                         t("settings-keybind-label"),
                                         t("settings-language-label"),
-                                        t("settings-theme-label"),
                                         t("settings-opacity-label"),
                                         t("settings-toast-position-label"),
                                         t("system-default-tab"),
@@ -4468,45 +4549,6 @@ impl HebnixApp {
                                         });
                                     if language_changed {
                                         self.change_language(&ctx, &chosen);
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
-                                    let mut selected = self.config.settings.theme.clone();
-                                    let mut changed = false;
-                                    egui::ComboBox::from_id_salt("theme_select")
-                                        .selected_text(selected.clone())
-                                        .width(120.0)
-                                        .show_ui(ui, |ui| {
-                                            for option in self.theme_options.clone() {
-                                                if ui
-                                                    .selectable_value(
-                                                        &mut selected,
-                                                        option.clone(),
-                                                        option,
-                                                    )
-                                                    .changed()
-                                                {
-                                                    changed = true;
-                                                }
-                                            }
-                                        });
-                                    if changed {
-                                        self.change_theme(&ctx, &selected);
-                                    }
-                                    if ui.button(t("btn-refresh")).clicked() {
-                                        self.theme_options = theme::list_themes(&self.themes_dir);
-                                        self.console.write(format!(
-                                            "[Console] {}",
-                                            t("console-themes-rescanned")
-                                        ));
-                                    }
-                                    if ui.button(t("btn-open-folder")).clicked() {
-                                        let _ = open::that(&self.themes_dir);
-                                    }
-                                    if ui.button(t("settings-open-fonts-folder")).clicked() {
-                                        let _ = open::that(&self.fonts_dir);
                                     }
                                 });
 
@@ -5785,7 +5827,7 @@ impl HebnixApp {
                     let tx = self.tx.clone();
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
-                        let message = match crate::update::download_update(&setup_url, &progress) {
+                        let message = match crate::update::download_update(&setup_url, false, &progress) {
                             Ok(staged) => AppMsg::AppUpdateReady { staged },
                             Err(error) => AppMsg::AppUpdateFailed { error },
                         };
@@ -6096,7 +6138,9 @@ impl HebnixApp {
             return;
         }
 
-        let items_per_page = 10;
+        // Keep two complete rows per page as the available width changes.
+        let columns = ((ui.available_width() + 12.0) / 260.0).floor().max(1.0) as usize;
+        let items_per_page = columns * 2;
         let (total_items, total_pages, current_page_items) = {
             let query = self.install_modal.search_query.to_lowercase();
             let filtered: Vec<&Value> = self
@@ -6174,7 +6218,10 @@ impl HebnixApp {
                     });
                 }
 
-                for plugin_data in current_page_items {
+                for row in current_page_items.chunks(columns) {
+                    ui.columns(columns, |tiles| {
+                        for (column, plugin_data) in row.iter().enumerate() {
+                            let ui = &mut tiles[column];
                     let id = plugin_data
                         .get("plugin_id")
                         .or_else(|| plugin_data.get("id"))
@@ -6211,76 +6258,41 @@ impl HebnixApp {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    egui::Frame::group(ui.style())
-                        .inner_margin(egui::Margin::same(8))
-                        .show(ui, |ui| {
-                            ui.set_height(76.0);
-                            ui.horizontal(|ui| {
-                                ui.set_height(76.0);
-                                match self.install_modal.images.get(banner) {
-                                    Some(ImageState::Ready(bytes)) => {
-                                        ui.add(
-                                            egui::Image::from_bytes(
-                                                format!("bytes://plugin/{banner}"),
-                                                bytes.clone(),
-                                            )
-                                            .fit_to_exact_size(egui::vec2(160.0, 72.0)),
-                                        );
-                                    }
-                                    Some(ImageState::Loading) => {
-                                        ui.allocate_ui(egui::vec2(160.0, 72.0), |ui| {
-                                            ui.centered_and_justified(|ui| ui.spinner());
-                                        });
-                                    }
-                                    Some(ImageState::Failed) | None => {
-                                        ui.allocate_space(egui::vec2(160.0, 72.0));
-                                    }
-                                }
-                                ui.add_space(4.0);
-                                let details_width = (ui.available_width() - 88.0).max(150.0);
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(details_width, 72.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        ui.strong(format!("{name} v{version}"));
-                                        ui.weak(t_args(
-                                            "hebnix-install-by-author",
-                                            &[("author", author.to_string().into())],
-                                        ));
-                                        ui.add_sized(
-                                            [details_width, 34.0],
-                                            egui::Label::new(short_desc)
-                                                .wrap()
-                                                .halign(egui::Align::Min),
-                                        )
-                                        .on_hover_text(hover);
-                                    },
-                                );
 
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 292.0), egui::Sense::hover());
+                            let mut tile = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(9.0)).layout(egui::Layout::top_down(egui::Align::Center)));
+                            tile.set_clip_rect(rect.intersect(ui.clip_rect()));
+                            let ui = &mut tile;
+                            let width = ui.available_width();
+                            match self.install_modal.images.get(banner) {
+                                Some(ImageState::Ready(bytes)) => { ui.add(egui::Image::from_bytes(format!("bytes://plugin/{banner}"), bytes.clone()).fit_to_exact_size(egui::vec2(width, 112.0))); }
+                                Some(ImageState::Loading) => { ui.allocate_ui(egui::vec2(width, 112.0), |ui| { ui.centered_and_justified(|ui| ui.spinner()); }); }
+                                _ => { ui.allocate_space(egui::vec2(width, 112.0)); }
+                            }
+                            ui.add(egui::Label::new(egui::RichText::new(format!("{name} v{version}")).strong()).truncate()).on_hover_text(name);
+                            ui.add(egui::Label::new(egui::RichText::new(author).weak()).truncate());
+                            let (description_rect, _) = ui.allocate_exact_size(egui::vec2(width, 66.0), egui::Sense::hover());
+                            let mut description = ui.new_child(egui::UiBuilder::new().max_rect(description_rect).layout(egui::Layout::top_down(egui::Align::Center)));
+                            description.set_clip_rect(description_rect.intersect(ui.clip_rect()));
+                            description.add(egui::Label::new(short_desc).wrap().halign(egui::Align::Center)).on_hover_text(hover);
+                            ui.add_space((ui.available_height() - ui.spacing().interact_size.y).max(0.0));
+                            ui.horizontal(|ui| {
                                         let existing =
                                             self.plugin_mgr.plugins.iter().find(|p| {
                                                 p.manifest.plugin_id.as_deref() == Some(id)
                                             });
+                                        ui.add_space(((ui.available_width() - 208.0) * 0.5).max(0.0));
                                         if let Some(existing) = existing {
                                             let slug = existing.slug.clone();
-                                            if existing.enabled {
-                                                if ui.button(t("hebnix-install-disable")).clicked()
-                                                {
-                                                    action = Some(ModalAction::Disable(slug));
-                                                }
-                                            } else if ui
-                                                .add(
-                                                    egui::Button::new(t("hebnix-install-enable"))
-                                                        .fill(egui::Color32::from_rgb(
-                                                            0x2e, 0xcc, 0x71,
-                                                        )),
-                                                )
-                                                .clicked()
-                                            {
-                                                action = Some(ModalAction::Enable(slug));
+                                            let enabled = existing.enabled;
+                                            let settings = existing.has_settings();
+                                            if ui.add_sized([100.0, 26.0], egui::Button::new(t(if enabled { "plugins-unload" } else { "plugins-load" }))).clicked() {
+                                                action = Some(if enabled { ModalAction::Disable(slug.clone()) } else { ModalAction::Enable(slug.clone()) });
+                                            }
+                                            if ui.add_enabled_ui(settings && enabled, |ui| ui.add_sized([100.0, 26.0], egui::Button::new(t("tab-settings")))).inner.clicked() {
+                                                self.selected_settings_plugin = Some(slug);
+                                                self.plugins_subtab = PluginsSubTab::Settings;
+                                                self.tab = Tab::Plugins;
                                             }
                                         } else if self.install_modal.downloading_id.as_deref()
                                             == Some(id)
@@ -6289,14 +6301,13 @@ impl HebnixApp {
                                                 false,
                                                 egui::Button::new(t("hebnix-install-installing")),
                                             );
-                                        } else if ui.button(t("hebnix-install-install")).clicked() {
+                                        } else if ui.add_sized([208.0, 26.0], egui::Button::new(t("hebnix-install-install"))).clicked() {
                                             action = Some(ModalAction::Download(id.to_string()));
                                         }
-                                    },
-                                );
                             });
-                        });
-                    ui.add_space(4.0);
+                        }
+                    });
+                    ui.add_space(12.0);
                 }
             });
         let display_page = if total_pages == 0 {
@@ -6820,6 +6831,7 @@ impl Drop for HebnixApp {
 
 impl eframe::App for HebnixApp {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
         crate::maintenance::acknowledge_update();
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {

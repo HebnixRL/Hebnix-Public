@@ -65,6 +65,8 @@ settings-heading-action-button = Action Button
 settings-keybind-label = Open/Close Keybind:
 settings-keybind-listening = Listening...
 settings-keybind-set = Set Keybind
+settings-appearance-general = General
+settings-appearance-theme = Theme
 settings-theme-label = Theme:
 settings-open-fonts-folder = Open Fonts Folder
 settings-opacity-label = Window Opacity:
@@ -355,9 +357,7 @@ rl-launch-setup-non-steam-shortcuts-can-t-pass = Non-Steam shortcuts can't pass 
 install-modal-install-from-hebnix = ☁
     
     Install from Hebnix
-install-modal-install-from-zip = 📁
-    
-    Install from .ZIP
+install-modal-install-from-zip = 📁 Install from .ZIP
 hebnix-install-no-plugins-found = No plugins found.
 hebnix-install-enable = Enable
 hebnix-install-installing = Installing...

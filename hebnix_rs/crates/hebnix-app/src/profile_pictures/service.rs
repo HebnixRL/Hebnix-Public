@@ -10,9 +10,10 @@ use std::{
     collections::HashMap,
     io::{Cursor, Read, Write},
     net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -82,7 +83,10 @@ fn limited(mut response: Response, max: usize) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, String> {
+pub(super) fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() > MAX_IMAGE {
+        return Err("Image exceeds 6 MB.".into());
+    }
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| "Unknown image format")?;
@@ -100,7 +104,7 @@ fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let rgb = image::RgbImage::from_fn(128, 128, |x, y| {
         let p = pixels.get_pixel(x, y);
         let a = p[3] as u32;
-        image::Rgb([0, 1, 2].map(|c| ((p[c] as u32 * a + 255 * (255 - a) + 127) / 255) as u8))
+        image::Rgb([0, 1, 2].map(|c| ((p[c] as u32 * a + 127) / 255) as u8))
     });
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, 88)
@@ -113,6 +117,7 @@ struct Resolver {
     profile: Client,
     image: Client,
     cache: Mutex<HashMap<String, Cached>>,
+    pictures: Option<PathBuf>,
 }
 impl Resolver {
     fn new() -> Result<Self, String> {
@@ -132,6 +137,7 @@ impl Resolver {
             profile,
             image,
             cache: Mutex::new(HashMap::new()),
+            pictures: None,
         })
     }
     fn fetch(&self, id: &Identity) -> Result<Arc<Vec<u8>>, String> {
@@ -176,7 +182,19 @@ impl Resolver {
         result
     }
     fn fetch_uncached(&self, id: &Identity) -> Result<Vec<u8>, String> {
-        let url = format!("{API}/{}/{}", id.platform, id.account);
+        if id.platform == "epic" {
+            if valid_epic(&id.account) {
+                if let Some(root) = &self.pictures {
+                    if let Ok(bytes) = std::fs::read(root.join(format!("{}.jpg", id.account))) {
+                        return normalize_image(&bytes);
+                    }
+                }
+            }
+        }
+        self.fetch_remote(id, API)
+    }
+    fn fetch_remote(&self, id: &Identity, api: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{api}/{}/{}", id.platform, id.account);
         let response = self
             .profile
             .get(url)
@@ -185,11 +203,10 @@ impl Resolver {
             .map_err(|_| "Profile service unavailable")?;
         let profile: Value = serde_json::from_slice(&limited(response, MAX_PROFILE)?)
             .map_err(|_| "Invalid profile response")?;
-        let avatar = profile
-            .get("avatar_url")
-            .and_then(Value::as_str)
-            .filter(|v| !v.trim().is_empty())
-            .ok_or("No avatar available")?;
+        let avatar = avatar_url(&profile).ok_or("No avatar available")?;
+        self.download(avatar)
+    }
+    fn download(&self, avatar: &str) -> Result<Vec<u8>, String> {
         let parsed = reqwest::Url::parse(avatar).map_err(|_| "Invalid avatar URL")?;
         if parsed.scheme() != "https"
             || parsed.host_str().is_none()
@@ -272,7 +289,10 @@ fn handle(mut stream: TcpStream, resolver: &Resolver) {
         .and_then(decode_path)
         .and_then(|v| Identity::parse(&v));
     let Ok(id) = id else {
-        println!("Rejected profile route: {}",path.chars().take(180).collect::<String>());
+        println!(
+            "Rejected profile route: {}",
+            path.chars().take(180).collect::<String>()
+        );
         reply(
             &mut stream,
             "404 Not Found",
@@ -297,52 +317,274 @@ fn handle(mut stream: TcpStream, resolver: &Resolver) {
         }
     }
 }
-pub fn serve() -> Result<(), String> {
-    let listener = TcpListener::bind("127.0.0.1:17895").map_err(|e| e.to_string())?;
-    let resolver = Arc::new(Resolver::new()?);
-    let active = Arc::new(AtomicUsize::new(0));
-    println!(
-        "Profile avatar bridge listening on 127.0.0.1:17895; provider={API}; no authentication or custom User-Agent"
-    );
-    for incoming in listener.incoming() {
-        let Ok(mut stream) = incoming else {
-            continue;
-        };
-        if active.fetch_add(1, Ordering::SeqCst) >= 8 {
-            active.fetch_sub(1, Ordering::SeqCst);
-            reply(
-                &mut stream,
-                "503 Service Unavailable",
-                "text/plain",
-                b"Busy",
-            );
-            continue;
-        }
-        let resolver = resolver.clone();
-        let active = active.clone();
-        thread::spawn(move || {
-            handle(stream, &resolver);
-            active.fetch_sub(1, Ordering::SeqCst);
-        });
-    }
-    Ok(())
+pub(super) fn valid_epic(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
-pub fn probe(primary: &str) -> Result<(), String> {
-    let id = Identity::parse(primary)?;
-    match Resolver::new()?.fetch(&id) {
-        Ok(jpeg) => println!(
-            "Profile resolved: {} (normalized JPEG: {} bytes)",
-            id.key(),
-            jpeg.len()
-        ),
-        Err(e) => println!("Profile resolved: {} ({e})", id.key()),
-    };
-    Ok(())
+fn avatar_url(profile: &Value) -> Option<&str> {
+    profile
+        .get("avatar_url")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null"))
+}
+pub(super) fn upload(account: &str, jpeg: Vec<u8>) -> Result<String, String> {
+    upload_to(
+        "https://pubapi.hebnix.com/rocket-profiles/upload",
+        account,
+        jpeg,
+    )
+}
+fn upload_to(endpoint: &str, account: &str, jpeg: Vec<u8>) -> Result<String, String> {
+    if !valid_epic(account) {
+        return Err("Invalid Epic account.".into());
+    }
+    let part = reqwest::blocking::multipart::Part::bytes(jpeg)
+        .file_name("avatar.jpg")
+        .mime_str("image/jpeg")
+        .map_err(|e| e.to_string())?;
+    let form = reqwest::blocking::multipart::Form::new()
+        .text("platform_id", account.to_owned())
+        .part("image", part);
+    let client = Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .post(endpoint)
+        .multipart(form)
+        .send()
+        .map_err(|e| e.to_string())?;
+    let body: Value =
+        serde_json::from_slice(&limited(response, MAX_PROFILE)?).map_err(|e| e.to_string())?;
+    body.get("image")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace("/rocket-profiles/files/", "/files/rocket-profiles/"))
+        .ok_or_else(|| "Upload response did not contain an image URL.".into())
+}
+
+pub(super) struct Runtime {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+    resolver: Arc<Resolver>,
+}
+impl Runtime {
+    pub(super) fn start(pictures: &Path) -> Result<Self, String> {
+        let mut resolver = Resolver::new()?;
+        resolver.pictures = Some(pictures.to_owned());
+        let resolver = Arc::new(resolver);
+        let listener = TcpListener::bind("127.0.0.1:17895")
+            .map_err(|e| format!("Cannot start profile picture service: {e}. Stop the old avatar test server if it is still running."))?;
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread_resolver = resolver.clone();
+        let thread = thread::spawn(move || {
+            let active = Arc::new(AtomicUsize::new(0));
+            while !thread_stop.load(Ordering::Relaxed) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(value) => value,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(40));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                if active.fetch_add(1, Ordering::SeqCst) >= 8 {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    reply(
+                        &mut stream,
+                        "503 Service Unavailable",
+                        "text/plain",
+                        b"Busy",
+                    );
+                    continue;
+                }
+                let resolver = thread_resolver.clone();
+                let active = active.clone();
+                thread::spawn(move || {
+                    handle(stream, &resolver);
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+            resolver,
+        })
+    }
+    pub(super) fn invalidate(&self) {
+        if let Ok(mut cache) = self.resolver.cache.lock() {
+            cache.clear();
+        }
+    }
+}
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_platform_uses_the_profile_service_and_null_keeps_default() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}/player", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let n = stream.read(&mut buffer).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(!request.contains("user-agent:"));
+                assert!(!request.contains("x-app-token:"));
+                paths.push(request.lines().next().unwrap().to_string());
+                reply(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    br#"{"avatar_url":null}"#,
+                );
+            }
+            paths
+        });
+        let resolver = Resolver::new().unwrap();
+        for primary in [
+            "Epic|account|0",
+            "Steam|account|0",
+            "PS4|account|0",
+            "XboxOne|account|0",
+            "Switch|account|0",
+        ] {
+            assert_eq!(
+                resolver
+                    .fetch_remote(&Identity::parse(primary).unwrap(), &api)
+                    .unwrap_err(),
+                "No avatar available"
+            );
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            ["epic", "steam", "psn", "xboxone", "switch"]
+                .map(|p| format!("get /player/{p}/account http/1.1"))
+        );
+    }
+    #[test]
+    fn partial_alpha_is_blended_against_black() {
+        let source = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 128]));
+        let mut png = Cursor::new(Vec::new());
+        source.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let jpeg = normalize_image(png.get_ref()).unwrap();
+        let rgb = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        let pixel = rgb.get_pixel(64, 64);
+        assert!((120..=136).contains(&pixel[0]));
+        assert!(pixel[1] < 10 && pixel[2] < 10);
+    }
+    #[test]
+    fn null_or_missing_avatar_keeps_the_default() {
+        for profile in [
+            serde_json::json!({}),
+            serde_json::json!({"avatar_url": null}),
+            serde_json::json!({"avatar_url": ""}),
+            serde_json::json!({"avatar_url": " null "}),
+        ] {
+            assert_eq!(avatar_url(&profile), None);
+        }
+        let profile = serde_json::json!({"avatar_url": "https://example.com/avatar.png"});
+        assert_eq!(avatar_url(&profile), Some("https://example.com/avatar.png"));
+    }
+    #[test]
+    fn imported_picture_resolves_without_network() {
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-avatar-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = Identity::parse("Epic|0123456789abcdef0123456789abcdef|0").unwrap();
+        let source = image::RgbImage::from_pixel(3, 7, image::Rgb([0, 200, 255]));
+        let mut png = Cursor::new(Vec::new());
+        source.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        std::fs::write(root.join(format!("{}.jpg", id.account)), png.get_ref()).unwrap();
+        let mut resolver = Resolver::new().unwrap();
+        resolver.profile = Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .build()
+            .unwrap();
+        resolver.pictures = Some(root.clone());
+        let result = resolver.fetch(&id).unwrap();
+        assert!(result.starts_with(&[0xff, 0xd8]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn upload_matches_plugin_multipart_contract() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/upload", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(str::trim)
+                                .and_then(|n| n.parse().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let body = br#"{"image":"https://example.com/me.jpg"}"#;
+            reply(&mut stream, "201 Created", "application/json", body);
+            String::from_utf8(request).unwrap()
+        });
+        let owner = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            upload_to(&endpoint, owner, b"test-image-bytes".to_vec()).unwrap(),
+            "https://example.com/me.jpg"
+        );
+        let request = server.join().unwrap();
+        assert!(request.contains("name=\"platform_id\"\r\n\r\n0123456789abcdef0123456789abcdef"));
+        assert!(request.contains("name=\"image\"; filename=\"avatar.jpg\""));
+        assert!(request.contains("test-image-bytes"));
+        let headers = request
+            .split("\r\n\r\n")
+            .next()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(!headers.contains("user-agent:"));
+        assert!(!headers.contains("x-app-token:"));
+        assert!(!headers.contains("authorization:"));
+    }
     #[test]
     fn identities_match_sdk_platform_aliases() {
         assert_eq!(Identity::parse("Xbox|1234|0").unwrap().platform, "xboxone");
@@ -374,7 +616,14 @@ mod tests {
         let jpeg = normalize_image(png.get_ref()).unwrap();
         let decoded = image::load_from_memory(&jpeg).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (128, 128));
-        assert!(decoded.to_rgb8().get_pixel(64, 64)[0] > 245);
+        assert!(
+            decoded
+                .to_rgb8()
+                .get_pixel(64, 64)
+                .0
+                .iter()
+                .all(|v| *v < 10)
+        );
     }
     #[test]
     fn requests_have_no_token_or_user_agent() {

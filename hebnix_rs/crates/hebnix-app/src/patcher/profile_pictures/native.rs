@@ -4,6 +4,15 @@ use super::*;
 use std::collections::HashSet;
 const PREFIX: &str = "http://127.0.0.1:17895/profile/";
 const PERSONA: &str = "GFxData_Workshop_TA.OnAvatarPersonaHandler";
+pub(super) const TARGETS: [&str; 7] = [
+    CALLBACK,
+    PERSONA,
+    "GFxData_PlayerAvatar_TA.SetAvatar",
+    "GFxData_PlayerVanity_TA.UpdatePlayerAvatars",
+    "GFxData_PRI_TA.UpdatePlayerAvatar",
+    "GFxData_Persona_TA.UpdatePlayerAvatar",
+    "GFxData_Persona_TA.HandleGetAvatar",
+];
 
 fn text(value: &str) -> Code {
     let mut code = Code::raw(&[0x1f]);
@@ -338,7 +347,20 @@ fn generic_callback(package: &UpkPackage, original: &[u8]) -> Result<(Vec<u8>, i
     // Prefix mismatch goes to vanilla Workshop behavior. Failed avatar
     // downloads return without changing any player's current texture.
     let texture_base = 3 + prefix.memory();
-    let texture_guard = guarded(texture, assignment, texture_base)?;
+    let friends = friends_completion(
+        package,
+        texture_base + 3 + texture.memory() + assignment.memory(),
+    )?;
+    let assignment = assignment.then(friends);
+    // The friends block already contains an absolute guard; validate its
+    // constituents at construction and bind the outer guard here.
+    validate(&texture)?;
+    let end = u16::try_from(texture_base + 3 + texture.memory() + assignment.memory())
+        .map_err(|_| "Friend callback branch overflow")?;
+    let texture_guard = Code::raw(&[0x07])
+        .then(Code::raw(&end.to_le_bytes()))
+        .then(texture)
+        .then(assignment);
     let length = 3 + prefix.memory() + texture_guard.memory() + 2;
     let mut code = Code::raw(&[0x07])
         .then(Code::raw(&(length as u16).to_le_bytes()))
@@ -364,6 +386,20 @@ fn avatar_row_hook(package: &UpkPackage, base: usize) -> Result<Code, String> {
         0x2b,
         "GFxData_PlayerAvatar_TA.SetAvatar.InPlayerAvatar",
     )?;
+    identity_request_hook(
+        package,
+        avatar.clone(),
+        field(package, avatar, "PlayerVanity_TA.PlayerID")?,
+        base,
+    )
+}
+
+fn identity_request_hook(
+    package: &UpkPackage,
+    owner: Code,
+    id: Code,
+    base: usize,
+) -> Result<Code, String> {
     let bridge = data_row(package, "GFxData_Workshop_TA")?;
     let store = field(
         package,
@@ -381,19 +417,13 @@ fn avatar_row_hook(package: &UpkPackage, base: usize) -> Result<Code, String> {
         )?,
         object(package, "ProjectX.GFxDataStore_X.CreateObject.ReturnValue")?,
     )?;
-    let live = condition_not_none(avatar.clone());
+    let live = condition_not_none(owner);
     // Bind the nested guards from their actual absolute memory starts.
     let inside = base + 3 + live.memory();
     let ensure = guarded(condition_none(bridge.clone()), create, inside)?;
     let request = context(
         bridge,
-        call(
-            package,
-            PERSONA,
-            field(package, avatar, "PlayerVanity_TA.PlayerID")?
-                .then(Code::raw(&[0x2a]))
-                .then(text("")),
-        )?,
+        call(package, PERSONA, id.then(Code::raw(&[0x2a])).then(text("")))?,
         0,
     )?;
     validate(&request)?;
@@ -407,6 +437,86 @@ fn avatar_row_hook(package: &UpkPackage, base: usize) -> Result<Code, String> {
         .then(live)
         .then(inner);
     Ok(code)
+}
+
+fn persona_texture(package: &UpkPackage) -> Result<Code, String> {
+    let id = field(
+        package,
+        variable(package, 0x01, "GFxData_Persona_TA.Persona")?,
+        "Persona_TA.PlayerID",
+    )?;
+    let manager = field(
+        package,
+        data_row(package, "GFxData_PlayerVanity_TA")?,
+        "GFxData_PlayerVanity_TA.VanityMgr",
+    )?;
+    let avatar = context(
+        manager,
+        call(package, "VanitySetManager_TA.GetAvatar", id)?,
+        object(package, "VanitySetManager_TA.GetAvatar.ReturnValue")?,
+    )?;
+    field(package, avatar, "PlayerVanity_TA.ToPlayer")
+}
+
+fn cached_persona_picture(package: &UpkPackage, base: usize) -> Result<Code, String> {
+    let texture = persona_texture(package)?;
+    let assign = Code::raw(&[0x0f])
+        .then(variable(package, 0x01, "GFxData_Persona_TA.PlayerAvatar")?)
+        .then(texture.clone());
+    guarded(condition_not_none(texture), assign, base)
+}
+
+fn friends_completion(package: &UpkPackage, base: usize) -> Result<Code, String> {
+    // Friends own Texture properties, not GFxData_PlayerAvatar rows. Look up
+    // only the downloaded identity, and never create a persona for a stranger.
+    // Borrow the callback's existing int local; vanilla initializes it itself.
+    let index = variable(package, 0x2b, &format!("{CALLBACK}.WorkshopItemIdx"))?;
+    let lookup = context(
+        data_row(package, "GFxData_Personas_TA")?,
+        call(
+            package,
+            "GFxData_Personas_TA.GetFromMap",
+            target_id(package)?,
+        )?,
+        object(package, "GFxData_Personas_TA.GetFromMap.ReturnValue")?,
+    )?;
+    let assign = Code::raw(&[0x0f]).then(index.clone()).then(lookup);
+    validate(&assign)?;
+    let store = field(
+        package,
+        variable(package, 0x01, "ProjectX.GFxDataRow_X.Shell")?,
+        "ProjectX.GFxShell_X.DataStore",
+    )?;
+    let row = context(
+        store,
+        call(
+            package,
+            "ProjectX.GFxDataStore_X.GetObject",
+            Code::raw(&[0x20])
+                .reference(object(package, "GFxData_Persona_TA")?)
+                .then(index.clone()),
+        )?,
+        object(package, "ProjectX.GFxDataStore_X.GetObject.ReturnValue")?,
+    )?;
+    let row = Code::raw(&[0x2e])
+        .reference(object(package, "GFxData_Persona_TA")?)
+        .then(row);
+    let update = context(
+        row,
+        call(
+            package,
+            "GFxData_Persona_TA.HandleGetAvatar",
+            target_id(package)?
+                .then(image_texture(package)?)
+                .then(text("")),
+        )?,
+        0,
+    )?;
+    let found = Code::raw(&[0x9a])
+        .then(index)
+        .then(Code::raw(&[0x1d, 0xff, 0xff, 0xff, 0xff, 0x16]));
+    let update = guarded(found, update, base + assign.memory())?;
+    Ok(assign.then(update))
 }
 
 fn replace_function(
@@ -436,6 +546,53 @@ fn function_body(package: &UpkPackage, path: &str) -> Result<Vec<u8>, String> {
     let e = &package.exports[object(package, path)? as usize - 1];
     let storage = package.read_int(e.serial_offset + 44)? as usize;
     Ok(package.image[e.serial_offset + 48..e.serial_offset + 48 + storage].to_vec())
+}
+
+fn match_avatar_fallback(package: &UpkPackage, original: &[u8]) -> Result<Code, String> {
+    // Vanilla assigns PRI.PlayerAvatar, optionally substitutes the local
+    // controller's avatar, then calls GetOrCreate. Remote client PRIs can lack
+    // PlayerAvatar entirely, or have a placeholder from the host. Resolve
+    // remote avatars in this client's own vanity manager by match PlayerID.
+    // The existing branch at storage 26 lands at memory 267, exactly the
+    // insertion point; its destination must continue to include the fallback.
+    if original.len() != 211
+        || original.get(26..29) != Some(&[0x07, 0x0b, 0x01])
+        || original.get(171..173) != Some(&[0x0f, 0x01])
+        || original.get(208..) != Some(&[0x04, 0x0b, 0x4c])
+    {
+        return Err("Match avatar row layout changed".into());
+    }
+    let avatar = variable(
+        package,
+        0x2b,
+        "GFxData_PRI_TA.UpdatePlayerAvatar.PlayerAvatar",
+    )?;
+    let manager = field(
+        package,
+        data_row(package, "GFxData_PlayerVanity_TA")?,
+        "GFxData_PlayerVanity_TA.VanityMgr",
+    )?;
+    let resolved = context(
+        manager,
+        call(
+            package,
+            "VanitySetManager_TA.GetAvatar",
+            variable(package, 0x01, "GFxData_PRI_TA.PlayerID")?,
+        )?,
+        object(package, "VanitySetManager_TA.GetAvatar.ReturnValue")?,
+    )?;
+    let assign = Code::raw(&[0x0f]).then(avatar.clone()).then(resolved);
+    let missing = guarded(condition_none(avatar), assign.clone(), 267)?;
+    let local = context(
+        variable(package, 0x01, "GFxData_PRI_TA.PRI")?,
+        call(package, "PRI_TA.IsLocalPlayerPRI", Code::default())?,
+        object(package, "PRI_TA.IsLocalPlayerPRI.ReturnValue")?,
+    )?;
+    let remote = Code::raw(&[0x81]).then(local).then(Code::raw(&[0x16]));
+    // Each guard binds its own expanded offset. Vanilla's original branch
+    // still lands at the first guard, and the original row assignment follows.
+    let resolve_remote = guarded(remote, assign, 267 + missing.memory())?;
+    Ok(missing.then(resolve_remote))
 }
 
 pub(super) struct Changes {
@@ -507,5 +664,64 @@ pub(super) fn patch(package: &mut UpkPackage) -> Result<Changes, String> {
         111 + process.memory() as i32,
         (111, 75),
     )?);
-    Ok(Changes { exports: changed.into_iter().collect(), renamed })
+    let match_update = "GFxData_PRI_TA.UpdatePlayerAvatar";
+    let original = function_body(package, match_update)?;
+    let fallback = match_avatar_fallback(package, &original)?;
+    let mut body = original[..171].to_vec();
+    body.extend(&fallback.bytes);
+    body.extend(&original[171..]);
+    changed.insert(replace_function(
+        package,
+        match_update,
+        &body,
+        331 + fallback.memory() as i32,
+        (331, 211),
+    )?);
+    let update = "GFxData_Persona_TA.UpdatePlayerAvatar";
+    let original = function_body(package, update)?;
+    if original.get(76..) != Some(&[0x04, 0x0b, 0x4c]) {
+        return Err("Friend avatar request layout changed".into());
+    }
+    let persona = variable(package, 0x01, "GFxData_Persona_TA.Persona")?;
+    let request = identity_request_hook(
+        package,
+        persona.clone(),
+        field(package, persona, "Persona_TA.PlayerID")?,
+        116,
+    )?;
+    let cached = cached_persona_picture(package, 116 + request.memory())?;
+    let mut body = original[..76].to_vec();
+    body.extend(&request.bytes);
+    body.extend(&cached.bytes);
+    body.extend([0x04, 0x0b, 0x4c]);
+    changed.insert(replace_function(
+        package,
+        update,
+        &body,
+        119 + request.memory() as i32 + cached.memory() as i32,
+        (119, 79),
+    )?);
+
+    // Cached pictures win over late platform callbacks, while failed/missing
+    // service pictures preserve the texture returned by the normal provider.
+    let handle = "GFxData_Persona_TA.HandleGetAvatar";
+    let original = function_body(package, handle)?;
+    if original.get(11..) != Some(&[0x04, 0x0b, 0x4c]) {
+        return Err("Friend avatar completion layout changed".into());
+    }
+    let cached = cached_persona_picture(package, 19)?;
+    let mut body = original[..11].to_vec();
+    body.extend(&cached.bytes);
+    body.extend([0x04, 0x0b, 0x4c]);
+    changed.insert(replace_function(
+        package,
+        handle,
+        &body,
+        22 + cached.memory() as i32,
+        (22, 14),
+    )?);
+    Ok(Changes {
+        exports: changed.into_iter().collect(),
+        renamed,
+    })
 }

@@ -19,7 +19,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.2.6";
+pub const APP_VERSION: &str = "2.3.0";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -1214,11 +1214,14 @@ impl LiteApp {
             if ui.button(t("action-open-plugins-folder")).clicked() {
                 let _ = open::that(&self.plugin_dir);
             }
-            if ui.button(t("plugins-install-plugin")).clicked() {
-                self.install_modal = InstallModal {
-                    open: true,
-                    ..Default::default()
-                };
+            if ui.button(t("install-modal-install-from-zip")).clicked() {
+                let dialog = rfd::FileDialog::new().add_filter(t("install-modal-plugin-archive"), &["zip"]);
+                if let Some(file) = winutil::parent_file_dialog(dialog).pick_file() {
+                    match install_zip(&file, &self.plugin_dir) {
+                        Ok(()) => { self.plugin_mgr.refresh(&mut self.config, true); self.save_config(); }
+                        Err(error) => self.console.write(format!("[Plugins] ZIP installation failed: {error}")),
+                    }
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(t("plugins-reload")).clicked() {
@@ -1404,7 +1407,7 @@ impl LiteApp {
                     let tx = self.tx.clone();
                     let ctx = ctx.clone();
                     std::thread::spawn(move || {
-                        let message = match crate::update::download_update(&setup_url, &progress) {
+                        let message = match crate::update::download_update(&setup_url, true, &progress) {
                             Ok(staged) => AppMsg::AppUpdateReady { staged },
                             Err(error) => AppMsg::AppUpdateFailed { error },
                         };

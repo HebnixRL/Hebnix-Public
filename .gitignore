@@ -45,3 +45,4 @@ hebnix_rs/crates/hebnix-app/src/_color_scanner.rs
 /hebnix_rs/crates/hebnix-app/testdata
 
 /tools/i18n-validator/target/
+/tools
