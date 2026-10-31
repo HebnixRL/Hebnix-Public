@@ -356,6 +356,37 @@ fn stage_package(cooked: &Path, map: &Path, name: &str, marker: &Path) -> Result
     Ok(true)
 }
 
+/// one line per synced peer title, with whether its map is ready to join
+pub fn offer_status(cooked: &Path) -> Vec<String> {
+    let Some(folder) = cooked.parent().map(|game| game.join(BRIDGE)) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(&folder) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "title"))
+        .filter_map(|p| {
+            let bytes = fs::read(&p).ok()?;
+            let units: Vec<u16> = bytes
+                .get(2..)?
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            let ready = p.with_extension("object").exists();
+            Some(format!(
+                "{} - {}",
+                String::from_utf16_lossy(&units),
+                if ready { "ready to join" } else { "not on this PC yet" }
+            ))
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
 /// bounded peer metadata crosses into the game through local data files only
 pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
     if !enabled(cooked) {
@@ -489,6 +520,13 @@ mod tests {
         );
         assert!(!folder.join("127.10.0.2_7777.object").exists());
         assert_eq!(fs::read(cooked.join("original_name.upk")).unwrap(), b"local test map");
+        assert_eq!(
+            offer_status(&cooked),
+            [
+                "Not downloaded - not on this PC yet",
+                "Readable workshop title \u{2603} - ready to join"
+            ]
+        );
         // a different package already using the name is never replaced or removed
         fs::write(cooked.join("taken.upk"), b"game package").unwrap();
         fs::write(root.join("taken.udk"), b"peer map data").unwrap();

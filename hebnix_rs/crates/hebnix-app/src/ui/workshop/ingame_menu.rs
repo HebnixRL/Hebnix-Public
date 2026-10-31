@@ -473,6 +473,9 @@ impl InGameMenuState {
                     }
                 }
             });
+            for line in crate::patcher::workshop_lan_trial::offer_status(&cooked) {
+                ui.label(format!("Peer map: {line}"));
+            }
         });
     }
 }
