@@ -11,6 +11,8 @@ const TITLE: &str = "GFxData_LanServer_TA.GetLocalizedMapName";
 const JOIN: &str = "GFxData_LanServer_TA.GetJoinOptions";
 const RECEIPT: &str = "WorkshopLanTrial.json";
 const BRIDGE: &str = "HbxLanTrial";
+// object name forms tried in order: absolute, game-relative, bare stem, absolute with extension
+const CANDIDATES: [&str; 4] = [".object", ".object2", ".object3", ".object4"];
 
 #[derive(Clone, Default)]
 struct Code {
@@ -102,28 +104,34 @@ fn prefix(p: &UpkPackage, path: &str) -> Result<Code, String> {
             0,
         );
     }
-    // loading TheWorld asks the engine to resolve the original custom package;
-    // the returned object is logged so failure is distinguishable from Error 40
-    let load = Code::raw(&[0x1c])
-        .reference(object(p, "Core.Object.DynamicLoadObject")?)
-        .then(destination.clone())
-        .then(Code::raw(&[0x20]).reference(object(p, "Core.Object")?))
-        .then(Code::raw(&[0x27, 0x16]));
-    let message = concat(
-        text("HBX LAN preload result: "),
-        Code::raw(&[0x38, 0x56]).then(load),
-    );
-    let log = Code::raw(&[0xe7])
-        .then(message)
-        .then(Code::raw(&[0x48, 0x48, 0x16]));
+    // each candidate name form is tried and logged, so the log shows which one
+    // the engine resolves; loading TheWorld asks it to find the custom package
     let request = Code::raw(&[0xe7])
         .then(concat(
             text("HBX LAN join preparation: "),
             variable(p, 0x01, "GFxData_LanServer_TA.ServerId")?,
         ))
         .then(Code::raw(&[0x48, 0x48, 0x16]));
-    let guard = guarded(read_file(p, ".object", destination)?, log, request.memory())?;
-    Ok(request.then(guard))
+    let mut offset = request.memory();
+    let mut code = request;
+    for (n, extension) in CANDIDATES.iter().enumerate() {
+        let load = Code::raw(&[0x1c])
+            .reference(object(p, "Core.Object.DynamicLoadObject")?)
+            .then(destination.clone())
+            .then(Code::raw(&[0x20]).reference(object(p, "Core.Object")?))
+            .then(Code::raw(&[0x27, 0x16]));
+        let message = concat(
+            concat(text(&format!("HBX LAN preload {}: ", n + 1)), destination.clone()),
+            concat(text(" = "), Code::raw(&[0x38, 0x56]).then(load)),
+        );
+        let log = Code::raw(&[0xe7])
+            .then(message)
+            .then(Code::raw(&[0x48, 0x48, 0x16]));
+        let guard = guarded(read_file(p, extension, destination.clone())?, log, offset)?;
+        offset += guard.memory();
+        code = code.then(guard);
+    }
+    Ok(code)
 }
 fn payload(p: &UpkPackage, path: &str) -> Result<Vec<u8>, String> {
     let index = object(p, path)? as usize - 1;
@@ -347,22 +355,46 @@ pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
         if let Some(map) = &offer.map {
             let map = fs::canonicalize(map).map_err(|e| e.to_string())?;
             // UE object paths use the package stem, followed by TheWorld
-            let object = map
-                .with_extension("")
-                .to_string_lossy()
-                .trim_start_matches(r"\\?\")
-                .to_string()
-                + ".TheWorld";
-            let path = folder.join(format!("{key}.object"));
-            unicode_file(&path, &object)?;
-            keep.insert(path);
+            let plain = map.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+            let stem = map.with_extension("");
+            let stem = stem.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+            let name = map
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let relative = cooked
+                .parent()
+                .and_then(|game| fs::canonicalize(game).ok())
+                .and_then(|game| {
+                    let rest = map.with_extension("");
+                    let rest = rest.strip_prefix(&game).ok()?;
+                    Some(format!(r"..\..\TAGame\{}.TheWorld", rest.display()))
+                });
+            let forms = [
+                Some(format!("{stem}.TheWorld")),
+                relative,
+                Some(format!("{name}.TheWorld")),
+                Some(format!("{plain}.TheWorld")),
+            ];
+            for (extension, form) in CANDIDATES.iter().zip(forms) {
+                let path = folder.join(format!("{key}{extension}"));
+                match form {
+                    Some(form) => {
+                        unicode_file(&path, &form)?;
+                        keep.insert(path);
+                    }
+                    None => {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+            }
         }
     }
     for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if matches!(
             path.extension().and_then(|e| e.to_str()),
-            Some("title" | "object")
+            Some("title" | "object" | "object2" | "object3" | "object4")
         ) && !keep.contains(&path)
         {
             fs::remove_file(path).map_err(|e| e.to_string())?;
