@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 const CALLBACK: &str = "GFxData_Workshop_TA.OnEventImageDownloaded";
-const PATCH_VERSION: u32 = 3;
+const PATCH_VERSION: u32 = 5;
 #[path = "profile_pictures/native.rs"]
 mod native;
 
@@ -508,9 +508,30 @@ fn validate(code: &Code) -> Result<(), String> {
                     self.take(2)?;
                     self.expression(depth + 1)?;
                 }
+                0x38 => {
+                    self.take(1)?;
+                    self.expression(depth + 1)?;
+                }
                 0x43 => {
                     self.take(8)?;
                     self.reference()?;
+                }
+                0x45 => {
+                    self.expression(depth + 1)?;
+                    let yes_skip = u16::from_le_bytes(self.take(2)?.try_into().unwrap()) as usize;
+                    let start = self.at;
+                    let refs = self.refs;
+                    self.expression(depth + 1)?;
+                    if self.at - start + 4 * (self.refs - refs) != yes_skip {
+                        return Err("Conditional true skip/memory size mismatch".into());
+                    }
+                    let no_skip = u16::from_le_bytes(self.take(2)?.try_into().unwrap()) as usize;
+                    let start = self.at;
+                    let refs = self.refs;
+                    self.expression(depth + 1)?;
+                    if self.at - start + 4 * (self.refs - refs) != no_skip {
+                        return Err("Conditional false skip/memory size mismatch".into());
+                    }
                 }
                 0x57 => {
                     if self.take(1)?[0] != 0x28 {
@@ -607,15 +628,18 @@ mod tests {
         assert!(!installed(&root).unwrap());
         set_copy_enabled(&root, true).unwrap();
         assert!(installed(&root).unwrap());
-        // Upgrade both older receipt layouts. Friends were untouched in both;
+        let patched = UpkPackage::load(&directory.join("TAGame.upk")).unwrap();
+        native::assert_friend_call_safety(&patched);
+        drop(patched);
+        // Upgrade all older receipts. Friends were untouched before version 3;
         // the match-row fallback was also absent in version 1.
-        for version in [1, 2] {
+        for version in [1, 2, 3, 4] {
             let mut legacy = read_receipt(&root).unwrap();
             let omitted: Vec<_> = legacy
                 .exports
                 .iter()
                 .filter(|e| {
-                    e.path.starts_with("GFxData_Persona_TA.")
+                    (version < 3 && e.path.starts_with("GFxData_Persona_TA."))
                         || (version == 1 && e.path == "GFxData_PRI_TA.UpdatePlayerAvatar")
                 })
                 .cloned()

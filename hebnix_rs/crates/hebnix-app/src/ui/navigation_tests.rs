@@ -42,10 +42,6 @@ fn game_file_tools_share_the_studio_sections() {
         ItemsMode::ArenaBackgrounds.section(),
         Some(StudioSection::Appearance)
     );
-    assert_eq!(
-        ItemsMode::MenuBackground.section(),
-        Some(StudioSection::Menus)
-    );
     assert_eq!(ItemsMode::Manage.section(), Some(StudioSection::Active));
 }
 

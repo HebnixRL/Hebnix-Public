@@ -813,6 +813,7 @@ pub fn apply(
 }
 
 pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
+    super::workshop_lan_trial::set_mode(cooked, "off")?;
     super::item_name::workshop_description(cooked, backups, false)?;
     set_all(cooked, false)?;
     write_list(cooked, &[])?;
@@ -828,6 +829,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
 pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
     if backups.join(ENABLED).is_file() {
         set_live(cooked, PACKAGE, tagame_values, true)?;
+        super::workshop_lan_trial::reapply(cooked)?;
     }
     Ok(())
 }

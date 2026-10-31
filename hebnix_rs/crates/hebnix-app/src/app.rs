@@ -13,6 +13,8 @@ mod name;
 mod spoofer_controls;
 #[path = "ui/titles.rs"]
 mod titles;
+#[path = "ui/menu_textures.rs"]
+mod menu_textures;
 #[cfg(test)]
 #[path = "ui/titles_tests.rs"]
 mod titles_tests;
@@ -396,7 +398,6 @@ enum ItemsMode {
     BallAppearance,
     GameColours,
     ArenaBackgrounds,
-    MenuBackground,
     ItemNames,
     Manage,
     ItemsActive,
@@ -408,7 +409,6 @@ enum StudioSection {
     Tools,
     CustomAssets,
     Appearance,
-    Menus,
     Active,
 }
 
@@ -419,7 +419,6 @@ impl ItemsMode {
             Self::SpeedPatch => StudioSection::Tools,
             Self::Patching | Self::ItemNames => StudioSection::CustomAssets,
             Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds => StudioSection::Appearance,
-            Self::MenuBackground => StudioSection::Menus,
             Self::Manage => StudioSection::Active,
         })
     }
@@ -445,7 +444,6 @@ enum PatcherSubTab {
     Swapper(crate::swapper::SwapCategory),
     Active,
     Presets,
-    Loadouts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -483,6 +481,7 @@ enum SpooferSubTab {
     ProfilePictures,
     TitleRank,
     Friends,
+    MenuTextures,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -653,6 +652,7 @@ pub struct HebnixApp {
     spoofer_title_glow_color: [u8; 3],
     title_editor: titles::TitleEditorState,
     profile_pictures: crate::profile_pictures::State,
+    menu_textures: menu_textures::MenuTextureState,
     spoofer_title_target: Option<String>,
     spoofer_titles: Vec<TitleSpoofSettings>,
     spoofer_title_filter: String,
@@ -1161,6 +1161,7 @@ impl HebnixApp {
             spoofer_title_glow_color: spoofer_title_glow_color.unwrap_or(spoofer_title_color),
             title_editor,
             profile_pictures: crate::profile_pictures::State::new(&base_dir),
+            menu_textures: Default::default(),
             spoofer_title_target,
             spoofer_titles,
             spoofer_title_filter: String::new(),
@@ -1528,6 +1529,18 @@ impl HebnixApp {
         self.patcher_boost.poll_ops(&self.tx, &mut self.config);
         self.patcher_decal
             .handle_op_result(&self.tx, &mut self.config);
+        self.colours.poll();
+        if !self.colours.is_busy()
+            && let Some(cars) = self.presets.pending_cars.take()
+        {
+            self.colours.begin(
+                crate::patcher::colours::ColourAction::ApplyCars(cars),
+                cooked_pc,
+                backups_dir,
+                &self.tx,
+                ctx,
+            );
+        }
         if self.patcher_ball.processing_target.is_none()
             && self.patcher_ball.active_ball.is_none()
             && let Some(name) = self.presets.pending_ball.take()
@@ -1608,6 +1621,7 @@ impl HebnixApp {
         self.presets.pending_ball = None;
         self.presets.pending_boost = None;
         self.presets.pending_decals.clear();
+        self.presets.pending_cars = None;
         let swap_report = self
             .swapper
             .apply_preset_swaps(&preset.swaps, cooked_pc, backups_dir);
@@ -1676,6 +1690,20 @@ impl HebnixApp {
                 ) {
                     messages.push(error);
                 } else {
+                    queued += 1;
+                }
+            }
+            if let Some(cars) = patches
+                .and_then(|p| p.get("car_colours"))
+                .filter(|v| !v.is_null())
+                .and_then(|v| serde_json::from_value::<crate::patcher::colours::CarColours>(v.clone()).ok())
+            {
+                if !spoofer::is_admin()
+                    && crate::patcher::colours::needs_admin(cooked_pc)
+                {
+                    messages.push("Car colours need administrator rights; apply them from the Colours tab".into());
+                } else {
+                    self.presets.pending_cars = Some(cars);
                     queued += 1;
                 }
             }
@@ -1777,6 +1805,7 @@ impl HebnixApp {
                         "boost": self.patcher_boost.active_boost,
                         "decals": self.patcher_decal.active_decals,
                         "cars": self.patcher_car.active_cars,
+                        "car_colours": self.colours.settings.car_colours_patch(),
                     })
                 } else {
                     serde_json::Value::Null
@@ -3597,6 +3626,11 @@ impl HebnixApp {
                         });
                         ui.selectable_value(
                             &mut self.spoofer_subtab,
+                            SpooferSubTab::MenuTextures,
+                            "Menus (experimental)",
+                        );
+                        ui.selectable_value(
+                            &mut self.spoofer_subtab,
                             SpooferSubTab::Friends,
                             t("spoofer-friends"),
                         );
@@ -3616,6 +3650,10 @@ impl HebnixApp {
                     self.profile_pictures.show(ui, std::path::Path::new(&self.config.settings.rl_path));
                     return;
                 }
+                if self.spoofer_subtab == SpooferSubTab::MenuTextures {
+                    self.render_menu_textures_page(ui);
+                    return;
+                }
                 if self.spoofer_subtab == SpooferSubTab::Username {
                     self.render_name_page(ui);
                     return;
@@ -3631,6 +3669,9 @@ impl HebnixApp {
                             unreachable!("Titles uses its own scrolling columns")
                         }
                         SpooferSubTab::ProfilePictures => unreachable!("Profile pictures uses its own page"),
+                        SpooferSubTab::MenuTextures => {
+                            unreachable!("Menu textures use their own scroll area")
+                        }
                         SpooferSubTab::Friends => {
                             ui.heading(t("spoofer-friends"));
                             ui.add_space(8.0);
@@ -7083,7 +7124,7 @@ impl HebnixApp {
             });
         }
         if self.items_subtab == ItemsSubTab::Loadouts {
-            self.loadouts.show(ui);
+            self.loadouts.show(ui, &self.swapper, &mut self.presets);
             return;
         }
         let mode = match self.items_subtab {
@@ -7103,7 +7144,6 @@ impl HebnixApp {
             for (value, key) in [
                 (StudioSection::CustomAssets, "studio-custom-assets"),
                 (StudioSection::Appearance, "studio-appearance"),
-                (StudioSection::Menus, "studio-menus"),
                 (StudioSection::Tools, "studio-tools"),
                 (StudioSection::Active, "nav-active"),
             ] {
@@ -7114,7 +7154,6 @@ impl HebnixApp {
             self.items_mode = match section {
                 StudioSection::CustomAssets => ItemsMode::Patching,
                 StudioSection::Appearance => ItemsMode::GameColours,
-                StudioSection::Menus => ItemsMode::MenuBackground,
                 StudioSection::Tools => ItemsMode::SpeedPatch,
                 StudioSection::Active => ItemsMode::Manage,
             };
@@ -7153,13 +7192,6 @@ impl HebnixApp {
                                 (ItemsMode::BallAppearance, "nav-ball-shape"),
                                 (ItemsMode::WheelAlignment, "app-wheel-alignment"),
                                 (ItemsMode::ArenaBackgrounds, "nav-arena-backgrounds"),
-                            ] {
-                                ui.selectable_value(&mut self.items_mode, value, t(key));
-                            }
-                        }
-                        StudioSection::Menus => {
-                            for (value, key) in [
-                                (ItemsMode::MenuBackground, "nav-menu-background"),
                             ] {
                                 ui.selectable_value(&mut self.items_mode, value, t(key));
                             }
@@ -7628,7 +7660,6 @@ impl HebnixApp {
                         PatcherSubTab::Presets => {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
                         }
-                        PatcherSubTab::Loadouts => self.loadouts.show(ui),
                     }
                 } else if mode == ItemsMode::ItemsActive {
                     self.render_active_items(ui, &cooked_pc, &backups_dir);
@@ -7715,9 +7746,6 @@ impl HebnixApp {
                         ItemsMode::ArenaBackgrounds => {
                             crate::ui::workshop::StudioMapPage::ArenaBackgrounds
                         }
-                        ItemsMode::MenuBackground => {
-                            crate::ui::workshop::StudioMapPage::MenuBackground
-                        }
                         _ => unreachable!("studio mode has an editor"),
                     };
                     self.workshop.render_studio_page(
@@ -7746,6 +7774,8 @@ impl HebnixApp {
             Tab::Home => self.render_home(ui),
             Tab::Console => self.render_console_tab(ui),
             Tab::Workshop => {
+                let join_rl_path = self.config.settings.rl_path.clone();
+                self.workshop.render_join_prompt(ui.ctx(), &join_rl_path);
                 let rl_path = self.config.settings.rl_path.clone();
                 let rl_launch = self.config.rl_launch.clone();
                 let tx = self.tx.clone();

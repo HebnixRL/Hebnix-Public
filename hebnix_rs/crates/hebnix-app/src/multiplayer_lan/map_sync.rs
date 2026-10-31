@@ -78,6 +78,9 @@ pub struct SlotMap {
     pub slot: String,
     pub id: String,
     pub name: String,
+    /// original package filename without its extension, separate from the title
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
     /// imported by the player rather than from the workshop cdn (derived
     /// from the id on receive, never taken from the wire)
     #[serde(default)]
@@ -624,6 +627,7 @@ pub fn fetch_peer_info(peer: IpAddr, port: u16) -> Result<PeerInfoReply, String>
             .filter(|map| valid_map_id(&map.id))
             .take(MAX_MAPS_PER_PEER)
             .map(|map| SlotMap {
+                file: if valid_package_stem(&map.file) { map.file.clone() } else { String::new() },
                 local: is_local_map_id(&map.id),
                 name: clean_name(&map.name),
                 author: clean_name(&map.author),
@@ -632,6 +636,18 @@ pub fn fetch_peer_info(peer: IpAddr, port: u16) -> Result<PeerInfoReply, String>
             })
             .collect(),
     })
+}
+
+pub fn valid_package_stem(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    !value.is_empty()
+        && value.len() <= 180
+        && !value.ends_with(['.', ' '])
+        && !value.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '.'])
+        && !value.chars().any(char::is_control)
+        && !matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        && !(upper.len() == 4 && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit())
 }
 
 /// downloads a map from a peer into `dest`. the file only lands at `dest` if
@@ -743,6 +759,20 @@ fn download(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn package_filename_is_separate_and_cannot_escape_its_folder() {
+        for invalid in ["", "../map", "C:\\map", "..", "map.udk", "map\n", "CON", "lpt1", "map "] {
+            assert!(!valid_package_stem(invalid), "{invalid:?}");
+        }
+        assert!(valid_package_stem("Noob_Dribble-v2"));
+        let legacy: SlotMap = serde_json::from_str(r#"{"slot":"Hosting","id":"123","name":"Readable title"}"#).unwrap();
+        assert!(legacy.file.is_empty());
+        let current = SlotMap { file: "Noob_Dribble-v2".into(), ..legacy };
+        let restored: SlotMap = serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(restored.file, "Noob_Dribble-v2");
+        assert_eq!(restored.name, "Readable title");
+    }
 
     fn slot(id: &str) -> SlotMap {
         SlotMap {

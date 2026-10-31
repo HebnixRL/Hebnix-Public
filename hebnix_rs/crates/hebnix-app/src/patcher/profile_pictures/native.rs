@@ -115,6 +115,123 @@ fn condition_not_none(code: Code) -> Code {
 fn condition_none(code: Code) -> Code {
     Code::raw(&[0xcf]).then(code).then(Code::raw(&[0x2a, 0x16]))
 }
+
+fn int_not_equal(left: Code, right: Code) -> Code {
+    // UE3 0x9a is ==; 0x9b is !=.
+    Code::raw(&[0x9b])
+        .then(left)
+        .then(right)
+        .then(Code::raw(&[0x16]))
+}
+
+fn platform_present(platform: Code) -> Code {
+    int_not_equal(Code::raw(&[0x38, 0x3a]).then(platform), Code::raw(&[0x25]))
+}
+
+fn persona_row_found(index: Code) -> Code {
+    int_not_equal(index, Code::raw(&[0x1d, 0xff, 0xff, 0xff, 0xff]))
+}
+
+fn online_friends(package: &UpkPackage) -> Result<Code, String> {
+    let player = field(
+        package,
+        variable(package, 0x01, "ProjectX.GFxDataRow_X.Shell")?,
+        "ProjectX.GFxShell_X.Player",
+    )?;
+    let online = field(package, player, "ProjectX.LocalPlayer_X.OnlinePlayer")?;
+    field(package, online, "ProjectX.OnlinePlayer_X.Friends")
+}
+
+fn personas(package: &UpkPackage) -> Result<Code, String> {
+    field(
+        package,
+        data_row(package, "GFxData_Personas_TA")?,
+        "GFxData_Personas_TA.PersonasData",
+    )
+}
+
+fn linked_epic_id(package: &UpkPackage, id: Code) -> Result<Code, String> {
+    // This takes its ID by value. GetLinkedId takes a const out-reference;
+    // passing StringToUniqueNetId's temporary there makes the engine execute
+    // that native converter with a null result buffer and crashes the game.
+    context(
+        personas(package)?,
+        call(package, "Personas_TA.GetEpicIDFromPlatformID", id)?,
+        object(package, "Personas_TA.GetEpicIDFromPlatformID.ReturnValue")?,
+    )
+}
+
+fn id_member(package: &UpkPackage, id: Code, member: &str) -> Result<Code, String> {
+    Ok(Code::raw(&[0x35])
+        .reference(object(
+            package,
+            &format!("Core._Types_Core.UniqueNetId.{member}"),
+        )?)
+        .reference(object(package, "Core._Types_Core.UniqueNetId")?)
+        .then(Code::raw(&[0, 0]))
+        .then(id))
+}
+
+fn epic_platform(package: &UpkPackage, id: Code) -> Result<Code, String> {
+    Ok(Code::raw(&[0x9a, 0x38, 0x3a])
+        .then(id_member(package, id, "Platform")?)
+        .then(Code::raw(&[0x2c, 11, 0x16])))
+}
+
+fn known_platform(package: &UpkPackage, id: Code) -> Result<Code, String> {
+    // Convert the platform byte to int before comparing it to Unknown (0).
+    Ok(platform_present(id_member(package, id, "Platform")?))
+}
+
+fn friend_picture_persona(package: &UpkPackage, persona: Code) -> Result<Code, String> {
+    let id = field(package, persona.clone(), "Persona_TA.PlayerID")?;
+    let platform = context(
+        personas(package)?,
+        call(
+            package,
+            "Personas_TA.GetPlatformPersonaFromEpicID",
+            online_friends(package)?.then(id.clone()),
+        )?,
+        object(
+            package,
+            "Personas_TA.GetPlatformPersonaFromEpicID.ReturnValue",
+        )?,
+    )?;
+    // The session can know a console player's primary ID before the friends
+    // link map does. Resolve that association by Epic account ID, never name.
+    let session = context(
+        personas(package)?,
+        call(
+            package,
+            "Personas_TA.GetRelevantPersonaFromEpicId",
+            id_member(package, id.clone(), "EpicAccountId")?,
+        )?,
+        object(
+            package,
+            "Personas_TA.GetRelevantPersonaFromEpicId.ReturnValue",
+        )?,
+    )?;
+    let source = conditional(condition_not_none(platform.clone()), platform, session)?;
+    // An unresolved Epic row has no platform ID yet. Leave its vanilla picture
+    // alone instead of querying /player/epic for a Steam or console player.
+    let source = conditional(epic_platform(package, id)?, source, persona.clone())?;
+    conditional(condition_not_none(persona), source, Code::raw(&[0x2a]))
+}
+
+fn conditional(condition: Code, yes: Code, no: Code) -> Result<Code, String> {
+    // UE3 EX_Conditional stores expanded expression lengths, not serialized
+    // byte lengths. Both arms have their own following expression size.
+    let yes_skip = u16::try_from(yes.memory()).map_err(|_| "Conditional too large")?;
+    let no_skip = u16::try_from(no.memory()).map_err(|_| "Conditional too large")?;
+    let code = Code::raw(&[0x45])
+        .then(condition)
+        .then(Code::raw(&yes_skip.to_le_bytes()))
+        .then(yes)
+        .then(Code::raw(&no_skip.to_le_bytes()))
+        .then(no);
+    validate(&code)?;
+    Ok(code)
+}
 fn log(message: &str) -> Code {
     Code::raw(&[0xe7])
         .then(text(message))
@@ -237,6 +354,14 @@ fn profile_request(package: &UpkPackage) -> Result<Code, String> {
         virtual_call(package, "IsURLTracked", url.clone())?,
         object(package, "PlayerVanity_TA.HasPlayerID.ReturnValue")?,
     )?;
+    let tracked = conditional(
+        known_platform(
+            package,
+            variable(package, 0x2b, &format!("{PERSONA}.PlayerNetId"))?,
+        )?,
+        tracked,
+        Code::raw(&[0x27]),
+    )?;
     // A tracked URL already has this bridge's completion callback. Returning
     // avoids synchronous cached callbacks recursively creating avatar rows.
     let add = Code::default();
@@ -349,9 +474,15 @@ fn generic_callback(package: &UpkPackage, original: &[u8]) -> Result<(Vec<u8>, i
     let texture_base = 3 + prefix.memory();
     let friends = friends_completion(
         package,
+        target_id(package)?,
         texture_base + 3 + texture.memory() + assignment.memory(),
     )?;
-    let assignment = assignment.then(friends);
+    let linked = friends_completion(
+        package,
+        linked_epic_id(package, target_id(package)?)?,
+        texture_base + 3 + texture.memory() + assignment.memory() + friends.memory(),
+    )?;
+    let assignment = assignment.then(friends).then(linked);
     // The friends block already contains an absolute guard; validate its
     // constituents at construction and bind the outer guard here.
     validate(&texture)?;
@@ -439,12 +570,7 @@ fn identity_request_hook(
     Ok(code)
 }
 
-fn persona_texture(package: &UpkPackage) -> Result<Code, String> {
-    let id = field(
-        package,
-        variable(package, 0x01, "GFxData_Persona_TA.Persona")?,
-        "Persona_TA.PlayerID",
-    )?;
+fn identity_texture(package: &UpkPackage, id: Code) -> Result<Code, String> {
     let manager = field(
         package,
         data_row(package, "GFxData_PlayerVanity_TA")?,
@@ -459,25 +585,29 @@ fn persona_texture(package: &UpkPackage) -> Result<Code, String> {
 }
 
 fn cached_persona_picture(package: &UpkPackage, base: usize) -> Result<Code, String> {
-    let texture = persona_texture(package)?;
+    let persona = friend_picture_persona(
+        package,
+        variable(package, 0x01, "GFxData_Persona_TA.Persona")?,
+    )?;
+    let texture = conditional(
+        condition_not_none(persona.clone()),
+        identity_texture(package, field(package, persona, "Persona_TA.PlayerID")?)?,
+        Code::raw(&[0x2a]),
+    )?;
     let assign = Code::raw(&[0x0f])
         .then(variable(package, 0x01, "GFxData_Persona_TA.PlayerAvatar")?)
         .then(texture.clone());
     guarded(condition_not_none(texture), assign, base)
 }
 
-fn friends_completion(package: &UpkPackage, base: usize) -> Result<Code, String> {
+fn friends_completion(package: &UpkPackage, id: Code, base: usize) -> Result<Code, String> {
     // Friends own Texture properties, not GFxData_PlayerAvatar rows. Look up
     // only the downloaded identity, and never create a persona for a stranger.
     // Borrow the callback's existing int local; vanilla initializes it itself.
     let index = variable(package, 0x2b, &format!("{CALLBACK}.WorkshopItemIdx"))?;
     let lookup = context(
         data_row(package, "GFxData_Personas_TA")?,
-        call(
-            package,
-            "GFxData_Personas_TA.GetFromMap",
-            target_id(package)?,
-        )?,
+        call(package, "GFxData_Personas_TA.GetFromMap", id.clone())?,
         object(package, "GFxData_Personas_TA.GetFromMap.ReturnValue")?,
     )?;
     let assign = Code::raw(&[0x0f]).then(index.clone()).then(lookup);
@@ -506,15 +636,11 @@ fn friends_completion(package: &UpkPackage, base: usize) -> Result<Code, String>
         call(
             package,
             "GFxData_Persona_TA.HandleGetAvatar",
-            target_id(package)?
-                .then(image_texture(package)?)
-                .then(text("")),
+            id.then(image_texture(package)?).then(text("")),
         )?,
         0,
     )?;
-    let found = Code::raw(&[0x9a])
-        .then(index)
-        .then(Code::raw(&[0x1d, 0xff, 0xff, 0xff, 0xff, 0x16]));
+    let found = persona_row_found(index);
     let update = guarded(found, update, base + assign.memory())?;
     Ok(assign.then(update))
 }
@@ -598,6 +724,101 @@ fn match_avatar_fallback(package: &UpkPackage, original: &[u8]) -> Result<Code, 
 pub(super) struct Changes {
     pub(super) exports: Vec<usize>,
     pub(super) renamed: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+pub(super) fn assert_friend_call_safety(package: &UpkPackage) {
+    // Regression for the minidump's null StringToUniqueNetId result pointer:
+    // the generated friend paths must not feed temporary structs to this
+    // const-reference API. The replacement persona APIs take IDs by value.
+    let reference = object(package, "ProjectX.OnlinePlayerFriends_X.GetLinkedId").unwrap();
+    let token = [&[0x1c][..], &reference.to_le_bytes()].concat();
+    for path in TARGETS {
+        let body = function_body(package, path).unwrap();
+        assert!(
+            !body.windows(token.len()).any(|bytes| bytes == token),
+            "unsafe const-reference call in {path}"
+        );
+    }
+    for path in [
+        "Personas_TA.GetEpicIDFromPlatformID.PlatformId",
+        "Personas_TA.GetPlatformPersonaFromEpicID.EpicID",
+        "Personas_TA.GetRelevantPersonaFromEpicId.EpicAccountId",
+    ] {
+        let property = &package.exports[object(package, path).unwrap() as usize - 1];
+        let flags = package.read_int(property.serial_offset + 20).unwrap() as u32;
+        assert_eq!(
+            flags & 0x180,
+            0x80,
+            "{path} must accept a value, not an out-reference"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Execute the guard's integer instruction subset using UE3's operator
+    // semantics, so inverted equality guards cannot pass a byte-size check.
+    fn evaluate(code: &Code) -> bool {
+        fn expression(bytes: &[u8], at: &mut usize) -> i32 {
+            let token = bytes[*at];
+            *at += 1;
+            match token {
+                0x25 => 0,
+                0x2c => {
+                    let v = bytes[*at];
+                    *at += 1;
+                    v as i32
+                }
+                0x1d => {
+                    let v = i32::from_le_bytes(bytes[*at..*at + 4].try_into().unwrap());
+                    *at += 4;
+                    v
+                }
+                0x38 => {
+                    assert_eq!(bytes[*at], 0x3a);
+                    *at += 1;
+                    expression(bytes, at)
+                }
+                0x9a | 0x9b => {
+                    let left = expression(bytes, at);
+                    let right = expression(bytes, at);
+                    assert_eq!(bytes[*at], 0x16);
+                    *at += 1;
+                    if token == 0x9a {
+                        (left == right) as i32
+                    } else {
+                        (left != right) as i32
+                    }
+                }
+                _ => panic!("unexpected guard instruction {token:02x}"),
+            }
+        }
+        let mut at = 0;
+        let result = expression(&code.bytes, &mut at);
+        assert_eq!(at, code.bytes.len());
+        result != 0
+    }
+
+    #[test]
+    fn only_known_platforms_are_requested() {
+        for platform in 0..=11 {
+            assert_eq!(
+                evaluate(&platform_present(Code::raw(&[0x2c, platform]))),
+                platform != 0
+            );
+        }
+    }
+
+    #[test]
+    fn only_existing_friend_rows_are_updated() {
+        for index in [-1i32, 0, 1, 100] {
+            let value = Code::raw(&[&[0x1d][..], &index.to_le_bytes()].concat());
+            assert_eq!(evaluate(&persona_row_found(value)), index != -1);
+        }
+    }
 }
 pub(super) fn patch(package: &mut UpkPackage) -> Result<Changes, String> {
     let persona = &package.exports[object(package, PERSONA)? as usize - 1];
@@ -683,10 +904,11 @@ pub(super) fn patch(package: &mut UpkPackage) -> Result<Changes, String> {
         return Err("Friend avatar request layout changed".into());
     }
     let persona = variable(package, 0x01, "GFxData_Persona_TA.Persona")?;
+    let source = friend_picture_persona(package, persona)?;
     let request = identity_request_hook(
         package,
-        persona.clone(),
-        field(package, persona, "Persona_TA.PlayerID")?,
+        source.clone(),
+        field(package, source, "Persona_TA.PlayerID")?,
         116,
     )?;
     let cached = cached_persona_picture(package, 116 + request.memory())?;

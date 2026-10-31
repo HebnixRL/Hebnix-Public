@@ -1,3 +1,4 @@
+use crate::patcher::colours::CarColours;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ pub struct PresetStore {
     pub pending_ball: Option<String>,
     pub pending_boost: Option<String>,
     pub pending_decals: Vec<(String, String)>,
+    pub pending_cars: Option<CarColours>,
 }
 
 impl PresetStore {
@@ -57,6 +59,7 @@ impl PresetStore {
             pending_ball: None,
             pending_boost: None,
             pending_decals: Vec::new(),
+            pending_cars: None,
         };
         this.refresh();
         this
