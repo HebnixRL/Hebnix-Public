@@ -243,18 +243,16 @@ fn all_maps(cooked: &Path) -> Vec<WorkshopMap> {
     scan(&workshop_menu::maps_folder(cooked))
 }
 
-/// With the LAN trial on, list each map by its LAN slot copy.
+/// List each map by its LAN slot copy. Hosting needs no patch, only the copy.
 fn slot_for_lan(cooked: &Path, maps: &mut [WorkshopMap]) {
-    if crate::patcher::workshop_lan_trial::enabled(cooked) {
-        let report = crate::patcher::workshop_slots::assign_host(cooked, maps);
-        if report.skipped > 0 {
-            crate::toast::report(
-                "slot-full",
-                &format!("{} maps have no LAN slot (16 max), remove some to host them", report.skipped),
-                None,
-                true,
-            );
-        }
+    let report = crate::patcher::workshop_slots::assign_host(cooked, maps);
+    if report.skipped > 0 {
+        crate::toast::report(
+            "slot-full",
+            &format!("{} maps have no LAN slot (16 max), remove some to host them", report.skipped),
+            None,
+            true,
+        );
     }
 }
 

@@ -975,6 +975,7 @@ pub struct WorkshopState {
     ingame_menu: InGameMenuState,
     /// connection state the LAN host file was last set for
     lan_synced: Option<bool>,
+    startup_done: bool,
     /// last failed join read from the game log, polled while the tab is open
     join_mismatch: Option<hebnix_sdk::log::JoinMismatch>,
     join_polled: Option<std::time::Instant>,
@@ -1026,6 +1027,7 @@ impl WorkshopState {
             menu_map: MenuMapState::default(),
             ingame_menu: InGameMenuState::default(),
             lan_synced: None,
+            startup_done: false,
             join_mismatch: None,
             join_polled: None,
             join_mismatch_dismissed: None,
@@ -1192,6 +1194,26 @@ impl WorkshopState {
         }
     }
 
+    /// once per run, from any tab: move old maps, make the LAN slot placeholders
+    /// (the game only indexes them at launch) and list maps by their slot copies
+    pub fn startup_sync(&mut self, rl_path: &str) {
+        if self.startup_done || rl_path.is_empty() {
+            return;
+        }
+        let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if !cooked.is_dir() {
+            return;
+        }
+        self.startup_done = true;
+        crate::patcher::workshop_menu::move_legacy_maps(&cooked);
+        if crate::patcher::workshop_lan_trial::enabled(&cooked) && crate::patcher::workshop_slots::ensure_pool(&cooked) > 0 {
+            crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
+        }
+        std::thread::spawn(move || {
+            let _ = ingame_menu::refresh(&cooked);
+        });
+    }
+
     /// render the tab. rl_path and rl_launch come from the app config.
     pub fn render(
         &mut self,
@@ -1205,17 +1227,7 @@ impl WorkshopState {
         if self.lan_synced != Some(connected) {
             self.lan_synced = Some(connected);
             ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
-            let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-            crate::patcher::workshop_menu::move_legacy_maps(&cooked);
-            // placeholders have to exist before the game starts to be indexed
-            if crate::patcher::workshop_lan_trial::enabled(&cooked) && crate::patcher::workshop_slots::ensure_pool(&cooked) > 0 {
-                crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
-            }
-            // list the maps by their LAN slot copies, copying any that are new
-            let cooked = cooked.clone();
-            std::thread::spawn(move || {
-                let _ = ingame_menu::refresh(&cooked);
-            });
+            self.startup_sync(rl_path);
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
             &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),

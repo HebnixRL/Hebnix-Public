@@ -7777,6 +7777,7 @@ impl HebnixApp {
         if self.tab != Tab::Spoofer || self.spoofer_subtab != SpooferSubTab::Titles {
             self.title_editor.leave_page();
         }
+        self.workshop.startup_sync(&self.config.settings.rl_path.clone());
         match self.tab {
             Tab::Home => self.render_home(ui),
             Tab::Console => self.render_console_tab(ui),
