@@ -32,12 +32,14 @@ peer titles and locally resolved map paths to `TAGame/HbxLanTrial`. It does not
 execute peer-supplied commands or paths. Test state and original function bytes
 are saved in `TAGame/CookedPCConsole/Backups/WorkshopLanTrial.json`.
 
-The preload experiment calls `DynamicLoadObject` for the local package's
-`TheWorld` before the normal LAN join. Whether this engine build accepts the
-absolute object path and retains/registers the package for network travel needs
-the two-client test. It does not reproduce Rocket Plugin's unpublished native
-preloader. The separate Utopia Retro fallback still has an unverified internal
-package identity risk.
+The engine only resolves a package by bare name through its package cache, and
+that cache only indexes `.upk` files in its scanned folders. Each offered map is
+therefore hardlinked (else copied) to `CookedPCConsole/<name>.upk`, with a
+`<name>.staged` marker in the bridge folder, and removed again when the offer
+goes. A different package already holding the name is never replaced. The join
+then calls `DynamicLoadObject("<name>.TheWorld")` before the normal LAN join.
+Full or relative paths, and a `.udk` in `mods`, all returned `None`. Verified on
+two PCs: the bare name resolved and the join succeeded.
 
 The second build searches the selected Workshop folder, Hebnix's fallback folder,
 and mods by original package filename, so a local catalog ID may differ from the

@@ -12,7 +12,7 @@ const JOIN: &str = "GFxData_LanServer_TA.GetJoinOptions";
 const RECEIPT: &str = "WorkshopLanTrial.json";
 const BRIDGE: &str = "HbxLanTrial";
 // object name forms tried in order: absolute, game-relative, bare stem, absolute with extension
-const CANDIDATES: [&str; 4] = [".object", ".object2", ".object3", ".object4"];
+const CANDIDATES: [&str; 1] = [".object"];
 
 #[derive(Clone, Default)]
 struct Code {
@@ -337,6 +337,25 @@ fn unicode_file(path: &Path, value: &str) -> Result<(), String> {
     fs::rename(temp, path).map_err(|e| e.to_string())
 }
 
+/// put the map in the engine's package cache as <name>.upk (hardlink, else copy);
+/// false when a different package already holds the name
+fn stage_package(cooked: &Path, map: &Path, name: &str, marker: &Path) -> Result<bool, String> {
+    let dest = cooked.join(format!("{name}.upk"));
+    if dest.exists() {
+        let same = |a: &Path, b: &Path| {
+            matches!((fs::metadata(a), fs::metadata(b)), (Ok(a), Ok(b)) if a.len() == b.len())
+        };
+        // only a package Hebnix placed, or an identical one, may be reused
+        if !marker.exists() && !same(&dest, map) {
+            return Ok(false);
+        }
+    } else if fs::hard_link(map, &dest).is_err() {
+        fs::copy(map, &dest).map_err(|e| e.to_string())?;
+    }
+    fs::write(marker, b"").map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// bounded peer metadata crosses into the game through local data files only
 pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
     if !enabled(cooked) {
@@ -360,49 +379,33 @@ pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
         keep.insert(title);
         if let Some(map) = &offer.map {
             let map = fs::canonicalize(map).map_err(|e| e.to_string())?;
-            // UE object paths use the package stem, followed by TheWorld
-            let plain = map.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-            let stem = map.with_extension("");
-            let stem = stem.to_string_lossy().trim_start_matches(r"\\?\").to_string();
             let name = map
                 .file_stem()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let relative = cooked
-                .parent()
-                .and_then(|game| fs::canonicalize(game).ok())
-                .and_then(|game| {
-                    let rest = map.with_extension("");
-                    let rest = rest.strip_prefix(&game).ok()?;
-                    Some(format!(r"..\..\TAGame\{}.TheWorld", rest.display()))
-                });
-            let forms = [
-                Some(format!("{stem}.TheWorld")),
-                relative,
-                Some(format!("{name}.TheWorld")),
-                Some(format!("{plain}.TheWorld")),
-            ];
-            for (extension, form) in CANDIDATES.iter().zip(forms) {
-                let path = folder.join(format!("{key}{extension}"));
-                match form {
-                    Some(form) => {
-                        unicode_file(&path, &form)?;
-                        keep.insert(path);
-                    }
-                    None => {
-                        let _ = fs::remove_file(path);
-                    }
-                }
+            // the engine finds a package by bare name, and only indexes .upk files
+            let marker = folder.join(format!("{name}.staged"));
+            if !stage_package(cooked, &map, &name, &marker)? {
+                continue;
             }
+            keep.insert(marker);
+            let path = folder.join(format!("{key}.object"));
+            unicode_file(&path, &format!("{name}.TheWorld"))?;
+            keep.insert(path);
         }
     }
     for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
         if matches!(
             path.extension().and_then(|e| e.to_str()),
-            Some("title" | "object" | "object2" | "object3" | "object4")
+            Some("title" | "object" | "staged")
         ) && !keep.contains(&path)
         {
+            if path.extension().is_some_and(|e| e == "staged") {
+                if let Some(stem) = path.file_stem() {
+                    let _ = fs::remove_file(cooked.join(stem).with_extension("upk"));
+                }
+            }
             fs::remove_file(path).map_err(|e| e.to_string())?;
         }
     }
@@ -485,7 +488,23 @@ mod tests {
             read_text(&folder.join("127.10.0.1_7777.object")).ends_with("original_name.TheWorld")
         );
         assert!(!folder.join("127.10.0.2_7777.object").exists());
+        assert_eq!(fs::read(cooked.join("original_name.upk")).unwrap(), b"local test map");
+        // a different package already using the name is never replaced or removed
+        fs::write(cooked.join("taken.upk"), b"game package").unwrap();
+        fs::write(root.join("taken.udk"), b"peer map data").unwrap();
+        sync_offers(
+            &cooked,
+            &[Offer {
+                ip: "127.10.0.3".parse().unwrap(),
+                title: "Taken".into(),
+                map: Some(root.join("taken.udk")),
+            }],
+        )
+        .unwrap();
+        assert!(!folder.join("127.10.0.3_7777.object").exists());
         sync_offers(&cooked, &[]).unwrap();
+        assert!(!cooked.join("original_name.upk").exists());
+        assert_eq!(fs::read(cooked.join("taken.upk")).unwrap(), b"game package");
         assert_eq!(fs::read_dir(folder).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
     }
