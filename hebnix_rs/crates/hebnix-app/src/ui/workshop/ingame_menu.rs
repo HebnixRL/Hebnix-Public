@@ -16,8 +16,6 @@ use std::time::Duration;
 
 /// Metadata written beside maps loaded into Hebnix's workshop folder.
 pub(super) const META: &str = "hebnix.json";
-/// Where Steam keeps Rocket League's workshop maps, under its app id.
-const WORKSHOP_CONTENT: [&str; 4] = ["steamapps", "workshop", "content", "252950"];
 
 enum Job {
     Status(Result<bool, String>),
@@ -240,45 +238,21 @@ fn from_steam(maps: &mut [WorkshopMap], cooked: &Path) {
     }
 }
 
-/// The picked folder's maps, then those in Hebnix's own workshop folder.
-fn all_maps(folder: &Path, cooked: &Path) -> Vec<WorkshopMap> {
-    let mut maps = scan(folder);
-    for fallback in [
-        cooked.join(super::WORKSHOP_MODS_DIR_NAME),
-        workshop_menu::maps_folder(cooked),
-    ] {
-        if fallback != folder {
-            maps.extend(scan(&fallback));
-        }
-    }
-    maps
+/// The maps in the game's mods folder.
+fn all_maps(cooked: &Path) -> Vec<WorkshopMap> {
+    scan(&workshop_menu::maps_folder(cooked))
 }
 
 /// Rebuild the in-game list from the folder the menu was enabled with.
 /// Returns Ok(None) when the menu is not enabled.
 pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
-    let Some(folder) = workshop_menu::enabled_folder(&cooked.join("Backups")) else {
+    if workshop_menu::enabled_folder(&cooked.join("Backups")).is_none() {
         return Ok(None);
-    };
-    let mut maps = all_maps(&folder, cooked);
+    }
+    let mut maps = all_maps(cooked);
     from_steam(&mut maps, cooked);
     workshop_menu::write_list(cooked, &maps)?;
     Ok(Some(maps.len()))
-}
-
-/// The first Steam library that has Rocket League workshop maps.
-fn steam_workshop_folder() -> Option<PathBuf> {
-    let steam = PathBuf::from(r"C:\Program Files (x86)\Steam");
-    let vdf = fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")).unwrap_or_default();
-    let libraries = vdf
-        .lines()
-        .filter(|l| l.trim_start().starts_with("\"path\""))
-        .filter_map(|l| l.split('"').nth(3))
-        .map(|p| PathBuf::from(p.replace("\\\\", "\\")));
-    std::iter::once(steam)
-        .chain(libraries)
-        .map(|library| WORKSHOP_CONTENT.iter().fold(library, |p, part| p.join(part)))
-        .find(|folder| folder.is_dir())
 }
 
 impl InGameMenuState {
@@ -318,10 +292,8 @@ impl InGameMenuState {
             self.spawn(&ctx, move || Job::Status(workshop_menu::status(&cooked)));
         }
         if self.folder.is_empty() {
-            if let Some(folder) = steam_workshop_folder() {
-                self.folder = folder.to_string_lossy().into_owned();
-                self.maps = all_maps(&folder, &cooked);
-            }
+            self.folder = workshop_menu::maps_folder(&cooked).to_string_lossy().into_owned();
+            self.maps = all_maps(&cooked);
         }
 
         ui.heading("In-game Workshop menu (experimental)");
@@ -339,16 +311,9 @@ impl InGameMenuState {
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label("Map folder");
-            ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(420.0));
-            if ui.button("Browse…").clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.folder = folder.to_string_lossy().into_owned();
-                    self.maps = all_maps(&folder, &cooked);
-                }
-            }
+            ui.label(format!("Maps are kept in {}", self.folder));
             if ui.button("Rescan").clicked() {
-                self.maps = all_maps(Path::new(&self.folder), &cooked);
+                self.maps = all_maps(&cooked);
             }
         });
         ui.label(format!("{} maps found", self.maps.len()));
@@ -376,8 +341,8 @@ impl InGameMenuState {
                 self.status = "Patching TAGame.upk...".into();
                 let (cooked, backups) = (cooked.clone(), backups.clone());
                 if enable.clicked() {
-                    let folder = PathBuf::from(&self.folder);
-                    let mut maps = all_maps(&folder, &cooked);
+                    let folder = workshop_menu::maps_folder(&cooked);
+                    let mut maps = all_maps(&cooked);
                     self.spawn(&ctx, move || {
                         from_steam(&mut maps, &cooked);
                         Job::Done(workshop_menu::apply(&cooked, &backups, &folder, &maps))

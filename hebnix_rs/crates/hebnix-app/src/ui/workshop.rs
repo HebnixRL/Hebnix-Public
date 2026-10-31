@@ -1205,6 +1205,7 @@ impl WorkshopState {
         if self.lan_synced != Some(connected) {
             self.lan_synced = Some(connected);
             ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
+            crate::patcher::workshop_menu::move_legacy_maps(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"));
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
             &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
@@ -1956,7 +1957,7 @@ impl WorkshopState {
                             map.file = failed.package.clone();
                         }
                     }
-                    let roots = [workshop.clone(), crate::patcher::workshop_menu::maps_folder(&cooked), cooked.join(WORKSHOP_MODS_DIR_NAME)];
+                    let roots = [workshop.clone()];
                     let local = if map.file.is_empty() { None } else {
                         peer_workshop_file(&workshop, &map).or_else(||
                             crate::patcher::workshop_lan_trial::find_local_map(&roots, &map.file))

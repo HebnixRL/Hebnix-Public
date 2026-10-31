@@ -33,19 +33,35 @@ const OLD_PREVIEWS: &str = "HebnixWorkshop";
 /// that rebuild from a pristine copy can put it back. Holds the map folder
 /// the player picked, so the list can be rebuilt without the menu page open.
 const ENABLED: &str = "WorkshopMenu.enabled";
-/// Fallback for maps loaded from the map browser with the "Workshop folder"
-/// target while the menu has no folder yet, beside CookedPCConsole.
-const MAPS_FOLDER: &str = "HebnixWorkshopMaps";
+/// The one folder every workshop map lives in, inside CookedPCConsole.
+const MAPS_FOLDER: &str = "mods";
+/// Earlier versions kept maps here, beside CookedPCConsole.
+const LEGACY_MAPS_FOLDER: &str = "HebnixWorkshopMaps";
 
 pub fn maps_folder(cooked: &Path) -> PathBuf {
-    cooked.parent().unwrap_or(cooked).join(MAPS_FOLDER)
+    cooked.join(MAPS_FOLDER)
 }
 
 /// Where the map browser puts workshop maps: the folder the menu lists.
 pub fn workshop_dir(cooked: &Path) -> PathBuf {
-    enabled_folder(&cooked.join("Backups"))
-        .filter(|folder| folder.is_dir())
-        .unwrap_or_else(|| maps_folder(cooked))
+    maps_folder(cooked)
+}
+
+/// Move maps from the old folder into the mods folder; a map already there
+/// stays as it is.
+pub fn move_legacy_maps(cooked: &Path) {
+    let legacy = cooked.parent().unwrap_or(cooked).join(LEGACY_MAPS_FOLDER);
+    let Ok(entries) = fs::read_dir(&legacy) else { return };
+    let target = maps_folder(cooked);
+    let _ = fs::create_dir_all(&target);
+    for entry in entries.flatten() {
+        let to = target.join(entry.file_name());
+        if !to.exists() {
+            let _ = fs::rename(entry.path(), to);
+        }
+    }
+    // only succeeds once empty
+    let _ = fs::remove_dir(&legacy);
 }
 
 pub const MAP_DIR_PREFIX: &str = "hebnix_";
@@ -836,6 +852,23 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_maps_move_into_mods_without_replacing() {
+        let game = std::env::temp_dir().join(format!("hebnix-legacy-{}", std::process::id()));
+        let cooked = game.join("CookedPCConsole");
+        let legacy = game.join(LEGACY_MAPS_FOLDER);
+        fs::create_dir_all(legacy.join("hebnix_1")).unwrap();
+        fs::create_dir_all(legacy.join("hebnix_2")).unwrap();
+        fs::write(legacy.join("hebnix_1").join("a.udk"), b"old").unwrap();
+        fs::create_dir_all(maps_folder(&cooked).join("hebnix_2")).unwrap();
+        fs::write(maps_folder(&cooked).join("hebnix_2").join("b.udk"), b"kept").unwrap();
+        move_legacy_maps(&cooked);
+        assert_eq!(fs::read(maps_folder(&cooked).join("hebnix_1").join("a.udk")).unwrap(), b"old");
+        assert_eq!(fs::read(maps_folder(&cooked).join("hebnix_2").join("b.udk")).unwrap(), b"kept");
+        assert!(legacy.join("hebnix_2").exists());
+        fs::remove_dir_all(game).unwrap();
+    }
+
     use super::*;
 
     #[test]
