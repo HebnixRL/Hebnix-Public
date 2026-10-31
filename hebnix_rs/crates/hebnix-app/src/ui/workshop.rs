@@ -1211,6 +1211,11 @@ impl WorkshopState {
             if crate::patcher::workshop_lan_trial::enabled(&cooked) && crate::patcher::workshop_slots::ensure_pool(&cooked) > 0 {
                 crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
             }
+            // list the maps by their LAN slot copies, copying any that are new
+            let cooked = cooked.clone();
+            std::thread::spawn(move || {
+                let _ = ingame_menu::refresh(&cooked);
+            });
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
             &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
