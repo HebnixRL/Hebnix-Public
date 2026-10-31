@@ -193,13 +193,19 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
         let original: Vec<u8> =
             serde_json::from_value(receipt["exports"][path]["original"].clone())
                 .map_err(|e| e.to_string())?;
-        let changed: Vec<u8> = serde_json::from_value(receipt["exports"][path]["patched"].clone())
+        let stored: Vec<u8> = serde_json::from_value(receipt["exports"][path]["patched"].clone())
             .map_err(|e| e.to_string())?;
         let current = payload(&p, path)?;
-        if current != original && current != changed {
+        // rebuild so a newer build replaces the code an older build saved in the receipt
+        let changed = patched(&p, path, &original)?;
+        if current != original && current != stored && current != changed {
             return Err(format!(
                 "{path} was changed by another patch; leaving it alone"
             ));
+        }
+        if stored != changed {
+            receipt["exports"][path]["patched"] = serde_json::json!(changed);
+            needs_write = true;
         }
         let enabled = mode != "off" && (path == TITLE || mode == "join");
         let bytes = if enabled { &changed } else { &original };
