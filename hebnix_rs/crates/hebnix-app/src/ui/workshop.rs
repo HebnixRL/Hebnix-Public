@@ -1205,7 +1205,12 @@ impl WorkshopState {
         if self.lan_synced != Some(connected) {
             self.lan_synced = Some(connected);
             ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
-            crate::patcher::workshop_menu::move_legacy_maps(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"));
+            let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+            crate::patcher::workshop_menu::move_legacy_maps(&cooked);
+            // placeholders have to exist before the game starts to be indexed
+            if crate::patcher::workshop_lan_trial::enabled(&cooked) && crate::patcher::workshop_slots::ensure_pool(&cooked) > 0 {
+                crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
+            }
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
             &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
@@ -1899,6 +1904,7 @@ impl WorkshopState {
                         let id = id_of(data);
                         valid_map_id(&id).then(|| SlotMap {
                             file: String::new(),
+                            package: String::new(),
                             slot: slot.clone(),
                             name: str_of(data, "name", slot).to_string(),
                             local: is_local_map_id(&id),
@@ -1963,7 +1969,7 @@ impl WorkshopState {
                             crate::patcher::workshop_lan_trial::find_local_map(&roots, &map.file))
                     };
                     Some(crate::patcher::workshop_lan_trial::Offer {
-                        ip, title: map.name.clone(), map: local,
+                        ip, title: map.name.clone(), map: local, package: map.package.clone(),
                     })
                 }).collect();
                 if let Err(error) = crate::patcher::workshop_lan_trial::sync_offers(&cooked, &offers) {

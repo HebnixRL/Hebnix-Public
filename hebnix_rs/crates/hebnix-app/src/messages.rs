@@ -99,6 +99,13 @@ pub enum AppMsg {
         text: String,
         style: crate::toast::ToastStyle,
     },
+    // file work with a bar, see toast::report
+    Progress {
+        key: String,
+        text: String,
+        fraction: Option<f32>,
+        done: bool,
+    },
     // http result, slug picks the plugin that asked
     PluginHttpRes {
         slug: String,

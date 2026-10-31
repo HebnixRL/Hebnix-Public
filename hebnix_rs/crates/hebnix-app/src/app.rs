@@ -733,6 +733,7 @@ impl HebnixApp {
 
         let (tx, rx) = crossbeam_channel::unbounded::<AppMsg>();
         let (control_tx, control_rx) = crossbeam_channel::unbounded();
+        crate::toast::install_sink(tx.clone(), cc.egui_ctx.clone());
         crate::notifications::check_on_start(
             config.notification_id,
             tx.clone(),
@@ -2795,6 +2796,12 @@ impl HebnixApp {
                     text,
                     style,
                 } => self.toasts.push(&slug, &name, &text, style),
+                AppMsg::Progress {
+                    key,
+                    text,
+                    fraction,
+                    done,
+                } => self.toasts.progress(&key, &text, fraction, done),
                 AppMsg::PluginHttpRes {
                     slug,
                     req_id,

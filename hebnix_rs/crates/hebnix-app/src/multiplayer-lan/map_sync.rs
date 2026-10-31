@@ -81,6 +81,9 @@ pub struct SlotMap {
     /// original package filename without its extension, separate from the title
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file: String,
+    /// package name the host loaded it under (a map slot), when not `file`
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub package: String,
     /// imported by the player rather than from the workshop cdn (derived
     /// from the id on receive, never taken from the wire)
     #[serde(default)]
@@ -628,6 +631,7 @@ pub fn fetch_peer_info(peer: IpAddr, port: u16) -> Result<PeerInfoReply, String>
             .take(MAX_MAPS_PER_PEER)
             .map(|map| SlotMap {
                 file: if valid_package_stem(&map.file) { map.file.clone() } else { String::new() },
+                package: if crate::patcher::workshop_slots::is_slot(&map.package) { map.package.clone() } else { String::new() },
                 local: is_local_map_id(&map.id),
                 name: clean_name(&map.name),
                 author: clean_name(&map.author),

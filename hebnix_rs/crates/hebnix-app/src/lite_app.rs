@@ -599,7 +599,7 @@ impl LiteApp {
                         winutil::set_main_window_topmost(topmost);
                     }
                 }
-                AppMsg::Toast { .. } => {}
+                AppMsg::Toast { .. } | AppMsg::Progress { .. } => {}
                 AppMsg::PluginHttpRes {
                     slug,
                     req_id,

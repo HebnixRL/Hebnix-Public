@@ -1,7 +1,7 @@
 //! opt-in LAN title and package preload experiment, independent of map swapping
 use super::upk_package::UpkPackage;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     net::Ipv4Addr,
     path::{Path, PathBuf},
@@ -262,6 +262,8 @@ pub struct Offer {
     pub ip: Ipv4Addr,
     pub title: String,
     pub map: Option<PathBuf>,
+    /// package name the host loaded the map under, a map slot or empty
+    pub package: String,
 }
 
 /// find an existing custom map by package name, independent of its catalog id
@@ -375,12 +377,16 @@ pub fn offer_status(cooked: &Path) -> Vec<String> {
                 .chunks_exact(2)
                 .map(|b| u16::from_le_bytes([b[0], b[1]]))
                 .collect();
-            let ready = p.with_extension("object").exists();
-            Some(format!(
-                "{} - {}",
-                String::from_utf16_lossy(&units),
-                if ready { "ready to join" } else { "not on this PC yet" }
-            ))
+            let object = fs::read(p.with_extension("object")).ok().map(|b| {
+                let units: Vec<u16> = b.get(2..).unwrap_or_default().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                String::from_utf16_lossy(&units)
+            });
+            let state = match object.as_deref().and_then(|o| o.strip_suffix(".TheWorld")) {
+                Some(name) if super::workshop_slots::is_slot(name) => format!("ready to join ({name})"),
+                Some(_) => "ready to join".to_string(),
+                None => "not on this PC yet".to_string(),
+            };
+            Some(format!("{} - {state}", String::from_utf16_lossy(&units)))
         })
         .collect();
     lines.sort();
@@ -395,6 +401,8 @@ pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
     let folder = cooked.parent().ok_or("missing TAGame folder")?.join(BRIDGE);
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let mut keep = HashSet::new();
+    // two hosts can use the same slot for different maps, the first one gets it
+    let mut claimed: HashMap<String, PathBuf> = HashMap::new();
     for offer in offers.iter().take(32) {
         let key = format!("{}_7777", offer.ip);
         let title = folder.join(format!("{key}.title"));
@@ -414,8 +422,27 @@ pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
                 .file_stem()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let marker;
+            if super::workshop_slots::is_slot(&offer.package) {
+                let name = offer.package.clone();
+                if claimed.get(&name).is_some_and(|other| *other != map) {
+                    continue;
+                }
+                claimed.insert(name.clone(), map.clone());
+                if let Err(error) = super::workshop_slots::place(cooked, &name, &map, &offer.title) {
+                    crate::toast::report(&format!("slot-{name}"), &error, None, true);
+                    continue;
+                }
+                let marker = folder.join(format!("{name}.staged"));
+                fs::write(&marker, b"").map_err(|e| e.to_string())?;
+                keep.insert(marker);
+                let path = folder.join(format!("{key}.object"));
+                unicode_file(&path, &format!("{name}.TheWorld"))?;
+                keep.insert(path);
+                continue;
+            }
             // the engine finds a package by bare name, and only indexes .upk files
-            let marker = folder.join(format!("{name}.staged"));
+            marker = folder.join(format!("{name}.staged"));
             if !stage_package(cooked, &map, &name, &marker)? {
                 continue;
             }
@@ -434,7 +461,12 @@ pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
         {
             if path.extension().is_some_and(|e| e == "staged") {
                 if let Some(stem) = path.file_stem() {
-                    let _ = fs::remove_file(cooked.join(stem).with_extension("upk"));
+                    // a slot goes back to its placeholder, anything else was only ours to stage
+                    if super::workshop_slots::is_slot(&stem.to_string_lossy()) {
+                        super::workshop_slots::release(cooked, &stem.to_string_lossy());
+                    } else {
+                        let _ = fs::remove_file(cooked.join(stem).with_extension("upk"));
+                    }
                 }
             }
             fs::remove_file(path).map_err(|e| e.to_string())?;
@@ -502,11 +534,13 @@ mod tests {
                     ip: "127.10.0.1".parse().unwrap(),
                     title: "Readable workshop title \u{2603}".into(),
                     map: Some(map),
+                    package: String::new(),
                 },
                 Offer {
                     ip: "127.10.0.2".parse().unwrap(),
                     title: "Not downloaded".into(),
                     map: None,
+                    package: String::new(),
                 },
             ],
         )
@@ -536,6 +570,7 @@ mod tests {
                 ip: "127.10.0.3".parse().unwrap(),
                 title: "Taken".into(),
                 map: Some(root.join("taken.udk")),
+                package: String::new(),
             }],
         )
         .unwrap();
@@ -543,7 +578,35 @@ mod tests {
         sync_offers(&cooked, &[]).unwrap();
         assert!(!cooked.join("original_name.upk").exists());
         assert_eq!(fs::read(cooked.join("taken.upk")).unwrap(), b"game package");
-        assert_eq!(fs::read_dir(folder).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+
+        // a host that loaded the map under a slot name: the joiner's slot is swapped
+        fs::write(cooked.join("Woods_SFX.upk"), b"placeholder").unwrap();
+        super::super::workshop_slots::ensure_pool(&cooked);
+        let slotted = |ip: &str, title: &str, path: &Path| Offer {
+            ip: ip.parse().unwrap(),
+            title: title.into(),
+            map: Some(path.to_path_buf()),
+            package: "hbx_slot04".into(),
+        };
+        sync_offers(&cooked, &[slotted("127.10.0.4", "Slotted", &root.join("taken.udk"))]).unwrap();
+        assert_eq!(fs::read(cooked.join("hbx_slot04.upk")).unwrap(), b"peer map data");
+        assert_eq!(read_text(&folder.join("127.10.0.4_7777.object")), "hbx_slot04.TheWorld");
+        assert_eq!(offer_status(&cooked), ["Slotted - ready to join (hbx_slot04)"]);
+        // another host using the same slot for a different map does not take it over
+        fs::write(root.join("other.udk"), b"other map").unwrap();
+        sync_offers(
+            &cooked,
+            &[
+                slotted("127.10.0.4", "Slotted", &root.join("taken.udk")),
+                slotted("127.10.0.5", "Clash", &root.join("other.udk")),
+            ],
+        )
+        .unwrap();
+        assert!(!folder.join("127.10.0.5_7777.object").exists());
+        assert_eq!(fs::read(cooked.join("hbx_slot04.upk")).unwrap(), b"peer map data");
+        sync_offers(&cooked, &[]).unwrap();
+        assert_eq!(fs::read(cooked.join("hbx_slot04.upk")).unwrap(), b"placeholder");
         fs::remove_dir_all(root).unwrap();
     }
 

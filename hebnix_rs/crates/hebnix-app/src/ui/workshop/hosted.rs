@@ -60,7 +60,11 @@ impl HostedMap {
 }
 
 /// Name the hosted file for peers and make sure the cache can serve it.
-fn describe(file: &Path, cache_dir: &Path, list: &Path) -> Option<SlotMap> {
+fn describe(hosted: &Path, cache_dir: &Path, list: &Path) -> Option<SlotMap> {
+    // a slot copy stands for the installed map, which names the id, title and file
+    let original = crate::patcher::workshop_slots::original(hosted);
+    let file = original.as_deref().unwrap_or(hosted);
+    let package = if original.is_some() { hosted.file_stem()?.to_string_lossy().to_string() } else { String::new() };
     let folder = file.parent()?;
     let id = folder
         .file_name()?
@@ -82,9 +86,9 @@ fn describe(file: &Path, cache_dir: &Path, list: &Path) -> Option<SlotMap> {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|list| list["Items"].as_array()?.iter().find(|item| {
             let Some(path) = item["FullPath"].as_str() else { return false; };
-            match (std::fs::canonicalize(path), std::fs::canonicalize(file)) {
+            match (std::fs::canonicalize(path), std::fs::canonicalize(hosted)) {
                 (Ok(a), Ok(b)) => a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()),
-                _ => Path::new(path) == file,
+                _ => Path::new(path) == hosted,
             }
         }).cloned()).unwrap_or_default();
     let text = |key: &str| {
@@ -96,6 +100,7 @@ fn describe(file: &Path, cache_dir: &Path, list: &Path) -> Option<SlotMap> {
     Some(SlotMap {
         slot: HOSTING_SLOT.to_string(),
         file: stem.clone(),
+        package,
         local: is_local_map_id(&id),
         name: Some(text("title")).filter(|t| !t.is_empty()).unwrap_or(stem),
         author: text("author"),

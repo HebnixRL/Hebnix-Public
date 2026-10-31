@@ -243,6 +243,21 @@ fn all_maps(cooked: &Path) -> Vec<WorkshopMap> {
     scan(&workshop_menu::maps_folder(cooked))
 }
 
+/// With the LAN trial on, list each map by its LAN slot copy.
+fn slot_for_lan(cooked: &Path, maps: &mut [WorkshopMap]) {
+    if crate::patcher::workshop_lan_trial::enabled(cooked) {
+        let report = crate::patcher::workshop_slots::assign_host(cooked, maps);
+        if report.skipped > 0 {
+            crate::toast::report(
+                "slot-full",
+                &format!("{} maps have no LAN slot (16 max), remove some to host them", report.skipped),
+                None,
+                true,
+            );
+        }
+    }
+}
+
 /// Rebuild the in-game list from the folder the menu was enabled with.
 /// Returns Ok(None) when the menu is not enabled.
 pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
@@ -251,6 +266,7 @@ pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
     }
     let mut maps = all_maps(cooked);
     from_steam(&mut maps, cooked);
+    slot_for_lan(cooked, &mut maps);
     workshop_menu::write_list(cooked, &maps)?;
     Ok(Some(maps.len()))
 }
@@ -321,7 +337,10 @@ impl InGameMenuState {
             .max_height(220.0)
             .show(ui, |ui| {
                 for map in &self.maps {
-                    ui.monospace(format!("{}  {}", map.title, map.path.display()));
+                    let slot = crate::patcher::workshop_slots::slot_of(&cooked, &map.path)
+                        .map(|slot| format!("[{slot}] "))
+                        .unwrap_or_default();
+                    ui.monospace(format!("{slot}{}  {}", map.title, map.path.display()));
                 }
             });
         ui.add_space(6.0);
@@ -345,6 +364,7 @@ impl InGameMenuState {
                     let mut maps = all_maps(&cooked);
                     self.spawn(&ctx, move || {
                         from_steam(&mut maps, &cooked);
+                        slot_for_lan(&cooked, &mut maps);
                         Job::Done(workshop_menu::apply(&cooked, &backups, &folder, &maps))
                     });
                 } else {
