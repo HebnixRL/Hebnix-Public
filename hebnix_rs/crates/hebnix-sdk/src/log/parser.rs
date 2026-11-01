@@ -160,6 +160,53 @@ fn find_launch_log() -> PathBuf {
         .join("Launch.log")
 }
 
+/// Read the local identity and display name without fetching playlists or contacting an API.
+pub fn local_player_session() -> Option<LogSessionInfo> {
+    let bytes = std::fs::read(find_launch_log()).ok()?;
+    Some(parse_session(&String::from_utf8_lossy(&bytes)))
+}
+
+fn parse_session(text: &str) -> LogSessionInfo {
+    // Session info (always parsed)
+    let mut session = LogSessionInfo::default();
+    if let Some(c) = find_last(re_username(), &text) {
+        session.username = Some(c[1].to_string());
+    }
+    if let Some(c) = re_steam_id().captures(&text) {
+        session.steam_id = Some(c[1].to_string());
+    }
+    if let Some(c) = find_last(re_epic_id(), &text) {
+        session.epic_id = Some(c[1].to_string());
+    }
+    if session.epic_id.is_none() {
+        if let Some(c) = find_last(re_eos_id(), &text) {
+            session.epic_id = Some(c[1].to_string());
+        }
+    }
+    session.primary_id = parse_primary_id(&text);
+    // Epic's launcher command line is local and remains unaffected by Hebnix's
+    // account-spoofer proxy. Prefer it over an externally supplied display name.
+    if session.epic_id.is_some() {
+        if let Some(c) = find_last(re_epic_username(), &text) {
+            session.username = Some(
+                c.get(1)
+                    .or_else(|| c.get(2))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    if let Some(c) = re_platform().captures(&text) {
+        session.platform = Some(c[1].to_string());
+    }
+    if let Some(c) = find_last(re_rich_presence(), &text) {
+        session.rich_presence = Some(c[1].trim().to_string());
+        session.rich_presence_data = Some(c[2].trim().to_string());
+    }
+
+    session
+}
+
 /// Read the local account ID without network or Stats API verification.
 pub fn local_player_id() -> Option<String> {
     let bytes = std::fs::read(find_launch_log()).ok()?;
@@ -191,7 +238,9 @@ pub struct JoinMismatch {
 
 /// The last failed join in the log, `None` if RL is not running.
 pub fn join_mismatch(log_path: Option<&Path>) -> Option<JoinMismatch> {
-    let log_path = log_path.map(Path::to_path_buf).unwrap_or_else(find_launch_log);
+    let log_path = log_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(find_launch_log);
     let text = String::from_utf8_lossy(&std::fs::read(log_path).ok()?).to_string();
     if !is_rocket_league_running() {
         return None;
@@ -204,11 +253,16 @@ fn join_mismatch_in(text: &str) -> Option<JoinMismatch> {
     let mut found = None;
     for line in text.split_inclusive('\n') {
         if let Some(rest) = line.split_once("Pending connect to '").map(|(_, r)| r) {
-            if let (Some((ip, _)), Some((_, package))) =
-                (rest.split_once('/'), rest.split_once("Content mismatch (Package "))
-            {
+            if let (Some((ip, _)), Some((_, package))) = (
+                rest.split_once('/'),
+                rest.split_once("Content mismatch (Package "),
+            ) {
                 if let Some((package, _)) = package.split_once(')') {
-                    found = Some(JoinMismatch { ip: ip.into(), package: package.into(), at });
+                    found = Some(JoinMismatch {
+                        ip: ip.into(),
+                        package: package.into(),
+                        at,
+                    });
                 }
             }
         }
@@ -221,7 +275,9 @@ fn join_mismatch_in(text: &str) -> Option<JoinMismatch> {
 /// the last `LoadMap:` line, when that load listens for players. A later menu
 /// load, or any non-hosting load, means nothing is being hosted.
 pub fn hosted_map(log_path: Option<&Path>) -> Option<String> {
-    let log_path = log_path.map(Path::to_path_buf).unwrap_or_else(find_launch_log);
+    let log_path = log_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(find_launch_log);
     let text = String::from_utf8_lossy(&std::fs::read(log_path).ok()?).to_string();
     if !is_rocket_league_running() {
         return None;
@@ -260,42 +316,7 @@ pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> Lo
         None => Default::default(),
     };
 
-    // Session info (always parsed)
-    let mut session = LogSessionInfo::default();
-    if let Some(c) = find_last(re_username(), &text) {
-        session.username = Some(c[1].to_string());
-    }
-    if let Some(c) = re_steam_id().captures(&text) {
-        session.steam_id = Some(c[1].to_string());
-    }
-    if let Some(c) = find_last(re_epic_id(), &text) {
-        session.epic_id = Some(c[1].to_string());
-    }
-    if session.epic_id.is_none() {
-        if let Some(c) = find_last(re_eos_id(), &text) {
-            session.epic_id = Some(c[1].to_string());
-        }
-    }
-    session.primary_id = parse_primary_id(&text);
-    // Epic's launcher command line is local and remains unaffected by Hebnix's
-    // account-spoofer proxy. Prefer it over an externally supplied display name.
-    if session.epic_id.is_some() {
-        if let Some(c) = find_last(re_epic_username(), &text) {
-            session.username = Some(
-                c.get(1)
-                    .or_else(|| c.get(2))
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_default(),
-            );
-        }
-    }
-    if let Some(c) = re_platform().captures(&text) {
-        session.platform = Some(c[1].to_string());
-    }
-    if let Some(c) = find_last(re_rich_presence(), &text) {
-        session.rich_presence = Some(c[1].trim().to_string());
-        session.rich_presence_data = Some(c[2].trim().to_string());
-    }
+    let session = parse_session(&text);
 
     // Game info (only after verification)
     let mut game: Option<LogGameInfo> = None;
@@ -366,7 +387,10 @@ fn parse_game_info(
         }
     }
     if let Some(pid) = game.playlist_id {
-        game.playlist_name = online_playlists.get(&pid).cloned().or_else(|| crate::utils::playlists::known_name(pid).map(str::to_owned));
+        game.playlist_name = online_playlists
+            .get(&pid)
+            .cloned()
+            .or_else(|| crate::utils::playlists::known_name(pid).map(str::to_owned));
     }
 
     // welcomed by server (map + game class + tags)
@@ -535,7 +559,10 @@ mod hosted_map_tests {
 
     #[test]
     fn hosting_load_gives_the_map_path() {
-        assert_eq!(hosted_map_in(HOSTING).as_deref(), Some("E:\\maps\\1843822064\\n.udk"));
+        assert_eq!(
+            hosted_map_in(HOSTING).as_deref(),
+            Some("E:\\maps\\1843822064\\n.udk")
+        );
     }
 
     #[test]
@@ -558,10 +585,34 @@ mod join_mismatch_tests {
 [2.0] Log: other
 ";
         let found = join_mismatch_in(log).unwrap();
-        assert_eq!((found.ip.as_str(), found.package.as_str(), found.at), ("127.10.0.2", "speedjumptrials1", 0));
-        assert_eq!(join_mismatch_in("[1.0] Log: nothing here
-"), None);
+        assert_eq!(
+            (found.ip.as_str(), found.package.as_str(), found.at),
+            ("127.10.0.2", "speedjumptrials1", 0)
+        );
+        assert_eq!(
+            join_mismatch_in(
+                "[1.0] Log: nothing here
+"
+            ),
+            None
+        );
         let again = format!("{log}{log}");
         assert_eq!(join_mismatch_in(&again).unwrap().at, log.len());
+    }
+}
+
+#[cfg(test)]
+mod local_session_tests {
+    use super::*;
+    #[test]
+    fn local_identity_and_name_are_paired_without_online_verification() {
+        let session = parse_session(
+            "-epicuserid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -epicusername=\"Saved Player\"\nDevOnline: Logged in as 'Spoofed Name'",
+        );
+        assert_eq!(session.username.as_deref(), Some("Saved Player"));
+        assert_eq!(
+            session.primary_id.as_deref(),
+            Some("Epic|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0")
+        );
     }
 }

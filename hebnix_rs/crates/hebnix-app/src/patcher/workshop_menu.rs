@@ -196,6 +196,15 @@ const IMPORT_JSON_BUILDS: [(&str, &str); 2] = [(r"..\..\TAGame\HebnixWorkshop.js
 /// earlier builds restore to vanilla.
 const NAMES: [(&str, &str); 2] = [("TransformedLeftX", "LoadFileToString"), ("TargetFind", "ImportJSON")];
 
+pub(super) fn rename_names(upk: &mut UpkPackage, on: bool) -> Result<(), String> {
+    for (vanilla, patched) in NAMES {
+        let index = upk.names.iter().position(|n| n == vanilla || n == patched)
+            .ok_or_else(|| format!("{vanilla} is missing from {PACKAGE}"))?;
+        upk.rename_name(index, if on { patched } else { vanilla })?;
+    }
+    Ok(())
+}
+
 /// The unused names, renamed while the menu is enabled.
 fn names(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
     NAMES
@@ -371,7 +380,7 @@ fn load_all(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String>
 /// OnlinePlayerName. HandleWorkshopData asks for every author's avatar, and
 /// on Epic the reply names them all "Unknown", so the statement becomes
 /// no-op tokens and the ini's names stay.
-fn avatar_name(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
+pub(super) fn avatar_name(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
     let path = format!("{CLASS}.OnAvatarPersonaHandler");
     let function = export(upk, &path)?;
     let object = |path: &str| {
@@ -672,7 +681,7 @@ fn load_map(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String>
     Ok(changes)
 }
 
-fn tagame_values(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
+pub(super) fn tagame_values(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
     let mut changes = values(upk, &locate(upk)?, on)?;
     changes.extend(names(upk, on)?);
     changes.extend(load_all(upk, on)?);
@@ -712,10 +721,13 @@ fn is_patched(upk: &UpkPackage, values: Values) -> Result<bool, String> {
 
 /// Whether the live packages have the Workshop menu enabled.
 pub fn status(cooked: &Path) -> Result<bool, String> {
-    is_patched(&UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?, tagame_values)
+    super::profile_pictures::workshop_status(cooked, tagame_values)
 }
 
 fn set_live(cooked: &Path, file: &str, values: Values, on: bool) -> Result<(), String> {
+    if file == PACKAGE {
+        return super::profile_pictures::edit_workshop(cooked, values, on);
+    }
     let live = game_path::resolve(cooked, file);
     let mut upk = UpkPackage::load(&live)?;
     let changes = values(&upk, on)?;
