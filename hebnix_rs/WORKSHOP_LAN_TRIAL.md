@@ -43,9 +43,12 @@ two PCs: the bare name resolved and the join succeeded.
 Staging by map name needs a game restart, because the package cache is built at
 launch. To avoid it, every PC keeps a pool of 128 small placeholder packages,
 `hbx_slot001` to `hbx_slot128`, in `CookedPCConsole`. While the trial is on, the
-host's in-game Workshop list points each map at a copy of it (a hardlink on NTFS,
-a copy elsewhere) in `TAGame/HbxSlots`, named for its slot, so the game loads the
-map as `hbx_slotNN` and the map keeps its own title in the list. The slot is
+host's in-game Workshop list points each ticked map at its slot's own file in
+`CookedPCConsole` (the map swapped in for the placeholder, a hardlink on NTFS, a
+copy elsewhere), so the game loads the map as `hbx_slotNN` and the map keeps its
+own title in the list. A second file under the slot's name next to the
+placeholder is loaded into the same package and crashes the game (duplicate
+NetIndex errors, then `Error_CouldntSpawnPlayer`). The slot is
 announced as the map's `package`. A joiner who has the map swaps the same-named
 placeholder to it while the game runs and joins with the usual preload. The first
 run on a PC creates the placeholders and needs one game restart. A slot the game

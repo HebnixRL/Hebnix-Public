@@ -2801,7 +2801,8 @@ impl HebnixApp {
                     text,
                     fraction,
                     done,
-                } => self.toasts.progress(&key, &text, fraction, done),
+                    failed,
+                } => self.toasts.progress(&key, &text, fraction, done, failed),
                 AppMsg::PluginHttpRes {
                     slug,
                     req_id,
@@ -7071,6 +7072,10 @@ impl eframe::App for HebnixApp {
         } else {
             Duration::from_millis(500)
         };
+        // peers' map names and the game's sync button need this on every tab, hidden or not
+        let join_rl_path = self.config.settings.rl_path.clone();
+        self.workshop.startup_sync(&join_rl_path);
+        self.workshop.render_join_prompt(ctx, &join_rl_path);
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
         self.render_plugin_windows(ctx);
         if !self.hidden {
@@ -7777,13 +7782,10 @@ impl HebnixApp {
         if self.tab != Tab::Spoofer || self.spoofer_subtab != SpooferSubTab::Titles {
             self.title_editor.leave_page();
         }
-        self.workshop.startup_sync(&self.config.settings.rl_path.clone());
         match self.tab {
             Tab::Home => self.render_home(ui),
             Tab::Console => self.render_console_tab(ui),
             Tab::Workshop => {
-                let join_rl_path = self.config.settings.rl_path.clone();
-                self.workshop.render_join_prompt(ui.ctx(), &join_rl_path);
                 let rl_path = self.config.settings.rl_path.clone();
                 let rl_launch = self.config.rl_launch.clone();
                 let tx = self.tx.clone();

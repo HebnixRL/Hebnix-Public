@@ -105,6 +105,7 @@ pub enum AppMsg {
         text: String,
         fraction: Option<f32>,
         done: bool,
+        failed: bool,
     },
     // http result, slug picks the plugin that asked
     PluginHttpRes {

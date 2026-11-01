@@ -3554,6 +3554,7 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                         text: color("text"),
                         duration: opts.as_ref().and_then(|t| t.get::<f32>("duration").ok()),
                         image,
+                        failed: false,
                     },
                 });
                 Ok(())

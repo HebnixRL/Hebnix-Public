@@ -741,7 +741,7 @@ fn set_live(cooked: &Path, file: &str, values: Values, on: bool) -> Result<(), S
         upk.patch(*at, bytes)?;
     }
     let temp = cooked.join(format!("{file}.workshop.tmp"));
-    upk.save(&temp)?;
+    upk.save_fast(&temp)?;
     let check = UpkPackage::load(&temp).and_then(|saved| Ok(is_patched(&saved, values)? == on));
     if check != Ok(true) {
         let _ = fs::remove_file(&temp);
@@ -829,7 +829,7 @@ fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
     let on = host_on(cooked);
     maps.iter()
         .map(|map| {
-            let lan = super::workshop_slots::reserved(cooked, &map.path).unwrap_or_else(|| map.path.clone());
+            let lan = super::workshop_slots::filled(cooked, &map.path).unwrap_or_else(|| map.path.clone());
             let mut flags = String::new();
             if ticked.contains(&*map.path.to_string_lossy()) {
                 flags.push('t');

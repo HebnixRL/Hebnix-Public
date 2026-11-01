@@ -24,6 +24,8 @@ const PROGRESS_MAX: usize = 3;
 const TEXT_MAX: usize = 2000;
 const PREVIEW_MAX: usize = 90;
 const DEF_SECS: f32 = 4.0;
+const FAILED_SECS: f32 = 15.0;
+const FAILED_ACCENT: [u8; 4] = [235, 87, 87, 255];
 const MIN_SECS: f32 = 1.5;
 const MAX_SECS: f32 = 5.0;
 const FADE_IN: f32 = 0.25;
@@ -96,6 +98,8 @@ pub struct ToastStyle {
     pub duration: Option<f32>,
     // full path, already checked against the plugin assets folder
     pub image: Option<String>,
+    // a failure: red and on screen long enough to read
+    pub failed: bool,
 }
 
 /// "#rrggbb" or "#rrggbbaa"
@@ -176,12 +180,22 @@ pub fn install_sink(tx: crossbeam_channel::Sender<crate::messages::AppMsg>, ctx:
 /// a running job as a card with a bar. fraction None is unknown length. `done`
 /// removes the card and leaves one normal toast with the text.
 pub fn report(key: &str, text: &str, fraction: Option<f32>, done: bool) {
+    send(key, text, fraction, done, false);
+}
+
+/// the job failed: its card goes and a red toast stays up long enough to read
+pub fn report_failed(key: &str, text: &str) {
+    send(key, text, None, true, true);
+}
+
+fn send(key: &str, text: &str, fraction: Option<f32>, done: bool, failed: bool) {
     if let Some((tx, ctx)) = SINK.get() {
         let _ = tx.send(crate::messages::AppMsg::Progress {
             key: key.to_string(),
             text: text.to_string(),
             fraction,
             done,
+            failed,
         });
         ctx.request_repaint();
     }
@@ -294,14 +308,18 @@ impl Current {
             },
             title: group.tag.name.clone(),
             age: 0.0,
-            secs: style
-                .duration
-                .filter(|s| s.is_finite())
-                .map_or(DEF_SECS, |s| s.clamp(MIN_SECS, MAX_SECS)),
+            secs: if style.failed {
+                FAILED_SECS
+            } else {
+                style
+                    .duration
+                    .filter(|s| s.is_finite())
+                    .map_or(DEF_SECS, |s| s.clamp(MIN_SECS, MAX_SECS))
+            },
             fit_w: -1.0,
             title_fit: String::new(),
             body_fit: String::new(),
-            accent: style.accent.unwrap_or(DEF_ACCENT),
+            accent: style.accent.unwrap_or(if style.failed { FAILED_ACCENT } else { DEF_ACCENT }),
             bg: style.background.unwrap_or(DEF_BG),
             text,
             body_col,
@@ -329,11 +347,13 @@ impl ToastCenter {
             return;
         }
         let tag = self.tag(slug, name);
+        let (line, cut) = preview(text);
+        let preview = if cut { format!("{line}...") } else { line.to_string() };
+        // a waiting toast from the same sender shows the newest text instead of a count
         if let Some(group) = self.waiting.iter_mut().find(|g| g.tag.slug == slug) {
-            group.count += 1;
+            group.preview = preview;
+            group.style = style;
         } else {
-            let (line, cut) = preview(text);
-            let preview = if cut { format!("{line}...") } else { line.to_string() };
             self.waiting.push_back(Group {
                 tag: Arc::clone(&tag),
                 count: 1,
@@ -354,10 +374,15 @@ impl ToastCenter {
         self.unread = self.unread.saturating_add(1);
     }
 
-    pub fn progress(&mut self, key: &str, text: &str, fraction: Option<f32>, done: bool) {
+    pub fn progress(&mut self, key: &str, text: &str, fraction: Option<f32>, done: bool, failed: bool) {
         if done {
             self.cards.retain(|c| c.key != key);
-            self.push("hebnix", "Hebnix", text, ToastStyle::default());
+            if failed {
+                let style = ToastStyle { failed: true, ..ToastStyle::default() };
+                self.push("hebnix-failed", "Hebnix: failed", text, style);
+            } else {
+                self.push("hebnix", "Hebnix", text, ToastStyle::default());
+            }
             return;
         }
         let now = Instant::now();

@@ -981,6 +981,10 @@ pub struct WorkshopState {
     join_polled: Option<std::time::Instant>,
     /// the Sync map slots button was pressed, so the next sync reports its result
     slot_sync_asked: bool,
+    /// the map title a sync asked for from the game's LAN browser, whose map is fetched if missing
+    sync_title: Option<String>,
+    /// maps a sync found missing, fetched from their hosts on the next frame
+    fetch_queue: Vec<(SlotMap, std::net::Ipv4Addr)>,
     join_mismatch_dismissed: Option<hebnix_sdk::log::JoinMismatch>,
     import_wizard: ImportWizard,
     steam_downloader: SteamDownloader,
@@ -1033,6 +1037,8 @@ impl WorkshopState {
             join_mismatch: None,
             join_polled: None,
             slot_sync_asked: false,
+            sync_title: None,
+            fetch_queue: Vec::new(),
             join_mismatch_dismissed: None,
             import_wizard: ImportWizard::default(),
             steam_downloader: SteamDownloader::default(),
@@ -1208,6 +1214,8 @@ impl WorkshopState {
             return;
         }
         self.startup_done = true;
+        // the game's sync button and ticks reach Hebnix through this, whatever tab is open
+        ingame_menu::watch_ticks(&cooked);
         crate::patcher::workshop_menu::move_legacy_maps(&cooked);
         if crate::patcher::workshop_lan_trial::enabled(&cooked) && crate::patcher::workshop_slots::ensure_pool(&cooked) > 0 {
             crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
@@ -1641,10 +1649,14 @@ impl WorkshopState {
                         crate::patcher::workshop_slots::ensure_pool(&cooked);
                         self.slot_sync_asked = true;
                         self.join_polled = None;
+                        // empty title = fetch every hosted map you are missing
+                        self.sync_title = Some(String::new());
                         self.multiplayer.status = "Syncing map slots...".into();
+                        crate::toast::report("slot-sync", "Syncing map slots...", None, false);
                     } else {
                         self.multiplayer.status =
                             "Enable the in-game Workshop menu first (Maps > In-game menu).".into();
+                        crate::toast::report_failed("slot-sync", &self.multiplayer.status);
                     }
                     ctx.request_repaint();
                 }
@@ -1982,15 +1994,28 @@ impl WorkshopState {
     /// Centered popup, on any tab, offering the hosted map of the player the
     /// game just failed to join.
     pub fn render_join_prompt(&mut self, ctx: &egui::Context, rl_path: &str) {
+        for (map, ip) in std::mem::take(&mut self.fetch_queue) {
+            self.install_peer_map(map, IpAddr::V4(ip), true, rl_path, ctx);
+        }
+        let request = ingame_menu::take_sync_request();
         let Some(session) = &self.multiplayer.relay else {
+            if request.is_some() {
+                crate::toast::report_failed("slot-sync", "Connect to Workshop multiplayer first to sync maps.");
+            }
             return;
         };
+        if let Some(title) = request {
+            self.slot_sync_asked = true;
+            self.join_polled = None;
+            self.sync_title = Some(title);
+        }
         if self.join_polled.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
             self.join_polled = Some(std::time::Instant::now());
             self.join_mismatch = hebnix_sdk::log::join_mismatch(None);
             let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
             if crate::patcher::workshop_lan_trial::enabled(&cooked) {
                 let workshop = crate::patcher::workshop_menu::workshop_dir(&cooked);
+                let mut missing = Vec::new();
                 let offers: Vec<_> = session.peer_offers().into_iter().filter_map(|offer| {
                     let IpAddr::V4(ip) = offer.ip else { return None; };
                     let mut map = offer.maps.iter().find(|m| m.slot == HOSTING_SLOT)?.clone();
@@ -2006,21 +2031,45 @@ impl WorkshopState {
                         peer_workshop_file(&workshop, &map).or_else(||
                             crate::patcher::workshop_lan_trial::find_local_map(&roots, &map.file))
                     };
+                    if local.is_none() {
+                        missing.push((map.clone(), ip));
+                    }
                     Some(crate::patcher::workshop_lan_trial::Offer {
                         ip, title: map.name.clone(), map: local, package: map.package.clone(),
                     })
                 }).collect();
                 let asked = std::mem::take(&mut self.slot_sync_asked);
-                match crate::patcher::workshop_lan_trial::sync_offers(&cooked, &offers) {
-                    Err(error) => self.multiplayer.status = format!("LAN map trial: {error}"),
+                let synced = crate::patcher::workshop_lan_trial::sync_offers(&cooked, &offers);
+                // a joined map took over one of your ticked maps' slots, so the game's list must show it unticked
+                if crate::patcher::workshop_slots::take_unticked() {
+                    let cooked = cooked.clone();
+                    std::thread::spawn(move || {
+                        let _ = ingame_menu::refresh(&cooked);
+                    });
+                }
+                match synced {
+                    Err(error) => {
+                        self.multiplayer.status = format!("LAN map trial: {error}");
+                        if asked {
+                            crate::toast::report_failed("slot-sync", &self.multiplayer.status);
+                        }
+                    }
                     Ok(()) if asked => {
                         let ready = offers.iter().filter(|o| o.map.is_some()).count();
                         self.multiplayer.status = format!(
                             "Map slots synced: {ready} of {} hosted map(s) ready to join.",
                             offers.len()
                         );
+                        crate::toast::report("slot-sync", &self.multiplayer.status, None, true);
                     }
                     Ok(()) => {}
+                }
+                // a sync from the game's LAN browser also fetches the map it is asking about
+                if let Some(title) = self.sync_title.take() {
+                    self.fetch_queue = missing
+                        .into_iter()
+                        .filter(|(map, _)| title.is_empty() || map.name.eq_ignore_ascii_case(&title))
+                        .collect();
                 }
             }
         }
@@ -2245,6 +2294,7 @@ impl WorkshopState {
             .map_install_busy
             .swap(true, Ordering::Relaxed)
         {
+            crate::toast::report_failed("peer-map-busy", &format!("Not getting {}: another map is still installing. Sync again when it finishes.", map.name));
             return;
         }
         let mut map_data = self
@@ -2273,6 +2323,24 @@ impl WorkshopState {
         transfer.total.store(0, Ordering::Relaxed);
         let rl_path = rl_path.to_string();
         let repaint = ctx.clone();
+        let key = format!("peer-map-{}", map.id);
+        crate::toast::report(&key, &format!("Getting {}...", map.name), None, false);
+        // the bar follows the transfer until the install finishes
+        let finished = Arc::new(AtomicBool::new(false));
+        {
+            let (finished, transfer, key, name) = (finished.clone(), transfer.clone(), key.clone(), map.name.clone());
+            std::thread::spawn(move || {
+                while !finished.load(Ordering::Relaxed) {
+                    let total = transfer.total.load(Ordering::Relaxed);
+                    if total > 0 {
+                        let done = transfer.done.load(Ordering::Relaxed);
+                        let text = format!("Downloading {name} ({} / {} MB)", done / 1_048_576, total / 1_048_576);
+                        crate::toast::report(&key, &text, Some(done as f32 / total as f32), false);
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            });
+        }
         std::thread::spawn(move || {
             let outcome = (|| {
                 manager.cache_from_workshop_folder(&map.id, &rl_path)?;
@@ -2310,10 +2378,17 @@ impl WorkshopState {
                 }
                 Ok::<(), String>(())
             })();
+            let failed = outcome.is_err();
             let text = match outcome {
                 Ok(()) => format!("Installed {} in {}.", map.name, if map.slot == WORKSHOP_TARGET || map.slot == HOSTING_SLOT { WORKSHOP_TARGET } else { SEEDED_SLOT }),
                 Err(error) => format!("Could not install {}: {error}", map.name),
             };
+            finished.store(true, Ordering::Relaxed);
+            if failed {
+                crate::toast::report_failed(&key, &text);
+            } else {
+                crate::toast::report(&key, &text, None, true);
+            }
             if let Ok(mut slot) = result.lock() {
                 *slot = text;
             }

@@ -150,10 +150,32 @@ pub fn watch_ticks(cooked: &Path) {
                 // a line the game is still writing waits for the next pass
                 let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { continue };
                 seen += end as u64 + 1;
-                apply_ticks(&cooked, &String::from_utf8_lossy(&bytes[..end]));
+                let text = String::from_utf8_lossy(&bytes[..end]);
+                apply_ticks(&cooked, &text);
+                queue_sync(&text);
             }
         });
     });
+}
+
+static SYNC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// the LAN browser's sync button logs owner|server|map of the selected row; the
+/// map title is what is kept for the multiplayer code to pick up
+fn queue_sync(text: &str) {
+    let Some(row) = text.lines().rev().find_map(|line| line.split_once("HBXSYNC: [GFx] ").map(|(_, row)| row)) else {
+        return;
+    };
+    let title = row.trim().rsplit('|').next().unwrap_or_default().to_string();
+    if let Ok(mut request) = SYNC.lock() {
+        *request = Some(title);
+    }
+    crate::toast::report("slot-sync", "Syncing map slots...", None, false);
+}
+
+/// the map title of a sync asked for in the game, once
+pub fn take_sync_request() -> Option<String> {
+    SYNC.lock().ok()?.take()
 }
 
 /// the last tick of each map in the log text, applied together
@@ -178,7 +200,7 @@ fn apply_ticks(cooked: &Path, text: &str) {
     for (cooked, ticks) in installs {
         for (path, on) in &ticks {
             if let Err(e) = crate::patcher::workshop_slots::set_ticked(&cooked, path, *on) {
-                crate::toast::report("lan-tick", &format!("LAN tick failed: {e}"), None, true);
+                crate::toast::report_failed("lan-tick", &format!("LAN tick failed: {e}"));
                 return;
             }
         }

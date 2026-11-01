@@ -137,6 +137,8 @@ impl Resolver {
         // and public avatar uploads use separate requests without that header.
         let profile = Client::builder()
             .redirect(Policy::none())
+            // the profile service rejects requests without a registered app User-Agent (HTTP 427)
+            .user_agent(concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;

@@ -222,7 +222,7 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
     let old_mode = receipt["mode"].clone();
     fs::write(&receipt_path, receipt.to_string()).map_err(|e| e.to_string())?;
     let temp = cooked.join("TAGame.lan-trial.tmp");
-    p.save(&temp)?;
+    p.save_fast(&temp)?;
     let check = UpkPackage::load(&temp)?;
     for path in [TITLE, JOIN] {
         if payload(&check, path)? != payload(&p, path)? {
@@ -429,13 +429,19 @@ pub fn sync_offers(cooked: &Path, offers: &[Offer]) -> Result<(), String> {
                     continue;
                 }
                 claimed.insert(name.clone(), map.clone());
-                if let Err(error) = super::workshop_slots::place(cooked, &name, &map, &offer.title) {
-                    crate::toast::report(&format!("slot-{name}"), &error, None, true);
-                    continue;
+                let placed = match super::workshop_slots::place(cooked, &name, &map, &offer.title) {
+                    Ok(placed) => placed,
+                    Err(error) => {
+                        crate::toast::report_failed(&format!("slot-{name}"), &error);
+                        continue;
+                    }
+                };
+                // the player's own copy of the map is not ours to put back
+                if !matches!(placed, super::workshop_slots::Placed::Own) {
+                    let marker = folder.join(format!("{name}.staged"));
+                    fs::write(&marker, b"").map_err(|e| e.to_string())?;
+                    keep.insert(marker);
                 }
-                let marker = folder.join(format!("{name}.staged"));
-                fs::write(&marker, b"").map_err(|e| e.to_string())?;
-                keep.insert(marker);
                 let path = folder.join(format!("{key}.object"));
                 unicode_file(&path, &format!("{name}.TheWorld"))?;
                 keep.insert(path);
