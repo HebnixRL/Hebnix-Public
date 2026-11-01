@@ -874,15 +874,18 @@ pub fn apply(
 ) -> Result<String, String> {
     write_list(cooked, maps)?;
     set_all(cooked, true)?;
+    // the menu works without the LAN controls, so a movie that can't be patched only costs those
+    let ui = super::workshop_menu_ui::apply(cooked, backups);
     super::item_name::workshop_description(cooked, backups, true)?;
     let _ = fs::remove_dir_all(cooked.join(OLD_PREVIEWS));
     fs::create_dir_all(backups).map_err(|e| e.to_string())?;
     fs::write(backups.join(ENABLED), folder.to_string_lossy().as_bytes())
         .map_err(|e| e.to_string())?;
     Ok(format!(
-        "Workshop menu enabled with {} maps, {} with previews",
+        "Workshop menu enabled with {} maps, {} with previews{}",
         maps.len(),
-        maps.iter().filter(|m| !m.preview_url.is_empty()).count()
+        maps.iter().filter(|m| !m.preview_url.is_empty()).count(),
+        ui.err().map(|e| format!(" (LAN controls not added: {e})")).unwrap_or_default()
     ))
 }
 
@@ -890,6 +893,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
     super::workshop_lan_trial::set_mode(cooked, "off")?;
     super::item_name::workshop_description(cooked, backups, false)?;
     set_all(cooked, false)?;
+    super::workshop_menu_ui::restore(cooked, backups)?;
     write_list(cooked, &[])?;
     let _ = fs::remove_file(list_path(cooked));
     let _ = fs::remove_file(host_path(cooked));
@@ -903,6 +907,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
 pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
     if backups.join(ENABLED).is_file() {
         set_live(cooked, PACKAGE, tagame_values, true)?;
+        let _ = super::workshop_menu_ui::apply(cooked, backups);
         super::workshop_lan_trial::reapply(cooked)?;
     }
     Ok(())
