@@ -587,12 +587,12 @@ mod tests {
             ip: ip.parse().unwrap(),
             title: title.into(),
             map: Some(path.to_path_buf()),
-            package: "hbx_slot04".into(),
+            package: "hbx_slot004".into(),
         };
         sync_offers(&cooked, &[slotted("127.10.0.4", "Slotted", &root.join("taken.udk"))]).unwrap();
-        assert_eq!(fs::read(cooked.join("hbx_slot04.upk")).unwrap(), b"peer map data");
-        assert_eq!(read_text(&folder.join("127.10.0.4_7777.object")), "hbx_slot04.TheWorld");
-        assert_eq!(offer_status(&cooked), ["Slotted - ready to join (hbx_slot04)"]);
+        assert_eq!(fs::read(cooked.join("hbx_slot004.upk")).unwrap(), b"peer map data");
+        assert_eq!(read_text(&folder.join("127.10.0.4_7777.object")), "hbx_slot004.TheWorld");
+        assert_eq!(offer_status(&cooked), ["Slotted - ready to join (hbx_slot004)"]);
         // another host using the same slot for a different map does not take it over
         fs::write(root.join("other.udk"), b"other map").unwrap();
         sync_offers(
@@ -604,9 +604,9 @@ mod tests {
         )
         .unwrap();
         assert!(!folder.join("127.10.0.5_7777.object").exists());
-        assert_eq!(fs::read(cooked.join("hbx_slot04.upk")).unwrap(), b"peer map data");
+        assert_eq!(fs::read(cooked.join("hbx_slot004.upk")).unwrap(), b"peer map data");
         sync_offers(&cooked, &[]).unwrap();
-        assert_eq!(fs::read(cooked.join("hbx_slot04.upk")).unwrap(), b"placeholder");
+        assert_eq!(fs::read(cooked.join("hbx_slot004.upk")).unwrap(), b"placeholder");
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -42,15 +42,15 @@ Full or relative paths, and a `.udk` in `mods`, all returned `None`. Verified on
 two PCs: the bare name resolved and the join succeeded.
 
 Staging by map name needs a game restart, because the package cache is built at
-launch. To avoid it, every PC keeps a pool of 16 small placeholder packages,
-`hbx_slot01` to `hbx_slot16`, in `CookedPCConsole`. While the trial is on, the
+launch. To avoid it, every PC keeps a pool of 128 small placeholder packages,
+`hbx_slot001` to `hbx_slot128`, in `CookedPCConsole`. While the trial is on, the
 host's in-game Workshop list points each map at a copy of it (a hardlink on NTFS,
 a copy elsewhere) in `TAGame/HbxSlots`, named for its slot, so the game loads the
 map as `hbx_slotNN` and the map keeps its own title in the list. The slot is
 announced as the map's `package`. A joiner who has the map swaps the same-named
 placeholder to it while the game runs and joins with the usual preload. The first
 run on a PC creates the placeholders and needs one game restart. A slot the game
-has loaded cannot be swapped, and more than 16 maps leave the extra ones unslotted.
+has loaded cannot be swapped. Only maps ticked in the Hebnix map list get a slot copy, and more than 128 ticked maps leave the extra ones unslotted.
 Copies show as progress cards in the overlay toasts.
 
 The second build searches the selected Workshop folder, Hebnix's fallback folder,

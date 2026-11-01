@@ -1227,6 +1227,7 @@ impl WorkshopState {
         if self.lan_synced != Some(connected) {
             self.lan_synced = Some(connected);
             ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
+            ingame_menu::watch_ticks(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"));
             self.startup_sync(rl_path);
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(

@@ -3,7 +3,7 @@
 //! placeholders. the host loads a map under a slot name, the joiner swaps that
 //! slot to the same map while the game runs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,20 +11,22 @@ use std::time::{Duration, Instant};
 
 use super::workshop_menu::WorkshopMap;
 
-pub const SLOTS: usize = 16;
+pub const SLOTS: usize = 128;
 const PREFIX: &str = "hbx_slot";
 const HOST_DIR: &str = "HbxSlots";
 const STATE: &str = "slots.json";
+// maps the player ticked for LAN, by path
+const TICKED: &str = "lan_ready.json";
 // a small vanilla package, copied to make each placeholder
 const PLACEHOLDER: &str = "Woods_SFX.upk";
 
 pub fn slot_name(n: usize) -> String {
-    format!("{PREFIX}{n:02}")
+    format!("{PREFIX}{n:03}")
 }
 
 pub fn is_slot(name: &str) -> bool {
     name.strip_prefix(PREFIX)
-        .filter(|n| n.len() == 2)
+        .filter(|n| n.len() == 3)
         .and_then(|n| n.parse::<usize>().ok())
         .is_some_and(|n| (1..=SLOTS).contains(&n))
 }
@@ -38,6 +40,32 @@ fn read_state(dir: &Path) -> BTreeMap<String, String> {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// paths of the maps ticked for LAN. before the first tick, the maps whose
+/// slot copy exists count as ticked.
+pub fn ticked(cooked: &Path) -> HashSet<String> {
+    let dir = host_dir(cooked);
+    match fs::read_to_string(dir.join(TICKED)).ok().and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()) {
+        Some(list) => list.into_iter().collect(),
+        None => read_state(&dir)
+            .into_iter()
+            .filter(|(slot, _)| is_slot(slot) && dir.join(format!("{slot}.udk")).is_file())
+            .map(|(_, path)| path)
+            .collect(),
+    }
+}
+
+pub fn set_ticked(cooked: &Path, map: &Path, on: bool) -> Result<(), String> {
+    let mut set = ticked(cooked);
+    let path = map.to_string_lossy().into_owned();
+    if on { set.insert(path) } else { set.remove(&path) };
+    let dir = host_dir(cooked);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut list: Vec<_> = set.into_iter().collect();
+    list.sort();
+    let text = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
+    fs::write(dir.join(TICKED), text).map_err(|e| e.to_string())
 }
 
 /// same size and write time, which a copy or link keeps
@@ -93,6 +121,11 @@ pub fn original(hosted: &Path) -> Option<PathBuf> {
     read_state(dir).remove(&stem).map(PathBuf::from)
 }
 
+/// the slot copy path a map was given, which only exists once the map is ticked
+pub fn reserved(cooked: &Path, map: &Path) -> Option<PathBuf> {
+    slot_of(cooked, map).map(|slot| host_dir(cooked).join(format!("{slot}.udk")))
+}
+
 /// the slot a map was given, for display
 pub fn slot_of(cooked: &Path, map: &Path) -> Option<String> {
     let want = map.to_string_lossy();
@@ -104,10 +137,11 @@ pub struct HostReport {
     pub errors: Vec<String>,
 }
 
-/// give each listed map a slot copy and point the list at it, so the game loads
-/// the map under a package name every player has ready. maps keep a slot until
-/// they are removed; more maps than slots leave the extra ones as they are.
-pub fn assign_host(cooked: &Path, maps: &mut [WorkshopMap]) -> HostReport {
+/// reserve a slot for every listed map and copy the ticked ones into theirs, so
+/// a right-click can load the map under a package name every player has ready.
+/// maps keep a slot until they are removed; unticked maps are never copied.
+/// more maps than slots leave the extra ones without.
+pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
     let dir = host_dir(cooked);
     let mut report = HostReport { skipped: 0, errors: Vec::new() };
     if let Err(e) = fs::create_dir_all(&dir) {
@@ -115,15 +149,17 @@ pub fn assign_host(cooked: &Path, maps: &mut [WorkshopMap]) -> HostReport {
         return report;
     }
     let mut state = read_state(&dir);
+    let ticked = ticked(cooked);
     let listed: Vec<String> = maps.iter().map(|m| m.path.to_string_lossy().into_owned()).collect();
     state.retain(|slot, path| {
-        let keep = listed.contains(path);
+        // the old two digit slot names are dropped with their copies
+        let keep = is_slot(slot) && listed.contains(path);
         if !keep {
             let _ = fs::remove_file(dir.join(format!("{slot}.udk")));
         }
         keep
     });
-    for map in maps.iter_mut() {
+    for map in maps {
         let path = map.path.to_string_lossy().into_owned();
         let slot = match state.iter().find(|(_, p)| **p == path) {
             Some((slot, _)) => slot.clone(),
@@ -136,6 +172,11 @@ pub fn assign_host(cooked: &Path, maps: &mut [WorkshopMap]) -> HostReport {
             },
         };
         let dest = dir.join(format!("{slot}.udk"));
+        if !ticked.contains(&path) {
+            let _ = fs::remove_file(&dest);
+            state.insert(slot, path);
+            continue;
+        }
         if !same_file(&dest, &map.path) {
             let key = format!("slot-{slot}");
             let label = format!("Preparing {} for LAN ({slot})", map.title);
@@ -157,7 +198,6 @@ pub fn assign_host(cooked: &Path, maps: &mut [WorkshopMap]) -> HostReport {
             }
         }
         state.insert(slot, path);
-        map.path = dest;
     }
     if let Ok(text) = serde_json::to_string_pretty(&state) {
         let _ = fs::write(dir.join(STATE), text);
@@ -236,8 +276,8 @@ mod tests {
 
     #[test]
     fn only_pool_names_are_slots() {
-        assert!(is_slot("hbx_slot01") && is_slot("hbx_slot16"));
-        for bad in ["hbx_slot00", "hbx_slot17", "hbx_slot1", "hbx_slot001", "Woods_SFX", "hbx_slot0a"] {
+        assert!(is_slot("hbx_slot001") && is_slot("hbx_slot128"));
+        for bad in ["hbx_slot000", "hbx_slot129", "hbx_slot01", "hbx_slot1", "hbx_slot0001", "Woods_SFX", "hbx_slot0a0"] {
             assert!(!is_slot(bad), "{bad}");
         }
     }
@@ -251,23 +291,33 @@ mod tests {
             fs::write(&path, name.as_bytes()).unwrap();
             WorkshopMap { id: 1, title: name.into(), author: String::new(), description: String::new(), path, preview_url: String::new() }
         };
-        let mut maps = vec![map("one"), map("two")];
+        let maps = vec![map("one"), map("two")];
         let originals: Vec<_> = maps.iter().map(|m| m.path.clone()).collect();
-        assert_eq!(assign_host(&cooked, &mut maps).errors.len(), 0);
-        assert_eq!(maps[0].path.file_name().unwrap(), "hbx_slot01.udk");
-        assert_eq!(maps[1].path.file_name().unwrap(), "hbx_slot02.udk");
-        assert_eq!(fs::read(&maps[1].path).unwrap(), b"two");
-        assert_eq!(original(&maps[1].path), Some(originals[1].clone()));
-        assert_eq!(slot_of(&cooked, &originals[0]).as_deref(), Some("hbx_slot01"));
+        // every map reserves a slot, but nothing is copied until ticked
+        assert_eq!(assign_host(&cooked, &maps).errors.len(), 0);
+        let dir = host_dir(&cooked);
+        assert_eq!(reserved(&cooked, &originals[0]), Some(dir.join("hbx_slot001.udk")));
+        assert_eq!(reserved(&cooked, &originals[1]), Some(dir.join("hbx_slot002.udk")));
+        assert!(!dir.join("hbx_slot001.udk").exists());
+        for path in &originals {
+            set_ticked(&cooked, path, true).unwrap();
+        }
+        assert_eq!(assign_host(&cooked, &maps).errors.len(), 0);
+        assert_eq!(fs::read(dir.join("hbx_slot002.udk")).unwrap(), b"two");
+        assert_eq!(original(&dir.join("hbx_slot002.udk")), Some(originals[1].clone()));
+        assert_eq!(slot_of(&cooked, &originals[0]).as_deref(), Some("hbx_slot001"));
 
-        // dropping the first map keeps the second in its slot and frees the first
-        let mut maps = vec![WorkshopMap { path: originals[1].clone(), ..map("two") }];
-        assign_host(&cooked, &mut maps);
-        assert_eq!(maps[0].path.file_name().unwrap(), "hbx_slot02.udk");
-        assert!(!host_dir(&cooked).join("hbx_slot01.udk").exists());
-        let mut maps = vec![WorkshopMap { path: originals[0].clone(), ..map("one") }, map("two")];
-        assign_host(&cooked, &mut maps);
-        assert_eq!(maps[0].path.file_name().unwrap(), "hbx_slot01.udk");
+        // unticking drops the copy and keeps the reserved name
+        set_ticked(&cooked, &originals[1], false).unwrap();
+        assign_host(&cooked, &maps);
+        assert!(!dir.join("hbx_slot002.udk").exists());
+        assert_eq!(slot_of(&cooked, &originals[1]).as_deref(), Some("hbx_slot002"));
+        // dropping the first map frees its slot and keeps the second's
+        let maps = vec![WorkshopMap { path: originals[1].clone(), ..map("two") }];
+        assign_host(&cooked, &maps);
+        assert!(!dir.join("hbx_slot001.udk").exists());
+        assert_eq!(slot_of(&cooked, &originals[0]), None);
+        assert_eq!(slot_of(&cooked, &originals[1]).as_deref(), Some("hbx_slot002"));
     }
 
     #[test]
@@ -278,16 +328,16 @@ mod tests {
         let map = game.join("map.udk");
         fs::write(&map, b"the real map").unwrap();
 
-        let slot_file = cooked.join("hbx_slot03.upk");
-        assert!(matches!(place(&cooked, "hbx_slot03", &map, "Map"), Ok(Placed::Restart)));
+        let slot_file = cooked.join("hbx_slot003.upk");
+        assert!(matches!(place(&cooked, "hbx_slot003", &map, "Map"), Ok(Placed::Restart)));
         assert_eq!(fs::read(&slot_file).unwrap(), b"the real map");
-        assert!(matches!(place(&cooked, "hbx_slot03", &map, "Map"), Ok(Placed::Ready)));
+        assert!(matches!(place(&cooked, "hbx_slot003", &map, "Map"), Ok(Placed::Ready)));
         assert_eq!(ensure_pool(&cooked), SLOTS - 1);
-        release(&cooked, "hbx_slot03");
+        release(&cooked, "hbx_slot003");
         assert_eq!(fs::read(&slot_file).unwrap(), b"placeholder");
         let other = game.join("other.udk");
         fs::write(&other, b"another, bigger map").unwrap();
-        assert!(matches!(place(&cooked, "hbx_slot03", &other, "Other"), Ok(Placed::Swapped)));
+        assert!(matches!(place(&cooked, "hbx_slot003", &other, "Other"), Ok(Placed::Swapped)));
         assert!(place(&cooked, "Woods_SFX", &map, "Map").is_err());
     }
 }

@@ -35,7 +35,7 @@ pub struct InGameMenuState {
 
 /// Hebnix's own flags, as URL options after the settings. The game ignores them.
 const ALWAYS: &str = "?HbxAlways";
-const NO_AUTO: &str = "?HbxNoAuto";
+const AUTO: &str = "?HbxAuto";
 
 const BOTS: [&str; 5] = ["BotsNone", "BotsEasy", "BotsMedium", "BotsHard", "BotsUnfair"];
 /// Options after the game tags, as Rocket Plugin hosts with.
@@ -63,7 +63,7 @@ impl LanHost {
         self.loaded = true;
         let text = workshop_menu::read_host(cooked).unwrap_or_default();
         self.always = text.contains(ALWAYS);
-        self.auto = !text.contains(NO_AUTO);
+        self.auto = text.contains(AUTO);
         let tags = text.split('?').next().unwrap_or_default();
         (self.team_size, self.bots) = (3, 0);
         let mut rest = Vec::new();
@@ -88,13 +88,13 @@ impl LanHost {
             .collect();
         tags.push(BOTS[self.bots].to_string());
         tags.push(format!("PlayerCount{}", self.team_size * 2));
-        let flags = [(self.always, ALWAYS), (!self.auto, NO_AUTO)];
+        let flags = [(self.always, ALWAYS), (self.auto, AUTO)];
         let flags: String = flags.iter().filter(|(set, _)| *set).map(|(_, flag)| *flag).collect();
         format!("{}{LISTEN}{flags}", tags.join(","))
     }
 
     /// Write the settings and switch the host file on or off to match.
-    fn sync(&self, cooked: &Path, connected: bool) -> Result<(), String> {
+    fn sync(&self, cooked: &Path, connected: bool) -> Result<bool, String> {
         workshop_menu::store_host(cooked, &self.file_text(), self.always || (self.auto && connected))
     }
 }
@@ -106,7 +106,81 @@ pub fn sync_lan(cooked: &Path, connected: bool) {
     }
     let mut lan = LanHost::default();
     lan.load(cooked);
-    let _ = lan.sync(cooked, connected);
+    // the map list tells the menu whether a plain pick hosts
+    if let Ok(true) = lan.sync(cooked, connected) {
+        let _ = refresh(cooked);
+    }
+}
+
+/// the game folder the tick watcher applies ticks to
+static WATCHED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Apply the LAN ticks made in the game's Workshop menu. The menu logs each one
+/// to Launch.log, so a thread follows the log and ticks the map in Hebnix.
+pub fn watch_ticks(cooked: &Path) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if let Ok(mut watched) = WATCHED.lock() {
+        *watched = Some(cooked.to_path_buf());
+    }
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            let log = dirs::document_dir().map(|d| d.join("My Games/Rocket League/TAGame/Logs/Launch.log"));
+            // ticks from an earlier game session were already applied
+            let mut seen = log.as_ref().and_then(|l| fs::metadata(l).ok()).map_or(0, |m| m.len());
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let Some(log) = &log else { continue };
+                let Some(cooked) = WATCHED.lock().ok().and_then(|w| w.clone()) else { continue };
+                let Ok(len) = fs::metadata(log).map(|m| m.len()) else { continue };
+                // a new game launch starts a new log
+                if len < seen {
+                    seen = 0;
+                }
+                if len == seen {
+                    continue;
+                }
+                let Ok(mut file) = fs::File::open(log) else { continue };
+                if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(seen)).is_err() {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                if file.read_to_end(&mut bytes).is_err() {
+                    continue;
+                }
+                // a line the game is still writing waits for the next pass
+                let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { continue };
+                seen += end as u64 + 1;
+                apply_ticks(&cooked, &String::from_utf8_lossy(&bytes[..end]));
+            }
+        });
+    });
+}
+
+/// the last tick of each map in the log text, applied together
+fn apply_ticks(cooked: &Path, text: &str) {
+    let mut last: Vec<(PathBuf, bool)> = Vec::new();
+    for line in text.lines() {
+        let Some((_, rest)) = line.split_once("HBXTICK: [GFx] ") else { continue };
+        let Some((on, path)) = rest.trim().split_once(' ') else { continue };
+        let path = PathBuf::from(path.trim());
+        last.retain(|(p, _)| *p != path);
+        last.push((path, on == "true"));
+    }
+    if last.is_empty() {
+        return;
+    }
+    for (path, on) in &last {
+        if let Err(e) = crate::patcher::workshop_slots::set_ticked(cooked, path, *on) {
+            crate::toast::report("lan-tick", &format!("LAN tick failed: {e}"), None, true);
+            return;
+        }
+    }
+    crate::toast::report("lan-tick", "Copying ticked maps for LAN...", None, false);
+    let done = match refresh(cooked) {
+        Ok(_) => "LAN maps updated".to_string(),
+        Err(e) => format!("LAN update failed: {e}"),
+    };
+    crate::toast::report("lan-tick", &done, None, true);
 }
 
 fn extension(path: &Path) -> String {
@@ -243,13 +317,13 @@ fn all_maps(cooked: &Path) -> Vec<WorkshopMap> {
     scan(&workshop_menu::maps_folder(cooked))
 }
 
-/// List each map by its LAN slot copy. Hosting needs no patch, only the copy.
-fn slot_for_lan(cooked: &Path, maps: &mut [WorkshopMap]) {
+/// List each ticked map by its LAN slot copy. Hosting needs no patch, only the copy.
+fn slot_for_lan(cooked: &Path, maps: &[WorkshopMap]) {
     let report = crate::patcher::workshop_slots::assign_host(cooked, maps);
     if report.skipped > 0 {
         crate::toast::report(
             "slot-full",
-            &format!("{} maps have no LAN slot (16 max), remove some to host them", report.skipped),
+            &format!("{} maps have no LAN slot (128 max), untick some to host them", report.skipped),
             None,
             true,
         );
@@ -264,7 +338,7 @@ pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
     }
     let mut maps = all_maps(cooked);
     from_steam(&mut maps, cooked);
-    slot_for_lan(cooked, &mut maps);
+    slot_for_lan(cooked, &maps);
     workshop_menu::write_list(cooked, &maps)?;
     Ok(Some(maps.len()))
 }
@@ -330,17 +404,30 @@ impl InGameMenuState {
                 self.maps = all_maps(&cooked);
             }
         });
-        ui.label(format!("{} maps found", self.maps.len()));
+        ui.label(format!("{} maps found. Tick a map to make it joinable over LAN.", self.maps.len()));
+        let mut toggled = None;
         egui::ScrollArea::vertical()
             .max_height(220.0)
             .show(ui, |ui| {
+                let ticked = crate::patcher::workshop_slots::ticked(&cooked);
                 for map in &self.maps {
                     let slot = crate::patcher::workshop_slots::slot_of(&cooked, &map.path)
                         .map(|slot| format!("[{slot}] "))
                         .unwrap_or_default();
-                    ui.monospace(format!("{slot}{}  {}", map.title, map.path.display()));
+                    let mut on = ticked.contains(&map.path.to_string_lossy().into_owned());
+                    let label = format!("{slot}{}  {}", map.title, map.path.display());
+                    if ui.checkbox(&mut on, egui::RichText::new(label).monospace()).changed() {
+                        toggled = Some((map.path.clone(), on));
+                    }
                 }
             });
+            if let Some((path, on)) = toggled {
+                let cooked = cooked.clone();
+                self.spawn(&ctx, move || {
+                    let done = crate::patcher::workshop_slots::set_ticked(&cooked, &path, on).and_then(|()| refresh(&cooked));
+                    Job::Done(done.map(|_| if on { "Map ticked for LAN.".into() } else { "Map unticked for LAN.".into() }))
+                });
+            }
         ui.add_space(6.0);
         let busy = self.pending.is_some();
         ui.horizontal(|ui| {
@@ -362,7 +449,7 @@ impl InGameMenuState {
                     let mut maps = all_maps(&cooked);
                     self.spawn(&ctx, move || {
                         from_steam(&mut maps, &cooked);
-                        slot_for_lan(&cooked, &mut maps);
+                        slot_for_lan(&cooked, &maps);
                         Job::Done(workshop_menu::apply(&cooked, &backups, &folder, &maps))
                     });
                 } else {
@@ -436,8 +523,10 @@ impl InGameMenuState {
             });
         });
         if changed {
-            if let Err(e) = lan.sync(&cooked, connected) {
-                self.status = e;
+            match lan.sync(&cooked, connected) {
+                Err(e) => self.status = e,
+                Ok(true) => drop(refresh(&cooked)),
+                Ok(false) => {}
             }
         }
         ui.add_space(10.0);
@@ -473,12 +562,12 @@ mod tests {
         std::fs::create_dir_all(&cooked).unwrap();
         let (picks, extra) = super::lan_mutators::parse("10Minutes,Ball_Puck,Lan".split(','));
         let host = super::LanHost { team_size: 2, bots: 3, picks, extra: extra.join(","), auto: true, ..Default::default() };
-        assert_eq!(host.file_text(), format!("10Minutes,Ball_Puck,Lan,BotsHard,PlayerCount4{}", super::LISTEN));
+        assert_eq!(host.file_text(), format!("10Minutes,Ball_Puck,Lan,BotsHard,PlayerCount4{}{}", super::LISTEN, super::AUTO));
         // auto hosting follows the connection; the settings survive being parked
         host.sync(&cooked, false).unwrap();
-        assert!(!crate::patcher::workshop_menu::host_path(&cooked).exists());
+        assert!(!crate::patcher::workshop_menu::host_on(&cooked));
         host.sync(&cooked, true).unwrap();
-        assert!(crate::patcher::workshop_menu::host_path(&cooked).exists());
+        assert!(crate::patcher::workshop_menu::host_on(&cooked));
         host.sync(&cooked, false).unwrap();
         let mut back = super::LanHost::default();
         back.load(&cooked);
@@ -488,7 +577,7 @@ mod tests {
         off.sync(&cooked, false).unwrap();
         back.load(&cooked);
         assert!(!back.auto && back.always);
-        assert!(crate::patcher::workshop_menu::host_path(&cooked).exists());
+        assert!(crate::patcher::workshop_menu::host_on(&cooked));
         crate::patcher::workshop_menu::set_host(&cooked, None).unwrap();
         let _ = std::fs::remove_dir_all(cooked.parent().unwrap().parent().unwrap());
     }

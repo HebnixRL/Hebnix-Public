@@ -497,14 +497,16 @@ fn create_match(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, Str
     ])
 }
 
-/// Hebnix's LAN host settings, relative to Binaries\Win64. Kept short: the
-/// whole statement has to fit where the extension check was. Present only
-/// while LAN hosting is on.
-const HOST: &str = r"..\..\HbxHost.txt";
+/// Hebnix's LAN host settings, in the install folder.
+const HOST: &str = "HbxHost.txt";
+/// The install folder, relative to Binaries\Win64.
+const INSTALL: &str = r"..\..\";
+/// Read by the first Workshop menu build, which hosted LAN on every pick.
+const OLD_HOST: &str = r"..\..\HbxHost.txt";
 
-/// The LAN host settings file, in the install folder.
+/// The LAN host settings file.
 pub fn host_path(cooked: &Path) -> PathBuf {
-    cooked.parent().and_then(Path::parent).unwrap_or(cooked).join(HOST.trim_start_matches(r"..\..\"))
+    cooked.parent().and_then(Path::parent).unwrap_or(cooked).join(HOST)
 }
 
 /// Turn LAN hosting from the Workshop menu on (with the URL text that goes
@@ -525,36 +527,56 @@ fn remove_if_present(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Where the host settings wait while LAN hosting is off, so Hebnix keeps them.
+/// Where the host settings waited while hosting was off, before a right-click
+/// could host without them.
 fn parked_path(cooked: &Path) -> PathBuf {
     host_path(cooked).with_extension("off")
 }
 
-/// The saved host settings, whether hosting is on or off.
+/// Present while a plain pick hosts a LAN match too; the map list carries it.
+fn on_path(cooked: &Path) -> PathBuf {
+    host_path(cooked).with_extension("on")
+}
+
+/// Whether a plain pick hosts a LAN match, as well as a right-click.
+pub fn host_on(cooked: &Path) -> bool {
+    on_path(cooked).exists()
+}
+
+/// The saved host settings.
 pub fn read_host(cooked: &Path) -> Option<String> {
     fs::read_to_string(host_path(cooked)).or_else(|_| fs::read_to_string(parked_path(cooked))).ok()
 }
 
-/// Save the host settings and turn hosting on (the game reads the file) or off
-/// (parked beside it).
-pub fn store_host(cooked: &Path, text: &str, on: bool) -> Result<(), String> {
-    let (live, parked) = (host_path(cooked), parked_path(cooked));
-    let (write, other) = if on { (live, parked) } else { (parked, live) };
-    fs::write(&write, text).map_err(|e| format!("Could not write {}: {e}", write.display()))?;
-    remove_if_present(&other)
+/// Save the host settings, which a right-click always reads, and whether a
+/// plain pick uses them too. Returns whether that changed.
+pub fn store_host(cooked: &Path, text: &str, on: bool) -> Result<bool, String> {
+    let live = host_path(cooked);
+    fs::write(&live, text).map_err(|e| format!("Could not write {}: {e}", live.display()))?;
+    remove_if_present(&parked_path(cooked))?;
+    let changed = host_on(cooked) != on;
+    if on {
+        fs::write(on_path(cooked), b"").map_err(|e| e.to_string())?;
+        Ok(changed)
+    } else {
+        remove_if_present(&on_path(cooked)).map(|()| changed)
+    }
 }
 
 /// GFxData_Workshop_TA.LoadWorkshopMap, which travels to the picked map with
-/// GameTags "Freeplay". Patched, the game tags come from Hebnix's host file
-/// when it exists, so the same click hosts a LAN match:
+/// GameTags "Freeplay". A right-click passes the map's ItemPath instead of its
+/// FullPath, which Hebnix sets to a path plus "?HbxHost.txt" (see list_json).
+/// Patched, the game tags come from the file the path ends with:
 ///
 ///     GameTags = "Freeplay";
-///     class'FileSystem'.static.LoadFileToString(HOST, GameTags);
+///     class'FileSystem'.static.LoadFileToString(INSTALL $ Right(TrimmedPath, 11), GameTags);
 ///
 /// The file holds e.g. `BotsNone,PlayerCount6?Playtest?Lan?Listen`. The game
 /// splits tags on commas only and joins them back into the URL, so the
-/// options after the last tag land in the URL as they are. A missing file
-/// leaves GameTags untouched, so the map loads in freeplay as before.
+/// options after the last tag land in the URL as they are, and "?HbxHost.txt"
+/// is an option the game ignores. A plain pick names something like
+/// "..\..\Trials1.udk", which does not exist, and a missing file leaves
+/// GameTags untouched, so the map loads in freeplay as before.
 ///
 /// Room for it comes from the .udk/.umap extension check, its error branch
 /// and the old GameTags line. The menu only lists .udk files.
@@ -595,23 +617,32 @@ fn load_map(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String>
     let load_file = name_index(upk, NAMES[0].0)
         .or_else(|_| name_index(upk, NAMES[0].1))
         .map(|index| [index.to_le_bytes(), [0; 4]].concat())?;
-    let call = [&[0x1b][..], &load_file, &[0x1f], HOST.as_bytes(), &[0x00, 0x2b], &tags, &[0x16]].concat();
-    // ClassContext(class'FileSystem'), skip (the call's size in memory, one
-    // ref at 8 bytes), no return value, then the call
-    let skip = u16::try_from(call.len() + 4).map_err(|e| e.to_string())?;
-    let mut patched = [
-        &freeplay[..],
-        &[0x5e, 0x12, 0x00, 0x20],
-        &file_system,
-        &skip.to_le_bytes(),
-        &[0, 0, 0, 0, 0],
-        &call,
-    ]
-    .concat();
-    if patched.len() > check.len() {
-        return Err(format!("The {path} patch does not fit"));
-    }
-    patched.resize(check.len(), 0x0b);
+    // INSTALL $ Right(TrimmedPath, 11): Concat_StrStr and Right are natives
+    // 0xf8 and 0xea in this build, 0x2c an int byte
+    let right = u8::try_from(HOST.len()).map_err(|e| e.to_string())?;
+    let file = [&[0xf8, 0x1f], INSTALL.as_bytes(), &[0x00, 0xea, 0x2b], &trimmed, &[0x2c, right, 0x16, 0x16]].concat();
+    let old_file = [&[0x1f], OLD_HOST.as_bytes(), &[0x00]].concat();
+    // ClassContext(class'FileSystem'), skip (the call's size in memory, refs
+    // at 8 bytes), no return value, then the call
+    let statement = |file: &[u8], refs: usize| -> Result<Vec<u8>, String> {
+        let call = [&[0x1b][..], &load_file, file, &[0x2b], &tags, &[0x16]].concat();
+        let skip = u16::try_from(call.len() + 4 * refs).map_err(|e| e.to_string())?;
+        let mut patched = [
+            &freeplay[..],
+            &[0x5e, 0x12, 0x00, 0x20],
+            &file_system,
+            &skip.to_le_bytes(),
+            &[0, 0, 0, 0, 0],
+            &call,
+        ]
+        .concat();
+        if patched.len() > check.len() {
+            return Err(format!("The {path} patch does not fit"));
+        }
+        patched.resize(check.len(), 0x0b);
+        Ok(patched)
+    };
+    let (patched, old) = (statement(&file, 2)?, statement(&old_file, 1)?);
     // statement offsets in the code; the jumps removed with the check and its
     // else were the function's only ones
     let header = function.serial_offset + 40;
@@ -622,13 +653,13 @@ fn load_map(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String>
         (code + 427, error.clone(), vec![0x0b; error.len()]),
     ];
     // memory size counts object refs as 8 bytes: the check holds seven and
-    // the old GameTags line one; the new lines hold four
-    let (vanilla_memory, patched_memory) = (660, 644);
+    // the old GameTags line one; the new lines hold five (the old build's four)
+    let (vanilla_memory, patched_memory, old_memory) = (660, 648, 644);
     if upk.read_int(header + 4)? != 460
-        || ![vanilla_memory, patched_memory].contains(&upk.read_int(header)?)
+        || ![vanilla_memory, patched_memory, old_memory].contains(&upk.read_int(header)?)
         || !regions.iter().all(|(at, vanilla, patched)| {
             let current = upk.image.get(*at..*at + vanilla.len());
-            current == Some(vanilla) || current == Some(patched)
+            current == Some(vanilla) || current == Some(patched) || (*at == code + 13 && current == Some(&old))
         })
     {
         return Err(format!("{path} changed layout in this Rocket League version"));
@@ -729,7 +760,7 @@ fn quote(text: &str) -> String {
 }
 
 /// Replace this feature's section of an ini, keeping everything else.
-fn with_section(ini: &str, maps: &[WorkshopMap]) -> String {
+fn with_section(ini: &str, maps: &[WorkshopMap], lan: &[LanFields]) -> String {
     let newline = if ini.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out = Vec::new();
     let mut inside = false;
@@ -747,18 +778,16 @@ fn with_section(ini: &str, maps: &[WorkshopMap]) -> String {
     if !maps.is_empty() {
         out.push(String::new());
         out.push(SECTION.to_string());
-        for map in maps {
+        for (map, lan) in maps.iter().zip(lan) {
             let author = if map.author.is_empty() { "Local" } else { &map.author };
-            let folder = map.path.parent().unwrap_or(Path::new(""));
-            let file = map.path.file_name().unwrap_or_default().to_string_lossy();
             out.push(format!(
                 "Items=(ItemID={},Title=\"{}\",Description=\"{}\",AuthorName=\"{}\",ItemPath=\"{}\",Filename=\"{}\",FullPath=\"{}\",PreviewURL=\"{}\")",
                 map.id,
                 quote(&map.title),
                 quote(&map.description),
                 quote(author),
-                quote(&folder.to_string_lossy()),
-                quote(&file),
+                quote(&lan.item_path),
+                quote(&lan.flags),
                 quote(&map.path.to_string_lossy()),
                 quote(&map.preview_url),
             ));
@@ -774,18 +803,46 @@ fn list_path(cooked: &Path) -> PathBuf {
     cooked.parent().unwrap_or(cooked).join(Path::new(LIST).file_name().unwrap_or_default())
 }
 
+/// What the menu's code reads from the fields the list does not otherwise
+/// use. ItemPath is what a right-click loads: the map's LAN slot copy, or the
+/// map itself, with the host settings file named at the end. Filename holds
+/// flags: "t" when the map is ticked for LAN, "h" when a plain pick hosts too.
+struct LanFields {
+    item_path: String,
+    flags: String,
+}
+
+fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
+    let ticked = super::workshop_slots::ticked(cooked);
+    let on = host_on(cooked);
+    maps.iter()
+        .map(|map| {
+            let lan = super::workshop_slots::reserved(cooked, &map.path).unwrap_or_else(|| map.path.clone());
+            let mut flags = String::new();
+            if ticked.contains(&*map.path.to_string_lossy()) {
+                flags.push('t');
+            }
+            if on {
+                flags.push('h');
+            }
+            LanFields { item_path: format!("{}?{HOST}", lan.display()), flags }
+        })
+        .collect()
+}
+
 /// {"Items":[...]} for DecodeObject, field names as in DownloadedWorkshopData.
-fn list_json(maps: &[WorkshopMap]) -> String {
+fn list_json(maps: &[WorkshopMap], lan: &[LanFields]) -> String {
     let items: Vec<_> = maps
         .iter()
-        .map(|map| {
+        .zip(lan)
+        .map(|(map, lan)| {
             serde_json::json!({
                 "ItemID": map.id,
                 "Title": map.title,
                 "Description": map.description,
                 "AuthorName": if map.author.is_empty() { "Local" } else { &map.author },
-                "ItemPath": map.path.parent().unwrap_or(Path::new("")).to_string_lossy(),
-                "Filename": map.path.file_name().unwrap_or_default().to_string_lossy(),
+                "ItemPath": lan.item_path,
+                "Filename": lan.flags,
                 "FullPath": map.path.to_string_lossy(),
                 "PreviewURL": map.preview_url,
             })
@@ -798,13 +855,14 @@ fn list_json(maps: &[WorkshopMap]) -> String {
 /// ini at start-up and the json each time the menu opens.
 pub fn write_list(cooked: &Path, maps: &[WorkshopMap]) -> Result<(), String> {
     let _ = fs::remove_file(cooked.parent().unwrap_or(cooked).join("HebnixWorkshop.json"));
-    fs::write(list_path(cooked), list_json(maps)).map_err(|e| format!("Could not write the map list: {e}"))?;
+    let lan = lan_fields(cooked, maps);
+    fs::write(list_path(cooked), list_json(maps, &lan)).map_err(|e| format!("Could not write the map list: {e}"))?;
     let path = ini_path()?;
     let old = fs::read_to_string(&path).unwrap_or_default();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, with_section(&old, maps))
+    fs::write(&path, with_section(&old, maps, &lan))
         .map_err(|e| format!("Could not write {}: {e}", path.display()))
 }
 
@@ -882,8 +940,10 @@ mod tests {
             path: PathBuf::from(r"E:\maps\7\n.udk"),
             preview_url: "https://x/p.png".into(),
         }];
-        let out = with_section(ini, &maps);
-        let json: serde_json::Value = serde_json::from_str(&list_json(&maps)).unwrap();
+        let lan = [LanFields { item_path: format!("{}?{HOST}", maps[0].path.display()), flags: "t".into() }];
+        let out = with_section(ini, &maps, &lan);
+        let json: serde_json::Value = serde_json::from_str(&list_json(&maps, &lan)).unwrap();
+        assert_eq!(json["Items"][0]["Filename"], "t");
         assert_eq!(json["Items"][0]["FullPath"], r"E:\maps\7\n.udk");
         assert_eq!(json["Items"][0]["AuthorName"], "Local");
         assert!(!out.contains("Items=(old)"));
@@ -892,7 +952,7 @@ mod tests {
         assert!(out.contains(r#"AuthorName="Local""#));
         assert!(out.contains(r#"FullPath="E:\\maps\\7\\n.udk",PreviewURL="https://x/p.png")"#));
         assert_eq!(
-            with_section(&out, &[]),
+            with_section(&out, &[], &[]),
             "[TAGame.RLBot_Util_TA]\r\nPacketSendRate=60\r\n\r\n[IniVersion]\r\n0=1\r\n"
         );
     }
