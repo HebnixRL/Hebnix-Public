@@ -1,5 +1,5 @@
 //! Uses the same endpoint, platform aliases and avatar_url schema as
-//! hebnix-sdk/src/tracker/client.rs, without credentials or a User-Agent.
+//! hebnix-sdk/src/tracker/client.rs, including its short-lived request token.
 use image::{ImageReader, codecs::jpeg::JpegEncoder};
 use reqwest::{
     blocking::{Client, Response},
@@ -20,6 +20,9 @@ use std::{
 };
 
 const API: &str = "https://req.hebnix.com/player";
+// Match the plugin HTTP client: the public image host rejects requests with
+// no User-Agent before they reach the upload/file endpoints.
+const AVATAR_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const MAX_PROFILE: usize = 2 * 1024 * 1024;
 const MAX_IMAGE: usize = 6 * 1024 * 1024;
 const CACHE_LIMIT: usize = 512;
@@ -84,6 +87,9 @@ fn limited(mut response: Response, max: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub(super) fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    normalize_size(bytes, 250)
+}
+fn normalize_size(bytes: &[u8], size: u32) -> Result<Vec<u8>, String> {
     if bytes.len() > MAX_IMAGE {
         return Err("Image exceeds 6 MB.".into());
     }
@@ -99,13 +105,19 @@ pub(super) fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .decode()
         .map_err(|_| "Unsupported or oversized image")?;
     let pixels = decoded
-        .resize_to_fill(128, 128, image::imageops::FilterType::Triangle)
+        .resize(size, size, image::imageops::FilterType::Lanczos3)
         .to_rgba8();
-    let rgb = image::RgbImage::from_fn(128, 128, |x, y| {
-        let p = pixels.get_pixel(x, y);
+    let mut rgb = image::RgbImage::new(size, size);
+    let left = (size - pixels.width()) / 2;
+    let top = (size - pixels.height()) / 2;
+    for (x, y, p) in pixels.enumerate_pixels() {
         let a = p[3] as u32;
-        image::Rgb([0, 1, 2].map(|c| ((p[c] as u32 * a + 127) / 255) as u8))
-    });
+        rgb.put_pixel(
+            left + x,
+            top + y,
+            image::Rgb([0, 1, 2].map(|c| ((p[c] as u32 * a + 127) / 255) as u8)),
+        );
+    }
     let mut jpeg = Vec::new();
     JpegEncoder::new_with_quality(&mut jpeg, 88)
         .encode_image(&rgb)
@@ -121,8 +133,8 @@ struct Resolver {
 }
 impl Resolver {
     fn new() -> Result<Self, String> {
-        // reqwest sends no User-Agent unless explicitly configured. No token
-        // headers, cookies, account secrets or SDK build-key files are used.
+        // Only the profile request receives the SDK token. CDN image requests
+        // and public avatar uploads use separate requests without that header.
         let profile = Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(10))
@@ -130,6 +142,7 @@ impl Resolver {
             .map_err(|e| e.to_string())?;
         let image = Client::builder()
             .redirect(Policy::limited(3))
+            .user_agent(AVATAR_USER_AGENT)
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
@@ -182,11 +195,20 @@ impl Resolver {
         result
     }
     fn fetch_uncached(&self, id: &Identity) -> Result<Vec<u8>, String> {
+        if valid_upload_id(&id.account) {
+            if let Some(root) = &self.pictures {
+                if let Ok(bytes) =
+                    std::fs::read(root.join(format!("{}-{}.jpg", id.platform, id.account)))
+                {
+                    return normalize_size(&bytes, 128);
+                }
+            }
+        }
         if id.platform == "epic" {
             if valid_epic(&id.account) {
                 if let Some(root) = &self.pictures {
                     if let Ok(bytes) = std::fs::read(root.join(format!("{}.jpg", id.account))) {
-                        return normalize_image(&bytes);
+                        return normalize_size(&bytes, 128);
                     }
                 }
             }
@@ -194,19 +216,46 @@ impl Resolver {
         self.fetch_remote(id, API)
     }
     fn fetch_remote(&self, id: &Identity, api: &str) -> Result<Vec<u8>, String> {
+        let token = hebnix_sdk::req_auth::app_token()?;
+        self.fetch_remote_with_token(id, api, &token)
+    }
+    fn profile_request(
+        &self,
+        id: &Identity,
+        api: &str,
+        token: &str,
+    ) -> reqwest::blocking::RequestBuilder {
         let url = format!("{api}/{}/{}", id.platform, id.account);
-        let response = self
-            .profile
+        self.profile
             .get(url)
             .header("Accept", "application/json")
+            .header("X-App-Token", token)
+    }
+    fn fetch_remote_with_token(
+        &self,
+        id: &Identity,
+        api: &str,
+        token: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.fetch_remote_size(id, api, token, 128)
+    }
+    fn fetch_remote_size(
+        &self,
+        id: &Identity,
+        api: &str,
+        token: &str,
+        size: u32,
+    ) -> Result<Vec<u8>, String> {
+        let response = self
+            .profile_request(id, api, token)
             .send()
             .map_err(|_| "Profile service unavailable")?;
         let profile: Value = serde_json::from_slice(&limited(response, MAX_PROFILE)?)
             .map_err(|_| "Invalid profile response")?;
         let avatar = avatar_url(&profile).ok_or("No avatar available")?;
-        self.download(avatar)
+        self.download(avatar, size)
     }
-    fn download(&self, avatar: &str) -> Result<Vec<u8>, String> {
+    fn download(&self, avatar: &str, size: u32) -> Result<Vec<u8>, String> {
         let parsed = reqwest::Url::parse(avatar).map_err(|_| "Invalid avatar URL")?;
         if parsed.scheme() != "https"
             || parsed.host_str().is_none()
@@ -220,7 +269,7 @@ impl Resolver {
             .get(parsed)
             .send()
             .map_err(|_| "Avatar download failed")?;
-        normalize_image(&limited(image, MAX_IMAGE)?)
+        normalize_size(&limited(image, MAX_IMAGE)?, size)
     }
 }
 
@@ -320,6 +369,13 @@ fn handle(mut stream: TcpStream, resolver: &Resolver) {
 pub(super) fn valid_epic(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
+pub(super) fn valid_upload_id(id: &str) -> bool {
+    valid_epic(id) || ((10..=20).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()))
+}
+pub(super) fn account_picture(platform: &str, id: &str) -> Result<Vec<u8>, String> {
+    let identity = Identity::parse(&format!("{platform}|{id}|0"))?;
+    Resolver::new()?.fetch_remote_size(&identity, API, &hebnix_sdk::req_auth::app_token()?, 250)
+}
 fn avatar_url(profile: &Value) -> Option<&str> {
     profile
         .get("avatar_url")?
@@ -335,8 +391,8 @@ pub(super) fn upload(account: &str, jpeg: Vec<u8>) -> Result<String, String> {
     )
 }
 fn upload_to(endpoint: &str, account: &str, jpeg: Vec<u8>) -> Result<String, String> {
-    if !valid_epic(account) {
-        return Err("Invalid Epic account.".into());
+    if !valid_upload_id(account) {
+        return Err("Invalid platform account.".into());
     }
     let part = reqwest::blocking::multipart::Part::bytes(jpeg)
         .file_name("avatar.jpg")
@@ -347,6 +403,7 @@ fn upload_to(endpoint: &str, account: &str, jpeg: Vec<u8>) -> Result<String, Str
         .part("image", part);
     let client = Client::builder()
         .redirect(Policy::none())
+        .user_agent(AVATAR_USER_AGENT)
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
@@ -453,7 +510,7 @@ mod tests {
                 }
                 let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
                 assert!(!request.contains("user-agent:"));
-                assert!(!request.contains("x-app-token:"));
+                assert!(request.contains("x-app-token: test-token\r\n"));
                 paths.push(request.lines().next().unwrap().to_string());
                 reply(
                     &mut stream,
@@ -474,7 +531,7 @@ mod tests {
         ] {
             assert_eq!(
                 resolver
-                    .fetch_remote(&Identity::parse(primary).unwrap(), &api)
+                    .fetch_remote_with_token(&Identity::parse(primary).unwrap(), &api, "test-token")
                     .unwrap_err(),
                 "No avatar available"
             );
@@ -581,7 +638,10 @@ mod tests {
             .next()
             .unwrap()
             .to_ascii_lowercase();
-        assert!(!headers.contains("user-agent:"));
+        assert!(headers.contains(&format!(
+            "user-agent: {}",
+            AVATAR_USER_AGENT.to_ascii_lowercase()
+        )));
         assert!(!headers.contains("x-app-token:"));
         assert!(!headers.contains("authorization:"));
     }
@@ -615,7 +675,7 @@ mod tests {
         source.write_to(&mut png, image::ImageFormat::Png).unwrap();
         let jpeg = normalize_image(png.get_ref()).unwrap();
         let decoded = image::load_from_memory(&jpeg).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (128, 128));
+        assert_eq!((decoded.width(), decoded.height()), (250, 250));
         assert!(
             decoded
                 .to_rgb8()
@@ -626,15 +686,47 @@ mod tests {
         );
     }
     #[test]
-    fn requests_have_no_token_or_user_agent() {
+    fn request_key_is_sent_only_to_the_profile_service() {
         let resolver = Resolver::new().unwrap();
+        let id = Identity::parse("Epic|example|0").unwrap();
         let request = resolver
-            .profile
-            .get("https://req.hebnix.com/player/epic/test")
-            .header("Accept", "application/json")
+            .profile_request(&id, API, "test-token")
             .build()
             .unwrap();
-        assert!(!request.headers().contains_key("X-App-Token"));
+        assert_eq!(request.headers()["X-App-Token"], "test-token");
         assert!(!request.headers().contains_key("User-Agent"));
+        let image = resolver
+            .image
+            .get("https://example.com/avatar.jpg")
+            .build()
+            .unwrap();
+        assert!(!image.headers().contains_key("X-App-Token"));
+    }
+    #[test]
+    fn image_downloads_send_plugin_agent_without_the_request_key() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/picture.jpg", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let mut buffer = [0; 1024];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buffer[..n]);
+            }
+            reply(&mut stream, "200 OK", "image/jpeg", b"test");
+            String::from_utf8(request).unwrap().to_ascii_lowercase()
+        });
+        Resolver::new().unwrap().image.get(url).send().unwrap();
+        let request = server.join().unwrap();
+        assert!(request.contains(&format!(
+            "user-agent: {}",
+            AVATAR_USER_AGENT.to_ascii_lowercase()
+        )));
+        assert!(!request.contains("x-app-token:"));
     }
 }

@@ -6,12 +6,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Read,
     ops::{Deref, DerefMut},
     path::Path,
     time::Instant,
 };
 const CALLBACK: &str = "GFxData_Workshop_TA.OnEventImageDownloaded";
-const PATCH_VERSION: u32 = 5;
+const PATCH_VERSION: u32 = 6;
 #[path = "profile_pictures/native.rs"]
 mod native;
 
@@ -24,7 +25,9 @@ struct UpkPackage {
 }
 impl UpkPackage {
     fn load(path: &Path) -> Result<Self, String> {
-        let inner = RawPackage::load(path)?;
+        Ok(Self::from_inner(RawPackage::load(path)?))
+    }
+    fn from_inner(inner: RawPackage) -> Self {
         let import_count = inner.import_debug().len();
         let mut objects = HashMap::with_capacity(inner.exports.len() + import_count);
         for index in (1..=inner.exports.len() as i32).chain((1..=import_count as i32).map(|i| -i)) {
@@ -32,7 +35,7 @@ impl UpkPackage {
                 .entry(inner.asset_path(index).to_ascii_lowercase())
                 .or_insert(index);
         }
-        Ok(Self { inner, objects })
+        Self { inner, objects }
     }
     fn find_object(&self, path: &str) -> Option<i32> {
         self.objects.get(&path.to_ascii_lowercase()).copied()
@@ -82,6 +85,24 @@ struct Receipt {
     source: String,
     exports: Vec<ExportSnapshot>,
     names: Vec<NameSnapshot>,
+    #[serde(default)]
+    enabled_sha256: Option<String>,
+    #[serde(default)]
+    disabled_sha256: Option<String>,
+}
+
+fn file_digest(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 128 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn cooked(game: &Path) -> std::path::PathBuf {
@@ -108,6 +129,48 @@ fn matches(package: &UpkPackage, receipt: &Receipt, on: bool) -> bool {
                 .is_ok_and(|(_, b)| b == if on { &e.patched } else { &e.original })
         })
 }
+
+// Workshop's author-name fix shares our callback host. A package restored by
+// another Hebnix feature can have that fix toggled since this receipt was made.
+// Accept only an otherwise completely restored avatar patch, and prove the
+// entire differing payload equals the saved original after that known edit.
+fn restored_workshop_variant(package: &UpkPackage, receipt: &Receipt) -> bool {
+    if !receipt
+        .names
+        .iter()
+        .all(|n| package.names.get(n.index) == Some(&n.original))
+    {
+        return false;
+    }
+    receipt.exports.iter().all(|export| {
+        let Ok((index, actual)) = bytes(package, &export.path) else {
+            return false;
+        };
+        if actual == export.original {
+            return true;
+        }
+        if export.path != "GFxData_Workshop_TA.OnAvatarPersonaHandler" {
+            return false;
+        }
+        let start = package.exports[index].serial_offset;
+        [false, true].into_iter().any(|on| {
+            let Ok(changes) = super::workshop_menu::avatar_name(package, on) else {
+                return false;
+            };
+            let mut normalized = actual.to_vec();
+            for (offset, value) in changes {
+                let Some(relative) = offset.checked_sub(start) else {
+                    return false;
+                };
+                let Some(destination) = normalized.get_mut(relative..relative + value.len()) else {
+                    return false;
+                };
+                destination.copy_from_slice(&value);
+            }
+            normalized == export.original
+        })
+    })
+}
 fn read_receipt(game: &Path) -> Result<Receipt, String> {
     serde_json::from_slice(&fs::read(receipt_path(game)).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())
@@ -118,7 +181,14 @@ pub fn installed(game: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     let receipt = read_receipt(game)?;
-    let package = UpkPackage::load(&super::game_path::resolve(&cooked(game), "TAGame.upk"))?;
+    if receipt.version != PATCH_VERSION {
+        return Ok(false);
+    }
+    let source = super::game_path::resolve(&cooked(game), "TAGame.upk");
+    if receipt.enabled_sha256.as_deref() == Some(file_digest(&source)?.as_str()) {
+        return Ok(true);
+    }
+    let package = UpkPackage::load(&source)?;
     Ok(receipt.version == PATCH_VERSION && matches(&package, &receipt, true))
 }
 fn restore_snapshot(package: &mut UpkPackage, saved: &Receipt) -> Result<(), String> {
@@ -134,12 +204,204 @@ fn restore_snapshot(package: &mut UpkPackage, saved: &Receipt) -> Result<(), Str
             .collect::<Vec<_>>(),
     )
 }
+fn create_receipt(
+    package: &mut UpkPackage,
+    build: String,
+    source: String,
+) -> Result<Receipt, String> {
+    let originals = native::TARGETS
+        .iter()
+        .map(|path| {
+            let (index, payload) = bytes(&package, path)?;
+            Ok((index, payload.to_vec()))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()?;
+    let changes = native::patch(package)?;
+    let exports = changes
+        .exports
+        .iter()
+        .map(|index| {
+            let path = package.asset_path(*index as i32 + 1);
+            Ok(ExportSnapshot {
+                original: originals
+                    .get(index)
+                    .ok_or("Unexpected profile picture patch target")?
+                    .clone(),
+                patched: bytes(&package, &path)?.1.to_vec(),
+                path,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let names = changes
+        .renamed
+        .iter()
+        .map(|(old, new)| NameSnapshot {
+            index: package
+                .names
+                .iter()
+                .position(|n| n == new)
+                .expect("renamed name exists"),
+            original: old.clone(),
+            patched: new.clone(),
+        })
+        .collect();
+    Ok(Receipt {
+        version: PATCH_VERSION,
+        build,
+        source,
+        exports,
+        names,
+        enabled_sha256: None,
+        disabled_sha256: None,
+    })
+}
 fn check_closed() -> Result<(), String> {
     if hebnix_sdk::process::is_rocket_league_running() {
         Err("Close Rocket League before changing native profile pictures.".into())
     } else {
         Ok(())
     }
+}
+
+type WorkshopValues = fn(&RawPackage, bool) -> Result<Vec<(usize, Vec<u8>)>, String>;
+
+// Both features use OnAvatarPersonaHandler. Workshop must inspect/edit its
+// original payload, not the avatar request dispatcher that replaces it.
+fn workshop_baseline(directory: &Path) -> Result<(UpkPackage, Option<(Receipt, bool)>), String> {
+    let source = super::game_path::resolve(directory, "TAGame.upk");
+    let mut package = UpkPackage::load(&source)?;
+    let path = directory.join("Backups/ProfilePictures/receipt.json");
+    if !path.is_file() {
+        return Ok((package, None));
+    }
+    let saved: Receipt = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    if !(1..=PATCH_VERSION).contains(&saved.version) || Path::new(&saved.source) != source {
+        return Err("The avatar snapshot does not belong to this game package.".into());
+    }
+    let enabled = matches(&package, &saved, true);
+    if enabled {
+        restore_snapshot(&mut package, &saved)?;
+    } else if !matches(&package, &saved, false) && !restored_workshop_variant(&package, &saved) {
+        return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+    }
+    Ok((package, Some((saved, enabled))))
+}
+
+pub(super) fn workshop_status(directory: &Path, values: WorkshopValues) -> Result<bool, String> {
+    let (package, _) = workshop_baseline(directory)?;
+    Ok(values(&package, true)?
+        .iter()
+        .all(|(at, value)| package.image.get(*at..*at + value.len()) == Some(value.as_slice())))
+}
+
+pub(super) fn edit_workshop(
+    directory: &Path,
+    values: WorkshopValues,
+    on: bool,
+) -> Result<(), String> {
+    edit_workshop_checked(directory, values, on, check_closed)
+}
+
+fn edit_workshop_checked(
+    directory: &Path,
+    values: WorkshopValues,
+    on: bool,
+    ensure_closed: impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    ensure_closed()?;
+    let source = super::game_path::resolve(directory, "TAGame.upk");
+    let source_digest = file_digest(&source)?;
+    let (mut package, previous) = workshop_baseline(directory)?;
+    if let Some((saved, _)) = &previous {
+        if saved.build != super::backup_guard::build_id(directory)? {
+            return Err("Rocket League changed since the avatar snapshot was saved.".into());
+        }
+    }
+    let changes = values(&package, on)?;
+    if changes
+        .iter()
+        .all(|(at, value)| package.image.get(*at..*at + value.len()) == Some(value.as_slice()))
+    {
+        return Ok(());
+    }
+    // Keep the parsed name table in sync before native bytecode is generated.
+    super::workshop_menu::rename_names(&mut package, on)?;
+    for (at, value) in changes {
+        package.patch(at, &value)?;
+    }
+    let mut updated = if let Some((saved, enabled)) = previous {
+        let receipt = create_receipt(&mut package, saved.build, saved.source)?;
+        if !enabled {
+            restore_snapshot(&mut package, &receipt)?;
+        }
+        Some((receipt, enabled))
+    } else {
+        None
+    };
+    let expected_names = package.names.clone();
+    let fingerprints: Vec<[u8; 32]> = package
+        .exports
+        .iter()
+        .map(|e| {
+            Sha256::digest(&package.image[e.serial_offset..e.serial_offset + e.serial_size]).into()
+        })
+        .collect();
+    let temporary = source.with_extension("workshop.tmp");
+    package.save_fast(&temporary)?;
+    drop(package);
+    let mut check = UpkPackage::load(&temporary)?;
+    if check.names != expected_names
+        || check.exports.len() != fingerprints.len()
+        || check
+            .exports
+            .iter()
+            .zip(&fingerprints)
+            .any(|(e, expected)| {
+                let actual: [u8; 32] =
+                    Sha256::digest(&check.image[e.serial_offset..e.serial_offset + e.serial_size])
+                        .into();
+                &actual != expected
+            })
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err("Workshop/avatar package validation failed.".into());
+    }
+    if let Some((saved, enabled)) = &updated {
+        if !matches(&check, saved, *enabled) {
+            return Err("Avatar hooks failed Workshop staging validation.".into());
+        }
+        if *enabled {
+            restore_snapshot(&mut check, saved)?;
+        }
+    }
+    if !values(&check, on)?
+        .iter()
+        .all(|(at, value)| check.image.get(*at..*at + value.len()) == Some(value.as_slice()))
+    {
+        return Err("Workshop settings failed avatar staging validation.".into());
+    }
+    drop(check);
+    let staged_digest = file_digest(&temporary)?;
+    ensure_closed()?;
+    if file_digest(&source)? != source_digest {
+        return Err("Another operation changed TAGame.upk. Try again.".into());
+    }
+    if let Some((saved, enabled)) = &mut updated {
+        if *enabled {
+            saved.enabled_sha256 = Some(staged_digest);
+        } else {
+            saved.disabled_sha256 = Some(staged_digest);
+        }
+        fs::write(
+            directory.join("Backups/ProfilePictures/receipt.json"),
+            serde_json::to_vec_pretty(saved).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    fs::copy(&temporary, &source).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(temporary);
+    Ok(())
 }
 pub fn set_enabled(game: &Path, on: bool) -> Result<String, String> {
     set_enabled_checked(game, on, check_closed)
@@ -154,15 +416,13 @@ fn set_enabled_checked(
     let directory = cooked(game);
     let source = super::game_path::resolve(&directory, "TAGame.upk");
     let build = super::backup_guard::build_id(&directory)?;
-    let source_digest = Sha256::digest(fs::read(&source).map_err(|e| e.to_string())?);
-    let mut package = UpkPackage::load(&source)?;
-    timing("load and index", started);
+    let source_digest = file_digest(&source)?;
     let receipt = if receipt_path(game).exists() {
         Some(read_receipt(game)?)
     } else {
         None
     };
-    let upgrading = on && receipt.as_ref().is_some_and(|r| r.version < PATCH_VERSION);
+    let mut upgrading = on && receipt.as_ref().is_some_and(|r| r.version < PATCH_VERSION);
     if let Some(saved) = &receipt {
         if !(1..=PATCH_VERSION).contains(&saved.version)
             || saved.build != build
@@ -170,6 +430,26 @@ fn set_enabled_checked(
         {
             return Err("Rocket League changed since this profile picture patch was saved. Its old backup will not be restored.".into());
         }
+        let known_digest = if on {
+            &saved.enabled_sha256
+        } else {
+            &saved.disabled_sha256
+        };
+        if !upgrading && known_digest.as_ref() == Some(&source_digest) {
+            timing("verified unchanged package", started);
+            return Ok(if on {
+                "Native profile pictures are enabled."
+            } else {
+                "Native profile pictures are disabled."
+            }
+            .into());
+        }
+    } else if !on {
+        return Ok("Native profile pictures are disabled.".into());
+    }
+    let mut package = UpkPackage::load(&source)?;
+    timing("load and index", started);
+    if let Some(saved) = &receipt {
         if matches(&package, saved, on) && !upgrading {
             return Ok(if on {
                 "Native profile pictures are enabled."
@@ -179,7 +459,16 @@ fn set_enabled_checked(
             .into());
         }
         if !matches(&package, saved, !on) && !(upgrading && matches(&package, saved, true)) {
-            return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+            if restored_workshop_variant(&package, saved) {
+                if !on {
+                    return Ok("Native profile pictures are disabled.".into());
+                }
+                // Generate a fresh receipt from the current restored package,
+                // preserving its current Workshop author-name setting on undo.
+                upgrading = true;
+            } else {
+                return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+            }
         }
     } else if !on {
         return Ok("Native profile pictures are disabled.".into());
@@ -202,7 +491,7 @@ fn set_enabled_checked(
             restore_snapshot(&mut package, previous)?;
         }
     }
-    let saved = if on && receipt.is_some() && !upgrading {
+    let mut saved = if on && receipt.is_some() && !upgrading {
         let saved = receipt.expect("receipt checked");
         package.rename_names_same_size(
             &saved
@@ -217,49 +506,7 @@ fn set_enabled_checked(
         }
         saved
     } else if on {
-        let originals = native::TARGETS
-            .iter()
-            .map(|path| {
-                let (index, payload) = bytes(&package, path)?;
-                Ok((index, payload.to_vec()))
-            })
-            .collect::<Result<HashMap<_, _>, String>>()?;
-        let changes = native::patch(&mut package)?;
-        let exports = changes
-            .exports
-            .iter()
-            .map(|index| {
-                let path = package.asset_path(*index as i32 + 1);
-                Ok(ExportSnapshot {
-                    original: originals
-                        .get(index)
-                        .ok_or("Unexpected profile picture patch target")?
-                        .clone(),
-                    patched: bytes(&package, &path)?.1.to_vec(),
-                    path,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let names = changes
-            .renamed
-            .iter()
-            .map(|(old, new)| NameSnapshot {
-                index: package
-                    .names
-                    .iter()
-                    .position(|n| n == new)
-                    .expect("renamed name exists"),
-                original: old.clone(),
-                patched: new.clone(),
-            })
-            .collect();
-        Receipt {
-            version: PATCH_VERSION,
-            build,
-            source: source.to_string_lossy().into(),
-            exports,
-            names,
-        }
+        create_receipt(&mut package, build, source.to_string_lossy().into())?
     } else {
         let saved = receipt.ok_or("No profile picture snapshot exists")?;
         for item in &saved.exports {
@@ -279,6 +526,12 @@ fn set_enabled_checked(
     let temporary = source.with_extension("profile-pictures.tmp");
     package.save_fast(&temporary)?;
     timing("save package", started);
+    let targets: HashSet<_> = saved
+        .exports
+        .iter()
+        .map(|e| object(&package, &e.path).map(|i| i as usize - 1))
+        .collect::<Result<_, _>>()?;
+    drop(package);
     let check = UpkPackage::load(&temporary)?;
     if !matches(&check, &saved, on) {
         let _ = fs::remove_file(&temporary);
@@ -290,11 +543,6 @@ fn set_enabled_checked(
         let _ = fs::remove_file(&temporary);
         return Err("Profile picture staging changed the export count.".into());
     }
-    let targets: HashSet<_> = saved
-        .exports
-        .iter()
-        .map(|e| object(&package, &e.path).map(|i| i as usize - 1))
-        .collect::<Result<_, _>>()?;
     for (index, expected) in fingerprints.iter().enumerate() {
         if targets.contains(&index) {
             continue;
@@ -313,8 +561,15 @@ fn set_enabled_checked(
         }
     }
     timing("validate every export", started);
+    drop(check);
+    let staged_digest = file_digest(&temporary)?;
+    if on {
+        saved.enabled_sha256 = Some(staged_digest);
+    } else {
+        saved.disabled_sha256 = Some(staged_digest);
+    }
     ensure_closed()?;
-    if Sha256::digest(fs::read(&source).map_err(|e| e.to_string())?) != source_digest {
+    if file_digest(&source)? != source_digest {
         let _ = fs::remove_file(&temporary);
         return Err("Another operation changed the game package while profile pictures were being prepared. Try again.".into());
     }
@@ -587,15 +842,168 @@ fn name(package: &UpkPackage, value: &str) -> Result<Code, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "requires HEBNIX_AVATAR_INSPECT_GAME with enabled avatars; operates only on a temporary copy"]
+    fn workshop_and_enabled_avatars_round_trip() {
+        let source_root = std::env::var_os("HEBNIX_AVATAR_INSPECT_GAME").expect("game path");
+        let source_root = Path::new(&source_root);
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-native-avatar-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let directory = cooked(&root);
+        fs::create_dir_all(receipt_path(&root).parent().unwrap()).unwrap();
+        fs::create_dir_all(root.join("Binaries/Win64")).unwrap();
+        fs::write(
+            root.join("Binaries/Win64/RocketLeague.exe"),
+            b"test build fingerprint",
+        )
+        .unwrap();
+        let source = directory.join("TAGame.upk");
+        fs::copy(
+            super::super::game_path::resolve(&cooked(source_root), "TAGame.upk"),
+            &source,
+        )
+        .unwrap();
+        let mut saved = read_receipt(source_root).unwrap();
+        saved.source = source.to_string_lossy().into();
+        saved.build = super::super::backup_guard::build_id(&directory).unwrap();
+        saved.enabled_sha256 = None;
+        saved.disabled_sha256 = None;
+        fs::write(receipt_path(&root), serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert!(installed(&root).unwrap());
+        let values = super::super::workshop_menu::tagame_values;
+        let (baseline, previous) = workshop_baseline(&directory).unwrap();
+        assert!(previous.unwrap().1);
+        let names_before = baseline.names.clone();
+        let before: Vec<[u8; 32]> = baseline
+            .exports
+            .iter()
+            .map(|e| {
+                Sha256::digest(&baseline.image[e.serial_offset..e.serial_offset + e.serial_size])
+                    .into()
+            })
+            .collect();
+        drop(baseline);
+        let initial = workshop_status(&directory, values).unwrap();
+        // Reproduce the old allocator's TargetFind collision, when present.
+        if saved.names.iter().any(|n| n.original == "TargetFind") {
+            let raw = RawPackage::load(&source).unwrap();
+            assert!(values(&raw, true).unwrap_err().contains("TargetFind"));
+        }
+        for on in [!initial, initial] {
+            edit_workshop_checked(&directory, values, on, || Ok(())).unwrap();
+            assert!(installed(&root).unwrap());
+            assert_eq!(workshop_status(&directory, values).unwrap(), on);
+            let updated = read_receipt(&root).unwrap();
+            assert!(!updated.names.iter().any(|n| [
+                "TargetFind",
+                "TransformedLeftX",
+                "ImportJSON",
+                "LoadFileToString"
+            ]
+            .contains(&n.original.as_str())));
+        }
+        set_copy_enabled(&root, false).unwrap();
+        assert_eq!(workshop_status(&directory, values).unwrap(), initial);
+        let restored = UpkPackage::load(&source).unwrap();
+        assert_eq!(names_before, restored.names);
+        for (e, expected) in restored.exports.iter().zip(before) {
+            let actual: [u8; 32] =
+                Sha256::digest(&restored.image[e.serial_offset..e.serial_offset + e.serial_size])
+                    .into();
+            assert_eq!(actual, expected);
+        }
+        drop(restored);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires HEBNIX_AVATAR_INSPECT_GAME with a restored Workshop variant and avatar receipt; writes only to a temporary copy"]
+    fn restored_workshop_variant_round_trip() {
+        let root = std::env::var_os("HEBNIX_AVATAR_INSPECT_GAME").expect("game path");
+        let root = Path::new(&root);
+        let saved = read_receipt(root).unwrap();
+        let package = UpkPackage::load(&super::super::game_path::resolve(
+            &cooked(root),
+            "TAGame.upk",
+        ))
+        .unwrap();
+        assert!(!matches(&package, &saved, false));
+        assert!(restored_workshop_variant(&package, &saved));
+        let original_names = package.names.clone();
+        let originals: Vec<_> = saved
+            .exports
+            .iter()
+            .map(|e| (e.path.clone(), bytes(&package, &e.path).unwrap().1.to_vec()))
+            .collect();
+        drop(package);
+        let fixture = std::env::temp_dir().join(format!(
+            "hebnix-native-avatar-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let target = cooked(&fixture).join("TAGame.upk");
+        fs::create_dir_all(receipt_path(&fixture).parent().unwrap()).unwrap();
+        fs::create_dir_all(fixture.join("Binaries/Win64")).unwrap();
+        fs::write(
+            fixture.join("Binaries/Win64/RocketLeague.exe"),
+            b"test build fingerprint",
+        )
+        .unwrap();
+        fs::copy(
+            super::super::game_path::resolve(&cooked(root), "TAGame.upk"),
+            &target,
+        )
+        .unwrap();
+        let mut saved = saved;
+        saved.source = target.to_string_lossy().into();
+        saved.build = super::super::backup_guard::build_id(&cooked(&fixture)).unwrap();
+        saved.enabled_sha256 = None;
+        saved.disabled_sha256 = None;
+        fs::write(receipt_path(&fixture), serde_json::to_vec(&saved).unwrap()).unwrap();
+        let digest = file_digest(&target).unwrap();
+        set_copy_enabled(&fixture, false).unwrap();
+        assert_eq!(file_digest(&target).unwrap(), digest);
+        // The known Workshop variant must not mask an additional unknown edit.
+        let mut changed = UpkPackage::load(&target).unwrap();
+        let path = "GFxData_Workshop_TA.OnAvatarPersonaHandler";
+        let (index, body) = bytes(&changed, path).unwrap();
+        let mut bad = body.to_vec();
+        *bad.last_mut().unwrap() ^= 1;
+        changed.replace_export_payload(index, &bad).unwrap();
+        assert!(!restored_workshop_variant(&changed, &saved));
+        drop(changed);
+        set_copy_enabled(&fixture, true).unwrap();
+        assert!(installed(&fixture).unwrap());
+        set_copy_enabled(&fixture, false).unwrap();
+        let restored = UpkPackage::load(&target).unwrap();
+        assert_eq!(restored.names, original_names);
+        for (path, original) in originals {
+            assert_eq!(bytes(&restored, &path).unwrap().1, original);
+        }
+        drop(restored);
+        fs::remove_dir_all(&fixture).unwrap();
+    }
+
+    #[test]
+    fn older_receipts_load_without_fingerprints() {
+        let saved: Receipt = serde_json::from_value(serde_json::json!({
+            "version": 5, "build": "test", "source": "TAGame.upk", "exports": [], "names": []
+        }))
+        .unwrap();
+        assert!(saved.enabled_sha256.is_none() && saved.disabled_sha256.is_none());
+    }
+
     fn set_copy_enabled(root: &Path, on: bool) -> Result<String, String> {
         // Only the isolated fixture may bypass the live-process guard.
         assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
-        assert!(
-            root.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("hebnix-native-avatar-")
-        );
+        assert!(root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("hebnix-native-avatar-"));
         assert_eq!(
             fs::read(root.join("Binaries/Win64/RocketLeague.exe")).unwrap(),
             b"test build fingerprint"
@@ -628,12 +1036,53 @@ mod tests {
         assert!(!installed(&root).unwrap());
         set_copy_enabled(&root, true).unwrap();
         assert!(installed(&root).unwrap());
+        let enabled_digest = file_digest(&directory.join("TAGame.upk")).unwrap();
+        let enabled_modified = fs::metadata(directory.join("TAGame.upk"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        set_copy_enabled(&root, true).unwrap();
+        assert_eq!(
+            enabled_digest,
+            file_digest(&directory.join("TAGame.upk")).unwrap()
+        );
+        assert_eq!(
+            enabled_modified,
+            fs::metadata(directory.join("TAGame.upk"))
+                .unwrap()
+                .modified()
+                .unwrap()
+        );
+        // A cached hash must never accept a conflicting edit to a target.
+        let enabled_receipt = read_receipt(&root).unwrap();
+        let target = &enabled_receipt.exports[0];
+        let mut changed = UpkPackage::load(&directory.join("TAGame.upk")).unwrap();
+        let (index, _) = bytes(&changed, &target.path).unwrap();
+        let mut conflicting = target.patched.clone();
+        *conflicting.last_mut().unwrap() ^= 1;
+        changed.replace_export_payload(index, &conflicting).unwrap();
+        changed.save_fast(&directory.join("TAGame.upk")).unwrap();
+        assert!(!installed(&root).unwrap());
+        let conflicting_digest = file_digest(&directory.join("TAGame.upk")).unwrap();
+        assert!(set_copy_enabled(&root, true)
+            .unwrap_err()
+            .contains("another patch"));
+        assert_eq!(
+            conflicting_digest,
+            file_digest(&directory.join("TAGame.upk")).unwrap()
+        );
+        changed
+            .replace_export_payload(index, &target.patched)
+            .unwrap();
+        changed.save_fast(&directory.join("TAGame.upk")).unwrap();
+        drop(changed);
+        assert!(installed(&root).unwrap());
         let patched = UpkPackage::load(&directory.join("TAGame.upk")).unwrap();
         native::assert_friend_call_safety(&patched);
         drop(patched);
         // Upgrade all older receipts. Friends were untouched before version 3;
         // the match-row fallback was also absent in version 1.
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let mut legacy = read_receipt(&root).unwrap();
             let omitted: Vec<_> = legacy
                 .exports
@@ -653,6 +1102,8 @@ mod tests {
             }
             legacy_package.save(&directory.join("TAGame.upk")).unwrap();
             legacy.version = version;
+            legacy.enabled_sha256 = None;
+            legacy.disabled_sha256 = None;
             legacy
                 .exports
                 .retain(|e| !omitted.iter().any(|old| old.path == e.path));
