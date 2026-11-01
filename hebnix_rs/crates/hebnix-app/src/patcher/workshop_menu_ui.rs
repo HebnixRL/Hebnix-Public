@@ -82,8 +82,19 @@ pub fn status(cooked: &Path) -> bool {
         .is_ok_and(|swf| digest(&swf) == digest(PATCHED))
 }
 
+/// not named like the package: the game scans subfolders and would load a
+/// same-named backup instead of the live file ("Ambiguous package name")
 fn backup_path(backups: &Path) -> std::path::PathBuf {
-    backups.join(PACKAGE)
+    let old = backups.join(PACKAGE);
+    let backup = backups.join(format!("{PACKAGE}.bak"));
+    if old.is_file() {
+        if backup.is_file() {
+            let _ = fs::remove_file(old);
+        } else {
+            let _ = fs::rename(old, &backup);
+        }
+    }
+    backup
 }
 
 /// Put the patched movie in, keeping the original package in the backups
@@ -92,15 +103,17 @@ fn backup_path(backups: &Path) -> std::path::PathBuf {
 pub fn apply(cooked: &Path, backups: &Path) -> Result<(), String> {
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
+    let backup = backup_path(backups);
     let current = digest(&movie(&upk)?);
     if current == digest(PATCHED) {
         return Ok(());
     }
     if current != VANILLA {
-        return Err("the game's Workshop menu movie is not the version Hebnix patches".into());
+        return Err(format!(
+            "the game's Workshop menu movie is not the version Hebnix patches (sha256 {current})"
+        ));
     }
     fs::create_dir_all(backups).map_err(|e| e.to_string())?;
-    let backup = backup_path(backups);
     if !backup.is_file() {
         fs::copy(&live, &backup).map_err(|e| format!("Could not back up {PACKAGE}: {e}"))?;
     }
@@ -163,7 +176,11 @@ mod tests {
         let original = digest(&movie(&UpkPackage::load(&dir.join(PACKAGE)).unwrap()).unwrap());
         apply(&dir, &dir.join("Backups")).unwrap();
         assert!(status(&dir));
+        // a backup named like the package makes the game load it instead of the live file
+        assert!(!dir.join("Backups").join(PACKAGE).exists());
+        fs::copy(backup_path(&dir.join("Backups")), dir.join("Backups").join(PACKAGE)).unwrap();
         apply(&dir, &dir.join("Backups")).unwrap();
+        assert!(!dir.join("Backups").join(PACKAGE).exists());
         restore(&dir, &dir.join("Backups")).unwrap();
         assert!(!status(&dir));
         assert_eq!(digest(&movie(&UpkPackage::load(&dir.join(PACKAGE)).unwrap()).unwrap()), original);

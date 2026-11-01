@@ -166,21 +166,36 @@ fn apply_ticks(cooked: &Path, text: &str) {
         last.retain(|(p, _)| *p != path);
         last.push((path, on == "true"));
     }
-    if last.is_empty() {
-        return;
-    }
-    for (path, on) in &last {
-        if let Err(e) = crate::patcher::workshop_slots::set_ticked(cooked, path, *on) {
-            crate::toast::report("lan-tick", &format!("LAN tick failed: {e}"), None, true);
-            return;
+    // the log is shared by every install, so a tick belongs to the install its map is in
+    let mut installs: Vec<(PathBuf, Vec<(PathBuf, bool)>)> = Vec::new();
+    for (path, on) in last {
+        let owner = owning_cooked(&path).unwrap_or_else(|| cooked.to_path_buf());
+        match installs.iter_mut().find(|(c, _)| *c == owner) {
+            Some((_, ticks)) => ticks.push((path, on)),
+            None => installs.push((owner, vec![(path, on)])),
         }
     }
-    crate::toast::report("lan-tick", "Copying ticked maps for LAN...", None, false);
-    let done = match refresh(cooked) {
-        Ok(_) => "LAN maps updated".to_string(),
-        Err(e) => format!("LAN update failed: {e}"),
-    };
-    crate::toast::report("lan-tick", &done, None, true);
+    for (cooked, ticks) in installs {
+        for (path, on) in &ticks {
+            if let Err(e) = crate::patcher::workshop_slots::set_ticked(&cooked, path, *on) {
+                crate::toast::report("lan-tick", &format!("LAN tick failed: {e}"), None, true);
+                return;
+            }
+        }
+        crate::toast::report("lan-tick", "Copying ticked maps for LAN...", None, false);
+        let done = match refresh(&cooked) {
+            Ok(_) => "LAN maps updated".to_string(),
+            Err(e) => format!("LAN update failed: {e}"),
+        };
+        crate::toast::report("lan-tick", &done, None, true);
+    }
+}
+
+/// the CookedPCConsole folder a map sits under
+fn owning_cooked(map: &Path) -> Option<PathBuf> {
+    map.ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n.eq_ignore_ascii_case("CookedPCConsole")))
+        .map(Path::to_path_buf)
 }
 
 fn extension(path: &Path) -> String {
