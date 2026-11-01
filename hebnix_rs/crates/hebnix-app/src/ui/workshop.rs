@@ -979,6 +979,8 @@ pub struct WorkshopState {
     /// last failed join read from the game log, polled while the tab is open
     join_mismatch: Option<hebnix_sdk::log::JoinMismatch>,
     join_polled: Option<std::time::Instant>,
+    /// the Sync map slots button was pressed, so the next sync reports its result
+    slot_sync_asked: bool,
     join_mismatch_dismissed: Option<hebnix_sdk::log::JoinMismatch>,
     import_wizard: ImportWizard,
     steam_downloader: SteamDownloader,
@@ -1030,6 +1032,7 @@ impl WorkshopState {
             startup_done: false,
             join_mismatch: None,
             join_polled: None,
+            slot_sync_asked: false,
             join_mismatch_dismissed: None,
             import_wizard: ImportWizard::default(),
             steam_downloader: SteamDownloader::default(),
@@ -1628,6 +1631,23 @@ impl WorkshopState {
                 if ui.button(t("multiplayer-disconnect")).clicked() {
                     stop = true;
                 }
+                if ui
+                    .button("Sync map slots")
+                    .on_hover_text("Prepare your map slots now and load the maps other players are hosting, instead of waiting for the next automatic check.")
+                    .clicked()
+                {
+                    let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+                    if crate::patcher::workshop_lan_trial::enabled(&cooked) {
+                        crate::patcher::workshop_slots::ensure_pool(&cooked);
+                        self.slot_sync_asked = true;
+                        self.join_polled = None;
+                        self.multiplayer.status = "Syncing map slots...".into();
+                    } else {
+                        self.multiplayer.status =
+                            "Enable the in-game Workshop menu first (Maps > In-game menu).".into();
+                    }
+                    ctx.request_repaint();
+                }
             });
         }
         ui.add_space(10.0);
@@ -1990,8 +2010,17 @@ impl WorkshopState {
                         ip, title: map.name.clone(), map: local, package: map.package.clone(),
                     })
                 }).collect();
-                if let Err(error) = crate::patcher::workshop_lan_trial::sync_offers(&cooked, &offers) {
-                    self.multiplayer.status = format!("LAN map trial: {error}");
+                let asked = std::mem::take(&mut self.slot_sync_asked);
+                match crate::patcher::workshop_lan_trial::sync_offers(&cooked, &offers) {
+                    Err(error) => self.multiplayer.status = format!("LAN map trial: {error}"),
+                    Ok(()) if asked => {
+                        let ready = offers.iter().filter(|o| o.map.is_some()).count();
+                        self.multiplayer.status = format!(
+                            "Map slots synced: {ready} of {} hosted map(s) ready to join.",
+                            offers.len()
+                        );
+                    }
+                    Ok(()) => {}
                 }
             }
         }

@@ -888,6 +888,8 @@ pub fn apply(
     set_all(cooked, true)?;
     // the menu works without the LAN controls, so a movie that can't be patched only costs those
     let ui = super::workshop_menu_ui::apply(cooked, backups);
+    // peers' map names and joining their custom maps come with the menu
+    let lan = super::workshop_lan_trial::set_mode(cooked, "join");
     super::item_name::workshop_description(cooked, backups, true)?;
     let _ = fs::remove_dir_all(cooked.join(OLD_PREVIEWS));
     fs::create_dir_all(backups).map_err(|e| e.to_string())?;
@@ -898,6 +900,7 @@ pub fn apply(
         maps.len(),
         maps.iter().filter(|m| !m.preview_url.is_empty()).count(),
         ui.err().map(|e| format!(" (LAN controls not added: {e})")).unwrap_or_default()
+            + &lan.err().map(|e| format!(" (peer maps not enabled: {e})")).unwrap_or_default()
     ))
 }
 

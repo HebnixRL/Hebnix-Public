@@ -4,19 +4,18 @@ This tests custom-map LAN joining without replacing Utopia Retro. It is an
 experiment, not a confirmed Error 40 fix. Both players should run the new Hebnix
 build so the host shares the original package filename as well as its title.
 
-The joining player enables the tests under Workshop > In-game menu
-(experimental) > LAN custom map test. Rocket League must be closed when changing
-test mode. Enable the in-game Workshop menu first.
+Both players turn this on by enabling the in-game Workshop menu (Maps >
+In-game menu (experimental) > Enable / update map list); there are no separate
+test buttons. Rocket League must be closed while enabling. Disable restores it.
 
-1. Select **1. Test map titles**, then start Rocket League and connect both
+1. Start Rocket League and connect both
    players to Hebnix multiplayer. Host the map from the game's Workshop menu.
    Keep Hebnix on its Workshop tab and allow about 15 seconds for peer metadata
    to arrive. Reopen/refresh **Join LAN Match**. Its map column should show the
    Workshop title, or the host's filename if no title metadata exists.
 2. On the joining player, download the hosting player's map to the Workshop
    folder through Hebnix if offered. An older install with a different filename
-   will be offered again. Close Rocket League and select **2. Test custom map
-   joining**, restart, and join through **Join LAN Match**. There is no need to
+   will be offered again. Restart Rocket League and join through **Join LAN Match**. There is no need to
    load freeplay or select Utopia Retro first.
 3. Record whether the title appears and whether joining succeeds independently.
    The joining client's log now contains `HBX LAN join preparation:` followed by
@@ -24,7 +23,7 @@ test mode. Enable the in-game Workshop menu first.
    `HBX LAN preload result:`. `None` indicates the experimental loader did not
    resolve the world object. A resolved object followed by Error 40 means this
    loading step was insufficient; it does not prove network package registration.
-4. Close Rocket League and select **Disable test** to restore the two original
+4. Close Rocket League and click **Disable** to restore the two original
    LAN functions while preserving other package patches.
 
 The title bridge uses the sidecar's IPv4 aliases and port 7777. It writes bounded
@@ -75,7 +74,7 @@ Changed existing functions:
 - `WorkshopState::start_relay`, its caller `render_multiplayer`,
   `render_join_prompt`, `install_peer_map`, and `render_player_maps`: carry the
   loader metadata, publish local bridge files, and preserve the host's filename.
-- `InGameMenuState::render`: expose the two test modes and restoration.
+- `workshop_menu::apply`: switch the trial to join mode when the menu is enabled.
 - `workshop_menu::restore`, `workshop_menu::reapply`: restore the trial before
   removing Workshop hooks, and retain it when another feature rebuilds the package.
 

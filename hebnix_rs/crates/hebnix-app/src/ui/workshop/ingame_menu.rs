@@ -544,26 +544,9 @@ impl InGameMenuState {
                 Ok(false) => {}
             }
         }
-        ui.add_space(10.0);
-        ui.collapsing("LAN custom map test", |ui| {
-            ui.label("Run on the joining player. Close Rocket League before changing the test.");
-            ui.label("First test map titles, then test loading the custom package before joining. Joining is unverified.");
-            ui.horizontal_wrapped(|ui| {
-                for (label, mode) in [("1. Test map titles", "labels"), ("2. Test custom map joining", "join"), ("Disable test", "off")] {
-                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked()
-                        && !crate::messages::block_item_action_if_game_running(tx) {
-                        let cooked = cooked.clone();
-                        self.spawn(&ctx, move || Job::Done(
-                            crate::patcher::workshop_lan_trial::set_mode(&cooked, mode)
-                                .map(|()| format!("LAN map test: {mode}. Restart Rocket League."))
-                        ));
-                    }
-                }
-            });
-            for line in crate::patcher::workshop_lan_trial::offer_status(&cooked) {
-                ui.label(format!("Peer map: {line}"));
-            }
-        });
+        for line in crate::patcher::workshop_lan_trial::offer_status(&cooked) {
+            ui.label(format!("Peer map: {line}"));
+        }
     }
 }
 
