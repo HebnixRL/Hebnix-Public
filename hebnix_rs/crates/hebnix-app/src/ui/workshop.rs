@@ -2005,11 +2005,12 @@ impl WorkshopState {
             return;
         };
         if let Some(title) = request {
+            session.poll_now();
             self.slot_sync_asked = true;
             self.join_polled = None;
             self.sync_title = Some(title);
         }
-        if self.join_polled.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
+        if self.join_polled.is_none_or(|at| at.elapsed() > Duration::from_secs(2)) {
             self.join_polled = Some(std::time::Instant::now());
             self.join_mismatch = hebnix_sdk::log::join_mismatch(None);
             let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
@@ -2073,7 +2074,7 @@ impl WorkshopState {
                 }
             }
         }
-        ctx.request_repaint_after(Duration::from_secs(5));
+        ctx.request_repaint_after(Duration::from_secs(2));
         let Some(failed) = self.join_mismatch.clone() else {
             return;
         };
