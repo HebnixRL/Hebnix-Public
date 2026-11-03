@@ -162,6 +162,13 @@ pub struct SpeedPatchCfg {
     pub items_page: bool,
 }
 
+/// tickboxes on the Game Mods page, keyed by patcher::game_mods::MODS id
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameModsCfg {
+    pub enabled: BTreeMap<String, bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplayUploadCfg {
@@ -362,6 +369,7 @@ pub struct Config {
     pub rl_launch: RlLaunchCfg,
     pub patcher: PatcherCfg,
     pub speed_patch: SpeedPatchCfg,
+    pub game_mods: GameModsCfg,
     pub replay_upload: ReplayUploadCfg,
     pub action_button: ActionButtonCfg,
     /// enabled state keyed by plugin slug

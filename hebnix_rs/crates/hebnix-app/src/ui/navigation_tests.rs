@@ -15,7 +15,7 @@ fn saved_tabs_survive_the_studio_reorganisation() {
     for tab in Tab::ALL {
         assert_eq!(Tab::from_config_key(tab.config_key()), tab);
     }
-    assert_eq!(Tab::ALL.len(), 10);
+    assert_eq!(Tab::ALL.len(), 11);
     assert_eq!(Tab::ALL[0], Tab::Home);
     assert_eq!(Tab::ALL[1], Tab::Workshop);
     assert_eq!(Tab::ALL[2], Tab::Items);

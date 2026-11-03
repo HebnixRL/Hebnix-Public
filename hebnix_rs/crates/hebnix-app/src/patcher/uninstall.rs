@@ -50,6 +50,7 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
             super::item_name::rename(&cooked, &backups, &language, "", None)?;
         }
     }
+    super::goal_explosion::restore(&cooked, &backups)?;
     super::colours::restore_for_uninstall(&cooked, &backups)?;
     // Nested feature snapshots may include older changes to the same package.
     // Restore them before the shared pristine package snapshots at the root.

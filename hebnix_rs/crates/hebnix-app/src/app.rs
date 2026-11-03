@@ -316,6 +316,7 @@ enum Tab {
     Spoofer,
     Items,
     Patcher,
+    GameMods,
     Settings,
     Plugins,
     Replays,
@@ -323,11 +324,12 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Home,
         Self::Workshop,
         Self::Items,
         Self::Patcher,
+        Self::GameMods,
         Self::Spoofer,
         Self::Replays,
         Self::Plugins,
@@ -345,6 +347,7 @@ impl Tab {
             Self::Spoofer => t("nav-player"),
             Self::Items => t("tab-patcher"),
             Self::Patcher => t("nav-upk-studio"),
+            Self::GameMods => t("tab-game-mods"),
             Self::Settings => t("tab-settings"),
             Self::Plugins => t("tab-plugins"),
             Self::Replays => t("tab-replays"),
@@ -362,6 +365,7 @@ impl Tab {
             Self::Spoofer => "Spoofer",
             Self::Items => "Items",
             Self::Patcher => "UPK Studio",
+            Self::GameMods => "Game Mods",
             Self::Settings => "Settings",
             Self::Plugins => "Plugins",
             Self::Replays => "Replays",
@@ -398,6 +402,7 @@ enum ItemsMode {
     BallAppearance,
     GameColours,
     ArenaBackgrounds,
+    GoalExplosion,
     ItemNames,
     Manage,
     ItemsActive,
@@ -418,7 +423,7 @@ impl ItemsMode {
             Self::Swapper | Self::Recolour | Self::ItemsActive | Self::Presets => return None,
             Self::SpeedPatch => StudioSection::Tools,
             Self::Patching | Self::ItemNames => StudioSection::CustomAssets,
-            Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds => StudioSection::Appearance,
+            Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds | Self::GoalExplosion => StudioSection::Appearance,
             Self::Manage => StudioSection::Active,
         })
     }
@@ -678,6 +683,7 @@ pub struct HebnixApp {
     patcher_car: crate::car_patcher::CarPatcherState,
     patcher_anthem: crate::patcher::anthem_patcher::AnthemPatcherState,
     wheel_alignment: crate::patcher::wheel_alignment::WheelAlignmentState,
+    goal_explosion: crate::patcher::goal_explosion::State,
     swapper: crate::swapper::SwapperState,
     colours: crate::patcher::colours::ColoursState,
     colour_admin_prompt_open: bool,
@@ -1187,6 +1193,7 @@ impl HebnixApp {
             patcher_car,
             patcher_anthem,
             wheel_alignment: Default::default(),
+            goal_explosion: Default::default(),
             swapper,
             colours: crate::patcher::colours::ColoursState::new(),
             colour_admin_prompt_open: false,
@@ -1372,6 +1379,22 @@ impl HebnixApp {
                 });
             }
             None => {}
+        }
+    }
+
+    fn render_game_mods_tab(&mut self, ui: &mut egui::Ui) {
+        ui.label(t("game-mods-intro"));
+        ui.add_space(8.0);
+        let mut changed = false;
+        for (id, label, description) in crate::patcher::game_mods::MODS {
+            let on = self.config.game_mods.enabled.entry(id.to_string()).or_default();
+            changed |= ui.checkbox(on, t(label)).on_hover_text(t(description)).changed();
+        }
+        if crate::patcher::game_mods::MODS.is_empty() {
+            ui.weak(t("game-mods-empty"));
+        }
+        if changed {
+            self.save_config();
         }
     }
 
@@ -5378,7 +5401,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy()
                     || self.title_patcher.busy() || self.swapper.busy()
                     || self.workshop.maintenance_busy()
                     || crate::replay_history_patch::busy()
@@ -7204,6 +7227,7 @@ impl HebnixApp {
                                 (ItemsMode::BallAppearance, "nav-ball-shape"),
                                 (ItemsMode::WheelAlignment, "app-wheel-alignment"),
                                 (ItemsMode::ArenaBackgrounds, "nav-arena-backgrounds"),
+                                (ItemsMode::GoalExplosion, "nav-goal-explosion-scale"),
                             ] {
                                 ui.selectable_value(&mut self.items_mode, value, t(key));
                             }
@@ -7714,6 +7738,8 @@ impl HebnixApp {
                                 self.save_config();
                             }
                         });
+                } else if mode == ItemsMode::GoalExplosion {
+                    self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
                 } else if mode == ItemsMode::WheelAlignment {
                     if self.catalogs_loading {
                         ui.spinner();
@@ -7794,6 +7820,7 @@ impl HebnixApp {
             Tab::Spoofer => self.render_spoofer_tab(ui),
             Tab::Items => self.render_items_tab(ui),
             Tab::Patcher => self.render_upk_studio(ui),
+            Tab::GameMods => self.render_game_mods_tab(ui),
             Tab::Settings => self.render_settings_tab(ui),
             Tab::Plugins => self.render_plugins_tab(ui),
             Tab::Replays => {
