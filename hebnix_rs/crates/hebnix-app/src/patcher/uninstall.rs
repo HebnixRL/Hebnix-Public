@@ -51,6 +51,8 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
         }
     }
     super::goal_explosion::restore(&cooked, &backups)?;
+    super::forfeit_command::restore(&cooked, &backups)?;
+    let _ = super::forfeit_command::set_binding(None);
     super::colours::restore_for_uninstall(&cooked, &backups)?;
     // Nested feature snapshots may include older changes to the same package.
     // Restore them before the shared pristine package snapshots at the root.

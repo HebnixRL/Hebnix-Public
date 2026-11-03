@@ -21,7 +21,11 @@ tab-plugins = Plugins
 tab-replays = Replays
 tab-game-mods = Game Mods
 game-mods-intro = Game Mods is a work in progress. More game mods will be released and enabled with every weekly release.
-game-mods-empty = No game mods are available yet. Check back after the next weekly release.
+game-mod-forfeit = Forfeit command
+game-mod-forfeit-description = Adds a Forfeit command you can bind to a key, to start the forfeit vote in matches that allow it. Rocket League must be closed to switch it on or off.
+game-mod-forfeit-key = Forfeit key
+game-mod-forfeit-on = Forfeit command is on.
+game-mod-forfeit-off = Forfeit command is off.
 app-automatically-upload-replays = Auto Save/Upload Replays
 tab-about = About
 

@@ -848,6 +848,7 @@ fn apply(
     let _ = fs::remove_file(&temp);
     crate::patcher::workshop_menu::reapply(cooked_pc, backups_dir)?;
     crate::patcher::goal_explosion::reapply(cooked_pc, backups_dir)?;
+    crate::patcher::forfeit_command::reapply(cooked_pc, backups_dir)?;
     let mut saved = settings.clone();
     saved.applied = true;
     save_state(backups_dir, &saved)
@@ -888,6 +889,7 @@ fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
     let _ = fs::remove_file(temp);
     crate::patcher::workshop_menu::reapply(cooked_pc, backups_dir)?;
     crate::patcher::goal_explosion::reapply(cooked_pc, backups_dir)?;
+    crate::patcher::forfeit_command::reapply(cooked_pc, backups_dir)?;
     save_state(backups_dir, &ColourSettings::default())
 }
 

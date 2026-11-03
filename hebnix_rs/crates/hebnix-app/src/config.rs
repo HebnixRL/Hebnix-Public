@@ -162,11 +162,12 @@ pub struct SpeedPatchCfg {
     pub items_page: bool,
 }
 
-/// tickboxes on the Game Mods page, keyed by patcher::game_mods::MODS id
+/// Game Mods page settings
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameModsCfg {
-    pub enabled: BTreeMap<String, bool>,
+    /// Rocket League key name the forfeit command is bound to.
+    pub forfeit_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

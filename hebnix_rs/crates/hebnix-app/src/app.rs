@@ -684,6 +684,7 @@ pub struct HebnixApp {
     patcher_anthem: crate::patcher::anthem_patcher::AnthemPatcherState,
     wheel_alignment: crate::patcher::wheel_alignment::WheelAlignmentState,
     goal_explosion: crate::patcher::goal_explosion::State,
+    forfeit_command: crate::patcher::forfeit_command::State,
     swapper: crate::swapper::SwapperState,
     colours: crate::patcher::colours::ColoursState,
     colour_admin_prompt_open: bool,
@@ -1194,6 +1195,7 @@ impl HebnixApp {
             patcher_anthem,
             wheel_alignment: Default::default(),
             goal_explosion: Default::default(),
+            forfeit_command: Default::default(),
             swapper,
             colours: crate::patcher::colours::ColoursState::new(),
             colour_admin_prompt_open: false,
@@ -1385,15 +1387,9 @@ impl HebnixApp {
     fn render_game_mods_tab(&mut self, ui: &mut egui::Ui) {
         ui.label(t("game-mods-intro"));
         ui.add_space(8.0);
-        let mut changed = false;
-        for (id, label, description) in crate::patcher::game_mods::MODS {
-            let on = self.config.game_mods.enabled.entry(id.to_string()).or_default();
-            changed |= ui.checkbox(on, t(label)).on_hover_text(t(description)).changed();
-        }
-        if crate::patcher::game_mods::MODS.is_empty() {
-            ui.weak(t("game-mods-empty"));
-        }
-        if changed {
+        let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
+        let backups_dir = cooked_pc.join("Backups");
+        if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key) {
             self.save_config();
         }
     }
@@ -5401,7 +5397,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.forfeit_command.busy()
                     || self.title_patcher.busy() || self.swapper.busy()
                     || self.workshop.maintenance_busy()
                     || crate::replay_history_patch::busy()
