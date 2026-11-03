@@ -1392,6 +1392,14 @@ impl HebnixApp {
         if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key) {
             self.save_config();
         }
+        ui.add_space(16.0);
+        ui.heading(t("game-mods-coming-soon"));
+        for id in ["font-swapper", "instant-suite", "celebration", "kickoff-training", "freeplay-checkpoint", "quickvoice"] {
+            ui.add_enabled_ui(false, |ui| {
+                ui.checkbox(&mut false, t(&format!("game-mod-{id}")))
+                    .on_disabled_hover_text(t(&format!("game-mod-{id}-description")));
+            });
+        }
     }
 
     fn render_replay_auto_upload_tab(&mut self, ui: &mut egui::Ui) {
