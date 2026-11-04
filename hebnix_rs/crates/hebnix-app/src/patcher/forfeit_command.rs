@@ -69,7 +69,7 @@ fn is_patched(upk: &UpkPackage) -> bool {
 /// Add the dispatcher block and the key action that runs it.
 pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), String> {
     let script = body(object(upk, PRI_CLASS)?, object(upk, PRI_VARIABLE)?, object(upk, VOTE)?);
-    dispatcher::install(upk, backups, build, SLOT as u8, &script)?;
+    dispatcher::install(upk, backups, build, SLOT as u8, &script, &[])?;
     actions::remove(upk, SLOT)?;
     actions::add(upk, SLOT, &format!("{} {SLOT}", dispatcher::COMMAND))
 }

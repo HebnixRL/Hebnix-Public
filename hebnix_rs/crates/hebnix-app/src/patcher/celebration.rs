@@ -5,9 +5,10 @@
 //!
 //!     GameEvent_Soccar_TA(GetGameEvent()).GotoGameState('PrePodiumSpotlight');
 //!
-//! starts the podium on demand. There is no freeplay check, so in any other
-//! match it also moves the local copy of the event. The statement is a block of
-//! the dispatcher (dispatcher.rs) with a key action of its own (actions.rs).
+//! starts the podium on demand. The command does nothing outside freeplay, and
+//! a second press ends the podium with the game's own freeplay reset. It is a
+//! block of the dispatcher (dispatcher.rs) with a key action of its own
+//! (actions.rs).
 use super::forfeit_command::{KEYS, set_binding};
 use super::script_patch::Script;
 use super::upk_package::UpkPackage;
@@ -28,6 +29,10 @@ const STATE: &str = "PrePodiumSpotlight";
 /// The next state, entered at once so both state changes finish before the HUD name is set.
 const PODIUM_STATE: &str = "PodiumSpotlight";
 const LOG_MARKER: &str = "HBXCELEBRATE";
+/// True in freeplay, offline or online.
+const IS_FREEPLAY: &str = "GameEvent_TA.IsPlayingFreeplay";
+/// The event's freeplay reset. The key's own command asserts on the ball, which the podium has removed.
+const RESET: &str = "GameEvent_TA.PlayerResetTraining";
 
 const MATCH_WINNER: &str = "GameEvent_Soccar_TA.MatchWinner";
 const PODIUM_TIME: &str = "GameEvent_Soccar_TA.PodiumTime";
@@ -49,6 +54,8 @@ struct Refs {
     class: i32,
     get_event: i32,
     goto: i32,
+    is_freeplay: i32,
+    reset: i32,
     state: i32,
     podium_state: i32,
     match_winner: i32,
@@ -90,19 +97,60 @@ fn event(refs: &Refs) -> Script {
     out
 }
 
-/// What the command runs, with LogInternal(marker) first to show in the log:
+/// A jump opcode with its target word to be filled in by `land`; the word's
+/// position goes in `jumps` for the dispatcher to shift.
+fn jump(out: &mut Script, op: u8, jumps: &mut Vec<usize>) -> usize {
+    out.raw(&[op]);
+    let at = out.len();
+    out.raw(&[0, 0]);
+    jumps.push(at);
+    at
+}
+
+/// Point the jump at `at` to the end of what is written so far (memory form,
+/// counted from the start of the body).
+fn land(out: &mut Script, at: usize) {
+    let target = out.mem_size() as u16;
+    out.set_word(at, target);
+}
+
+/// A call of a final function with no parameters.
+fn call_of(function: i32) -> Script {
+    let mut call = Script::new();
+    call.raw(&[0x1c]).object(function).raw(&[0x16]);
+    call
+}
+
+/// What the command runs, with LogInternal(marker) first to show in the log.
+/// GameEvent is `GameEvent_Soccar_TA(GetGameEvent())`.
 ///
-///     GameEvent.MatchWinner = PRI.Team;   // the podium lines up the winners' cars
-///     GameEvent.PodiumTime = 3600.0;      // and ends the match when its time is up
-///     GameEvent.bAllowWinnersExplosion = false; // the explosion podium needs a goal for the winner
-///     GameEvent.GotoGameState('PrePodiumSpotlight');
-///     GameEvent.GotoGameState('PodiumSpotlight');
-///     GFxHUD_TA(myHUD).GameEventData.GameState = 'Active'; // the menu code reads this
+///     if (GameEvent.IsPlayingFreeplay())
+///     {
+///         if (GameEvent.bAllowWinnersExplosion)   // nothing running yet: start
+///         {
+///             GameEvent.MatchWinner = PRI.Team;   // the podium lines up the winners' cars
+///             GameEvent.PodiumTime = 3600.0;      // and ends the match when its time is up
+///             GameEvent.bAllowWinnersExplosion = false; // the explosion podium needs a goal; also the flag
+///             GameEvent.GotoGameState('PrePodiumSpotlight');
+///             GameEvent.GotoGameState('PodiumSpotlight');
+///             GFxHUD_TA(myHUD).GameEventData.GameState = 'Active'; // the menu code reads this
+///         }
+///         else                                    // running: end it
+///         {
+///             GameEvent.bAllowWinnersExplosion = true;
+///             GameEvent.PlayerResetTraining();
+///         }
+///     }
 ///
-/// where GameEvent is `GameEvent_Soccar_TA(GetGameEvent())`.
-fn body(refs: &Refs) -> Script {
+/// Returns the body and the positions of its jump targets.
+fn body(refs: &Refs) -> (Script, Vec<usize>) {
+    let mut jumps = Vec::new();
     let mut out = Script::new();
     out.raw(&[0xe7, 0x1f]).raw(LOG_MARKER.as_bytes()).raw(&[0x00, 0x48, 0x48, 0x16]);
+    let outer = jump(&mut out, 0x07, &mut jumps);
+    out.append(&context(&event(refs), 0, &call_of(refs.is_freeplay)));
+    let inner = jump(&mut out, 0x07, &mut jumps);
+    out.append(&member(&event(refs), refs.allow_explosion, true));
     let mut own_pri = Script::new();
     own_pri.raw(&[0x01]).object(refs.pri);
     out.raw(&[0x0f]).append(&member(&event(refs), refs.match_winner, false)).append(&member(&own_pri, refs.team, false));
@@ -117,7 +165,13 @@ fn body(refs: &Refs) -> Script {
     hud.raw(&[0x2e]).object(refs.hud_class).raw(&[0x01]).object(refs.my_hud);
     let data = member(&hud, refs.event_data, false);
     out.raw(&[0x0f]).append(&member(&data, refs.state_binding, false)).raw(&[0x21]).name(refs.shown_state);
-    out
+    let skip = jump(&mut out, 0x06, &mut jumps);
+    land(&mut out, inner);
+    out.raw(&[0x14]).append(&member(&event(refs), refs.allow_explosion, true)).raw(&[0x27]);
+    out.append(&context(&event(refs), 0, &call_of(refs.reset)));
+    land(&mut out, skip);
+    land(&mut out, outer);
+    (out, jumps)
 }
 
 fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
@@ -139,6 +193,8 @@ pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), St
         class: object(upk, EVENT_CLASS)?,
         get_event: object(upk, GET_EVENT)?,
         goto: object(upk, GOTO)?,
+        is_freeplay: object(upk, IS_FREEPLAY)?,
+        reset: object(upk, RESET)?,
         state,
         podium_state: name(upk, PODIUM_STATE)?,
         match_winner: object(upk, MATCH_WINNER)?,
@@ -152,8 +208,8 @@ pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), St
         state_binding: object(upk, STATE_BINDING)?,
         shown_state: name(upk, SHOWN_STATE)?,
     };
-    let script = body(&refs);
-    dispatcher::install(upk, backups, build, SLOT as u8, &script)?;
+    let (script, jumps) = body(&refs);
+    dispatcher::install(upk, backups, build, SLOT as u8, &script, &jumps)?;
     actions::remove(upk, SLOT)?;
     actions::add(upk, SLOT, &format!("{} {SLOT}", dispatcher::COMMAND))
 }
@@ -330,24 +386,31 @@ mod tests {
     use super::*;
 
     fn refs() -> Refs {
-        Refs { class: 100, get_event: 200, goto: 300, state: 7, podium_state: 8, match_winner: 400, podium_time: 500, allow_explosion: 800, team: 600, pri: 700, hud_class: 900, my_hud: 1000, event_data: 1100, state_binding: 1200, shown_state: 9 }
+        Refs { class: 100, get_event: 200, goto: 300, state: 7, podium_state: 8, is_freeplay: 1300, reset: 1400, match_winner: 400, podium_time: 500, allow_explosion: 800, team: 600, pri: 700, hud_class: 900, my_hud: 1000, event_data: 1100, state_binding: 1200, shown_state: 9 }
     }
 
-    /// Each reference appears, the memory size counts them at 8 bytes, and the
-    /// skip words of the three context expressions match their call sizes.
+    /// Each reference appears, the memory size counts them at 8 bytes, the
+    /// body ends with the reset call, and the three jumps land where the
+    /// `if` and `else` end (the outer one at the very end of the body).
     #[test]
-    fn body_has_every_reference_and_ends_with_the_goto_call() {
-        let script = body(&refs());
-        for reference in [100i32, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200] {
+    fn body_has_every_reference_and_its_jumps_land_inside() {
+        let (script, jumps) = body(&refs());
+        for reference in [100i32, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400] {
             assert!(script.bytes().windows(4).any(|w| w == reference.to_le_bytes()), "{reference}");
         }
-        // class, get_event x3, goto, member x4 (twice object+property), pri, team ...
         assert_eq!(script.mem_size(), script.len() + 4 * script.refs());
         assert!(script.bytes().starts_with(&[0xe7, 0x1f]));
-        let mut tail = vec![0x21];
-        tail.extend_from_slice(&9i32.to_le_bytes());
-        tail.extend_from_slice(&[0, 0, 0, 0]);
+        let mut tail = vec![0x1c];
+        tail.extend_from_slice(&1400i32.to_le_bytes());
+        tail.push(0x16);
         assert!(script.bytes().ends_with(&tail));
+        assert_eq!(jumps.len(), 3);
+        let target = |at: usize| u16::from_le_bytes([script.bytes()[at], script.bytes()[at + 1]]) as usize;
+        assert_eq!(target(jumps[0]), script.mem_size());
+        assert_eq!(target(jumps[2]), script.mem_size());
+        assert!(target(jumps[1]) < script.mem_size());
+        // the else part (a LetBool and the reset call) is what follows the inner target
+        assert_eq!(script.mem_size() - target(jumps[1]), 1 + member(&event(&refs()), 800, true).mem_size() + 1 + context(&event(&refs()), 0, &call_of(1400)).mem_size());
     }
 
     /// `object.member` is the game's own shape: skip = size of `01 <property>`
@@ -381,6 +444,33 @@ mod tests {
     /// Enable both commands on a temp copy of the real package, turn one off
     /// and then the other, and check the package ends exactly as it began.
     /// Run with HEBNIX_UPK_TEST_SOURCE set to a vanilla TAGame.upk.
+    /// The command applies to a vanilla package (every name resolves), survives
+    /// a save and load, and its jumps stay valid next to a second block.
+    /// Run with HEBNIX_UPK_TEST_SOURCE set to a vanilla TAGame.upk.
+    #[test]
+    #[ignore]
+    fn applies_next_to_another_block_and_removes() {
+        let source = std::env::var("HEBNIX_UPK_TEST_SOURCE").unwrap();
+        let backups = std::env::temp_dir().join("hebnix_celebration_apply_test");
+        let _ = std::fs::remove_dir_all(&backups);
+        let mut upk = UpkPackage::load(Path::new(&source)).unwrap();
+        let mut other = Script::new();
+        other.raw(&[0x0b, 0x0b]);
+        dispatcher::install(&mut upk, &backups, "b", 1, &other, &[]).unwrap();
+        apply(&mut upk, &backups, "b").unwrap();
+        dispatcher::install(&mut upk, &backups, "b", 3, &other, &[]).unwrap();
+        let out = std::env::temp_dir().join("hebnix_celebration_apply_test.upk");
+        upk.save_fast(&out).unwrap();
+        let mut reloaded = UpkPackage::load(&out).unwrap();
+        let _ = std::fs::remove_file(out);
+        assert!(is_patched(&reloaded));
+        dispatcher::remove(&mut reloaded, &backups, "b", 1).unwrap();
+        dispatcher::remove(&mut reloaded, &backups, "b", 3).unwrap();
+        assert!(is_patched(&reloaded));
+        dispatcher::remove(&mut reloaded, &backups, "b", SLOT as u8).unwrap();
+        assert!(!dispatcher::has(&reloaded, SLOT as u8));
+    }
+
     #[test]
     #[ignore]
     fn both_commands_enable_and_restore() {

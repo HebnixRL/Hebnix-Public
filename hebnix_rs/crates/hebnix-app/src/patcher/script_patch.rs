@@ -88,6 +88,12 @@ impl Script {
         self
     }
 
+    /// Overwrite the two bytes at `at` (a jump target) with `value`.
+    pub fn set_word(&mut self, at: usize, value: u16) -> &mut Self {
+        self.bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        self
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
