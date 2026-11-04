@@ -1,8 +1,8 @@
 //! Local title presentation through embedded Scaleform code. No proxy or save writes.
 #[path = "title_patcher/abc.rs"]
-mod abc;
+pub(super) mod abc;
 #[path = "title_patcher/movie.rs"]
-mod movie;
+pub(super) mod movie;
 use super::{
     backup_guard,
     upk_package::{UpkPackage, strip},

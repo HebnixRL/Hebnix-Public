@@ -3,11 +3,12 @@
 //!
 //!     PRI_TA(Player.Actor.PlayerReplicationInfo).ServerVoteToForfeit();
 //!
-//! Hebnix gives the player controller an exec function with the same body so
-//! `Forfeit` works from the console and from a key binding. There is no room
-//! for a new function, so an exec function nothing binds
-//! (PlayerController_TA.TargetSelectNext) is rewritten and renamed. Its
-//! original payload and name go to Backups/ForfeitCommand to restore it.
+//! Hebnix gives the player controller a function with the same body. A key
+//! binding names an Action, and PlayerInput_TA.GetDefaultActions maps each
+//! Action to a console command, so the command must be one an existing Action
+//! runs. PlayerController_TA.ShowControllerApplet (action ShowControllerApplet,
+//! never shown in the controls menu) is rewritten and the key is bound to that
+//! action. Its original payload goes to Backups/ForfeitCommand to restore it.
 use super::script_patch::{Script, replace_script};
 use super::upk_package::UpkPackage;
 use super::{backup_guard, game_path};
@@ -15,15 +16,15 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const PACKAGE: &str = "TAGame.upk";
-const DONOR: &str = "PlayerController_TA.TargetSelectNext";
-const COMMAND: &str = "PlayerController_TA.Forfeit";
-/// A function already called Forfeit, whose name table entry the command reuses.
-const NAME_SOURCE: &str = "Team_TA.Forfeit";
+const DONOR: &str = "PlayerController_TA.ShowControllerApplet";
+/// Where builds before the key action fix put the command, renamed.
+const LEGACY_COMMAND: &str = "PlayerController_TA.Forfeit";
 const PRI_CLASS: &str = "PRI_TA";
 const PRI_VARIABLE: &str = "Engine.Controller.PlayerReplicationInfo";
 const VOTE: &str = "PRI_TA.ServerVoteToForfeit";
 /// Return, Nothing, EndOfScript: how every function here ends.
 const END: [u8; 3] = [0x04, 0x0b, 0x4c];
+const LOG_MARKER: &str = "HBXFORFEIT";
 /// An export entry is class, super, outer, then the name.
 const NAME_FIELD: usize = 12;
 
@@ -34,6 +35,8 @@ fn body(pri_class: i32, pri_variable: i32, vote: i32) -> Script {
     let mut call = Script::new();
     call.raw(&[0x1c]).object(vote).raw(&[0x16]);
     let mut out = Script::new();
+    // LogInternal("HBXFORFEIT"), a ScriptLog line that shows the command ran.
+    out.raw(&[0xe7, 0x1f]).raw(LOG_MARKER.as_bytes()).raw(&[0x00, 0x48, 0x48, 0x16]);
     out.raw(&[0x5e, 0x19, 0x00, 0x2e]).object(pri_class).raw(&[0x01]).object(pri_variable);
     out.raw(&(call.mem_size() as u16).to_le_bytes());
     out.object(0).raw(&[0x00]).append(&call).raw(&END);
@@ -49,20 +52,32 @@ fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
     upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec()
 }
 
+/// The donor's payload carries the log marker only once it is rewritten.
 fn is_patched(upk: &UpkPackage) -> bool {
-    upk.find_object(COMMAND).is_some()
+    upk.find_object(DONOR).is_some_and(|index| {
+        let marker = LOG_MARKER.as_bytes();
+        payload(upk, index as usize - 1).windows(marker.len()).any(|w| w == marker)
+    })
 }
 
-/// Rewrite the donor into the command and give it the Forfeit name.
+/// Rewrite the donor into the command.
 pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
     if is_patched(upk) {
-        return Err(format!("{COMMAND} already exists"));
+        return Err(format!("{DONOR} is already rewritten"));
     }
     let script = body(object(upk, PRI_CLASS)?, object(upk, PRI_VARIABLE)?, object(upk, VOTE)?);
-    let name = upk.exports[object(upk, NAME_SOURCE)? as usize - 1].object_name;
-    let donor = object(upk, DONOR)? as usize - 1;
-    replace_script(upk, DONOR, &script)?;
-    rename(upk, donor, name.name_index, name.instance)
+    replace_script(upk, DONOR, &script)
+}
+
+/// Undo what builds before the key action fix did: the command lived in
+/// TargetSelectNext, renamed Forfeit. Put its payload and name back.
+fn undo_legacy(upk: &mut UpkPackage, saved: &Saved) -> Result<(), String> {
+    let Some(index) = upk.find_object(LEGACY_COMMAND) else {
+        return Ok(());
+    };
+    let index = index as usize - 1;
+    upk.replace_export_payload(index, &saved.original)?;
+    rename(upk, index, saved.name_index, saved.instance)
 }
 
 fn rename(upk: &mut UpkPackage, export: usize, name_index: usize, instance: i32) -> Result<(), String> {
@@ -80,7 +95,10 @@ struct Saved {
     build: String,
     /// The donor's export payload before the patch.
     original: Vec<u8>,
+    /// Only set by builds before the key action fix, which renamed the donor.
+    #[serde(default)]
     name_index: usize,
+    #[serde(default)]
     instance: i32,
 }
 
@@ -124,16 +142,18 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
+    if let Some(old) = read_saved(backups) {
+        undo_legacy(&mut upk, &old)?;
+    }
     if is_patched(&upk) {
         return Ok(());
     }
     let donor = object(&upk, DONOR)? as usize - 1;
-    let name = upk.exports[donor].object_name;
     let saved = Saved {
         build: backup_guard::build_id(cooked)?,
         original: payload(&upk, donor),
-        name_index: name.name_index,
-        instance: name.instance,
+        name_index: 0,
+        instance: 0,
     };
     apply(&mut upk)?;
     install(cooked, &live, &upk, true)?;
@@ -151,13 +171,17 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
-    if is_patched(&upk) {
+    let legacy = upk.find_object(LEGACY_COMMAND).is_some();
+    if legacy || is_patched(&upk) {
         if saved.build != backup_guard::build_id(cooked)? {
             return Err("The forfeit backup belongs to another game build. Verify the game files.".into());
         }
-        let command = object(&upk, COMMAND)? as usize - 1;
-        upk.replace_export_payload(command, &saved.original)?;
-        rename(&mut upk, command, saved.name_index, saved.instance)?;
+        if legacy {
+            undo_legacy(&mut upk, &saved)?;
+        } else {
+            let donor = object(&upk, DONOR)? as usize - 1;
+            upk.replace_export_payload(donor, &saved.original)?;
+        }
         install(cooked, &live, &upk, false)?;
     }
     let _ = std::fs::remove_dir_all(backups.join("ForfeitCommand"));
@@ -175,19 +199,25 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
         return Ok(());
     }
     ensure_closed()?;
+    if let Some(saved) = read_saved(backups) {
+        undo_legacy(&mut upk, &saved)?;
+    }
     apply(&mut upk)?;
     install(cooked, &live, &upk, true)
 }
 
 /// Keys the page offers, by Rocket League's names.
-pub const KEYS: [&str; 15] = [
+pub const KEYS: [&str; 41] = [
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
     "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F11", "F12", "Home", "End", "Insert", "Delete", "PageUp",
 ];
-pub const DEFAULT_KEY: &str = "F9";
+pub const DEFAULT_KEY: &str = "J";
 /// The binding goes next to ReadyUp, a PlayerController_TA exec function bound
 /// the same way, in every control preset that has it.
 const NEIGHBOUR: &str = "Action=\"ReadyUp\"";
-const ACTION: &str = "Action=\"Forfeit\"";
+const ACTION: &str = "Action=\"ShowControllerApplet\"";
+/// What earlier builds bound, an action the game has no command for.
+const LEGACY_ACTION: &str = "Action=\"Forfeit\"";
 
 /// `ini` with the Forfeit binding set to `key`, or removed when `key` is None.
 fn with_binding(ini: &str, key: Option<&str>) -> String {
@@ -201,12 +231,12 @@ fn with_binding(ini: &str, key: Option<&str>) -> String {
         if line.trim_start().starts_with('[') {
             added = false;
         }
-        if line.contains(ACTION) {
+        if line.contains(ACTION) || line.contains(LEGACY_ACTION) {
             continue;
         }
         out.push(line.to_string());
         if let Some(key) = key.filter(|_| !added && line.trim_start().starts_with("PCBindings") && line.contains(NEIGHBOUR)) {
-            out.push(format!("PCBindings=( Action=\"Forfeit\", Key=\"{key}\" )"));
+            out.push(format!("PCBindings=( Action=\"ShowControllerApplet\", Key=\"{key}\" )"));
             added = true;
         }
     }
@@ -309,7 +339,9 @@ mod tests {
     #[test]
     fn body_matches_the_games_own_call_shape() {
         let script = body(58203, -3726, 58051);
-        let mut expected = vec![0x5e, 0x19, 0x00, 0x2e];
+        let mut expected = vec![0xe7, 0x1f];
+        expected.extend_from_slice(LOG_MARKER.as_bytes());
+        expected.extend_from_slice(&[0x00, 0x48, 0x48, 0x16, 0x5e, 0x19, 0x00, 0x2e]);
         expected.extend_from_slice(&58203i32.to_le_bytes());
         expected.push(0x01);
         expected.extend_from_slice(&(-3726i32).to_le_bytes());
@@ -328,9 +360,9 @@ PCBindings=( Action=\"ReadyUp\", Key=\"X\" )
 PCBindings=( Action=\"ReadyUp\", Key=\"Spacebar\" )
 ";
         let bound = with_binding(ini, Some("F9"));
-        assert_eq!(bound.matches("Action=\"Forfeit\"").count(), 2);
+        assert_eq!(bound.matches("Action=\"ShowControllerApplet\"").count(), 2);
         assert!(bound.contains("Spacebar\" )
-PCBindings=( Action=\"Forfeit\", Key=\"F9\" )
+PCBindings=( Action=\"ShowControllerApplet\", Key=\"F9\" )
 "));
         assert_eq!(with_binding(&bound, Some("F8")).matches("Key=\"F8\"").count(), 2);
         assert_eq!(with_binding(&bound, None), ini);
@@ -348,8 +380,8 @@ PCBindings=( Action=\"Forfeit\", Key=\"F9\" )
         upk.save_fast(&out).unwrap();
         let reloaded = UpkPackage::load(&out).unwrap();
         let _ = std::fs::remove_file(out);
-        let index = object(&reloaded, COMMAND).unwrap() as usize - 1;
-        assert!(reloaded.find_object(DONOR).is_none());
+        let index = object(&reloaded, DONOR).unwrap() as usize - 1;
+        assert!(is_patched(&reloaded));
         let script = Script::of_function(&payload(&reloaded, index)).unwrap();
         let vote = object(&reloaded, VOTE).unwrap();
         assert!(script.bytes().windows(4).any(|w| w == vote.to_le_bytes()));

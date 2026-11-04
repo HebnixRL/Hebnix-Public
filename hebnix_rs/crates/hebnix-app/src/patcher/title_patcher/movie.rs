@@ -13,6 +13,15 @@ fn u32_at(data: &[u8], at: usize) -> Result<usize> {
 }
 
 pub(super) fn patch(raw: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<u8>, usize)>> {
+    rewrite(raw, &|abc| abc::patch(abc, rules))
+}
+
+/// Run `edit` over every DoABC block of a GFx/SWF movie and rebuild the movie
+/// when any block changed. `edit` returns the new ABC and a change count.
+pub(in crate::patcher) fn rewrite(
+    raw: &[u8],
+    edit: &dyn Fn(&[u8]) -> Result<Option<(Vec<u8>, usize)>>,
+) -> Result<Option<(Vec<u8>, usize)>> {
     if raw.len() < 9 {
         return Err("Truncated title UI movie".into());
     }
@@ -74,7 +83,7 @@ pub(super) fn patch(raw: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<u
                 .ok_or("Invalid DoABC name")?
                 + 4;
             let abc_start = nul + 1;
-            if let Some((abc, count)) = abc::patch(&data[abc_start..], rules)? {
+            if let Some((abc, count)) = edit(&data[abc_start..])? {
                 let len = abc_start + abc.len();
                 output.extend_from_slice(&((82u16 << 6) | 63).to_le_bytes());
                 output.extend_from_slice(&(len as u32).to_le_bytes());

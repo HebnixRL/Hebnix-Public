@@ -168,6 +168,8 @@ pub struct SpeedPatchCfg {
 pub struct GameModsCfg {
     /// Rocket League key name the forfeit command is bound to.
     pub forfeit_key: String,
+    /// What Instant Suite does when a match ends: requeue, freeplay or menu.
+    pub instant_suite_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
