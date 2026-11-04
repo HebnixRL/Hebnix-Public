@@ -13,13 +13,23 @@ const SCRIPT: usize = SIZES + 8;
 /// A function body being assembled. In memory every object reference takes 8
 /// bytes where the file has 4, and ScriptMemorySize counts the memory form,
 /// so `object` keeps count.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Script {
     bytes: Vec<u8>,
     refs: usize,
 }
 
 impl Script {
+    /// Bytes with the number of object references inside them.
+    pub fn from_parts(bytes: Vec<u8>, refs: usize) -> Self {
+        Self { bytes, refs }
+    }
+
+    /// How many object references the bytes hold.
+    pub fn refs(&self) -> usize {
+        self.refs
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -60,6 +70,22 @@ impl Script {
     /// Cut the last `n` bytes, which must hold no object references.
     pub fn split_off(&mut self, n: usize) -> Vec<u8> {
         self.bytes.split_off(self.bytes.len() - n)
+    }
+
+    /// Put `add` before the last `tail` bytes, which stay as they are.
+    pub fn insert_before_tail(&mut self, tail: usize, add: &Script) -> &mut Self {
+        let end = self.bytes.split_off(self.bytes.len() - tail);
+        self.bytes.extend_from_slice(&add.bytes);
+        self.bytes.extend_from_slice(&end);
+        self.refs += add.refs;
+        self
+    }
+
+    /// Cut `len` bytes at `start`, which hold `refs` object references.
+    pub fn cut(&mut self, start: usize, len: usize, refs: usize) -> &mut Self {
+        self.bytes.drain(start..start + len);
+        self.refs -= refs;
+        self
     }
 
     pub fn bytes(&self) -> &[u8] {

@@ -3,28 +3,28 @@
 //!
 //!     PRI_TA(Player.Actor.PlayerReplicationInfo).ServerVoteToForfeit();
 //!
-//! Hebnix gives the player controller a function with the same body. A key
-//! binding names an Action, and PlayerInput_TA.GetDefaultActions maps each
-//! Action to a console command, so the command must be one an existing Action
-//! runs. PlayerController_TA.ShowControllerApplet (action ShowControllerApplet,
-//! never shown in the controls menu) is rewritten and the key is bound to that
-//! action. Its original payload goes to Backups/ForfeitCommand to restore it.
-use super::script_patch::{Script, replace_script};
+//! Hebnix runs a copy of that statement as a block of the dispatcher
+//! (dispatcher.rs) and adds a key action for it (actions.rs), so a key bound to
+//! that action starts the vote. Builds before the dispatcher rewrote
+//! PlayerController_TA.ShowControllerApplet instead (and, before that,
+//! TargetSelectNext); their payload is in Backups/ForfeitCommand and is put back.
+use super::script_patch::Script;
 use super::upk_package::UpkPackage;
-use super::{backup_guard, game_path};
+use super::{actions, backup_guard, dispatcher, game_path};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const PACKAGE: &str = "TAGame.upk";
-const DONOR: &str = "PlayerController_TA.ShowControllerApplet";
+/// The function builds before the dispatcher rewrote.
+const LEGACY_DONOR: &str = "PlayerController_TA.ShowControllerApplet";
 /// Where builds before the key action fix put the command, renamed.
 const LEGACY_COMMAND: &str = "PlayerController_TA.Forfeit";
 const PRI_CLASS: &str = "PRI_TA";
 const PRI_VARIABLE: &str = "Engine.Controller.PlayerReplicationInfo";
 const VOTE: &str = "PRI_TA.ServerVoteToForfeit";
-/// Return, Nothing, EndOfScript: how every function here ends.
-const END: [u8; 3] = [0x04, 0x0b, 0x4c];
 const LOG_MARKER: &str = "HBXFORFEIT";
+/// The key action slot (see actions.rs), also the dispatcher block id.
+const SLOT: u32 = 1;
 /// An export entry is class, super, outer, then the name.
 const NAME_FIELD: usize = 12;
 
@@ -39,7 +39,7 @@ fn body(pri_class: i32, pri_variable: i32, vote: i32) -> Script {
     out.raw(&[0xe7, 0x1f]).raw(LOG_MARKER.as_bytes()).raw(&[0x00, 0x48, 0x48, 0x16]);
     out.raw(&[0x5e, 0x19, 0x00, 0x2e]).object(pri_class).raw(&[0x01]).object(pri_variable);
     out.raw(&(call.mem_size() as u16).to_le_bytes());
-    out.object(0).raw(&[0x00]).append(&call).raw(&END);
+    out.object(0).raw(&[0x00]).append(&call);
     out
 }
 
@@ -52,32 +52,47 @@ fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
     upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec()
 }
 
-/// The donor's payload carries the log marker only once it is rewritten.
-fn is_patched(upk: &UpkPackage) -> bool {
-    upk.find_object(DONOR).is_some_and(|index| {
+/// The old donor's payload carries the log marker only once it is rewritten.
+fn legacy_donor_rewritten(upk: &UpkPackage) -> bool {
+    upk.find_object(LEGACY_DONOR).is_some_and(|index| {
         let marker = LOG_MARKER.as_bytes();
         payload(upk, index as usize - 1).windows(marker.len()).any(|w| w == marker)
     })
 }
 
-/// Rewrite the donor into the command.
-pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
-    if is_patched(upk) {
-        return Err(format!("{DONOR} is already rewritten"));
-    }
-    let script = body(object(upk, PRI_CLASS)?, object(upk, PRI_VARIABLE)?, object(upk, VOTE)?);
-    replace_script(upk, DONOR, &script)
+/// The command is whole once its block and key action exist and no old
+/// rewrite is left.
+fn is_patched(upk: &UpkPackage) -> bool {
+    dispatcher::has(upk, SLOT as u8) && actions::has(upk, SLOT) && !legacy_donor_rewritten(upk)
 }
 
-/// Undo what builds before the key action fix did: the command lived in
-/// TargetSelectNext, renamed Forfeit. Put its payload and name back.
+/// Add the dispatcher block and the key action that runs it.
+pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), String> {
+    let script = body(object(upk, PRI_CLASS)?, object(upk, PRI_VARIABLE)?, object(upk, VOTE)?);
+    dispatcher::install(upk, backups, build, SLOT as u8, &script)?;
+    actions::remove(upk, SLOT)?;
+    actions::add(upk, SLOT, &format!("{} {SLOT}", dispatcher::COMMAND))
+}
+
+/// The Action name TAInput.ini binds the key to.
+pub fn action() -> String {
+    actions::action_name(SLOT)
+}
+
+/// Undo what earlier builds did: the command lived in TargetSelectNext,
+/// renamed Forfeit, and after that in ShowControllerApplet. Put the saved
+/// payload (and name) back.
 fn undo_legacy(upk: &mut UpkPackage, saved: &Saved) -> Result<(), String> {
-    let Some(index) = upk.find_object(LEGACY_COMMAND) else {
-        return Ok(());
-    };
-    let index = index as usize - 1;
-    upk.replace_export_payload(index, &saved.original)?;
-    rename(upk, index, saved.name_index, saved.instance)
+    if let Some(index) = upk.find_object(LEGACY_COMMAND) {
+        let index = index as usize - 1;
+        upk.replace_export_payload(index, &saved.original)?;
+        rename(upk, index, saved.name_index, saved.instance)?;
+    }
+    if legacy_donor_rewritten(upk) {
+        let donor = object(upk, LEGACY_DONOR)? as usize - 1;
+        upk.replace_export_payload(donor, &saved.original)?;
+    }
+    Ok(())
 }
 
 fn rename(upk: &mut UpkPackage, export: usize, name_index: usize, instance: i32) -> Result<(), String> {
@@ -93,7 +108,8 @@ fn rename(upk: &mut UpkPackage, export: usize, name_index: usize, instance: i32)
 #[derive(Serialize, Deserialize)]
 struct Saved {
     build: String,
-    /// The donor's export payload before the patch.
+    /// What an earlier build rewrote, before its patch. Empty from the
+    /// dispatcher on, which keeps its own backup.
     original: Vec<u8>,
     /// Only set by builds before the key action fix, which renamed the donor.
     #[serde(default)]
@@ -148,15 +164,10 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     if is_patched(&upk) {
         return Ok(());
     }
-    let donor = object(&upk, DONOR)? as usize - 1;
-    let saved = Saved {
-        build: backup_guard::build_id(cooked)?,
-        original: payload(&upk, donor),
-        name_index: 0,
-        instance: 0,
-    };
-    apply(&mut upk)?;
+    let build = backup_guard::build_id(cooked)?;
+    apply(&mut upk, backups, &build)?;
     install(cooked, &live, &upk, true)?;
+    let saved = Saved { build, original: Vec::new(), name_index: 0, instance: 0 };
     let path = saved_path(backups);
     std::fs::create_dir_all(path.parent().unwrap_or(backups)).map_err(|e| e.to_string())?;
     std::fs::write(path, serde_json::to_vec(&saved).map_err(|e| e.to_string())?)
@@ -171,17 +182,18 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
-    let legacy = upk.find_object(LEGACY_COMMAND).is_some();
-    if legacy || is_patched(&upk) {
-        if saved.build != backup_guard::build_id(cooked)? {
+    let touched = upk.find_object(LEGACY_COMMAND).is_some()
+        || legacy_donor_rewritten(&upk)
+        || actions::has(&upk, SLOT)
+        || dispatcher::has(&upk, SLOT as u8);
+    if touched {
+        let build = backup_guard::build_id(cooked)?;
+        if saved.build != build {
             return Err("The forfeit backup belongs to another game build. Verify the game files.".into());
         }
-        if legacy {
-            undo_legacy(&mut upk, &saved)?;
-        } else {
-            let donor = object(&upk, DONOR)? as usize - 1;
-            upk.replace_export_payload(donor, &saved.original)?;
-        }
+        undo_legacy(&mut upk, &saved)?;
+        actions::remove(&mut upk, SLOT)?;
+        dispatcher::remove(&mut upk, backups, &build, SLOT as u8)?;
         install(cooked, &live, &upk, false)?;
     }
     let _ = std::fs::remove_dir_all(backups.join("ForfeitCommand"));
@@ -202,7 +214,7 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
     if let Some(saved) = read_saved(backups) {
         undo_legacy(&mut upk, &saved)?;
     }
-    apply(&mut upk)?;
+    apply(&mut upk, backups, &backup_guard::build_id(cooked)?)?;
     install(cooked, &live, &upk, true)
 }
 
@@ -215,12 +227,12 @@ pub const DEFAULT_KEY: &str = "J";
 /// The binding goes next to ReadyUp, a PlayerController_TA exec function bound
 /// the same way, in every control preset that has it.
 const NEIGHBOUR: &str = "Action=\"ReadyUp\"";
-const ACTION: &str = "Action=\"ShowControllerApplet\"";
-/// What earlier builds bound, an action the game has no command for.
-const LEGACY_ACTION: &str = "Action=\"Forfeit\"";
+/// Actions earlier builds bound: the donor's own action, then one the game has no command for.
+pub const LEGACY: [&str; 2] = ["ShowControllerApplet", "Forfeit"];
 
 /// `ini` with the Forfeit binding set to `key`, or removed when `key` is None.
-fn with_binding(ini: &str, key: Option<&str>) -> String {
+fn with_binding(ini: &str, action: &str, legacy: &[&str], key: Option<&str>) -> String {
+    let tag = format!("Action=\"{action}\"");
     let nl = if ini.contains("
 ") { "
 " } else { "
@@ -231,12 +243,12 @@ fn with_binding(ini: &str, key: Option<&str>) -> String {
         if line.trim_start().starts_with('[') {
             added = false;
         }
-        if line.contains(ACTION) || line.contains(LEGACY_ACTION) {
+        if line.contains(&tag) || legacy.iter().any(|old| line.contains(&format!("Action=\"{old}\""))) {
             continue;
         }
         out.push(line.to_string());
         if let Some(key) = key.filter(|_| !added && line.trim_start().starts_with("PCBindings") && line.contains(NEIGHBOUR)) {
-            out.push(format!("PCBindings=( Action=\"ShowControllerApplet\", Key=\"{key}\" )"));
+            out.push(format!("PCBindings=( {tag}, Key=\"{key}\" )"));
             added = true;
         }
     }
@@ -247,15 +259,20 @@ fn with_binding(ini: &str, key: Option<&str>) -> String {
     text
 }
 
+/// Remove the key binding.
+pub fn unbind() -> Result<(), String> {
+    set_binding(&action(), &LEGACY, None)
+}
+
 /// Bind the command to `key` in TAInput.ini, or unbind it with None.
-pub fn set_binding(key: Option<&str>) -> Result<(), String> {
+pub fn set_binding(action: &str, legacy: &[&str], key: Option<&str>) -> Result<(), String> {
     let path = hebnix_sdk::utils::paths::documents_dir()
         .map(|d| d.join("My Games/Rocket League/TAGame/Config/TAInput.ini"))
         .ok_or("Could not find the Documents folder")?;
     let Ok(ini) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    let updated = with_binding(&ini, key);
+    let updated = with_binding(&ini, action, legacy, key);
     if updated == ini {
         return Ok(());
     }
@@ -313,9 +330,9 @@ impl State {
             self.status.clear();
             std::thread::spawn(move || {
                 let result = if !want {
-                    restore(&cooked, &backups).and_then(|_| set_binding(None)).map(|_| t("game-mod-forfeit-off"))
+                    restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-forfeit-off"))
                 } else {
-                    enable(&cooked, &backups).and_then(|_| set_binding(Some(&key))).map(|_| t("game-mod-forfeit-on"))
+                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &LEGACY, Some(&key))).map(|_| t("game-mod-forfeit-on"))
                 };
                 let _ = tx.send(result);
             });
@@ -333,6 +350,11 @@ impl State {
 mod tests {
     use super::*;
 
+    const ACTION: &str = "Checkpoint_1";
+    /// The function the dispatcher rewrites.
+    const DONOR: &str = "PlayerController_TA.NetClientInputRate";
+    const ACTIONS: &str = "PlayerInput_TA.GetDefaultActions";
+
     /// The body is the game's own statement with the player's PRI in place of
     /// Player.Actor.PlayerReplicationInfo: 5e 19 00 2e <cast> 01 <variable>
     /// then the skip, return property, size and the call.
@@ -347,7 +369,7 @@ mod tests {
         expected.extend_from_slice(&(-3726i32).to_le_bytes());
         expected.extend_from_slice(&[0x0a, 0x00, 0, 0, 0, 0, 0x00, 0x1c]);
         expected.extend_from_slice(&58051i32.to_le_bytes());
-        expected.extend_from_slice(&[0x16, 0x04, 0x0b, 0x4c]);
+        expected.push(0x16);
         assert_eq!(script.bytes(), &expected[..]);
     }
 
@@ -359,13 +381,13 @@ PCBindings=( Action=\"ReadyUp\", Key=\"X\" )
 [B]
 PCBindings=( Action=\"ReadyUp\", Key=\"Spacebar\" )
 ";
-        let bound = with_binding(ini, Some("F9"));
-        assert_eq!(bound.matches("Action=\"ShowControllerApplet\"").count(), 2);
+        let bound = with_binding(ini, ACTION, &[], Some("F9"));
+        assert_eq!(bound.matches("Action=\"Checkpoint_1\"").count(), 2);
         assert!(bound.contains("Spacebar\" )
-PCBindings=( Action=\"ShowControllerApplet\", Key=\"F9\" )
+PCBindings=( Action=\"Checkpoint_1\", Key=\"F9\" )
 "));
-        assert_eq!(with_binding(&bound, Some("F8")).matches("Key=\"F8\"").count(), 2);
-        assert_eq!(with_binding(&bound, None), ini);
+        assert_eq!(with_binding(&bound, ACTION, &[], Some("F8")).matches("Key=\"F8\"").count(), 2);
+        assert_eq!(with_binding(&bound, ACTION, &[], None), ini);
     }
 
     /// Patch a copy of the real package, reload it and look for the command.
@@ -375,12 +397,15 @@ PCBindings=( Action=\"ShowControllerApplet\", Key=\"F9\" )
     fn real_package() {
         let source = std::env::var("HEBNIX_UPK_TEST_SOURCE").unwrap();
         let mut upk = UpkPackage::load(Path::new(&source)).unwrap();
-        apply(&mut upk).unwrap();
+        let backups = std::env::temp_dir().join("hebnix_forfeit_test");
+        let _ = std::fs::remove_dir_all(&backups);
+        apply(&mut upk, &backups, "b").unwrap();
         let out = std::env::temp_dir().join("hebnix_forfeit_test.upk");
         upk.save_fast(&out).unwrap();
         let reloaded = UpkPackage::load(&out).unwrap();
         let _ = std::fs::remove_file(out);
         let index = object(&reloaded, DONOR).unwrap() as usize - 1;
+        let _ = std::fs::remove_dir_all(&backups);
         assert!(is_patched(&reloaded));
         let script = Script::of_function(&payload(&reloaded, index)).unwrap();
         let vote = object(&reloaded, VOTE).unwrap();
@@ -404,7 +429,7 @@ PCBindings=( Action=\"ShowControllerApplet\", Key=\"F9\" )
         let load = || UpkPackage::load(&cooked.join("TAGame.upk")).unwrap();
         let vanilla = {
             let upk = load();
-            payload(&upk, object(&upk, DONOR).unwrap() as usize - 1)
+            (payload(&upk, object(&upk, DONOR).unwrap() as usize - 1), payload(&upk, object(&upk, ACTIONS).unwrap() as usize - 1))
         };
         enable(&cooked, &backups).unwrap();
         assert!(enabled(&backups) && is_patched(&load()));
@@ -412,7 +437,8 @@ PCBindings=( Action=\"ShowControllerApplet\", Key=\"F9\" )
         restore(&cooked, &backups).unwrap();
         let upk = load();
         assert!(!enabled(&backups) && !is_patched(&upk));
-        assert_eq!(payload(&upk, object(&upk, DONOR).unwrap() as usize - 1), vanilla);
+        assert_eq!(payload(&upk, object(&upk, DONOR).unwrap() as usize - 1), vanilla.0);
+        assert_eq!(payload(&upk, object(&upk, ACTIONS).unwrap() as usize - 1), vanilla.1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -685,6 +685,7 @@ pub struct HebnixApp {
     wheel_alignment: crate::patcher::wheel_alignment::WheelAlignmentState,
     goal_explosion: crate::patcher::goal_explosion::State,
     forfeit_command: crate::patcher::forfeit_command::State,
+    celebration: crate::patcher::celebration::State,
     chat_export: crate::patcher::chat_export::State,
     instant_suite: crate::patcher::instant_suite::State,
     swapper: crate::swapper::SwapperState,
@@ -1199,6 +1200,7 @@ impl HebnixApp {
             wheel_alignment: Default::default(),
             goal_explosion: Default::default(),
             forfeit_command: Default::default(),
+            celebration: Default::default(),
             chat_export: Default::default(),
             instant_suite: Default::default(),
             swapper,
@@ -1403,9 +1405,13 @@ impl HebnixApp {
         if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.instant_suite_mode) {
             self.save_config();
         }
+        ui.add_space(8.0);
+        if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key) {
+            self.save_config();
+        }
         ui.add_space(16.0);
         ui.heading(t("game-mods-coming-soon"));
-        for id in ["font-swapper", "celebration", "kickoff-training", "freeplay-checkpoint", "quickvoice"] {
+        for id in ["font-swapper", "kickoff-training", "freeplay-checkpoint", "quickvoice"] {
             ui.add_enabled_ui(false, |ui| {
                 ui.checkbox(&mut false, t(&format!("game-mod-{id}")))
                     .on_disabled_hover_text(t(&format!("game-mod-{id}-description")));
@@ -5416,7 +5422,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.forfeit_command.busy() || self.chat_export.busy() || self.instant_suite.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.chat_export.busy() || self.instant_suite.busy()
                     || self.title_patcher.busy() || self.swapper.busy()
                     || self.workshop.maintenance_busy()
                     || crate::replay_history_patch::busy()

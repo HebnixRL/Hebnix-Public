@@ -52,7 +52,9 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     }
     super::goal_explosion::restore(&cooked, &backups)?;
     super::forfeit_command::restore(&cooked, &backups)?;
-    let _ = super::forfeit_command::set_binding(None);
+    super::celebration::restore(&cooked, &backups)?;
+    let _ = super::celebration::unbind();
+    let _ = super::forfeit_command::unbind();
     super::chat_export::restore(&cooked, &backups)?;
     super::instant_suite::restore(&cooked, &backups)?;
     super::colours::restore_for_uninstall(&cooked, &backups)?;
