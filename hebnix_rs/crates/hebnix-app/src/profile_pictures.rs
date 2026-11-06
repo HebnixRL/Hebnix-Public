@@ -9,8 +9,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::mpsc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// A picture upload that has not finished. It is retried once this old.
+const UPLOAD_RETRY_SECS: u64 = 2 * 60 * 60;
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -21,6 +24,38 @@ struct Settings {
     selected: Option<String>,
     active: HashMap<String, String>,
     account: Option<String>,
+    pending_upload: Option<PendingUpload>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PendingUpload {
+    owner: String,
+    id: String,
+    /// Unix seconds when the upload was started.
+    since: u64,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn upload_due(pending: &PendingUpload, now: u64) -> bool {
+    now.saturating_sub(pending.since) >= UPLOAD_RETRY_SECS
+}
+
+#[cfg(test)]
+mod pending_upload_tests {
+    use super::*;
+
+    #[test]
+    fn upload_is_due_only_after_two_hours() {
+        let pending = PendingUpload { owner: "epic:a".into(), id: "x".into(), since: 1_000 };
+        assert!(!upload_due(&pending, 1_000 + UPLOAD_RETRY_SECS - 1));
+        assert!(upload_due(&pending, 1_000 + UPLOAD_RETRY_SECS));
+    }
 }
 enum Completion {
     Started(Option<service::Runtime>, bool),
@@ -86,6 +121,13 @@ impl State {
         }
         settings.selected = None;
         settings.imported_owner = None;
+        if settings
+            .pending_upload
+            .as_ref()
+            .is_some_and(|p| !gallery::path(&root, &p.id).is_ok_and(|path| path.is_file()))
+        {
+            settings.pending_upload = None;
+        }
         let mut state = Self {
             root,
             settings,
@@ -236,6 +278,13 @@ impl State {
             }
             self.owner = owner;
         }
+        if self.pending.is_none() {
+            if let (Some(pending), Some(owner)) = (self.settings.pending_upload.clone(), self.owner.clone()) {
+                if pending.owner == owner.key && upload_due(&pending, now_secs()) {
+                    self.upload(ctx, pending.id);
+                }
+            }
+        }
         if let Some((key, picture)) = self.active_scan.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.active_scan = None;
             if !self.settings.active.contains_key(&key) {
@@ -312,6 +361,7 @@ impl State {
                     self.save();
                 }
                 Ok(Completion::Uploaded { owner, id }) => {
+                    self.settings.pending_upload = None;
                     self.settings.active.insert(owner, id.clone());
                     gallery::remember(&mut self.settings.history, id);
                     if let Some(runtime) = &self.runtime {
@@ -336,6 +386,12 @@ impl State {
         let Some(owner) = self.owner.clone() else {
             return;
         };
+        self.settings.pending_upload = Some(PendingUpload {
+            owner: owner.key.clone(),
+            id: id.clone(),
+            since: now_secs(),
+        });
+        self.save();
         let root = self.root.clone();
         let pictures = self.pictures();
         self.spawn(ctx, "Uploading picture…", move || {
@@ -422,7 +478,7 @@ impl State {
         let busy = self.pending.is_some();
         ui.set_max_width(400.0);
         ui.vertical(|ui| {
-            ui.strong("Recent pictures");
+            ui.strong("Recent pictures (click one to upload)");
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(!busy, egui::Button::new("Import picture…"))
@@ -553,6 +609,7 @@ impl State {
             .show(ui, |ui| {
                 ui.heading("Profile Pictures");
                 ui.label("Choose a picture to share with other Hebnix players.");
+                ui.label(egui::RichText::new("Click a picture under Recent pictures to upload it as your avatar.").strong());
                 ui.add_space(14.0);
                 let busy = self.pending.is_some();
                 let running = hebnix_sdk::process::is_rocket_league_running();

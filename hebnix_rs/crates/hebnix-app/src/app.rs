@@ -684,8 +684,11 @@ pub struct HebnixApp {
     patcher_anthem: crate::patcher::anthem_patcher::AnthemPatcherState,
     wheel_alignment: crate::patcher::wheel_alignment::WheelAlignmentState,
     goal_explosion: crate::patcher::goal_explosion::State,
+    goal_explosion_volume: crate::patcher::goal_explosion_volume::State,
     forfeit_command: crate::patcher::forfeit_command::State,
     celebration: crate::patcher::celebration::State,
+    bots_freeplay: crate::patcher::bots_freeplay::State,
+    delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
     instant_suite: crate::patcher::instant_suite::State,
     swapper: crate::swapper::SwapperState,
@@ -1199,8 +1202,11 @@ impl HebnixApp {
             patcher_anthem,
             wheel_alignment: Default::default(),
             goal_explosion: Default::default(),
+            goal_explosion_volume: Default::default(),
             forfeit_command: Default::default(),
             celebration: Default::default(),
+            bots_freeplay: Default::default(),
+            delete_backups: Default::default(),
             chat_export: Default::default(),
             instant_suite: Default::default(),
             swapper,
@@ -1409,9 +1415,13 @@ impl HebnixApp {
         if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key) {
             self.save_config();
         }
+        ui.add_space(8.0);
+        if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key) {
+            self.save_config();
+        }
         ui.add_space(16.0);
         ui.heading(t("game-mods-coming-soon"));
-        for id in ["font-swapper", "kickoff-training", "freeplay-checkpoint", "quickvoice"] {
+        for id in ["font-swapper", "freeplay-checkpoint", "quickvoice"] {
             ui.add_enabled_ui(false, |ui| {
                 ui.checkbox(&mut false, t(&format!("game-mod-{id}")))
                     .on_disabled_hover_text(t(&format!("game-mod-{id}-description")));
@@ -5117,6 +5127,9 @@ impl HebnixApp {
                             }
 
                             HebnixSettingsTab::System => {
+                                let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
+                                self.delete_backups.render(ui, &cooked_pc);
+                                ui.add_space(16.0);
                                 let label_w = label_column_width(
                                     ui,
                                     &[
@@ -5422,7 +5435,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.chat_export.busy() || self.instant_suite.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.instant_suite.busy()
                     || self.title_patcher.busy() || self.swapper.busy()
                     || self.workshop.maintenance_busy()
                     || crate::replay_history_patch::busy()
@@ -7761,6 +7774,8 @@ impl HebnixApp {
                         });
                 } else if mode == ItemsMode::GoalExplosion {
                     self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
+                    ui.add_space(16.0);
+                    self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
                 } else if mode == ItemsMode::WheelAlignment {
                     if self.catalogs_loading {
                         ui.spinner();

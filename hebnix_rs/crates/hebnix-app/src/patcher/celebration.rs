@@ -72,7 +72,7 @@ struct Refs {
 
 /// `Context(object).call`, in the game's shape: Context, no fail flag, the
 /// object expression, skip size of the call, return property, size, the call.
-fn context(object: &Script, retprop: i32, call: &Script) -> Script {
+pub(super) fn context(object: &Script, retprop: i32, call: &Script) -> Script {
     let mut out = Script::new();
     out.raw(&[0x5e, 0x19, 0x00]).append(object).raw(&(call.mem_size() as u16).to_le_bytes());
     out.object(retprop).raw(&[0x00]).append(call);
@@ -99,7 +99,7 @@ fn event(refs: &Refs) -> Script {
 
 /// A jump opcode with its target word to be filled in by `land`; the word's
 /// position goes in `jumps` for the dispatcher to shift.
-fn jump(out: &mut Script, op: u8, jumps: &mut Vec<usize>) -> usize {
+pub(super) fn jump(out: &mut Script, op: u8, jumps: &mut Vec<usize>) -> usize {
     out.raw(&[op]);
     let at = out.len();
     out.raw(&[0, 0]);
@@ -109,13 +109,13 @@ fn jump(out: &mut Script, op: u8, jumps: &mut Vec<usize>) -> usize {
 
 /// Point the jump at `at` to the end of what is written so far (memory form,
 /// counted from the start of the body).
-fn land(out: &mut Script, at: usize) {
+pub(super) fn land(out: &mut Script, at: usize) {
     let target = out.mem_size() as u16;
     out.set_word(at, target);
 }
 
 /// A call of a final function with no parameters.
-fn call_of(function: i32) -> Script {
+pub(super) fn call_of(function: i32) -> Script {
     let mut call = Script::new();
     call.raw(&[0x1c]).object(function).raw(&[0x16]);
     call
@@ -174,11 +174,11 @@ fn body(refs: &Refs) -> (Script, Vec<usize>) {
     (out, jumps)
 }
 
-fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
+pub(super) fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
     upk.find_object(path).ok_or_else(|| format!("{path} was not found"))
 }
 
-fn name(upk: &UpkPackage, text: &str) -> Result<i32, String> {
+pub(super) fn name(upk: &UpkPackage, text: &str) -> Result<i32, String> {
     upk.names.iter().position(|n| n == text).map(|i| i as i32).ok_or_else(|| format!("{text} is missing from {PACKAGE}"))
 }
 

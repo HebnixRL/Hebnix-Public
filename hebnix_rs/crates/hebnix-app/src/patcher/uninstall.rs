@@ -54,6 +54,8 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     super::forfeit_command::restore(&cooked, &backups)?;
     super::celebration::restore(&cooked, &backups)?;
     let _ = super::celebration::unbind();
+    super::bots_freeplay::restore(&cooked, &backups)?;
+    let _ = super::bots_freeplay::unbind();
     let _ = super::forfeit_command::unbind();
     super::chat_export::restore(&cooked, &backups)?;
     super::instant_suite::restore(&cooked, &backups)?;

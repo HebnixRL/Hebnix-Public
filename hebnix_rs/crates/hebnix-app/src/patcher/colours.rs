@@ -850,6 +850,7 @@ fn apply(
     crate::patcher::goal_explosion::reapply(cooked_pc, backups_dir)?;
     crate::patcher::forfeit_command::reapply(cooked_pc, backups_dir)?;
     crate::patcher::celebration::reapply(cooked_pc, backups_dir)?;
+    crate::patcher::bots_freeplay::reapply(cooked_pc, backups_dir)?;
     crate::patcher::chat_export::reapply(cooked_pc, backups_dir)?;
     let mut saved = settings.clone();
     saved.applied = true;
