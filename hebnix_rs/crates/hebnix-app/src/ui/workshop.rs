@@ -174,24 +174,43 @@ pub const REMOTE_FILES_BASE: &str = "https://hebnix.com";
 pub const API_ENDPOINT: &str = "https://api.hebnix.com/maps";
 pub const DOWNLOAD_ENDPOINT_BASE: &str = "https://api.hebnix.com/download/map/";
 
-pub const TARGET_MAPS: [(&str, &str); 4] = [
+const SHADER_PACKAGE: &str = "Engine_MI_Shaders.upk";
+const SHADER_URL: &str = "https://api.hebnix.com/catalogs/Engine_MI_Shaders.upk";
+
+/// Workshop maps need this stock package; a joiner missing it is dropped with
+/// "Content mismatch (Package Engine_MI_Shaders)". Fetched once if it isn't there.
+fn ensure_shader_package(rl_path: &str) -> Result<(), String> {
+    let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+    let dest = cooked.join(SHADER_PACKAGE);
+    if dest.exists() || !cooked.is_dir() {
+        return Ok(());
+    }
+    let part = cooked.join(format!("{SHADER_PACKAGE}.part"));
+    let resp = get_download(SHADER_URL)?;
+    let copied = std::fs::File::create(&part)
+        .map_err(|e| e.to_string())
+        .and_then(|mut out| std::io::copy(&mut resp.into_reader(), &mut out).map_err(|e| e.to_string()));
+    if let Err(error) = copied {
+        let _ = std::fs::remove_file(&part);
+        return Err(error);
+    }
+    std::fs::rename(&part, &dest).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        e.to_string()
+    })
+}
+
+/// Maps are copied into Hebnix's workshop folder for the in-game Workshop menu.
+pub const WORKSHOP_TARGET: &str = "Workshop folder";
+
+/// The files older builds copied into the game's mods folder to replace a stock map.
+/// Only used to take those copies out again.
+const LEGACY_SWAPS: [(&str, &str); 4] = [
     ("Utopia Retro", "Labs_Utopia_P.upk"),
     ("Underpass", "Labs_Underpass_P.upk"),
     ("Roadblock", "Labs_Octagon_B2B_02_P.upk"),
     ("Hourglass", "Labs_PillarGlass_P.upk"),
 ];
-
-/// Map-to-replace entry that copies the map into Hebnix's workshop folder for
-/// the in-game Workshop menu instead of replacing a map.
-pub const WORKSHOP_TARGET: &str = "Workshop folder";
-pub const SEEDED_SLOT: &str = "Utopia Retro";
-
-fn target_filename(target: &str) -> Option<&'static str> {
-    TARGET_MAPS
-        .iter()
-        .find(|(name, _)| *name == target)
-        .map(|(_, file)| *file)
-}
 
 // Map manager (shared with worker threads)
 
@@ -264,9 +283,15 @@ impl MapManager {
             .join("TAGame")
             .join("CookedPCConsole")
             .join(WORKSHOP_MODS_DIR_NAME);
-        maps.retain(|target, _| {
-            target_filename(target).is_some_and(|filename| mods_dir.join(filename).is_file())
-        });
+        for (target, filename) in LEGACY_SWAPS {
+            if maps.remove(target).is_some() {
+                let _ = std::fs::remove_file(mods_dir.join(filename));
+                if target == "Hourglass" {
+                    let _ = std::fs::remove_file(mods_dir.join("Labs_Hourglass_P.upk"));
+                }
+            }
+        }
+        maps.clear();
         *self.active_maps.lock().unwrap() = maps;
         self.save_active_maps();
         self.save_install_state(rl_path);
@@ -352,38 +377,22 @@ impl MapManager {
     pub fn install_map(
         &self,
         map_data: &Value,
-        target_name: &str,
+        _target_name: &str,
         rl_path: &str,
     ) -> Result<(), String> {
         let map_id = id_of(map_data);
         let cached_map_path = self.cache_dir.join(format!("{map_id}.upk"));
 
+        if let Err(error) = ensure_shader_package(rl_path) {
+            tracing::warn!("could not fetch {SHADER_PACKAGE}: {error}");
+        }
         self.cache_from_workshop_folder(&map_id, rl_path)?;
         if !self.is_cached(&map_id) {
             self.download_map_file(&map_id, &cached_map_path)?;
         }
 
         let cooked_pc_dir = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        if target_name == WORKSHOP_TARGET {
-            return self.install_to_workshop_folder(map_data, &cached_map_path, &cooked_pc_dir);
-        }
-        let mods_dir = cooked_pc_dir.join(WORKSHOP_MODS_DIR_NAME);
-        std::fs::create_dir_all(&mods_dir).map_err(|e| e.to_string())?;
-
-        let filename =
-            target_filename(target_name).ok_or_else(|| "Invalid target map.".to_string())?;
-        if target_name == "Hourglass" {
-            let _ = std::fs::remove_file(mods_dir.join("Labs_Hourglass_P.upk"));
-        }
-        std::fs::copy(&cached_map_path, mods_dir.join(filename)).map_err(|e| e.to_string())?;
-
-        self.active_maps
-            .lock()
-            .unwrap()
-            .insert(target_name.to_string(), map_data.clone());
-        self.save_active_maps();
-        self.save_install_state(rl_path);
-        Ok(())
+        self.install_to_workshop_folder(map_data, &cached_map_path, &cooked_pc_dir)
     }
 
     fn cache_from_workshop_folder(&self, map_id: &str, rl_path: &str) -> Result<(), String> {
@@ -436,68 +445,18 @@ impl MapManager {
             .map_err(|e| e.to_string())
     }
 
-    /// Rocket League only notices mod files that existed when it started.
-    /// Pre-seeding lets a peer later install a map into an otherwise unused
-    /// slot. Only the Utopia Retro slot is seeded at multiplayer launch.
-    pub fn seed_empty_slots(&self, rl_path: &str) {
-        let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        let mods_dir = cooked.join(WORKSHOP_MODS_DIR_NAME);
-        if std::fs::create_dir_all(&mods_dir).is_err() {
-            return;
-        }
-        if let Some(filename) = target_filename(SEEDED_SLOT) {
-            let (vanilla, modded) = (cooked.join(filename), mods_dir.join(filename));
-            if !modded.exists() && vanilla.is_file() {
-                let _ = std::fs::copy(&vanilla, &modded);
-            }
-        }
-    }
-
-    pub fn unload_active_map(&self, target_name: &str, rl_path: &str) -> Result<(), String> {
-        let filename =
-            target_filename(target_name).ok_or_else(|| "Invalid target map.".to_string())?;
-        let target_file = Path::new(rl_path)
-            .join("TAGame")
-            .join("CookedPCConsole")
-            .join(WORKSHOP_MODS_DIR_NAME)
-            .join(filename);
-        if target_file.exists() {
-            std::fs::remove_file(&target_file).map_err(|e| format!("Failed to unload map: {e}"))?;
-        }
-        if target_name == "Hourglass" {
-            let _ = std::fs::remove_file(
-                Path::new(rl_path)
-                    .join("TAGame")
-                    .join("CookedPCConsole")
-                    .join(WORKSHOP_MODS_DIR_NAME)
-                    .join("Labs_Hourglass_P.upk"),
-            );
-        }
-        self.active_maps.lock().unwrap().remove(target_name);
-        self.save_active_maps();
-        self.save_install_state(rl_path);
-        Ok(())
-    }
 }
 
 /// the player list grows a search box past this many players
 const PLAYER_SEARCH_THRESHOLD: usize = 6;
-/// names listed in a "players differ" tooltip before it says "and N more"
-const MAX_TOOLTIP_NAMES: usize = 10;
 const OK_COLOUR: egui::Color32 = egui::Color32::LIGHT_GREEN;
 const WARN_COLOUR: egui::Color32 = egui::Color32::from_rgb(0xf3, 0x9c, 0x12);
 
 /// a player's maps in one line: "Map", "Map + 2 more" or "no map replaced"
 fn offer_map_summary(maps: &[SlotMap]) -> String {
-    let mut names = maps
-        .iter()
-        .filter(|map| target_filename(&map.slot).is_some())
-        .map(|map| map.name.as_str());
-    match (names.next(), names.count()) {
-        (None, _) => "no map replaced".to_string(),
-        (Some(first), 0) => first.to_string(),
-        (Some(first), more) => format!("{first} + {more} more"),
-    }
+    maps.iter()
+        .find(|map| map.slot == HOSTING_SLOT)
+        .map_or_else(|| "no map hosted".to_string(), |map| map.name.clone())
 }
 
 fn matches_filter(label: &str, filter: &str) -> bool {
@@ -505,86 +464,12 @@ fn matches_filter(label: &str, filter: &str) -> bool {
     filter.is_empty() || label.to_lowercase().contains(&filter.to_lowercase())
 }
 
-/// true if any of the player's maps isn't sitting in the same slot on your side
-fn player_differs(offer: &PeerOffer, mine: &serde_json::Map<String, Value>) -> bool {
-    offer
-        .maps
-        .iter()
-        .filter(|map| target_filename(&map.slot).is_some())
-        .any(|map| mine.get(&map.slot).is_none_or(|have| id_of(have) != map.id))
-}
-
-/// what's off about one of your slots for one player, None if they match
-fn slot_problem(offer: &PeerOffer, slot: &str, id: &str) -> Option<String> {
-    let who = offer.label();
-    match offer.maps.iter().find(|m| m.slot == slot) {
-        Some(theirs) if theirs.id == id => None,
-        Some(theirs) => Some(format!("{who} has {} here", theirs.name)),
-        None => Some(match offer.maps.iter().find(|m| m.id == id) {
-            Some(elsewhere) => format!("{who} put it in {} instead", elsewhere.slot),
-            None => format!("{who} hasn't replaced it"),
-        }),
-    }
-}
-
-/// one of your replaced slots, with a short "does everyone match" status
-fn render_my_slot(ui: &mut egui::Ui, slot: &str, data: &Value, offers: &[PeerOffer]) {
-    let id = id_of(data);
-    let name = str_of(data, "name", slot);
-    let problems: Vec<String> = offers
-        .iter()
-        .filter_map(|offer| slot_problem(offer, slot, &id))
-        .collect();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!("  {slot}: {name}"));
-        if offers.is_empty() {
-            return;
-        }
-        if problems.is_empty() {
-            ui.colored_label(OK_COLOUR, t("my-slot-everyone-has-it"));
-            return;
-        }
-        let mut tip = problems
-            .iter()
-            .take(MAX_TOOLTIP_NAMES)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-        if problems.len() > MAX_TOOLTIP_NAMES {
-            tip.push_str(&format!(
-                "\nand {} more",
-                problems.len() - MAX_TOOLTIP_NAMES
-            ));
-        }
-        ui.colored_label(
-            WARN_COLOUR,
-            t_args(
-                "my-slot-problems-of-offers-players-differ",
-                &[
-                    ("problems", (problems.len()).to_string().into()),
-                    ("offers", (offers.len()).to_string().into()),
-                ],
-            ),
-        )
-        .on_hover_text(tip);
-    });
-}
-
-/// "Name — Map", the map part coloured by whether you match them
-fn player_header(
-    ui: &egui::Ui,
-    offer: &PeerOffer,
-    mine: &serde_json::Map<String, Value>,
-) -> egui::text::LayoutJob {
+/// "Name — Map", the map part coloured by whether they host one
+fn player_header(ui: &egui::Ui, offer: &PeerOffer) -> egui::text::LayoutJob {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let visuals = ui.visuals();
-    let map_colour = if offer_map_summary(&offer.maps) == "no map replaced" {
-        visuals.weak_text_color()
-    } else if player_differs(offer, mine) {
-        WARN_COLOUR
-    } else {
-        OK_COLOUR
-    };
+    let hosting = offer.maps.iter().any(|map| map.slot == HOSTING_SLOT);
+    let map_colour = if hosting { OK_COLOUR } else { visuals.weak_text_color() };
     let mut job = egui::text::LayoutJob::default();
     job.append(
         &offer.label(),
@@ -613,82 +498,24 @@ fn render_player_maps(
     busy: bool,
     install: &mut Option<(SlotMap, IpAddr, bool)>,
 ) {
-    if let Some(map) = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT) {
-        let have = peer_workshop_file(workshop, map).is_some();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
-            if have {
-                ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
-            } else if ui
-                .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
-                .clicked()
-            {
-                // from the peer: it may be a Steam or hand-made map the cdn lacks
-                let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map.clone() };
-                *install = Some((target, offer.ip, true));
-            }
-        });
-    }
-    let maps: Vec<&SlotMap> = offer
-        .maps
-        .iter()
-        .filter(|map| target_filename(&map.slot).is_some())
-        .collect();
-    if maps.is_empty() {
+    let Some(map) = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT) else {
         ui.small(t("player-maps-hasn-t-replaced-any-map"));
-    }
-    for map in maps {
-        let have = mine.get(&map.slot);
-        let same = have.is_some_and(|m| id_of(m) == map.id);
-        let elsewhere = mine
-            .iter()
-            .find(|(slot, m)| **slot != map.slot && id_of(m) == map.id)
-            .map(|(slot, _)| slot.clone());
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("{}: {}", map.slot, map.name));
-            if map.local {
-                ui.small(t("player-maps-imported-not-on-the-workshop"));
-            }
-            if same {
-                ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
-                return;
-            }
-            let note = match (&elsewhere, have) {
-                (Some(slot), _) => {
-                    format!("you put this map in {slot}, replace {} instead", map.slot)
-                }
-                (None, Some(m)) => format!(
-                    "you have {} in {}",
-                    str_of(m, "name", "another map"),
-                    map.slot
-                ),
-                (None, None) => format!("you haven't replaced {}", map.slot),
-            };
-            ui.colored_label(WARN_COLOUR, note);
-            let label = format!("Install to {}", map.slot);
-            if map.local {
-                // imported maps aren't on the cdn, only the peer has them
-                if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                    *install = Some((map.clone(), offer.ip, true));
-                }
-            } else {
-                // cdn maps can come from either, so the peer is the way
-                // around a slow or unreachable cdn
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.menu_button(format!("{label} v"), |ui| {
-                        if ui.button(t("player-maps-from-the-cdn")).clicked() {
-                            *install = Some((map.clone(), offer.ip, false));
-                            ui.close();
-                        }
-                        if ui.button(t("player-maps-from-this-player")).clicked() {
-                            *install = Some((map.clone(), offer.ip, true));
-                            ui.close();
-                        }
-                    });
-                });
-            }
-        });
-    }
+        return;
+    };
+    let have = peer_workshop_file(workshop, map).is_some();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
+        if have {
+            ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
+        } else if ui
+            .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
+            .clicked()
+        {
+            // the cdn first, the peer only if that fails: it may be a Steam or hand-made map the cdn lacks
+            let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map.clone() };
+            *install = Some((target, offer.ip, true));
+        }
+    });
 }
 
 /// everyone else who's on, with how they're connected
@@ -1032,7 +859,7 @@ impl WorkshopState {
             page_size: 12,
             search: String::new(),
             view_downloaded: false,
-            target: TARGET_MAPS[0].0.to_string(),
+            target: WORKSHOP_TARGET.to_string(),
             images: HashMap::new(),
             busy: HashSet::new(),
             catalog_status: t("catalog-loading-catalog").to_string(),
@@ -1079,6 +906,89 @@ impl WorkshopState {
         self.catalog = items;
         self.merge_local_maps();
         self.execute_search(true);
+        crate::patcher::workshop_menu::set_downloadable(
+            self.catalog
+                .iter()
+                .map(|map| crate::patcher::workshop_menu::Downloadable {
+                    id: id_of(map),
+                    title: str_of(map, "name", "").to_string(),
+                    author: str_of(map, "author", "").to_string(),
+                    preview_url: match str_of(map, "banner_path", "") {
+                        "" => String::new(),
+                        banner => banner_url_and_cache_rel(banner).0,
+                    },
+                    downloads: str_of(map, "download_count", "0").parse().unwrap_or(0),
+                })
+                .filter(|map| !map.title.is_empty() && map.id != "0")
+                .collect(),
+        );
+        self.downloads_stale = true;
+    }
+
+    /// Installs the maps picked in the game's Workshop downloader, and puts a new
+    /// catalogue into its list.
+    pub fn poll_downloads(&mut self, rl_path: &str, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        let requests = ingame_menu::take_download_requests();
+        if rl_path.is_empty() {
+            return;
+        }
+        let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if std::mem::take(&mut self.downloads_stale) && crate::patcher::workshop_menu::downloader_on(&cooked) {
+            let cooked = cooked.clone();
+            std::thread::spawn(move || drop(ingame_menu::refresh(&cooked)));
+        }
+        for id in requests {
+            let Some(map_data) = self.catalog.iter().find(|map| id_of(map) == id).cloned() else {
+                crate::toast::report(&format!("game-dl-{id}"), "[Workshop] That map is not in Hebnix's map list. Open the Workshop tab once to load it.", None, true);
+                continue;
+            };
+            if !self.busy.insert(id.clone()) {
+                crate::toast::report(&format!("game-dl-{id}"), "[Workshop] Already downloading that map.", None, true);
+                continue;
+            }
+            let name = str_of(&map_data, "name", "map").to_string();
+            crate::toast::report(&format!("game-dl-{id}"), &format!("Downloading {name} for the game..."), None, false);
+            let manager = self.manager.clone();
+            let (rl_path, tx, ctx, cooked) = (rl_path.to_string(), tx.clone(), ctx.clone(), cooked.clone());
+            let finished = Arc::new(AtomicBool::new(false));
+            {
+                let (finished, key, name) = (finished.clone(), format!("game-dl-{id}"), name.clone());
+                MAP_DL_DONE.store(0, Ordering::Relaxed);
+                MAP_DL_TOTAL.store(0, Ordering::Relaxed);
+                std::thread::spawn(move || {
+                    while !finished.load(Ordering::Relaxed) {
+                        let (done, total) = (MAP_DL_DONE.load(Ordering::Relaxed), MAP_DL_TOTAL.load(Ordering::Relaxed));
+                        if done > 0 {
+                            let (mb, fraction) = (done / 1_048_576, (total > 0).then(|| (done as f32 / total as f32).min(1.0)));
+                            let text = match total {
+                                0 => format!("Downloading {name} ({mb} MB)"),
+                                total => format!("Downloading {name} ({mb} / {} MB)", total / 1_048_576),
+                            };
+                            crate::toast::report(&key, &text, fraction, false);
+                        }
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
+                });
+            }
+            std::thread::spawn(move || {
+                let result = manager
+                    .install_map(&map_data, WORKSHOP_TARGET, &rl_path)
+                    .and_then(|()| ingame_menu::refresh(&cooked));
+                finished.store(true, Ordering::Relaxed);
+                let message = match result {
+                    Ok(_) => format!("[Workshop] Downloaded '{name}'. Reopen the Workshop menu in game to play it."),
+                    Err(e) => format!("[Workshop] Could not download '{name}': {e}"),
+                };
+                let key = format!("game-dl-{id}");
+                if message.contains("Could not") {
+                    crate::toast::report_failed(&key, &message);
+                } else {
+                    crate::toast::report(&key, &message, None, true);
+                }
+                let _ = tx.send(AppMsg::WorkshopOpDone { message });
+                ctx.request_repaint();
+            });
+        }
     }
 
     /// adds imported maps missing from the catalog (also what keeps them
@@ -1365,43 +1275,21 @@ impl WorkshopState {
             .response
             .on_hover_text(t("render-can-t-find-a-map"));
 
-            ui.strong(t("render-map-to-replace"));
-            let mut target_changed = false;
-            egui::ComboBox::from_id_salt("target_map")
-                .selected_text(self.target.clone())
-                .show_ui(ui, |ui| {
-                    for name in TARGET_MAPS.map(|(name, _)| name).into_iter().chain([WORKSHOP_TARGET]) {
-                        if ui
-                            .selectable_value(&mut self.target, name.to_string(), name)
-                            .changed()
-                        {
-                            target_changed = true;
-                        }
-                    }
-                });
-            if target_changed {
-                self.execute_search(false);
-            }
-
-            let restore_enabled = self.manager.active_maps().contains_key(&self.target);
-            if ui
-                .add_enabled(
-                    restore_enabled,
-                    egui::Button::new(t("ball-restore-original"))
-                        .fill(egui::Color32::from_rgb(0xc0, 0x39, 0x2b)),
-                )
-                .clicked()
-            {
-                match self.manager.unload_active_map(&self.target, rl_path) {
-                    Ok(()) => {
-                        let _ = tx.send(AppMsg::Log(
-                            "[Workshop] Original map restored successfully.".to_string(),
-                        ));
-                        self.execute_search(false);
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AppMsg::Log(format!("[Workshop] {e}")));
-                    }
+        });
+        // maps only appear in Rocket League through its Workshop menu
+        let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        self.ingame_menu.tick(&ctx, &cooked);
+        if self.ingame_menu.is_enabled() == Some(false) {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    WARN_COLOUR,
+                    "Installed maps show up in Rocket League's Workshop menu. Enable it to play them.",
+                );
+                if ui
+                    .add_enabled(!self.ingame_menu.busy(), egui::Button::new("Enable in-game Workshop menu"))
+                    .clicked()
+                {
+                    self.ingame_menu.start(&ctx, &cooked, true, tx);
                 }
             }
         });
@@ -1935,7 +1823,6 @@ impl WorkshopState {
         let tx = tx.clone();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
-            manager.seed_empty_slots(&rl_path);
             let result = crate::winutil::start_rocket_league(&rl_launch, Path::new(&rl_path))
                 .map_err(|error| error.to_string());
             let _ = tx.send(AppMsg::WorkshopMultiplayerLaunched { result });
@@ -2174,23 +2061,12 @@ impl WorkshopState {
         let Some(session) = &self.multiplayer.relay else {
             return;
         };
-        let mine = self.manager.active_maps();
         let workshop = self.workshop_maps.clone();
         let mut offers = session.peer_offers();
         offers.sort_by_key(|offer| offer.label().to_lowercase());
         let busy = self.multiplayer.map_install_busy.load(Ordering::Relaxed);
         ui.group(|ui| {
             ui.strong(t("maps-in-use-maps-in-use"));
-            ui.small(t("maps-in-use-everyone-has-to-replace-the-same"));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(t("maps-in-use-you")).strong());
-            if mine.is_empty() {
-                ui.small(format!("  {}", t("maps-none-replaced-yet")));
-            }
-            for (slot, data) in &mine {
-                render_my_slot(ui, slot, data, &offers);
-            }
-
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(t_args(
@@ -2224,11 +2100,11 @@ impl WorkshopState {
                         .filter(|o| matches_filter(&o.label(), &filter))
                     {
                         shown += 1;
-                        egui::CollapsingHeader::new(player_header(ui, offer, &mine))
+                        egui::CollapsingHeader::new(player_header(ui, offer))
                             .id_salt(("workshop_player", offer.ip))
                             .default_open(false)
                             .show(ui, |ui| {
-                                render_player_maps(ui, offer, &mine, &workshop, busy, install);
+                                render_player_maps(ui, offer, &workshop, busy, install);
                                 ui.add_space(4.0);
                                 if ui
                                     .button(t("maps-in-use-block-player"))
@@ -2320,8 +2196,8 @@ impl WorkshopState {
     }
 
     /// installs a map a peer has into the same slot. cdn maps are downloaded
-    /// from the cdn unless `from_peer` is set; maps the peer imported
-    /// themselves (not on the cdn) are always fetched from that peer and
+    /// from the cdn, and with `from_peer` set only when the cdn fails; maps the
+    /// peer imported themselves (not on the cdn) are always fetched from that peer and
     /// checked against their id first. the id was validated when it came off
     /// the wire (see map_sync.rs).
     fn install_peer_map(
@@ -2387,6 +2263,11 @@ impl WorkshopState {
         std::thread::spawn(move || {
             let outcome = (|| {
                 manager.cache_from_workshop_folder(&map.id, &rl_path)?;
+                // the cdn goes first: a long distance transfer from a peer often drops, so a
+                // peer only serves a cdn map when the cdn fails. imported maps have no cdn copy.
+                if from_peer && !map.local && !manager.is_cached(&map.id) {
+                    let _ = manager.download_map_file(&map.id, &manager.cache_dir.join(format!("{}.upk", map.id)));
+                }
                 if (map.local || from_peer) && !manager.is_cached(&map.id) {
                     fetch_map_file(
                         peer,
@@ -2414,16 +2295,13 @@ impl WorkshopState {
                         }
                     }
                 }
-                let target = if map.slot == WORKSHOP_TARGET || map.slot == HOSTING_SLOT { WORKSHOP_TARGET } else { SEEDED_SLOT };
-                manager.install_map(&map_data, target, &rl_path)?;
-                if target == WORKSHOP_TARGET {
-                    ingame_menu::refresh(&Path::new(&rl_path).join("TAGame").join("CookedPCConsole"))?;
-                }
+                manager.install_map(&map_data, WORKSHOP_TARGET, &rl_path)?;
+                ingame_menu::refresh(&Path::new(&rl_path).join("TAGame").join("CookedPCConsole"))?;
                 Ok::<(), String>(())
             })();
             let failed = outcome.is_err();
             let text = match outcome {
-                Ok(()) => format!("Installed {} in {}.", map.name, if map.slot == WORKSHOP_TARGET || map.slot == HOSTING_SLOT { WORKSHOP_TARGET } else { SEEDED_SLOT }),
+                Ok(()) => format!("Installed {} in the {WORKSHOP_TARGET}.", map.name),
                 Err(error) => format!("Could not install {}: {error}", map.name),
             };
             finished.store(true, Ordering::Relaxed);
@@ -2501,9 +2379,7 @@ impl WorkshopState {
         // relay itself no longer needs to know the map, host or guest
         let arena = arena.trim_end_matches(".upk");
         if let Some((target, map)) = self.manager.active_maps().into_iter().find(|(target, _)| {
-            target_filename(target)
-                .map(|name| name.trim_end_matches(".upk").eq_ignore_ascii_case(arena))
-                .unwrap_or_else(|| target.trim_end_matches(".upk").eq_ignore_ascii_case(arena))
+            target.trim_end_matches(".upk").eq_ignore_ascii_case(arena)
         }) {
             self.multiplayer.detected_map = Some(str_of(&map, "name", &target).to_string());
             self.multiplayer.detected_target = Some(target);
@@ -2747,9 +2623,6 @@ impl WorkshopState {
                         result = Some(CardAction::DeleteCache);
                     }
                 });
-                if let Some(action) = self.utopia_action(ui, &map_id, None) {
-                    result = Some(action);
-                }
             });
         });
 
@@ -2764,17 +2637,6 @@ impl WorkshopState {
             targets.push(WORKSHOP_TARGET.to_string());
         }
         targets
-    }
-
-    fn utopia_action(&self, ui: &mut egui::Ui, map_id: &str, height: Option<f32>) -> Option<CardAction> {
-        let downloaded = self.is_downloaded(map_id);
-        let active = self.manager.get_active_targets_for_map(map_id).iter().any(|slot| slot == SEEDED_SLOT);
-        let enabled = downloaded && !active && !self.busy.contains(map_id);
-        let response = ui.add_enabled_ui(enabled, |ui| {
-            ui.add_sized([ui.available_width(), height.unwrap_or(28.0)], egui::Button::new("Load to Utopia Retro").wrap())
-        }).inner;
-        response.on_hover_text("Use this map when hosting LAN with the in-game Utopia Retro entry. Restart Rocket League if it has already loaded the previous map.")
-            .clicked().then_some(CardAction::SetUtopiaRetro)
     }
 
     fn is_downloaded(&self, map_id: &str) -> bool {
@@ -2792,12 +2654,8 @@ impl WorkshopState {
     ) {
         let map_data = self.catalog[map_idx].clone();
         let map_id = id_of(&map_data);
-        if let CardAction::SetUtopiaRetro = action {
-            self.target = SEEDED_SLOT.to_string();
-        }
-
         match action {
-            CardAction::Unload if self.target == WORKSHOP_TARGET => {
+            CardAction::Unload => {
                 let dir = crate::patcher::workshop_menu::map_dir_name(&map_id);
                 let result = std::fs::remove_dir_all(self.workshop_maps.join(dir))
                     .map_err(|e| format!("Could not remove the map (is it loaded in game?): {e}"))
@@ -2809,16 +2667,46 @@ impl WorkshopState {
                 }
                 self.execute_search(false);
             }
-            CardAction::Unload => match self.manager.unload_active_map(&self.target, rl_path) {
-                Ok(()) => self.execute_search(false),
-                Err(e) => {
-                    let _ = tx.send(AppMsg::Log(format!("[Workshop] {e}")));
-                }
-            },
             CardAction::DeleteCache => {
                 self.confirm_delete = Some(map_data);
             }
-            CardAction::InstallOrDownload | CardAction::SetUtopiaRetro => {
+            CardAction::HostLan => {
+                tracing::info!(%map_id, "workshop: host over LAN requested");
+                self.busy.insert(map_id.clone());
+                let manager = self.manager.clone();
+                let installed = self.active_targets(&map_id).iter().any(|t| t == WORKSHOP_TARGET);
+                let rl_path = rl_path.to_string();
+                let tx = tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let cooked = Path::new(&rl_path).join("TAGame").join("CookedPCConsole");
+                    let result = (|| {
+                        if !installed {
+                            manager.install_map(&map_data, WORKSHOP_TARGET, &rl_path)?;
+                        }
+                        ingame_menu::host_lan(&cooked, &crate::patcher::workshop_menu::map_dir_name(&id_of(&map_data)))
+                    })();
+                    let name = str_of(&map_data, "name", "map");
+                    tracing::info!(?result, "workshop: host over LAN prepared");
+                    let msg = match result {
+                        Ok(()) if !hebnix_sdk::process::is_rocket_league_running() => {
+                            format!("[Workshop] '{name}' is in its LAN slot. Start Rocket League to host it.")
+                        }
+                        Ok(()) if !crate::patcher::workshop_host::ready(&cooked) => format!(
+                            "[Workshop] '{name}' is in its LAN slot. Restart Rocket League once so Hebnix can start it, or pick it in the in-game Workshop list."
+                        ),
+                        Ok(()) => {
+                            let command = hebnix_sdk::stats::WsCommand::new(crate::patcher::workshop_host::MESSAGE);
+                            let _ = tx.send(AppMsg::SendWsCommand(command));
+                            format!("[Workshop] Hosting '{name}' over LAN.")
+                        }
+                        Err(e) => format!("[Workshop] Could not prepare '{name}' for LAN: {e}"),
+                    };
+                    let _ = tx.send(AppMsg::WorkshopOpDone { message: msg });
+                    ctx.request_repaint();
+                });
+            }
+            CardAction::InstallOrDownload => {
                 self.busy.insert(map_id.clone());
                 let manager = self.manager.clone();
                 let target = self.target.clone();
@@ -2930,7 +2818,6 @@ impl WorkshopState {
 
 enum CardAction {
     InstallOrDownload,
-    SetUtopiaRetro,
     Unload,
     DeleteCache,
 }
@@ -2960,8 +2847,8 @@ impl ThemedTileMetrics {
         let small_height = ui.text_style_height(&egui::TextStyle::Small);
         let button_font = egui::TextStyle::Button.resolve(ui.style());
         let text_width = (body_width - ui.spacing().button_padding.x * 2.0 - 2.0).max(1.0);
-        let labels = if details { vec!["Details".to_owned(), "Load to Utopia Retro".to_owned()] } else {
-            vec![t("tab-working"), format!("Unload {target}"), format!("Load to {target}"), format!("Download for {target}"), "Load to Utopia Retro".to_string()]
+        let labels = if details { vec!["Details".to_owned()] } else {
+            vec![t("tab-working"), format!("Unload {target}"), format!("Load to {target}"), format!("Download for {target}")]
         };
         let text_height = labels.into_iter().map(|label|ui.fonts_mut(|fonts|
             fonts.layout(label,button_font.clone(),egui::Color32::WHITE,text_width).size().y
@@ -3212,8 +3099,7 @@ impl WorkshopState {
             if footer.add_sized([width,metrics.action_height],egui::Button::new("Details")).clicked() {
                 self.theme_selected_map = Some(id_of(&self.catalog[idx]));
             }
-            let id = id_of(&self.catalog[idx]);
-            self.utopia_action(&mut footer, &id, Some(metrics.action_height))
+            None
         }
     }
     fn themed_map_actions(&mut self, ui: &mut egui::Ui, idx: usize, metrics: Option<&ThemedTileMetrics>) -> Option<CardAction> {
@@ -3237,9 +3123,6 @@ impl WorkshopState {
             else { ui.add_enabled(!busy,button) };
         if response.on_hover_text(&label).clicked() {
             result = Some(if active {CardAction::Unload} else {CardAction::InstallOrDownload});
-        }
-        if let Some(action) = self.utopia_action(ui, &id, metrics.map(|m| m.action_height)) {
-            result = Some(action);
         }
         if self.manager.is_cached(&id) && !active && !busy {
             let clicked = if let Some(m)=metrics { ui.add_sized([ui.available_width(),m.delete_height],egui::Button::new(egui::RichText::new("Delete cached map").small()).truncate()).clicked() }
@@ -3265,73 +3148,6 @@ mod theme_layout_tests {
         std::fs::write(&original, b"original map").unwrap();
         assert_eq!(peer_workshop_file(&root, &map), Some(original));
         std::fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn utopia_action_is_visible_on_every_card_in_details_layout() {
-        let base = std::env::temp_dir().join(format!("hebnix-utopia-cards-{}", rand::random::<u64>()));
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes");
-        for width in [760.0, 1250.0] {
-            let ctx = egui::Context::default();
-            crate::theme::apply_theme(&ctx, &dir, &dir, "Ocean Studio Dark").unwrap();
-            let mut p = (*crate::theme::presentation(&ctx).unwrap()).clone();
-            p.pages.workshop.layout = crate::theme::WorkshopPresentation::LibraryWithDetails;
-            let mut workshop = WorkshopState::new(&base);
-            workshop.catalog = (0..2).map(|i| serde_json::json!({"id":format!("utopia-{i}"),"name":format!("Map {i}"),"author":"Author"})).collect();
-            let mut output = egui::FullOutput::default();
-            for _ in 0..3 {
-                output = ctx.run_ui(egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1000.0))),
-                    ..Default::default()
-                }, |ui| { assert!(workshop.render_themed_library(ui, &[0, 1], &p).is_none()); });
-            }
-            fn count(shape: &egui::Shape) -> usize {
-                match shape {
-                    egui::Shape::Text(text) => usize::from(text.galley.text() == "Load to Utopia Retro"),
-                    egui::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
-                    _ => 0,
-                }
-            }
-            assert_eq!(output.shapes.iter().map(|shape| count(&shape.shape)).sum::<usize>(),
-                if width >= 880.0 { 3 } else { 2 }, "missing per-card Utopia action at {width}");
-        }
-        std::fs::remove_dir_all(base).unwrap();
-    }
-    #[test]
-    fn utopia_install_reuses_downloads_and_can_be_replaced_and_unloaded() {
-        let root = std::env::temp_dir().join(format!("hebnix-utopia-{}", rand::random::<u64>()));
-        let game = root.join("game");
-        let cooked = game.join("TAGame").join("CookedPCConsole");
-        std::fs::create_dir_all(&cooked).unwrap();
-        for (_, file) in TARGET_MAPS {
-            std::fs::write(cooked.join(file), b"vanilla").unwrap();
-        }
-        let manager = MapManager::new(&root.join("hebnix"));
-        let game_path = game.to_str().unwrap();
-        manager.seed_empty_slots(game_path);
-        let mods = cooked.join(WORKSHOP_MODS_DIR_NAME);
-        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 1);
-        let slot = mods.join(target_filename(SEEDED_SLOT).unwrap());
-        assert_eq!(std::fs::read(&slot).unwrap(), b"vanilla");
-
-        let folder = crate::patcher::workshop_menu::workshop_dir(&cooked)
-            .join(crate::patcher::workshop_menu::map_dir_name("100"));
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("map.udk"), b"first workshop map").unwrap();
-        manager.install_map(&serde_json::json!({"id":"100", "name":"first"}), SEEDED_SLOT, game_path).unwrap();
-        manager.seed_empty_slots(game_path);
-        assert_eq!(std::fs::read(&slot).unwrap(), b"first workshop map");
-        assert!(manager.is_cached("100"));
-        assert_eq!(id_of(&manager.active_maps()[SEEDED_SLOT]), "100");
-
-        std::fs::write(manager.cache_dir.join("200.upk"), b"second workshop map").unwrap();
-        manager.install_map(&serde_json::json!({"id":"200", "name":"second"}), SEEDED_SLOT, game_path).unwrap();
-        assert_eq!(std::fs::read(&slot).unwrap(), b"second workshop map");
-        assert_eq!(id_of(&manager.active_maps()[SEEDED_SLOT]), "200");
-        manager.unload_active_map(SEEDED_SLOT, game_path).unwrap();
-        assert!(!slot.exists());
-        assert!(manager.active_maps().is_empty());
-        assert_eq!(std::fs::read(cooked.join(target_filename(SEEDED_SLOT).unwrap())).unwrap(), b"vanilla");
-        std::fs::remove_dir_all(&root).unwrap();
     }
     #[test]
     fn maps_browser_keeps_map_tiles_and_pages_in_three_rows() {
@@ -3455,7 +3271,7 @@ mod theme_layout_tests {
     fn themed_tiles_keep_fixed_rectangles_across_images_states_and_columns() {
         let base = std::env::temp_dir().join(format!("hebnix-fixed-tiles-{}", std::process::id()));
         let mut workshop = WorkshopState::new(&base);
-        workshop.target = "Utopia Retro".into();
+        workshop.target = WORKSHOP_TARGET.into();
         workshop.catalog=(0..8).map(|i|serde_json::json!({
             "id":format!("tile-{i}"),"name":if i==1 {"A deliberately very long map title that must not grow its tile".to_string()} else {format!("Tile {i}")},
             "author":if i==2 {"A creator name that is far too long to fit".to_string()} else {format!("Creator {i}")},
@@ -3499,7 +3315,7 @@ mod theme_layout_tests {
             .active_maps
             .lock()
             .unwrap()
-            .insert("Utopia Retro".into(), serde_json::json!({"id":"tile-2"}));
+            .insert(WORKSHOP_TARGET.into(), serde_json::json!({"id":"tile-2"}));
         workshop.busy.insert("tile-3".into());
         let indices: Vec<usize> = (0..8).collect();
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/themes");
