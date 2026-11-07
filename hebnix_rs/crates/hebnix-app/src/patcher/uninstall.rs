@@ -56,6 +56,15 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
             super::item_name::rename(&cooked, &backups, &language, "", None)?;
         }
     }
+    super::goal_explosion::restore(&cooked, &backups)?;
+    super::forfeit_command::restore(&cooked, &backups)?;
+    super::celebration::restore(&cooked, &backups)?;
+    let _ = super::celebration::unbind();
+    super::bots_freeplay::restore(&cooked, &backups)?;
+    let _ = super::bots_freeplay::unbind();
+    let _ = super::forfeit_command::unbind();
+    super::chat_export::restore(&cooked, &backups)?;
+    super::instant_suite::restore(&cooked, &backups)?;
     super::colours::restore_for_uninstall(&cooked, &backups)?;
     // Nested feature snapshots may include older changes to the same package.
     // Restore them before the shared pristine package snapshots at the root.

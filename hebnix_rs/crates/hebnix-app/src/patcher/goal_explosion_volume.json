@@ -1,0 +1,4034 @@
+{
+ "version": 150,
+ "banks": [
+  {
+   "bank": "SFX_GoalExplosion_AW.bnk",
+   "sha256": "deeb671ab98b34654095e9d2507e7a2e2ef5a489b01461eb34c2e26c6e3764c8",
+   "hircLenPos": 323338,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 323382,
+     "objSizePos": 323347,
+     "objSize": 59
+    },
+    {
+     "cProps": 323446,
+     "objSizePos": 323411,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Aerosaturn.bnk",
+   "sha256": "b432f4bdc5901b11548e9000413beb654b4107fa433e11dc65428e12554b1641",
+   "hircLenPos": 527383,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 527491,
+     "objSizePos": 527456,
+     "objSize": 59
+    },
+    {
+     "cProps": 527427,
+     "objSizePos": 527392,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Aglet.bnk",
+   "sha256": "30d5e1fe7d3b5476641df31be48e76c726a4fafc59c6fb836f50dd9b34525643",
+   "hircLenPos": 812941,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 813039,
+     "objSizePos": 813004,
+     "objSize": 49
+    },
+    {
+     "cProps": 812985,
+     "objSizePos": 812950,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Anime.bnk",
+   "sha256": "007c46c649f7aae8fff4f52cdadd0bd3c5b3c7e7f3991824027035d6346746c7",
+   "hircLenPos": 469353,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 469404,
+     "objSizePos": 469362,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_AnimeSmoke.bnk",
+   "sha256": "1b60df1754995e8182ac5e3db25940ad3b079950350f3e27dd855f9c1d57839f",
+   "hircLenPos": 479895,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 479939,
+     "objSizePos": 479904,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Aquarium.bnk",
+   "sha256": "b16513f149a66a415240c098edb2319dbb85764dea293249c941a5727efc7bce",
+   "hircLenPos": 739064,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 739108,
+     "objSizePos": 739073,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Aventurine.bnk",
+   "sha256": "ed2bfb58662e5622a7b6dbf3b7c56b9f9f17834174d42703dda43d0e008c748d",
+   "hircLenPos": 934159,
+   "hircLen": 293,
+   "targets": [
+    {
+     "cProps": 934276,
+     "objSizePos": 934234,
+     "objSize": 66
+    },
+    {
+     "cProps": 934210,
+     "objSizePos": 934168,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_B89.bnk",
+   "sha256": "3cc235909fc91c225d3e471bd4ff301ce22ef2ecc76e24e27e9597c46fba02fe",
+   "hircLenPos": 669152,
+   "hircLen": 987,
+   "targets": [
+    {
+     "cProps": 669196,
+     "objSizePos": 669161,
+     "objSize": 54
+    },
+    {
+     "cProps": 669457,
+     "objSizePos": 669436,
+     "objSize": 520
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BPMS.bnk",
+   "sha256": "f171dca09b847117cc8e8b8d88f883cece76ef526bf70e397bb73fc04905120c",
+   "hircLenPos": 389183,
+   "hircLen": 321,
+   "targets": [
+    {
+     "cProps": 389298,
+     "objSizePos": 389256,
+     "objSize": 66
+    },
+    {
+     "cProps": 389227,
+     "objSizePos": 389192,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Badaboom.bnk",
+   "sha256": "bf3c1420fc9fce9aed6f3e1a6890023633415214dc5b9c5483e5b3c08a99d445",
+   "hircLenPos": 336586,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 336637,
+     "objSizePos": 336595,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ballistic.bnk",
+   "sha256": "b28bc12838ea7a8c18e0d721ea3ce5b39db0f0fa46af8ac039220b02ccc71ada",
+   "hircLenPos": 627214,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 627258,
+     "objSizePos": 627223,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Banjo.bnk",
+   "sha256": "b4444d53627768007b4c4e580caf79827ba65c844e64a63f730a27a18d25e187",
+   "hircLenPos": 635913,
+   "hircLen": 269,
+   "targets": [
+    {
+     "cProps": 636016,
+     "objSizePos": 635981,
+     "objSize": 49
+    },
+    {
+     "cProps": 635957,
+     "objSizePos": 635922,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BarrelBomb.bnk",
+   "sha256": "8166f9507e1b2a2e6a1ce12180db5124dc496dda82f909ab1a03d02e4d0059c1",
+   "hircLenPos": 656498,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 656549,
+     "objSizePos": 656507,
+     "objSize": 61
+    },
+    {
+     "cProps": 656615,
+     "objSizePos": 656573,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Baseball.bnk",
+   "sha256": "89fe1b282612a03d40cc5940bf0087fc7a519fac05f2b888fa6377aba77d85d9",
+   "hircLenPos": 1044519,
+   "hircLen": 737,
+   "targets": [
+    {
+     "cProps": 1044939,
+     "objSizePos": 1044918,
+     "objSize": 196
+    },
+    {
+     "cProps": 1044570,
+     "objSizePos": 1044528,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Batman.bnk",
+   "sha256": "16cd4d8ac1105b9779ee57cca10b0314e5ebf38c37f6a1454c39ee5cf9ff112d",
+   "hircLenPos": 920412,
+   "hircLen": 987,
+   "targets": [
+    {
+     "cProps": 921197,
+     "objSizePos": 921162,
+     "objSize": 54
+    },
+    {
+     "cProps": 920658,
+     "objSizePos": 920637,
+     "objSize": 520
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Bats.bnk",
+   "sha256": "285a94b51998a8b4ac52e0a08a4aae860d53340dcd093315914107f0c09220cc",
+   "hircLenPos": 855084,
+   "hircLen": 978,
+   "targets": [
+    {
+     "cProps": 855128,
+     "objSizePos": 855093,
+     "objSize": 54
+    },
+    {
+     "cProps": 855389,
+     "objSizePos": 855368,
+     "objSize": 511
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BeachBalls.bnk",
+   "sha256": "04ed46431a1c607565e150ffc0ce321b0fff6443c5ac9a4802c7c6f91d3addf8",
+   "hircLenPos": 670117,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 670161,
+     "objSizePos": 670126,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Bender.bnk",
+   "sha256": "ee976eddcc62c3ab8c8fda7bb76a4abdb62e11f45852fda8a7fb3e1ec9586c4e",
+   "hircLenPos": 363556,
+   "hircLen": 298,
+   "targets": [
+    {
+     "cProps": 363673,
+     "objSizePos": 363631,
+     "objSize": 71
+    },
+    {
+     "cProps": 363607,
+     "objSizePos": 363565,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Big.bnk",
+   "sha256": "b6a54dd468fb91e39d69a398fc33326eb5667aefdb07db4aa078144654f14597",
+   "hircLenPos": 675106,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 675150,
+     "objSizePos": 675115,
+     "objSize": 59
+    },
+    {
+     "cProps": 675214,
+     "objSizePos": 675179,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BigBang.bnk",
+   "sha256": "d724ff6b082851f39db10ed626deba8622223967a9f644a329ecec977f9bd56a",
+   "hircLenPos": 577689,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 577733,
+     "objSizePos": 577698,
+     "objSize": 54
+    },
+    {
+     "cProps": 577792,
+     "objSizePos": 577757,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Blade_T01.bnk",
+   "sha256": "99ced8774cfbb4818fcb88a4c19dde20228a9942b6a112f81924d43d5a33d17f",
+   "hircLenPos": 547396,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 547440,
+     "objSizePos": 547405,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Blade_T02.bnk",
+   "sha256": "a4b7a7fe28d66fa966929afbcc916dd12afb33cc85cec2b068583b3911971a6f",
+   "hircLenPos": 529565,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 529609,
+     "objSizePos": 529574,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BlightShield.bnk",
+   "sha256": "60b7f7ca69679d7cbba96305b3df2920066153e0b87e3a16b79d7d63ea226e86",
+   "hircLenPos": 466754,
+   "hircLen": 278,
+   "targets": [
+    {
+     "cProps": 466805,
+     "objSizePos": 466763,
+     "objSize": 56
+    },
+    {
+     "cProps": 466866,
+     "objSizePos": 466824,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BobsRamen.bnk",
+   "sha256": "ea623684a06b0790a2fb3fc9f9693996c6cbf0b90b6bf6c35cc471696a0ac875",
+   "hircLenPos": 1177209,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 1177331,
+     "objSizePos": 1177289,
+     "objSize": 56
+    },
+    {
+     "cProps": 1177260,
+     "objSizePos": 1177218,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Boxing.bnk",
+   "sha256": "9ebac9f17ab0be1605d957e2e774f545bbcb3525a68314dacfd4c9898af6660c",
+   "hircLenPos": 846611,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 846655,
+     "objSizePos": 846620,
+     "objSize": 49
+    },
+    {
+     "cProps": 846709,
+     "objSizePos": 846674,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Break.bnk",
+   "sha256": "b5d789d3b84d9c0177197ee632617d633df3e6b5a7801c6b3cd34668e534697c",
+   "hircLenPos": 597171,
+   "hircLen": 468,
+   "targets": [
+    {
+     "cProps": 597336,
+     "objSizePos": 597294,
+     "objSize": 66
+    },
+    {
+     "cProps": 597275,
+     "objSizePos": 597233,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_BreakThrough.bnk",
+   "sha256": "1ab6417407f70effaca5e7c776aebbc2b0e755b6570463076190d48513495fe0",
+   "hircLenPos": 983341,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 983439,
+     "objSizePos": 983404,
+     "objSize": 49
+    },
+    {
+     "cProps": 983385,
+     "objSizePos": 983350,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Bubblegum.bnk",
+   "sha256": "a790dd921b8a6e9dfad93bf9b1072fbc9fbc4710161646712e1d3a0c44e2d193",
+   "hircLenPos": 424979,
+   "hircLen": 299,
+   "targets": [
+    {
+     "cProps": 425077,
+     "objSizePos": 425042,
+     "objSize": 54
+    },
+    {
+     "cProps": 425023,
+     "objSizePos": 424988,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Bubbles.bnk",
+   "sha256": "5b80502f2d7754d88afe0fe3c10a8c35faeb34a0288354efcbe46097aa021b8f",
+   "hircLenPos": 668185,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 668236,
+     "objSizePos": 668194,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Butterflies.bnk",
+   "sha256": "f58e3f9c723f5c220f67dc5571893a81114e1af7011135192382469c07edd988",
+   "hircLenPos": 1331880,
+   "hircLen": 1451,
+   "targets": [
+    {
+     "cProps": 1331924,
+     "objSizePos": 1331889,
+     "objSize": 54
+    },
+    {
+     "cProps": 1332509,
+     "objSizePos": 1332488,
+     "objSize": 612
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_CatPortal.bnk",
+   "sha256": "be62210abe4c409b4adc0b5b1fc7db0f26832377a0b7db0ac2ce99c4006e07a9",
+   "hircLenPos": 538273,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 538371,
+     "objSizePos": 538336,
+     "objSize": 49
+    },
+    {
+     "cProps": 538317,
+     "objSizePos": 538282,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_ChinaDragon.bnk",
+   "sha256": "00d889efec46e562d80e76f7d52955d07435ccb452a11c1abe5c751013b73db0",
+   "hircLenPos": 700936,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 700980,
+     "objSizePos": 700945,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Chomp.bnk",
+   "sha256": "55ca50bd5d9beb2671ca51ad44e131b04ef6f2a6a80e3a563f79a529b20b48ad",
+   "hircLenPos": 704249,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 704352,
+     "objSizePos": 704317,
+     "objSize": 54
+    },
+    {
+     "cProps": 704293,
+     "objSizePos": 704258,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Chrisp.bnk",
+   "sha256": "dcaeb6d808e55f40b5966b96b03ab02b960c7688ce4d8f6c77195f43780b00d6",
+   "hircLenPos": 752890,
+   "hircLen": 281,
+   "targets": [
+    {
+     "cProps": 752995,
+     "objSizePos": 752953,
+     "objSize": 66
+    },
+    {
+     "cProps": 752934,
+     "objSizePos": 752899,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Chrome.bnk",
+   "sha256": "ad8b077fbac0a6f5063d15cedc22a87db0bb3f33c6ef6f82627bcfc8449ff1d2",
+   "hircLenPos": 593617,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 593734,
+     "objSizePos": 593692,
+     "objSize": 61
+    },
+    {
+     "cProps": 593668,
+     "objSizePos": 593626,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Chromophore.bnk",
+   "sha256": "6ae694222a5faede3a2512478baa993c56fb679c7f1024e0e70463aef3affd74",
+   "hircLenPos": 788702,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 788819,
+     "objSizePos": 788777,
+     "objSize": 61
+    },
+    {
+     "cProps": 788753,
+     "objSizePos": 788711,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Cluster.bnk",
+   "sha256": "c3d18fe516c46c5752834c1d5b471061e30968ae11ef855a8e9f8e8b9974396a",
+   "hircLenPos": 731373,
+   "hircLen": 279,
+   "targets": [
+    {
+     "cProps": 731417,
+     "objSizePos": 731382,
+     "objSize": 59
+    },
+    {
+     "cProps": 731481,
+     "objSizePos": 731446,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Colorsmoke.bnk",
+   "sha256": "42543cffb7876e7c387f58b394bbd8a4d2c8060da75e39f99705138f566d83b9",
+   "hircLenPos": 264323,
+   "hircLen": 165,
+   "targets": [
+    {
+     "cProps": 264367,
+     "objSizePos": 264332,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Comics.bnk",
+   "sha256": "db7f3bf7274106e4beec4f8ffcec913c17b0c9157ded3a03b402b351e04bde3b",
+   "hircLenPos": 680106,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 680150,
+     "objSizePos": 680115,
+     "objSize": 54
+    },
+    {
+     "cProps": 680209,
+     "objSizePos": 680174,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Confetti.bnk",
+   "sha256": "37b606400db325a53105b75da2345f2771e36a69288cb9f9d670e920b01c0edb",
+   "hircLenPos": 355218,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 355262,
+     "objSizePos": 355227,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Core.bnk",
+   "sha256": "9805abcbf41abaf702b6a7115bd5ff3ae2fe0b7ca45b5a1215251b4cff689586",
+   "hircLenPos": 527548,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 527665,
+     "objSizePos": 527623,
+     "objSize": 61
+    },
+    {
+     "cProps": 527599,
+     "objSizePos": 527557,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_CosmicDice.bnk",
+   "sha256": "373fab40585e60ce5a74ad498ab4394d46491e258cde39c7942073dbd6804aec",
+   "hircLenPos": 1485975,
+   "hircLen": 1262,
+   "targets": [
+    {
+     "cProps": 1486991,
+     "objSizePos": 1486949,
+     "objSize": 61
+    },
+    {
+     "cProps": 1486847,
+     "objSizePos": 1486826,
+     "objSize": 118
+    },
+    {
+     "cProps": 1486019,
+     "objSizePos": 1485984,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Countdown.bnk",
+   "sha256": "cb4d51589ebe7c24e4350e5c5929778977366bbff229f8e3cdb1703906b59041",
+   "hircLenPos": 961003,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 961047,
+     "objSizePos": 961012,
+     "objSize": 54
+    },
+    {
+     "cProps": 961106,
+     "objSizePos": 961071,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Courgette.bnk",
+   "sha256": "01d9f545afbea70dfec27b8219a493e47b1d527469c60094f23c5568b47c4d89",
+   "hircLenPos": 1008241,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 1008339,
+     "objSizePos": 1008304,
+     "objSize": 49
+    },
+    {
+     "cProps": 1008285,
+     "objSizePos": 1008250,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Crumple.bnk",
+   "sha256": "68b3ab166862ebbf9a5280213dfc5931acc978462f056d6dfa327678d6031801",
+   "hircLenPos": 838201,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 838245,
+     "objSizePos": 838210,
+     "objSize": 49
+    },
+    {
+     "cProps": 838299,
+     "objSizePos": 838264,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_DarkEnergy_T01.bnk",
+   "sha256": "f8e0c999282e4d1c9c8660ce64f7de91280a30e5d9b5abc1b71d4f588fc6a3f3",
+   "hircLenPos": 973950,
+   "hircLen": 555,
+   "targets": [
+    {
+     "cProps": 973994,
+     "objSizePos": 973959,
+     "objSize": 49
+    },
+    {
+     "cProps": 974161,
+     "objSizePos": 974126,
+     "objSize": 54
+    },
+    {
+     "cProps": 974102,
+     "objSizePos": 974067,
+     "objSize": 54
+    },
+    {
+     "cProps": 974048,
+     "objSizePos": 974013,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_DarkEnergy_T02.bnk",
+   "sha256": "03a26108398598e5c0dbd35daef32f36a42f7a1390f49961592102c53f884c0b",
+   "hircLenPos": 1063635,
+   "hircLen": 555,
+   "targets": [
+    {
+     "cProps": 1063792,
+     "objSizePos": 1063757,
+     "objSize": 49
+    },
+    {
+     "cProps": 1063846,
+     "objSizePos": 1063811,
+     "objSize": 54
+    },
+    {
+     "cProps": 1063679,
+     "objSizePos": 1063644,
+     "objSize": 54
+    },
+    {
+     "cProps": 1063738,
+     "objSizePos": 1063703,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_DarkEnergy_T03.bnk",
+   "sha256": "892289006a5ba9d2e00b011b77a8678487c47a080522d5fec10197c11e3cd073",
+   "hircLenPos": 1282879,
+   "hircLen": 560,
+   "targets": [
+    {
+     "cProps": 1283095,
+     "objSizePos": 1283060,
+     "objSize": 49
+    },
+    {
+     "cProps": 1282923,
+     "objSizePos": 1282888,
+     "objSize": 54
+    },
+    {
+     "cProps": 1283036,
+     "objSizePos": 1283001,
+     "objSize": 54
+    },
+    {
+     "cProps": 1282982,
+     "objSizePos": 1282947,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_DarkMatter.bnk",
+   "sha256": "c52799397fbfacc4cbdbbe5c5d60c5919d1cc06c82bb79d8cc34dce7b84960fd",
+   "hircLenPos": 737458,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 737566,
+     "objSizePos": 737531,
+     "objSize": 59
+    },
+    {
+     "cProps": 737502,
+     "objSizePos": 737467,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Darkstar.bnk",
+   "sha256": "dcbe1bba17278c8ff657091810c8972a364dcae00fb0877845987d1d6237ceb4",
+   "hircLenPos": 969276,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 969327,
+     "objSizePos": 969285,
+     "objSize": 61
+    },
+    {
+     "cProps": 969393,
+     "objSizePos": 969351,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_DecoDragon.bnk",
+   "sha256": "dd4463b25452d7d3992a4dc9225015dd5148b0fa8c34ed76b666d4dba8b390f9",
+   "hircLenPos": 732354,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 732457,
+     "objSizePos": 732422,
+     "objSize": 54
+    },
+    {
+     "cProps": 732398,
+     "objSizePos": 732363,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Digiglobe.bnk",
+   "sha256": "2d9e5fd495563f2f340bbfd612eb42e3de16e7dea45d7a08d25953380c32f250",
+   "hircLenPos": 288322,
+   "hircLen": 281,
+   "targets": [
+    {
+     "cProps": 288373,
+     "objSizePos": 288331,
+     "objSize": 66
+    },
+    {
+     "cProps": 288437,
+     "objSizePos": 288402,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Dimensionator.bnk",
+   "sha256": "436bedc862e72e739c5d6c7bd4668008644e35dd2b805658edcba03edeae894f",
+   "hircLenPos": 705282,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 705385,
+     "objSizePos": 705350,
+     "objSize": 54
+    },
+    {
+     "cProps": 705326,
+     "objSizePos": 705291,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Dirt.bnk",
+   "sha256": "2185169c87f59396ec6a603be156697933bbcb4f0947c20fb8e32cbc98f18e3f",
+   "hircLenPos": 849089,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 849133,
+     "objSizePos": 849098,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Doughnut.bnk",
+   "sha256": "16753418e71c1b60926a0b872f5b816e759850d0244387f356c3748897f8fccb",
+   "hircLenPos": 451283,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 451334,
+     "objSizePos": 451292,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Dragon.bnk",
+   "sha256": "9ca9b4dda1895d88eb2162d10f9f470705ee6d391ecd1c0347aa882a2f520a14",
+   "hircLenPos": 680127,
+   "hircLen": 545,
+   "targets": [
+    {
+     "cProps": 680311,
+     "objSizePos": 680276,
+     "objSize": 59
+    },
+    {
+     "cProps": 680171,
+     "objSizePos": 680136,
+     "objSize": 135
+    },
+    {
+     "cProps": 680375,
+     "objSizePos": 680340,
+     "objSize": 135
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Dragoncat.bnk",
+   "sha256": "b74e83cf66b015d1f7a48a20bb94dd98482a7efb03cd34d6537c79244fb49b4d",
+   "hircLenPos": 560394,
+   "hircLen": 217,
+   "targets": [
+    {
+     "cProps": 560445,
+     "objSizePos": 560403,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Dreamy.bnk",
+   "sha256": "c06bfb64323e92149cf3322f616e4cac94f5b11c06149236d2ddb0d98d264fe2",
+   "hircLenPos": 633061,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 633159,
+     "objSizePos": 633124,
+     "objSize": 49
+    },
+    {
+     "cProps": 633105,
+     "objSizePos": 633070,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_DynamicEnergy.bnk",
+   "sha256": "aaab73e4ea42d284a6d7149f5280ac61c05e2cbaa47f8d9214fff1efbf15406b",
+   "hircLenPos": 303608,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 303652,
+     "objSizePos": 303617,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ekin.bnk",
+   "sha256": "34439a879b1a1e50a84652daa93ad67983e91265f604a82a3ad0c51aaf1c7075",
+   "hircLenPos": 476446,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 476490,
+     "objSizePos": 476455,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ekin2.bnk",
+   "sha256": "b3dd040cbff07440ce00b778c9f1102c54b8dd6dc6da24f55caf257ff792c85e",
+   "hircLenPos": 607170,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 607214,
+     "objSizePos": 607179,
+     "objSize": 59
+    },
+    {
+     "cProps": 607278,
+     "objSizePos": 607243,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Electric.bnk",
+   "sha256": "a95fc6a835630069d81d2479f65eaf58c3ee0a29532727bfedd48c4beda5ed4c",
+   "hircLenPos": 548038,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 548082,
+     "objSizePos": 548047,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Electrogalactic.bnk",
+   "sha256": "a6480fce8c5b487a47e518d2ae6440b5347c4c4e340ebd250f7819f6018d732b",
+   "hircLenPos": 918366,
+   "hircLen": 378,
+   "targets": [
+    {
+     "cProps": 918469,
+     "objSizePos": 918434,
+     "objSize": 54
+    },
+    {
+     "cProps": 918410,
+     "objSizePos": 918375,
+     "objSize": 54
+    },
+    {
+     "cProps": 918528,
+     "objSizePos": 918493,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Esports_2022.bnk",
+   "sha256": "7f09975ce4a75db63a3504c602ecd9490db943e01576ba76d08448e911817cbe",
+   "hircLenPos": 578830,
+   "hircLen": 309,
+   "targets": [
+    {
+     "cProps": 578874,
+     "objSizePos": 578839,
+     "objSize": 54
+    },
+    {
+     "cProps": 578933,
+     "objSizePos": 578898,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Esports_2022_Nov.bnk",
+   "sha256": "b96b2832bb5d8c229c82c69d6c9b757360c21cb0f89e0bd6d0a1c465d0260791",
+   "hircLenPos": 274874,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 274977,
+     "objSizePos": 274942,
+     "objSize": 54
+    },
+    {
+     "cProps": 274918,
+     "objSizePos": 274883,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Esports_2025.bnk",
+   "sha256": "1b507b28f2da174c3d947a7dafe7f172e10d6369ddddd1b357789ce0c4a0a204",
+   "hircLenPos": 760375,
+   "hircLen": 269,
+   "targets": [
+    {
+     "cProps": 760473,
+     "objSizePos": 760438,
+     "objSize": 54
+    },
+    {
+     "cProps": 760419,
+     "objSizePos": 760384,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_BloodMoon.bnk",
+   "sha256": "3c774cca9c60b6c06db5c921e227d47c772a7ba990c18e0fa3e6eafac73dcc69",
+   "hircLenPos": 674104,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 674148,
+     "objSizePos": 674113,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Candies.bnk",
+   "sha256": "16b240188b65a1bcb0b422a6258f7feb1b80ddca588bbb7d9d89719f47f0248e",
+   "hircLenPos": 640183,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 640291,
+     "objSizePos": 640256,
+     "objSize": 59
+    },
+    {
+     "cProps": 640227,
+     "objSizePos": 640192,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Disco.bnk",
+   "sha256": "e212eabcd65aef601ab14faddab9913069c73475390ac549b8eba8aa58f3c9b5",
+   "hircLenPos": 335481,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 335525,
+     "objSizePos": 335490,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_DivineConnection.bnk",
+   "sha256": "04f8bd5208773c3192887bff24c14bda421b9cc0c61ace535680d9442320a09e",
+   "hircLenPos": 720768,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 720812,
+     "objSizePos": 720777,
+     "objSize": 54
+    },
+    {
+     "cProps": 720871,
+     "objSizePos": 720836,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Ghost.bnk",
+   "sha256": "7fc3c30718fbcb2f3b2a23f1f3676a13af26ba9c555d109c71a575eed928d751",
+   "hircLenPos": 1214940,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 1214991,
+     "objSizePos": 1214949,
+     "objSize": 61
+    },
+    {
+     "cProps": 1215057,
+     "objSizePos": 1215015,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Gray.bnk",
+   "sha256": "9acfc227b09985297b52ecfa96368eee0ed118c1b1f543de5f86198f89f57514",
+   "hircLenPos": 1051885,
+   "hircLen": 293,
+   "targets": [
+    {
+     "cProps": 1051936,
+     "objSizePos": 1051894,
+     "objSize": 66
+    },
+    {
+     "cProps": 1052007,
+     "objSizePos": 1051965,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Hero.bnk",
+   "sha256": "1a581e88348b6e5fdb935267f9cb24c4a64c00ded391144df1a62842c9551922",
+   "hircLenPos": 500544,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 500647,
+     "objSizePos": 500612,
+     "objSize": 54
+    },
+    {
+     "cProps": 500588,
+     "objSizePos": 500553,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Hypercube1.bnk",
+   "sha256": "942619ec547eb4b3216864158234b7bb1186b0ee30f3e607a483840c0f00b61b",
+   "hircLenPos": 593568,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 593612,
+     "objSizePos": 593577,
+     "objSize": 54
+    },
+    {
+     "cProps": 593671,
+     "objSizePos": 593636,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Hypnoclock.bnk",
+   "sha256": "db0638b60208c50c1920e854f1723895353582d2b40e66fcdab4493837dc95ec",
+   "hircLenPos": 667418,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 667521,
+     "objSizePos": 667486,
+     "objSize": 54
+    },
+    {
+     "cProps": 667462,
+     "objSizePos": 667427,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_PolkaEye.bnk",
+   "sha256": "8ea0bf75af1abb638e259d6167047af2e6f574fc3406b163f0fc1b4e2a5f1aa2",
+   "hircLenPos": 595634,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 595678,
+     "objSizePos": 595643,
+     "objSize": 54
+    },
+    {
+     "cProps": 595737,
+     "objSizePos": 595702,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Pristinous.bnk",
+   "sha256": "6741ced09ba8b08e32ed6ead2d8ddb7905f0ce930d8186238f2a5a0846bfb25b",
+   "hircLenPos": 615743,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 615787,
+     "objSizePos": 615752,
+     "objSize": 49
+    },
+    {
+     "cProps": 615841,
+     "objSizePos": 615806,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_SkullGA.bnk",
+   "sha256": "a89d696a51bf6928b92d38c2ba9f5da9db1641f765852fd195e21a9e6b5a1ad4",
+   "hircLenPos": 995355,
+   "hircLen": 165,
+   "targets": [
+    {
+     "cProps": 995399,
+     "objSizePos": 995364,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FS_Sticky.bnk",
+   "sha256": "3135424ea426fd76b9429a7826aa6c04fc0e011ae46ae8ae5b5c92453b4ce796",
+   "hircLenPos": 785315,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 785413,
+     "objSizePos": 785378,
+     "objSize": 49
+    },
+    {
+     "cProps": 785359,
+     "objSizePos": 785324,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fangs.bnk",
+   "sha256": "b9ba16a7887cfaa3fee26c63bd35e13310b74c3bac05fd133b37132d05aa63cb",
+   "hircLenPos": 517478,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 517586,
+     "objSizePos": 517551,
+     "objSize": 59
+    },
+    {
+     "cProps": 517522,
+     "objSizePos": 517487,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_FieldStrikes.bnk",
+   "sha256": "1949aa25809adf010ccc3707b2fef90e40d9975724b235180d53f48135deb31a",
+   "hircLenPos": 628617,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 628661,
+     "objSizePos": 628626,
+     "objSize": 49
+    },
+    {
+     "cProps": 628715,
+     "objSizePos": 628680,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fingerguns.bnk",
+   "sha256": "2951e1fc226da1d87382b08f29633fa7655f43500b32bb079f1338236a884810",
+   "hircLenPos": 447371,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 447422,
+     "objSizePos": 447380,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Finish.bnk",
+   "sha256": "cf2fc71819b9ccbde10f9b7812bf6c6e3ac8650c7b052c3bf58648b2efbf3eb5",
+   "hircLenPos": 321574,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 321625,
+     "objSizePos": 321583,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fireball.bnk",
+   "sha256": "fd97dce90badff4da979d1eb09eadccbfb22df6fc1d59829875dd8aca58dc983",
+   "hircLenPos": 258207,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 258324,
+     "objSizePos": 258282,
+     "objSize": 61
+    },
+    {
+     "cProps": 258258,
+     "objSizePos": 258216,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fireworks.bnk",
+   "sha256": "724ac98d73b7dcbdc08cadc3262caa9606270c0e88d3114de6fbee0c9ce5eac2",
+   "hircLenPos": 1114676,
+   "hircLen": 555,
+   "targets": [
+    {
+     "cProps": 1114720,
+     "objSizePos": 1114685,
+     "objSize": 54
+    },
+    {
+     "cProps": 1114981,
+     "objSizePos": 1114960,
+     "objSize": 124
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fish.bnk",
+   "sha256": "5a62aa42dcfe7ac93f0e8fa40bf6164fd5af9df389079914c6ab4d20911ee348",
+   "hircLenPos": 948660,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 948711,
+     "objSizePos": 948669,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fluffy.bnk",
+   "sha256": "053d6c472fbd4e159aaa945e9b6cf141fd9a62e193c6fe0abc1846ffff062a78",
+   "hircLenPos": 915677,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 915775,
+     "objSizePos": 915740,
+     "objSize": 49
+    },
+    {
+     "cProps": 915721,
+     "objSizePos": 915686,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Foosball.bnk",
+   "sha256": "9425d5822d0bb780cd59f1210d4061a80cc702a01f9eb77f38aab7a2584f8b4d",
+   "hircLenPos": 774271,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 774369,
+     "objSizePos": 774334,
+     "objSize": 49
+    },
+    {
+     "cProps": 774315,
+     "objSizePos": 774280,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fruit.bnk",
+   "sha256": "91dc13cf8e41bb52f7cae1cf720cb19a6b1204b0c1cf8bb43cd1e772821b1e19",
+   "hircLenPos": 689938,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 689982,
+     "objSizePos": 689947,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fullscreen_Fire.bnk",
+   "sha256": "462da56b685ad9e7a9f03f6886b1b01680c62bbcb9aeadf5a849607bac1b6e0e",
+   "hircLenPos": 322045,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 322096,
+     "objSizePos": 322054,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fullscreen_Glitch.bnk",
+   "sha256": "3ee7743e3dc46f1875fabe84c28e6ff743ad4a4cfee6c38319fd642e53b07855",
+   "hircLenPos": 479465,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 479516,
+     "objSizePos": 479474,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fullscreen_Ice.bnk",
+   "sha256": "f4d234f60deeb228a528de55cfe1d21434d4f56d67993a0abe67c2f7233e6fc7",
+   "hircLenPos": 567895,
+   "hircLen": 298,
+   "targets": [
+    {
+     "cProps": 568017,
+     "objSizePos": 567975,
+     "objSize": 66
+    },
+    {
+     "cProps": 567946,
+     "objSizePos": 567904,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Fullscreen_Retrowave.bnk",
+   "sha256": "d26623326d1f683b03344cc15454bd9d917d3ae18cd1771bb4d24e3478780231",
+   "hircLenPos": 578836,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 578887,
+     "objSizePos": 578845,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_GeoTech.bnk",
+   "sha256": "b287053ce941f9eaa9643207c7746ee1ee179943da04585af67752bc0af57bf9",
+   "hircLenPos": 729250,
+   "hircLen": 357,
+   "targets": [
+    {
+     "cProps": 729307,
+     "objSizePos": 729259,
+     "objSize": 72
+    },
+    {
+     "cProps": 729378,
+     "objSizePos": 729336,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ghost.bnk",
+   "sha256": "e5d5714e799328119494611ec881b6dc447f0a90cbdb2ebdd85a56ac726c54a7",
+   "hircLenPos": 616672,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 616716,
+     "objSizePos": 616681,
+     "objSize": 59
+    },
+    {
+     "cProps": 616780,
+     "objSizePos": 616745,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_GhostAquarium.bnk",
+   "sha256": "5a9d11d87b997b9b2fb0f453fe7bd9badda169d2ab8c43138fbbcc54991a6f70",
+   "hircLenPos": 752215,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 752323,
+     "objSizePos": 752288,
+     "objSize": 59
+    },
+    {
+     "cProps": 752259,
+     "objSizePos": 752224,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_GoldenLychee01.bnk",
+   "sha256": "8cb61a59e99279b962e0dd89ab7d149f0b27839f2a27275ddea8c96d3bc65bdf",
+   "hircLenPos": 720080,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 720178,
+     "objSizePos": 720143,
+     "objSize": 49
+    },
+    {
+     "cProps": 720124,
+     "objSizePos": 720089,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Goldy.bnk",
+   "sha256": "032ab7a6f6c506389c61b1825c3b2c9750909b900691e45a8a52295d2dce47ee",
+   "hircLenPos": 773218,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 773316,
+     "objSizePos": 773281,
+     "objSize": 49
+    },
+    {
+     "cProps": 773262,
+     "objSizePos": 773227,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Gravity.bnk",
+   "sha256": "0a3ee0db88ca0d6b78c210737a05afc0a7a892358f83afa1c2ce49d0e8c0e2ca",
+   "hircLenPos": 338897,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 338948,
+     "objSizePos": 338906,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_HeartHands.bnk",
+   "sha256": "ee74f60ca04ddb602fe75a9ecfefae406563e3b95e6f7994b2d2d3a2549b416a",
+   "hircLenPos": 629250,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 629353,
+     "objSizePos": 629318,
+     "objSize": 54
+    },
+    {
+     "cProps": 629294,
+     "objSizePos": 629259,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Hologlass.bnk",
+   "sha256": "251bedf9dd1a97a8c0ca88d81e6b9072adb13aacab5e3ed814c990259457e8d9",
+   "hircLenPos": 612648,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 612692,
+     "objSizePos": 612657,
+     "objSize": 49
+    },
+    {
+     "cProps": 612746,
+     "objSizePos": 612711,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_HonDuel01.bnk",
+   "sha256": "ef3b63c888f136681af968f901dc2ee8c73f1642767100ffd6c2d3509dc4b3f0",
+   "hircLenPos": 692901,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 692945,
+     "objSizePos": 692910,
+     "objSize": 54
+    },
+    {
+     "cProps": 693004,
+     "objSizePos": 692969,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Honeybees.bnk",
+   "sha256": "34eb7fc869fc629f449af5291b87e1ff2a2fb4a5a5ec066bd5d421c2f34a36f0",
+   "hircLenPos": 714881,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 714979,
+     "objSizePos": 714944,
+     "objSize": 49
+    },
+    {
+     "cProps": 714925,
+     "objSizePos": 714890,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_HorseHindLegs.bnk",
+   "sha256": "352e14649c69abdcf3fbf9f0feda9b81a13750a7992fd3b1df8259c0147c8699",
+   "hircLenPos": 384906,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 384957,
+     "objSizePos": 384915,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Hug.bnk",
+   "sha256": "ad180bb42931c51120d6025574d5f3f4e1e8269a9ca9c6db89f7c086de629b8f",
+   "hircLenPos": 695877,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 695921,
+     "objSizePos": 695886,
+     "objSize": 49
+    },
+    {
+     "cProps": 695975,
+     "objSizePos": 695940,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Hypnotik.bnk",
+   "sha256": "ae51eae629d86da12f8ef818aa8e865329dc8e5d5db4173fdd2addd578d6be21",
+   "hircLenPos": 730702,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 730753,
+     "objSizePos": 730711,
+     "objSize": 61
+    },
+    {
+     "cProps": 730819,
+     "objSizePos": 730777,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_IceShards.bnk",
+   "sha256": "df0affbc8801d4717f6f2d9d53744d0d7fbdd394e5521e4b96708382085e9901",
+   "hircLenPos": 1258631,
+   "hircLen": 976,
+   "targets": [
+    {
+     "cProps": 1259302,
+     "objSizePos": 1259267,
+     "objSize": 54
+    },
+    {
+     "cProps": 1259155,
+     "objSizePos": 1259134,
+     "objSize": 128
+    },
+    {
+     "cProps": 1258823,
+     "objSizePos": 1258802,
+     "objSize": 111
+    },
+    {
+     "cProps": 1259361,
+     "objSizePos": 1259326,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_IllustratedBursts.bnk",
+   "sha256": "059af58670e4a8a2ce53286e683c6e43d0884932c8f48046fa9f931b84c70d15",
+   "hircLenPos": 796278,
+   "hircLen": 300,
+   "targets": [
+    {
+     "cProps": 796335,
+     "objSizePos": 796287,
+     "objSize": 67
+    },
+    {
+     "cProps": 796407,
+     "objSizePos": 796359,
+     "objSize": 67
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Infinite.bnk",
+   "sha256": "a889496aee183cff2516d04880776d40694ab925f0aa4d7607768670c56bdfb4",
+   "hircLenPos": 531164,
+   "hircLen": 368,
+   "targets": [
+    {
+     "cProps": 531208,
+     "objSizePos": 531173,
+     "objSize": 54
+    },
+    {
+     "cProps": 531321,
+     "objSizePos": 531286,
+     "objSize": 49
+    },
+    {
+     "cProps": 531267,
+     "objSizePos": 531232,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_IonCannon.bnk",
+   "sha256": "f6468c11553fd6f2de446cfc347935fc83f03616f1782c286dbc2778ab5e1487",
+   "hircLenPos": 313835,
+   "hircLen": 328,
+   "targets": [
+    {
+     "cProps": 313886,
+     "objSizePos": 313844,
+     "objSize": 66
+    },
+    {
+     "cProps": 313957,
+     "objSizePos": 313915,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Jigsaw.bnk",
+   "sha256": "bfe32e027ebd88ba21b7857d7036ac08c7c7eed5bbee794fc78b64053c2a8d46",
+   "hircLenPos": 369360,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 369404,
+     "objSizePos": 369369,
+     "objSize": 59
+    },
+    {
+     "cProps": 369468,
+     "objSizePos": 369433,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Kaleido.bnk",
+   "sha256": "2fc8fe03b033b1ca75e44a4e0ddd109b960106af1b3bb2d7ce6214544bfde104",
+   "hircLenPos": 794341,
+   "hircLen": 279,
+   "targets": [
+    {
+     "cProps": 794449,
+     "objSizePos": 794414,
+     "objSize": 54
+    },
+    {
+     "cProps": 794385,
+     "objSizePos": 794350,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Kitty.bnk",
+   "sha256": "adf082edaf2a78f2f13e4e6ac3d86bfa5fe10ecec3144cb13d38b6bb7b9db3bc",
+   "hircLenPos": 619698,
+   "hircLen": 279,
+   "targets": [
+    {
+     "cProps": 619801,
+     "objSizePos": 619766,
+     "objSize": 59
+    },
+    {
+     "cProps": 619742,
+     "objSizePos": 619707,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Lanterns.bnk",
+   "sha256": "fd040fef7209103068ab26edf01b2e891113e545bd37f7e003290ee64f1087a6",
+   "hircLenPos": 524048,
+   "hircLen": 183,
+   "targets": [
+    {
+     "cProps": 524105,
+     "objSizePos": 524057,
+     "objSize": 67
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LaserBeam.bnk",
+   "sha256": "febcc1d537d8cb48fae6c24c8c5f909d4e26f5c5668243782a7202ff068743bf",
+   "hircLenPos": 643206,
+   "hircLen": 304,
+   "targets": [
+    {
+     "cProps": 643250,
+     "objSizePos": 643215,
+     "objSize": 54
+    },
+    {
+     "cProps": 643309,
+     "objSizePos": 643274,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Lasersmoke.bnk",
+   "sha256": "bf888b26b76e653701dba73069c418e25cf30c8e2aa0bd97a5736b2998d5785e",
+   "hircLenPos": 625390,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 625434,
+     "objSizePos": 625399,
+     "objSize": 49
+    },
+    {
+     "cProps": 625488,
+     "objSizePos": 625453,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Leaves.bnk",
+   "sha256": "4bc2b11eb462d3bbe3cccc31063a856c2bdd45089fc48bb063852f452165f706",
+   "hircLenPos": 611048,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 611092,
+     "objSizePos": 611057,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LightRock.bnk",
+   "sha256": "f6e7603b4e156f0a0e6e8de320f678f7df0ab88437eef1970516901219267bf4",
+   "hircLenPos": 800973,
+   "hircLen": 279,
+   "targets": [
+    {
+     "cProps": 801081,
+     "objSizePos": 801046,
+     "objSize": 54
+    },
+    {
+     "cProps": 801017,
+     "objSizePos": 800982,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LineColors.bnk",
+   "sha256": "b6147fb4095129a63c616e1fd6724c25fda12160d431cebe8e10f4764f64c9c3",
+   "hircLenPos": 516106,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 516209,
+     "objSizePos": 516174,
+     "objSize": 54
+    },
+    {
+     "cProps": 516150,
+     "objSizePos": 516115,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LionsMane.bnk",
+   "sha256": "14ec388293a5d7d5e4f3390b54e67ba20c7b4a7ddf739c7f8ff4466a7efc5a22",
+   "hircLenPos": 1031386,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 1031484,
+     "objSizePos": 1031449,
+     "objSize": 49
+    },
+    {
+     "cProps": 1031430,
+     "objSizePos": 1031395,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LoopDeLoop.bnk",
+   "sha256": "1be1edf08f155c01f59f0710ef540bf9a113fd7a79f2a3e7fe90307b075e09a5",
+   "hircLenPos": 767568,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 767612,
+     "objSizePos": 767577,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LotusDrone.bnk",
+   "sha256": "bfe183178166bfa6f36f876fdef057dfda35e32d275cadc21984e816937ca397",
+   "hircLenPos": 635835,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 635879,
+     "objSizePos": 635844,
+     "objSize": 49
+    },
+    {
+     "cProps": 635933,
+     "objSizePos": 635898,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LotusFlow.bnk",
+   "sha256": "b6e57b4b75cca47eaf7e1f736c1aa5db3c5429a17a036417402f1288d8966294",
+   "hircLenPos": 378718,
+   "hircLen": 298,
+   "targets": [
+    {
+     "cProps": 378840,
+     "objSizePos": 378798,
+     "objSize": 66
+    },
+    {
+     "cProps": 378769,
+     "objSizePos": 378727,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LuckyOnyx01.bnk",
+   "sha256": "9d9876faf74002cba59795a95da644f5fc13266aa7d0cb0cbb3d69e9418b36f4",
+   "hircLenPos": 671313,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 671430,
+     "objSizePos": 671388,
+     "objSize": 61
+    },
+    {
+     "cProps": 671364,
+     "objSizePos": 671322,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_LuminousAirplaneLTE01.bnk",
+   "sha256": "a4b77b59c41ec6a8db77794abd6833051978fc89af20a26d10a26d29bc4f73cf",
+   "hircLenPos": 647427,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 647544,
+     "objSizePos": 647502,
+     "objSize": 61
+    },
+    {
+     "cProps": 647478,
+     "objSizePos": 647436,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_MagicLamp.bnk",
+   "sha256": "f6e0131b5183f8b7e6ac52b6cf37517e336e66cb1252890138d6d996c397d85b",
+   "hircLenPos": 831015,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 831059,
+     "objSizePos": 831024,
+     "objSize": 54
+    },
+    {
+     "cProps": 831118,
+     "objSizePos": 831083,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_MagicSplash.bnk",
+   "sha256": "bfc2418bcbe05a4cc9a45b04a0b75c40820dbc73e0417ac2ff69e3c889910496",
+   "hircLenPos": 839298,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 839401,
+     "objSizePos": 839366,
+     "objSize": 54
+    },
+    {
+     "cProps": 839342,
+     "objSizePos": 839307,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Mandalas.bnk",
+   "sha256": "ea57011f94f09a341263adcd4a1d377024d7162da3fa68dc65ed724ae37aa5ea",
+   "hircLenPos": 516592,
+   "hircLen": 279,
+   "targets": [
+    {
+     "cProps": 516700,
+     "objSizePos": 516665,
+     "objSize": 54
+    },
+    {
+     "cProps": 516636,
+     "objSizePos": 516601,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Meteors.bnk",
+   "sha256": "9873abbd9552b18caf53c2b5e74776c5130e4d5a405ba79136aedfbc3304c8d2",
+   "hircLenPos": 669200,
+   "hircLen": 304,
+   "targets": [
+    {
+     "cProps": 669244,
+     "objSizePos": 669209,
+     "objSize": 54
+    },
+    {
+     "cProps": 669303,
+     "objSizePos": 669268,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Mexico.bnk",
+   "sha256": "cbed6f23073077d382f50549fb552be7d7efc634f37a21c23424cc0155efb148",
+   "hircLenPos": 288335,
+   "hircLen": 291,
+   "targets": [
+    {
+     "cProps": 288450,
+     "objSizePos": 288408,
+     "objSize": 66
+    },
+    {
+     "cProps": 288379,
+     "objSizePos": 288344,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_MicDrop.bnk",
+   "sha256": "62af8aceeb2f99ccde7000a67766edb83c2df859076eeeb0b6a2a1036940e31d",
+   "hircLenPos": 467502,
+   "hircLen": 298,
+   "targets": [
+    {
+     "cProps": 467624,
+     "objSizePos": 467582,
+     "objSize": 66
+    },
+    {
+     "cProps": 467553,
+     "objSizePos": 467511,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Missiles.bnk",
+   "sha256": "b6765cdbc65bf951fc261f2ebbc2df40935939f37712591d2bb9cb9df786f7b2",
+   "hircLenPos": 881329,
+   "hircLen": 383,
+   "targets": [
+    {
+     "cProps": 881496,
+     "objSizePos": 881461,
+     "objSize": 54
+    },
+    {
+     "cProps": 881373,
+     "objSizePos": 881338,
+     "objSize": 54
+    },
+    {
+     "cProps": 881432,
+     "objSizePos": 881397,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_MisterMonsoon.bnk",
+   "sha256": "0c3c2cc94118666584d1634c7e1a3995f66f438a62a318f809678190e16c9e71",
+   "hircLenPos": 1943304,
+   "hircLen": 726,
+   "targets": [
+    {
+     "cProps": 1943689,
+     "objSizePos": 1943647,
+     "objSize": 66
+    },
+    {
+     "cProps": 1943766,
+     "objSizePos": 1943718,
+     "objSize": 72
+    },
+    {
+     "cProps": 1943550,
+     "objSizePos": 1943529,
+     "objSize": 113
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Mooncake.bnk",
+   "sha256": "fdcda2c2b1696f516daa47652ceb1a21eae6768fe9e22b7e63c1f28a523e4f78",
+   "hircLenPos": 511607,
+   "hircLen": 172,
+   "targets": [
+    {
+     "cProps": 511658,
+     "objSizePos": 511616,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Moonsword.bnk",
+   "sha256": "61dbec301f9b545b0cdb5c39032e9cb9cd9b22f4183bd7b66b543746f714c6ba",
+   "hircLenPos": 580751,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 580795,
+     "objSizePos": 580760,
+     "objSize": 54
+    },
+    {
+     "cProps": 580854,
+     "objSizePos": 580819,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Mountain.bnk",
+   "sha256": "63dac99d194208c3f2edfbd9ba25cc87966436bb167a38432fc15f5f9a59ab8b",
+   "hircLenPos": 800423,
+   "hircLen": 378,
+   "targets": [
+    {
+     "cProps": 800585,
+     "objSizePos": 800550,
+     "objSize": 54
+    },
+    {
+     "cProps": 800467,
+     "objSizePos": 800432,
+     "objSize": 54
+    },
+    {
+     "cProps": 800526,
+     "objSizePos": 800491,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Murk.bnk",
+   "sha256": "77596e99e2ac59d09d01a3291c660002c7627b007af8481f8296e03988e40d57",
+   "hircLenPos": 827906,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 827950,
+     "objSizePos": 827915,
+     "objSize": 54
+    },
+    {
+     "cProps": 828009,
+     "objSizePos": 827974,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_NBC.bnk",
+   "sha256": "575f0aae87521e9b463a3b01dd2766a6661f4cb9ef4d2faee0a57ae9da29c995",
+   "hircLenPos": 1010055,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 1010099,
+     "objSizePos": 1010064,
+     "objSize": 59
+    },
+    {
+     "cProps": 1010163,
+     "objSizePos": 1010128,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_NFL_LombardiTrophy.bnk",
+   "sha256": "97c45300d7d536a74e2c78d8da6086472cf442439c8ab6dca7e6906850eafc8b",
+   "hircLenPos": 168592,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 168643,
+     "objSizePos": 168601,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Necromancer.bnk",
+   "sha256": "d00a30b04086010c87dfac9a45f868b797505521c0365103d17cfc62d597928c",
+   "hircLenPos": 523131,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 523239,
+     "objSizePos": 523204,
+     "objSize": 59
+    },
+    {
+     "cProps": 523175,
+     "objSizePos": 523140,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_NegativeWings.bnk",
+   "sha256": "27fd2c1183742e601c4f7b6fda4bf39db877c9a6dba527a73c21a559b3ddaed9",
+   "hircLenPos": 740225,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 740328,
+     "objSizePos": 740293,
+     "objSize": 54
+    },
+    {
+     "cProps": 740269,
+     "objSizePos": 740234,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Neurons.bnk",
+   "sha256": "152421ae46bba71007f3414ae45ed928bc208be94c310aa874e073c5904160e0",
+   "hircLenPos": 591602,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 591646,
+     "objSizePos": 591611,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_NewDefault.bnk",
+   "sha256": "6b1c879120f09eca31a6fee47df77c8dc63fc1918bb0e14245bca57f6fc60566",
+   "hircLenPos": 604883,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 604927,
+     "objSizePos": 604892,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_NiceShot.bnk",
+   "sha256": "51d30d70d9897d53cb7fb395c2365d2bdb7dbecd739270114a634d89ce8b6cb4",
+   "hircLenPos": 561964,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 562008,
+     "objSizePos": 561973,
+     "objSize": 59
+    },
+    {
+     "cProps": 562072,
+     "objSizePos": 562037,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_NuggetSauce.bnk",
+   "sha256": "39dbeb83cb3f0f831f983bdab04fac1f00a48335d067421273c5aeb9f9d33a5c",
+   "hircLenPos": 824160,
+   "hircLen": 378,
+   "targets": [
+    {
+     "cProps": 824263,
+     "objSizePos": 824228,
+     "objSize": 54
+    },
+    {
+     "cProps": 824322,
+     "objSizePos": 824287,
+     "objSize": 54
+    },
+    {
+     "cProps": 824204,
+     "objSizePos": 824169,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Nuhai.bnk",
+   "sha256": "1f6faaf20365ebcbac7fb4f93a9f052ca0946a0c4a155c053b6128680f573fa4",
+   "hircLenPos": 507882,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 507926,
+     "objSizePos": 507891,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Nuke.bnk",
+   "sha256": "d86e65a5aa61c8cbadcf465d5062bde495a453f26ed2fffd171731c0fdaf1a17",
+   "hircLenPos": 447450,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 447501,
+     "objSizePos": 447459,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Numb.bnk",
+   "sha256": "97f294432ccf906fd7e27d47005a76a262e047118de6de3d0fe50d9a499e1578",
+   "hircLenPos": 624386,
+   "hircLen": 278,
+   "targets": [
+    {
+     "cProps": 624437,
+     "objSizePos": 624395,
+     "objSize": 56
+    },
+    {
+     "cProps": 624498,
+     "objSizePos": 624456,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_October.bnk",
+   "sha256": "e6339923af5545ab15565d435afc55f1a2328bb81d8097a84b5e79a9e1333e91",
+   "hircLenPos": 849503,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 849554,
+     "objSizePos": 849512,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_OldCRT.bnk",
+   "sha256": "45b137ca066db4214829bf308304503220d9741a2d75310a603af50126ec723a",
+   "hircLenPos": 866896,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 866994,
+     "objSizePos": 866959,
+     "objSize": 49
+    },
+    {
+     "cProps": 866940,
+     "objSizePos": 866905,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_OpticOrange01.bnk",
+   "sha256": "b610123890a56ca2b17a13c193a68aa4108f48748f2976418562bd91c33c8803",
+   "hircLenPos": 423430,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 423481,
+     "objSizePos": 423439,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PaintPuzzle.bnk",
+   "sha256": "8a5fdd52bfc3eb4ebc35b4078f5c1602504a76df3e3b39064716e1667e9e2f58",
+   "hircLenPos": 779598,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 779706,
+     "objSizePos": 779671,
+     "objSize": 59
+    },
+    {
+     "cProps": 779642,
+     "objSizePos": 779607,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Paintball.bnk",
+   "sha256": "202d8e045f5c00b9fa296e40848c8af2e1009ac647d7d5c8108508f3ff5e1660",
+   "hircLenPos": 716080,
+   "hircLen": 278,
+   "targets": [
+    {
+     "cProps": 716131,
+     "objSizePos": 716089,
+     "objSize": 56
+    },
+    {
+     "cProps": 716192,
+     "objSizePos": 716150,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Phoenix.bnk",
+   "sha256": "64443d402ce7de12e6392f9c03d2babdcefd1a2f9f778f65dd80da15f3e8a3e5",
+   "hircLenPos": 752075,
+   "hircLen": 284,
+   "targets": [
+    {
+     "cProps": 752183,
+     "objSizePos": 752148,
+     "objSize": 59
+    },
+    {
+     "cProps": 752119,
+     "objSizePos": 752084,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PixelBubble.bnk",
+   "sha256": "bc51dad4f9aff977480f4a6a8909d33975e11fdee338f1e756f61ec150ee7df4",
+   "hircLenPos": 598916,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 598967,
+     "objSizePos": 598925,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PixelCobra.bnk",
+   "sha256": "3ce6209fe8bf6757a45d467f31e460464b2f6df4ac86d900af2db67a9422e79c",
+   "hircLenPos": 832476,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 832574,
+     "objSizePos": 832539,
+     "objSize": 49
+    },
+    {
+     "cProps": 832520,
+     "objSizePos": 832485,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Pixie.bnk",
+   "sha256": "c7d30418ead54c2cab2a77f27ce857752249c7e08df3027f3a197ca45ce584ba",
+   "hircLenPos": 468933,
+   "hircLen": 269,
+   "targets": [
+    {
+     "cProps": 468977,
+     "objSizePos": 468942,
+     "objSize": 54
+    },
+    {
+     "cProps": 469036,
+     "objSizePos": 469001,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Plasma.bnk",
+   "sha256": "a3fb6ea252923d35cf57cb95a673b8d93ad6ea929d3222257df24031c8160bdf",
+   "hircLenPos": 727524,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 727568,
+     "objSizePos": 727533,
+     "objSize": 49
+    },
+    {
+     "cProps": 727622,
+     "objSizePos": 727587,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PlasmaBloom.bnk",
+   "sha256": "4c5f48a3fcd8ce5f02aaa84f3ff45a4b07410a6aab151a0159f0442926de2c48",
+   "hircLenPos": 790553,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 790656,
+     "objSizePos": 790621,
+     "objSize": 54
+    },
+    {
+     "cProps": 790597,
+     "objSizePos": 790562,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PlasmaEnergy.bnk",
+   "sha256": "cbe0e64d7711a725b1f90d3d4cdcdff0a050bca5417c6ee18a4d38984e5415c7",
+   "hircLenPos": 603501,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 603599,
+     "objSizePos": 603564,
+     "objSize": 49
+    },
+    {
+     "cProps": 603545,
+     "objSizePos": 603510,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PoisonMushroom.bnk",
+   "sha256": "f480ce95dd52d13065063abf1b28a8ec8eb2d62df52b6d6c826c5c0b18a3f696",
+   "hircLenPos": 739398,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 739501,
+     "objSizePos": 739466,
+     "objSize": 54
+    },
+    {
+     "cProps": 739442,
+     "objSizePos": 739407,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Polygon.bnk",
+   "sha256": "1c46d0565c3339f5d0c6d9eeb1520962d73b9942c4e44dbd00e03784d140c253",
+   "hircLenPos": 417994,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 418038,
+     "objSizePos": 418003,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PopArt.bnk",
+   "sha256": "5c4e20263d18228a0529f51d4acf0d1ea25f8da567a7c3177cbd3ea7a0493936",
+   "hircLenPos": 625967,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 626070,
+     "objSizePos": 626035,
+     "objSize": 54
+    },
+    {
+     "cProps": 626011,
+     "objSizePos": 625976,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Popcorn.bnk",
+   "sha256": "58efbfcf5077f76660fd0158d7cf9fc87cde99923423c2f1b853d5c634091212",
+   "hircLenPos": 659384,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 659428,
+     "objSizePos": 659393,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Portal.bnk",
+   "sha256": "861f378b7df7fdda67222ab8333d0a8fa652e779a9c0a3984763a36773f54881",
+   "hircLenPos": 471182,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 471233,
+     "objSizePos": 471191,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_PowerStar.bnk",
+   "sha256": "8ba51662e3cd8d269e9e748dbd3d0ee463de6a2816bba8a5312a6754774aa5fb",
+   "hircLenPos": 537850,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 537967,
+     "objSizePos": 537925,
+     "objSize": 61
+    },
+    {
+     "cProps": 537901,
+     "objSizePos": 537859,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Presents.bnk",
+   "sha256": "aa4540452a1cbd27e337d98893453dd12e5acd2591965503d58ca5021febc96d",
+   "hircLenPos": 613298,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 613342,
+     "objSizePos": 613307,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Quakey.bnk",
+   "sha256": "e6261d479ce7efb3de562faca2160060e83a85e22ca4a933fa0dd0780e4ca803",
+   "hircLenPos": 317187,
+   "hircLen": 313,
+   "targets": [
+    {
+     "cProps": 317304,
+     "objSizePos": 317262,
+     "objSize": 61
+    },
+    {
+     "cProps": 317238,
+     "objSizePos": 317196,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Quartz.bnk",
+   "sha256": "7939d08828a8d85b447be987be92e03dc8f882a3b4d8ceac1af2eb8dd7e0933a",
+   "hircLenPos": 949096,
+   "hircLen": 303,
+   "targets": [
+    {
+     "cProps": 949147,
+     "objSizePos": 949105,
+     "objSize": 56
+    },
+    {
+     "cProps": 949208,
+     "objSizePos": 949166,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_RIP.bnk",
+   "sha256": "e2ec50275bc197b5b0f74f3a293da1cd031618104d9681acf3815987a928b14c",
+   "hircLenPos": 952905,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 952949,
+     "objSizePos": 952914,
+     "objSize": 49
+    },
+    {
+     "cProps": 953003,
+     "objSizePos": 952968,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_RLCS_01.bnk",
+   "sha256": "71c983dc52d5802ab1f1dbe0d9aa1b1c098c5c4cc16db6f28260981cc47b3bdc",
+   "hircLenPos": 660024,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 660068,
+     "objSizePos": 660033,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_RPGoldenLychee.bnk",
+   "sha256": "26833d7c9e60deffc776934c273a24415c662961d2639fbbf7a2a11351f3ef08",
+   "hircLenPos": 657024,
+   "hircLen": 283,
+   "targets": [
+    {
+     "cProps": 657141,
+     "objSizePos": 657099,
+     "objSize": 56
+    },
+    {
+     "cProps": 657075,
+     "objSizePos": 657033,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_ReactiveShop01.bnk",
+   "sha256": "350eea8e1fa6523ba00414e33d1f4495a48c703b5993f137a3492e568c58177e",
+   "hircLenPos": 732498,
+   "hircLen": 298,
+   "targets": [
+    {
+     "cProps": 732620,
+     "objSizePos": 732578,
+     "objSize": 66
+    },
+    {
+     "cProps": 732549,
+     "objSizePos": 732507,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_ReactiveShop01_Tier2.bnk",
+   "sha256": "033d72575a234639d43654728897202a5d0a2ba2378c48cdac5f89145c91ee72",
+   "hircLenPos": 666829,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 666880,
+     "objSizePos": 666838,
+     "objSize": 61
+    },
+    {
+     "cProps": 666946,
+     "objSizePos": 666904,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ring_T01.bnk",
+   "sha256": "0bd22b2225d894e1a9f9feff948d633b21fdd0bce14faab2594470bd2688da97",
+   "hircLenPos": 463737,
+   "hircLen": 218,
+   "targets": [
+    {
+     "cProps": 463781,
+     "objSizePos": 463746,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ring_T02.bnk",
+   "sha256": "8613de637d38b1edf5f6bc77927c32aa7315ccfc8f35c4feca2586c7f40bac72",
+   "hircLenPos": 520911,
+   "hircLen": 218,
+   "targets": [
+    {
+     "cProps": 520955,
+     "objSizePos": 520920,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ring_T03.bnk",
+   "sha256": "6c435e42b88ef2b9f6cd25fbe87e83628e3acb276df4e54e3a9c4f0b0c8caf66",
+   "hircLenPos": 519158,
+   "hircLen": 218,
+   "targets": [
+    {
+     "cProps": 519202,
+     "objSizePos": 519167,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Ringer.bnk",
+   "sha256": "a8863040aa8c78cdd0408131c76b393954cba0d9dc6f98961e845230b83e09ec",
+   "hircLenPos": 815115,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 815166,
+     "objSizePos": 815124,
+     "objSize": 61
+    },
+    {
+     "cProps": 815232,
+     "objSizePos": 815190,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_RubberDucky.bnk",
+   "sha256": "3062a4550073b2408108bab3873c3282cd914e22535a304bd05116708b3af1ae",
+   "hircLenPos": 746600,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 746703,
+     "objSizePos": 746668,
+     "objSize": 54
+    },
+    {
+     "cProps": 746644,
+     "objSizePos": 746609,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Rufous.bnk",
+   "sha256": "ff19a997cae9cfa8a0f6c2ab8061f1c9f6e25e19a270dc000e6b4dd30b0e4c1f",
+   "hircLenPos": 627282,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 627385,
+     "objSizePos": 627350,
+     "objSize": 54
+    },
+    {
+     "cProps": 627326,
+     "objSizePos": 627291,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Runestone_01.bnk",
+   "sha256": "a578bc661c580b4b7555391800495a7bdf1f1ab2c106bcc214109545fc5c8adf",
+   "hircLenPos": 408512,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 408556,
+     "objSizePos": 408521,
+     "objSize": 49
+    },
+    {
+     "cProps": 408610,
+     "objSizePos": 408575,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Runestone_02.bnk",
+   "sha256": "66aa8c88d78ec880719f477dc7c82b77087b3aaccffa4424f33b7ce09aacf916",
+   "hircLenPos": 535610,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 535708,
+     "objSizePos": 535673,
+     "objSize": 49
+    },
+    {
+     "cProps": 535654,
+     "objSizePos": 535619,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Runestone_03.bnk",
+   "sha256": "9a5584ba3d8c92f5b3c8d5815ce0e6cc092d493c2fd5a13cf9353148fe023ec7",
+   "hircLenPos": 515505,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 515549,
+     "objSizePos": 515514,
+     "objSize": 49
+    },
+    {
+     "cProps": 515603,
+     "objSizePos": 515568,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_S22_ESports_v4.bnk",
+   "sha256": "47fe2444b8799e9882b858b7cb602b6e5df7e4c3406763440cca501812ed2bb8",
+   "hircLenPos": 617510,
+   "hircLen": 278,
+   "targets": [
+    {
+     "cProps": 617561,
+     "objSizePos": 617519,
+     "objSize": 56
+    },
+    {
+     "cProps": 617622,
+     "objSizePos": 617580,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_S23RLC01.bnk",
+   "sha256": "c9ff91ad32e3fea5b8e0ca9a7218b47ff6f4a3b862aaf6d288581a51e57a888d",
+   "hircLenPos": 450757,
+   "hircLen": 373,
+   "targets": [
+    {
+     "cProps": 450860,
+     "objSizePos": 450825,
+     "objSize": 49
+    },
+    {
+     "cProps": 450914,
+     "objSizePos": 450879,
+     "objSize": 54
+    },
+    {
+     "cProps": 450801,
+     "objSizePos": 450766,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SARBPC.bnk",
+   "sha256": "d99c8b090eeedbef25949899630e2156ae437da51b14bbf0f4526513ef66e1a0",
+   "hircLenPos": 128658,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 128709,
+     "objSizePos": 128667,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Safe.bnk",
+   "sha256": "29644388e81b07a7983b90c2b83b282afbcf3261a02e5663cce7fd8cd48d1afc",
+   "hircLenPos": 568235,
+   "hircLen": 283,
+   "targets": [
+    {
+     "cProps": 568352,
+     "objSizePos": 568310,
+     "objSize": 56
+    },
+    {
+     "cProps": 568286,
+     "objSizePos": 568244,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season06_T1.bnk",
+   "sha256": "b118828ac9c05901bdf4961ff6c3f9cd79efa033641a48ebf20ecb20f2b231da",
+   "hircLenPos": 801289,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 801392,
+     "objSizePos": 801357,
+     "objSize": 54
+    },
+    {
+     "cProps": 801333,
+     "objSizePos": 801298,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season06_T2.bnk",
+   "sha256": "57a56a0fcc260529833dda68158a914ea72bc5a307b7f8e732a32fb94069e1c5",
+   "hircLenPos": 894651,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 894695,
+     "objSizePos": 894660,
+     "objSize": 54
+    },
+    {
+     "cProps": 894754,
+     "objSizePos": 894719,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season06_T3.bnk",
+   "sha256": "a59150204ff83d23852f2682513c1d3b0c0e7631d8c7c2198fc92a86a2b5ed13",
+   "hircLenPos": 934028,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 934131,
+     "objSizePos": 934096,
+     "objSize": 54
+    },
+    {
+     "cProps": 934072,
+     "objSizePos": 934037,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season10_T1.bnk",
+   "sha256": "35dd1d606cdf2f0d936417bc51aa43145e5b390e9b4545084b5aa8a4923e1bb5",
+   "hircLenPos": 839922,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 840025,
+     "objSizePos": 839990,
+     "objSize": 54
+    },
+    {
+     "cProps": 839966,
+     "objSizePos": 839931,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season10_T2.bnk",
+   "sha256": "f45c63b2290684c4a8fda891f40f7749d38bbcb3f8d9153e381d7d3fb50b3c37",
+   "hircLenPos": 932092,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 932195,
+     "objSizePos": 932160,
+     "objSize": 54
+    },
+    {
+     "cProps": 932136,
+     "objSizePos": 932101,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season10_T3.bnk",
+   "sha256": "72183905793b82c6791a093920c2e1e500e4876409f482200d1a6e866999dc77",
+   "hircLenPos": 936035,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 936079,
+     "objSizePos": 936044,
+     "objSize": 54
+    },
+    {
+     "cProps": 936138,
+     "objSizePos": 936103,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season17_T1.bnk",
+   "sha256": "f929eaedf4141ae594bcbbb0a1090439a044b2965b0ad462263abd23baec49bc",
+   "hircLenPos": 567474,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 567572,
+     "objSizePos": 567537,
+     "objSize": 49
+    },
+    {
+     "cProps": 567518,
+     "objSizePos": 567483,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season17_T2.bnk",
+   "sha256": "9dd78602f09428a14d81569b0f30c13cb313a9a7455102624390b5640c0c7214",
+   "hircLenPos": 613518,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 613616,
+     "objSizePos": 613581,
+     "objSize": 49
+    },
+    {
+     "cProps": 613562,
+     "objSizePos": 613527,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Season17_T3.bnk",
+   "sha256": "f1730169c49c51d52d5d1adff512acf0ee3855e0bf66fad881fac4ce00a72923",
+   "hircLenPos": 655587,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 655685,
+     "objSizePos": 655650,
+     "objSize": 49
+    },
+    {
+     "cProps": 655631,
+     "objSizePos": 655596,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SideSwipe.bnk",
+   "sha256": "f7cc5b8a45f05aa5ad263e0a4201a4d0b1d6d2e9491fd01bc7d21725223f9b8d",
+   "hircLenPos": 460759,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 460810,
+     "objSizePos": 460768,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Sideswipe_Calculated.bnk",
+   "sha256": "0f4fa47d09fe33b3d5eebd9f42191c7841134c9b65afb659d6b86712f4c486f0",
+   "hircLenPos": 582582,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 582626,
+     "objSizePos": 582591,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SimplePoof.bnk",
+   "sha256": "7ee22448a1d6146ed35c15ae0db8a6c13a163e9407d8d58a4aa5eae20f694c27",
+   "hircLenPos": 117292,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 117336,
+     "objSizePos": 117301,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SingleAtoms.bnk",
+   "sha256": "5811825c60aa52c09ae2d575c0676c0d6cac7bb199c95c2057ab6fd42742bb48",
+   "hircLenPos": 787216,
+   "hircLen": 313,
+   "targets": [
+    {
+     "cProps": 787333,
+     "objSizePos": 787291,
+     "objSize": 61
+    },
+    {
+     "cProps": 787267,
+     "objSizePos": 787225,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Skull.bnk",
+   "sha256": "9aa1748d47ad01553b251ec9d1c04c853543e076d401e0f34bd69f2f023889b7",
+   "hircLenPos": 451908,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 451952,
+     "objSizePos": 451917,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Solar.bnk",
+   "sha256": "3dee17997b0f69578fa4abc94740d973ebce2900b4203d4869655fc9b8ed482a",
+   "hircLenPos": 1040889,
+   "hircLen": 1066,
+   "targets": [
+    {
+     "cProps": 1041754,
+     "objSizePos": 1041719,
+     "objSize": 54
+    },
+    {
+     "cProps": 1041250,
+     "objSizePos": 1041222,
+     "objSize": 492
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Songbird.bnk",
+   "sha256": "860781c15892cbdff117977300704326d7f2808464a8b831f75100cc56377913",
+   "hircLenPos": 444715,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 444759,
+     "objSizePos": 444724,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SpaceSticker.bnk",
+   "sha256": "babdea618ea648b4072cffe024f8e31a38da178c88e149637ebf576010e38f18",
+   "hircLenPos": 417414,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 417458,
+     "objSizePos": 417423,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Spellbook.bnk",
+   "sha256": "84d9053db4edea61fc4a5a9591db63aff195da1070ed0c7df7a167613790d9da",
+   "hircLenPos": 711433,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 711536,
+     "objSizePos": 711501,
+     "objSize": 54
+    },
+    {
+     "cProps": 711477,
+     "objSizePos": 711442,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Sphenergy.bnk",
+   "sha256": "8cb98b0298ce071721adea579126cf42996720bb9dd5ee3894cda437c51af7b0",
+   "hircLenPos": 362464,
+   "hircLen": 293,
+   "targets": [
+    {
+     "cProps": 362581,
+     "objSizePos": 362539,
+     "objSize": 66
+    },
+    {
+     "cProps": 362515,
+     "objSizePos": 362473,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Sphere.bnk",
+   "sha256": "241530ce1ebed9c00660e4177c5ef3cd608fc11400e5798d54eadc6b7dcd4881",
+   "hircLenPos": 702971,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 703074,
+     "objSizePos": 703039,
+     "objSize": 54
+    },
+    {
+     "cProps": 703015,
+     "objSizePos": 702980,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SphereGulp01.bnk",
+   "sha256": "9912883ae868c66d801a2e8f1ab31e424cd86c47a965ce91dae90d1c81f18325",
+   "hircLenPos": 797246,
+   "hircLen": 293,
+   "targets": [
+    {
+     "cProps": 797368,
+     "objSizePos": 797326,
+     "objSize": 61
+    },
+    {
+     "cProps": 797297,
+     "objSizePos": 797255,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Sphexe.bnk",
+   "sha256": "e9146a894e5744d361390ab5a56fb480b21be2ecf1cf5f6405a815737cab15bc",
+   "hircLenPos": 615990,
+   "hircLen": 293,
+   "targets": [
+    {
+     "cProps": 616107,
+     "objSizePos": 616065,
+     "objSize": 66
+    },
+    {
+     "cProps": 616041,
+     "objSizePos": 615999,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Splash.bnk",
+   "sha256": "4ea763e6f1fb848b437c8cf6eb144e448872f0be38cf0d48f0ef2bcad4e3a161",
+   "hircLenPos": 636818,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 636869,
+     "objSizePos": 636827,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_SplitEnergy.bnk",
+   "sha256": "a67aea48708dae2890989812cf16e8ea8d644a6151ec707fa5dcc8a08b9efec3",
+   "hircLenPos": 504127,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 504230,
+     "objSizePos": 504195,
+     "objSize": 54
+    },
+    {
+     "cProps": 504171,
+     "objSizePos": 504136,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Stage.bnk",
+   "sha256": "2fe2712cdb8617cf5b9491f0089f076072368c08049651a972b2cba86f175ae5",
+   "hircLenPos": 570031,
+   "hircLen": 230,
+   "targets": [
+    {
+     "cProps": 570075,
+     "objSizePos": 570040,
+     "objSize": 92
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Starbeam.bnk",
+   "sha256": "e878014cb9c406eeaa976ee2020e7f890515c514a7e4cd0e649836c2f7449536",
+   "hircLenPos": 719999,
+   "hircLen": 338,
+   "targets": [
+    {
+     "cProps": 720050,
+     "objSizePos": 720008,
+     "objSize": 56
+    },
+    {
+     "cProps": 720111,
+     "objSizePos": 720069,
+     "objSize": 56
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Street.bnk",
+   "sha256": "d3746657fa84889b24a12e6f4f76284bd429bb07dcf04fa66486fe5871a55ac3",
+   "hircLenPos": 273258,
+   "hircLen": 298,
+   "targets": [
+    {
+     "cProps": 273380,
+     "objSizePos": 273338,
+     "objSize": 66
+    },
+    {
+     "cProps": 273309,
+     "objSizePos": 273267,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_StylizedFlame.bnk",
+   "sha256": "14a4676f641fc0184febbc684710ac0654f38ef80e2398aee654989a3805940e",
+   "hircLenPos": 510261,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 510359,
+     "objSizePos": 510324,
+     "objSize": 49
+    },
+    {
+     "cProps": 510305,
+     "objSizePos": 510270,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_StylizedSmoke.bnk",
+   "sha256": "8cb7c142dfedf1316b1319e088347d4059786e4a3ad432b3299381b9dbf5b900",
+   "hircLenPos": 561398,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 561442,
+     "objSizePos": 561407,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_TBM.bnk",
+   "sha256": "80f12f9d58531038f5b058a0260b8b6650f3148741b62f73629670b18758dcd0",
+   "hircLenPos": 722240,
+   "hircLen": 992,
+   "targets": [
+    {
+     "cProps": 722284,
+     "objSizePos": 722249,
+     "objSize": 59
+    },
+    {
+     "cProps": 722550,
+     "objSizePos": 722529,
+     "objSize": 520
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_TW.bnk",
+   "sha256": "d072f5395bb2913480abc88e624e0506e42b6021ef9781a0d4d5bbeda85fd185",
+   "hircLenPos": 792226,
+   "hircLen": 177,
+   "targets": [
+    {
+     "cProps": 792277,
+     "objSizePos": 792235,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Target.bnk",
+   "sha256": "aac6c147386aeaa0f410df8ea9956baa350ab31cd3e2c99e285f8314dcb4a128",
+   "hircLenPos": 1029689,
+   "hircLen": 472,
+   "targets": [
+    {
+     "cProps": 1029733,
+     "objSizePos": 1029698,
+     "objSize": 54
+    },
+    {
+     "cProps": 1029792,
+     "objSizePos": 1029757,
+     "objSize": 54
+    },
+    {
+     "cProps": 1029851,
+     "objSizePos": 1029816,
+     "objSize": 49
+    },
+    {
+     "cProps": 1029905,
+     "objSizePos": 1029870,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Team01.bnk",
+   "sha256": "72bf0d3d620b735fab093d40ee6478fa360cbbd6eaad82e3d9e8d626b046291f",
+   "hircLenPos": 393860,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 393904,
+     "objSizePos": 393869,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Techy.bnk",
+   "sha256": "48de45799e3d14b694fd752cbea8a1335a96954466d298a66794db7327c4a302",
+   "hircLenPos": 528548,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 528592,
+     "objSizePos": 528557,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Teepeed.bnk",
+   "sha256": "dbd0aaf08b228365b028e453aa2aefb5c31fa4231d4e316a743ee70a96c67dad",
+   "hircLenPos": 377005,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 377049,
+     "objSizePos": 377014,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Tmblr.bnk",
+   "sha256": "ecfeccc66c71f3d7cea71019b0db637df5f5e1dd9f10b22007d431c5ffc9a4fb",
+   "hircLenPos": 795728,
+   "hircLen": 987,
+   "targets": [
+    {
+     "cProps": 796513,
+     "objSizePos": 796478,
+     "objSize": 54
+    },
+    {
+     "cProps": 795974,
+     "objSizePos": 795953,
+     "objSize": 520
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Toon.bnk",
+   "sha256": "56cf6a1af869ed908c22079b562024655b7dd2218020395a9c5e5e1b9b9a85c1",
+   "hircLenPos": 366536,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 366580,
+     "objSizePos": 366545,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Toony.bnk",
+   "sha256": "06b085314b79a7ef6cd2ee967dd655740ecef287fbd3616aca6748280c1d9166",
+   "hircLenPos": 455965,
+   "hircLen": 175,
+   "targets": [
+    {
+     "cProps": 456009,
+     "objSizePos": 455974,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Top.bnk",
+   "sha256": "e03c4bdeea220b33106e95151470203880f2fe90bc7b7c88cb69e537211a32a4",
+   "hircLenPos": 947981,
+   "hircLen": 274,
+   "targets": [
+    {
+     "cProps": 948025,
+     "objSizePos": 947990,
+     "objSize": 54
+    },
+    {
+     "cProps": 948084,
+     "objSizePos": 948049,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Tornado.bnk",
+   "sha256": "0a704ec9ad93255242a4e404ca5216cf00a45b62449ef7250bd5ea548e52214d",
+   "hircLenPos": 1334534,
+   "hircLen": 714,
+   "targets": [
+    {
+     "cProps": 1335012,
+     "objSizePos": 1334977,
+     "objSize": 54
+    },
+    {
+     "cProps": 1334692,
+     "objSizePos": 1334671,
+     "objSize": 301
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Trex.bnk",
+   "sha256": "c9908f6cebf5fecd8095ca1f8132ad9a86eb845c30248dc162318f0c4f5c83c1",
+   "hircLenPos": 531549,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 531593,
+     "objSizePos": 531558,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_UFO.bnk",
+   "sha256": "bb3757b51c962544e76446a90e4ed242c0a6a98fab057c14e2e4515215c9056b",
+   "hircLenPos": 692579,
+   "hircLen": 264,
+   "targets": [
+    {
+     "cProps": 692677,
+     "objSizePos": 692642,
+     "objSize": 49
+    },
+    {
+     "cProps": 692623,
+     "objSizePos": 692588,
+     "objSize": 49
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_UmbraGenesis01.bnk",
+   "sha256": "347df2fc04a1a2d9995edea8f2759a0185ea02b3c019a693a830c112381f1dae",
+   "hircLenPos": 733234,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 733351,
+     "objSizePos": 733309,
+     "objSize": 61
+    },
+    {
+     "cProps": 733285,
+     "objSizePos": 733243,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Underworld.bnk",
+   "sha256": "b78ac27069cf363ecb2cd103942759d67f876e28dbebbee6492ac15bbfdf330f",
+   "hircLenPos": 566989,
+   "hircLen": 279,
+   "targets": [
+    {
+     "cProps": 567097,
+     "objSizePos": 567062,
+     "objSize": 54
+    },
+    {
+     "cProps": 567033,
+     "objSizePos": 566998,
+     "objSize": 59
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_VSpace.bnk",
+   "sha256": "afaf19529dc2a7902d347cf82bbf3336e9de25848acda1a48f50f52e867ee7b4",
+   "hircLenPos": 886239,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 886356,
+     "objSizePos": 886314,
+     "objSize": 61
+    },
+    {
+     "cProps": 886290,
+     "objSizePos": 886248,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_VoidGaze.bnk",
+   "sha256": "cb08ee3ce2adb4bc4921b5d680e4071d2b98ec85be0eef9f0712ca74f2b9bd4b",
+   "hircLenPos": 897381,
+   "hircLen": 288,
+   "targets": [
+    {
+     "cProps": 897432,
+     "objSizePos": 897390,
+     "objSize": 61
+    },
+    {
+     "cProps": 897498,
+     "objSizePos": 897456,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Voxel.bnk",
+   "sha256": "49840199e06bd6cc08b114d556dbfdcf4714ae59aa6fe4b256d22b5a5f19cd7b",
+   "hircLenPos": 515839,
+   "hircLen": 182,
+   "targets": [
+    {
+     "cProps": 515890,
+     "objSizePos": 515848,
+     "objSize": 66
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_WallBreak_T01.bnk",
+   "sha256": "f8e48cb3a1b01e37971f883b626770f7eb7497b097231f922d8bc24c0ddc141f",
+   "hircLenPos": 483757,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 483801,
+     "objSizePos": 483766,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_WallBreak_T02.bnk",
+   "sha256": "5ea0ce3f67b4f7c47cd56b24749be636bc14ef015613d592d1a3be3d0ec8a8f7",
+   "hircLenPos": 529801,
+   "hircLen": 170,
+   "targets": [
+    {
+     "cProps": 529845,
+     "objSizePos": 529810,
+     "objSize": 54
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_WarpSpeed.bnk",
+   "sha256": "2f963a535e248d9d90d4d99b024728a844cdb7a680441e49b43736a55b969def",
+   "hircLenPos": 517072,
+   "hircLen": 478,
+   "targets": [
+    {
+     "cProps": 517176,
+     "objSizePos": 517134,
+     "objSize": 71
+    },
+    {
+     "cProps": 517252,
+     "objSizePos": 517210,
+     "objSize": 61
+    }
+   ]
+  },
+  {
+   "bank": "SFX_GoalExplosion_Waypoint.bnk",
+   "sha256": "4b58184ef6ea9cb431b0f4e56c2548ff666831ff1d58890abe8db67a7216a292",
+   "hircLenPos": 645553,
+   "hircLen": 269,
+   "targets": [
+    {
+     "cProps": 645651,
+     "objSizePos": 645616,
+     "objSize": 54
+    },
+    {
+     "cProps": 645597,
+     "objSizePos": 645562,
+     "objSize": 49
+    }
+   ]
+  }
+ ]
+}

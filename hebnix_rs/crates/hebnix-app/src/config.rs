@@ -162,6 +162,20 @@ pub struct SpeedPatchCfg {
     pub items_page: bool,
 }
 
+/// Game Mods page settings
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameModsCfg {
+    /// Rocket League key name the forfeit command is bound to.
+    pub forfeit_key: String,
+    /// Rocket League key name the celebration command is bound to.
+    pub celebration_key: String,
+    /// Rocket League key name the bots in freeplay command is bound to.
+    pub bots_freeplay_key: String,
+    /// What Instant Suite does when a match ends: requeue, freeplay or menu.
+    pub instant_suite_mode: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplayUploadCfg {
@@ -362,6 +376,7 @@ pub struct Config {
     pub rl_launch: RlLaunchCfg,
     pub patcher: PatcherCfg,
     pub speed_patch: SpeedPatchCfg,
+    pub game_mods: GameModsCfg,
     pub replay_upload: ReplayUploadCfg,
     pub action_button: ActionButtonCfg,
     /// enabled state keyed by plugin slug

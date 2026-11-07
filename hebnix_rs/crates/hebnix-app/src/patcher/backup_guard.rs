@@ -68,6 +68,20 @@ fn discard_root(backups_dir: &Path) -> Result<(), String> {
 /// A missing marker is deliberately treated as untrusted when backup entries already exist.
 /// This makes upgrades from older Hebnix releases fail safe: an unknown backup can never be
 /// copied over files from a newer Rocket League build.
+/// Deletes the whole Backups folder. Patched files stay patched, but Hebnix can
+/// no longer restore them, so the game needs Verify game files to get clean ones.
+pub fn delete_backups(cooked_pc: &Path) -> Result<(), String> {
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before deleting backups.".into());
+    }
+    let root = cooked_pc.join("Backups");
+    match fs::remove_dir_all(&root) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Could not delete {}: {e}", root.display())),
+    }
+}
+
 pub fn synchronize_install(cooked_pc: &Path, backups_dir: &Path) -> Result<bool, String> {
     let root = backup_root(backups_dir);
     fs::create_dir_all(root).map_err(|e| format!("Could not create {}: {e}", root.display()))?;

@@ -596,6 +596,7 @@ fn navigation_icon(key: &str) -> egui::Image<'static> {
         "Spoofer" => egui::include_image!("../../assets/navigation/spoofer.svg"),
         "Colours" => egui::include_image!("../../assets/navigation/colours.svg"),
         "Items" | "UPK Studio" => egui::include_image!("../../assets/navigation/items.svg"),
+        "Game Mods" => egui::include_image!("../../assets/navigation/game_mods.svg"),
         "Plugins" => egui::include_image!("../../assets/navigation/plugins.svg"),
         "Replays" => egui::include_image!("../../assets/navigation/replays.svg"),
         "Settings" => egui::include_image!("../../assets/navigation/settings.svg"),
