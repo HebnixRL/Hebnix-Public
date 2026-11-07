@@ -145,6 +145,18 @@ pub struct HostReport {
     pub errors: Vec<String>,
 }
 
+/// the slot is missing or still the placeholder it started as
+fn is_placeholder(cooked: &Path, slot: &str) -> bool {
+    let dest = cooked.join(format!("{slot}.upk"));
+    let Ok(have) = fs::metadata(&dest) else { return true };
+    fs::metadata(cooked.join(PLACEHOLDER)).is_ok_and(|p| p.len() == have.len())
+}
+
+/// the slot holds some other map than `map`
+fn taken(cooked: &Path, slot: &str, map: &Path) -> bool {
+    !is_placeholder(cooked, slot) && !same_file(&cooked.join(format!("{slot}.upk")), map)
+}
+
 /// the slot file, only once it really holds the map. hosting a slot that still
 /// holds its placeholder loads an empty world and the game dies spawning the player
 pub fn filled(cooked: &Path, map: &Path) -> Option<PathBuf> {
@@ -167,7 +179,8 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
     let listed: Vec<String> = maps.iter().map(|m| m.path.to_string_lossy().into_owned()).collect();
     state.retain(|slot, path| {
         // the old two digit slot names are dropped with their copies
-        let keep = is_slot(slot) && listed.contains(path);
+        // a slot another map took (a synced host map) is the map's no more, it gets a new one below
+        let keep = is_slot(slot) && listed.contains(path) && !taken(cooked, slot, Path::new(path));
         if !keep {
             let _ = fs::remove_file(dir.join(format!("{slot}.udk")));
             if is_slot(slot) && same_file(&cooked.join(format!("{slot}.upk")), Path::new(path)) {
@@ -180,7 +193,12 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
         let path = map.path.to_string_lossy().into_owned();
         let slot = match state.iter().find(|(_, p)| **p == path) {
             Some((slot, _)) => slot.clone(),
-            None => match (1..=SLOTS).map(slot_name).find(|s| !state.contains_key(s)) {
+            None => match (1..=SLOTS)
+                .map(slot_name)
+                .filter(|s| !state.contains_key(s))
+                .find(|s| is_placeholder(cooked, s))
+                .or_else(|| (1..=SLOTS).map(slot_name).find(|s| !state.contains_key(s)))
+            {
                 Some(slot) => slot,
                 None => {
                     report.skipped += 1;
@@ -190,8 +208,11 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
         };
         let dest = cooked.join(format!("{slot}.upk"));
         if !ticked.contains(&path) {
-            // only a slot filled with this map goes back to its placeholder
-            if same_file(&dest, &map.path) {
+            // a right-click in the game loads the slot copy, so every map gets one where a
+            // hardlink is free (NTFS). only a slot still holding its placeholder is taken.
+            let placeholder = fs::metadata(cooked.join(PLACEHOLDER)).map(|m| m.len()).ok();
+            let free = dest.exists() && fs::metadata(&dest).map(|m| m.len()).ok() == placeholder && !same_file(&dest, &map.path);
+            if free && fs::remove_file(&dest).is_ok() && fs::hard_link(&map.path, &dest).is_err() {
                 release(cooked, &slot);
             }
             state.insert(slot, path);
@@ -276,6 +297,9 @@ pub fn place(cooked: &Path, slot: &str, map: &Path, title: &str) -> Result<Place
             UNTICKED.store(true, std::sync::atomic::Ordering::Relaxed);
             let name = own.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             crate::toast::report("slot-unticked", &format!("Unticked {name} to join {title}, it was in {slot}"), None, true);
+        } else if !same_file(&own, map) {
+            // the player's own map loses the slot and gets another on the next refresh
+            UNTICKED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
     let existed = dest.exists();
@@ -354,10 +378,10 @@ mod tests {
         assert_eq!(original(&cooked.join("hbx_slot002.upk")), Some(originals[1].clone()));
         assert_eq!(slot_of(&cooked, &originals[0]).as_deref(), Some("hbx_slot001"));
 
-        // unticking drops the copy and keeps the reserved name
+        // unticking keeps the copy, every map with a slot stays loadable from it
         set_ticked(&cooked, &originals[1], false).unwrap();
         assign_host(&cooked, &maps);
-        assert!(!cooked.join("hbx_slot002.upk").exists());
+        assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
         assert_eq!(slot_of(&cooked, &originals[1]).as_deref(), Some("hbx_slot002"));
         // dropping the first map frees its slot and keeps the second's
         let maps = vec![WorkshopMap { path: originals[1].clone(), ..map("two") }];
