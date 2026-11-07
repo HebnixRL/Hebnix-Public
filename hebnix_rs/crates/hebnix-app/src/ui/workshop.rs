@@ -979,6 +979,9 @@ impl WorkshopState {
             return;
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if crate::patcher::workshop_menu::downloader_on(&cooked) {
+            crate::preview_server::start(&self.manager.cache_dir);
+        }
         if std::mem::take(&mut self.downloads_stale) && crate::patcher::workshop_menu::downloader_on(&cooked) {
             let cooked = cooked.clone();
             std::thread::spawn(move || drop(ingame_menu::refresh(&cooked)));

@@ -97,10 +97,6 @@ pub struct Downloadable {
     pub downloads: u64,
 }
 
-/// The engine downloads and keeps every row's preview when the menu opens, so only the
-/// most downloaded maps get one (three pages of the grid).
-const DOWNLOAD_PREVIEWS: usize = 36;
-
 static DOWNLOADABLE: std::sync::Mutex<Vec<Downloadable>> = std::sync::Mutex::new(Vec::new());
 
 /// Remember the catalogue the in-game downloader lists (see `downloader_on`).
@@ -109,6 +105,17 @@ pub fn set_downloadable(mut maps: Vec<Downloadable>) {
     if let Ok(mut list) = DOWNLOADABLE.lock() {
         *list = maps;
     }
+    crate::preview_server::warm();
+}
+
+pub fn downloadable_ids() -> Vec<String> {
+    DOWNLOADABLE.lock().map(|list| list.iter().filter(|m| !m.preview_url.is_empty()).map(|m| m.id.clone()).collect()).unwrap_or_default()
+}
+
+/// the banner a catalogue map's thumbnail is made from
+pub fn downloadable_preview(id: &str) -> Option<String> {
+    let list = DOWNLOADABLE.lock().ok()?;
+    list.iter().find(|map| map.id == id).map(|map| map.preview_url.clone()).filter(|url| !url.is_empty())
 }
 
 /// Present while the downloader is on. It only works with the menu enabled.
@@ -919,7 +926,6 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields], downloads: &[Downloadable]
         })
         .collect();
     // "D" in Filename marks a row only the menu's downloader shows; FullPath is the catalogue id it asks for
-    let mut previews = 0;
     for map in downloads {
         let dir = map_dir_name(&map.id);
         if maps.iter().any(|m| m.path.parent().and_then(|p| p.file_name()).is_some_and(|n| *n == *dir)) {
@@ -935,9 +941,8 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields], downloads: &[Downloadable]
             "ItemPath": "",
             "Filename": "D",
             "FullPath": map.id,
-            "PreviewURL": if previews < DOWNLOAD_PREVIEWS { &map.preview_url } else { "" },
+            "PreviewURL": if !map.preview_url.is_empty() { crate::preview_server::url(&map.id) } else { String::new() },
         }));
-        previews += 1;
     }
     serde_json::json!({ "Items": items }).to_string()
 }

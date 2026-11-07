@@ -46,6 +46,7 @@ mod dpi_fix;
 mod dpi_fix;
 mod epic_connection;
 mod panel;
+mod preview_server;
 #[cfg(target_os = "windows")]
 mod hotkey;
 #[cfg(target_os = "linux")]
