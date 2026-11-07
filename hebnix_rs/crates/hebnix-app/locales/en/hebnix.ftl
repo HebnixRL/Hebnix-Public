@@ -1089,3 +1089,7 @@ multiplayer-rocket-league-is-starting = Rocket League is starting.
 spoofer-http-only = Uses the HTTP proxy only. The WebSocket bypass is no longer available.
 spoofer-http-proxy = HTTP Proxy
 spoofer-websocket-proxy = WebSocket Proxy
+
+## hosts file repair
+hosts-repair-done = [Hosts] The hosts file was not valid UTF-8 and was converted. Your original is saved at { $backup }.
+render-arena-look-note = Experimental. The arena you play keeps its own goals, boost pads and physics, only the scenery changes. Restore from Active changes below.

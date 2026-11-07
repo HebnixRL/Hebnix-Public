@@ -748,6 +748,17 @@ impl HebnixApp {
         let (tx, rx) = crossbeam_channel::unbounded::<AppMsg>();
         let (control_tx, control_rx) = crossbeam_channel::unbounded();
         crate::toast::install_sink(tx.clone(), cc.egui_ctx.clone());
+        #[cfg(windows)]
+        match crate::hosts_file::startup_repair() {
+            Some(Ok(backup)) => {
+                let _ = tx.send(AppMsg::Log(t_args(
+                    "hosts-repair-done",
+                    &[("backup", backup.display().to_string().into())],
+                )));
+            }
+            Some(Err(error)) => crate::toast::report_failed("hosts-repair", error),
+            None => {}
+        }
         crate::notifications::check_on_start(
             config.notification_id,
             tx.clone(),

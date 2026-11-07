@@ -373,6 +373,7 @@ fn main() -> eframe::Result {
     std::thread::spawn(move || maintenance::first_launch_shortcut(&shortcut_base));
     tracing::info!("startup single-instance guard acquired");
 
+    hosts_file::repair_at_startup();
     spoofer::restore_if_crashed(&base_dir);
     tracing::info!("checking legacy WebSocket cleanup");
     if let Err(error) = spoofer::cleanup_websocket_once(&base_dir) {

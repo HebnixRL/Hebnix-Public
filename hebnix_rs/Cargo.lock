@@ -2580,6 +2580,7 @@ dependencies = [
  "egui_extras",
  "embed-manifest",
  "embed-resource",
+ "encoding_rs",
  "evdev",
  "flate2",
  "fluent-bundle",
