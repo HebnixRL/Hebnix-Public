@@ -20,13 +20,28 @@ pub(crate) fn build_id(cooked_pc: &Path) -> Result<String, String> {
     .into_iter()
     .find(|path| path.is_file())
     .ok_or_else(|| format!("Could not find RocketLeague.exe below {}", root.display()))?;
+    // every patch asks for this several times and hashing the exe is most of their wait,
+    // so it is remembered until the exe's size or modified time changes
+    static CACHE: std::sync::Mutex<Option<(std::path::PathBuf, u64, Option<std::time::SystemTime>, String)>> =
+        std::sync::Mutex::new(None);
+    let meta = fs::metadata(&exe).ok();
+    let stamp = (meta.as_ref().map(|m| m.len()).unwrap_or(0), meta.and_then(|m| m.modified().ok()));
+    if let Some((path, len, modified, id)) = CACHE.lock().ok().and_then(|c| c.clone()) {
+        if path == exe && (len, modified) == stamp && modified.is_some() {
+            return Ok(id);
+        }
+    }
     let bytes = fs::read(&exe).map_err(|e| {
         format!(
             "Could not read {} to check backup compatibility: {e}",
             exe.display()
         )
     })?;
-    Ok(hex::encode(Sha256::digest(bytes)))
+    let id = hex::encode(Sha256::digest(bytes));
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((exe, stamp.0, stamp.1, id.clone()));
+    }
+    Ok(id)
 }
 
 fn backup_root<'a>(backups_dir: &'a Path) -> &'a Path {
