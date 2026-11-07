@@ -4,7 +4,7 @@
 //! A movie is stored as the RawData of an export in its GFX package. Only the
 //! vanilla movie is patched; the original package is kept in the backups
 //! folder and put back on restore.
-use super::{game_path, upk_package::UpkPackage};
+use super::{backup_guard, game_path, upk_package::UpkPackage};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -101,6 +101,15 @@ impl Movie {
             .is_ok_and(|swf| digest(&swf) == digest(self.patched))
     }
 
+    /// one marker per movie, so one movie's check can't vouch for the other's backup
+    fn marker(&self) -> String {
+        format!("{}.build.sha256", self.package)
+    }
+
+    fn is_backup(&self, name: &str) -> bool {
+        name == format!("{}.bak", self.package)
+    }
+
     /// not named like the package: the game scans subfolders and would load a
     /// same-named backup instead of the live file ("Ambiguous package name")
     fn backup_path(&self, backups: &Path) -> std::path::PathBuf {
@@ -134,6 +143,8 @@ impl Movie {
             ));
         }
         fs::create_dir_all(backups).map_err(|e| e.to_string())?;
+        // a backup from another game build is dropped, not restored over this one
+        backup_guard::prepare(cooked, backups, &self.marker(), |name| self.is_backup(name))?;
         if !backup.is_file() {
             fs::copy(&live, &backup).map_err(|e| format!("Could not back up {}: {e}", self.package))?;
         }
@@ -159,6 +170,7 @@ impl Movie {
             let _ = fs::remove_file(backup);
             return Ok(());
         }
+        backup_guard::check(cooked, backups, &self.marker(), |name| self.is_backup(name))?;
         let original =
             UpkPackage::load(&backup).map_err(|_| format!("No backup of {} to restore", self.package))?;
         if digest(&self.movie(&original)?) != self.vanilla {
@@ -167,6 +179,7 @@ impl Movie {
         fs::copy(&backup, game_path::resolve(cooked, self.package))
             .map_err(|e| format!("Could not restore {}: {e}", self.package))?;
         let _ = fs::remove_file(backup);
+        let _ = fs::remove_file(backups.join(self.marker()));
         Ok(())
     }
 }

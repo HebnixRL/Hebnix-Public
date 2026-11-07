@@ -279,6 +279,7 @@ impl MapManager {
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
+        // a map that replaced a stock one is taken out, the workshop folder replaces that
         let mods_dir = Path::new(rl_path)
             .join("TAGame")
             .join("CookedPCConsole")
@@ -453,6 +454,7 @@ const OK_COLOUR: egui::Color32 = egui::Color32::LIGHT_GREEN;
 const WARN_COLOUR: egui::Color32 = egui::Color32::from_rgb(0xf3, 0x9c, 0x12);
 
 /// a player's maps in one line: "Map", "Map + 2 more" or "no map replaced"
+/// a player's hosted map in one line, or "no map hosted"
 fn offer_map_summary(maps: &[SlotMap]) -> String {
     maps.iter()
         .find(|map| map.slot == HOSTING_SLOT)
@@ -489,11 +491,10 @@ fn player_header(ui: &egui::Ui, offer: &PeerOffer) -> egui::text::LayoutJob {
     job
 }
 
-/// a player's maps once their row is expanded, with install options
+/// a player's hosted map once their row is expanded, with the download
 fn render_player_maps(
     ui: &mut egui::Ui,
     offer: &PeerOffer,
-    mine: &serde_json::Map<String, Value>,
     workshop: &Path,
     busy: bool,
     install: &mut Option<(SlotMap, IpAddr, bool)>,
@@ -806,6 +807,8 @@ pub struct WorkshopState {
     background_changer: BackgroundChangerState,
     menu_map: MenuMapState,
     ingame_menu: InGameMenuState,
+    /// right-clicked map (catalog index) and where the menu opens
+    lan_menu: Option<(usize, egui::Pos2)>,
     /// connection state the LAN host file was last set for
     lan_synced: Option<bool>,
     startup_done: bool,
@@ -870,6 +873,7 @@ impl WorkshopState {
             background_changer: BackgroundChangerState::default(),
             menu_map: MenuMapState::default(),
             ingame_menu: InGameMenuState::default(),
+            lan_menu: None,
             lan_synced: None,
             startup_done: false,
             join_mismatch: None,
@@ -1136,7 +1140,7 @@ impl WorkshopState {
         }
         self.startup_done = true;
         // the game's sync button and ticks reach Hebnix through this, whatever tab is open
-        ingame_menu::watch_ticks(&cooked);
+        ingame_menu::watch_ticks();
         crate::patcher::workshop_menu::move_legacy_maps(&cooked);
         if crate::patcher::workshop_lan_trial::enabled(&cooked) && crate::patcher::workshop_slots::ensure_pool(&cooked) > 0 {
             crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
@@ -1181,7 +1185,7 @@ impl WorkshopState {
         if self.lan_synced != Some(connected) {
             self.lan_synced = Some(connected);
             ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
-            ingame_menu::watch_ticks(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"));
+            ingame_menu::watch_ticks();
             self.startup_sync(rl_path);
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
@@ -1291,8 +1295,11 @@ impl WorkshopState {
                 {
                     self.ingame_menu.start(&ctx, &cooked, true, tx);
                 }
-            }
-        });
+                if self.ingame_menu.busy() {
+                    ui.spinner();
+                }
+            });
+        }
         ui.add_space(4.0);
         let presentation = crate::theme::presentation(&ctx);
         let column_count = self.browse_columns(ui, presentation.as_deref());
@@ -1352,6 +1359,26 @@ impl WorkshopState {
                         });
                     }
                 });
+        }
+
+        if let Some((map_idx, pos)) = self.lan_menu {
+            let mut close = false;
+            let menu = egui::Area::new(egui::Id::new("workshop_lan_menu"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        if ui.button("Host over LAN").clicked() {
+                            action = Some((map_idx, CardAction::HostLan));
+                            close = true;
+                        }
+                    });
+                });
+            // any click outside the menu, or the button itself, closes it
+            let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !menu.response.rect.contains(p)));
+            if close || outside {
+                self.lan_menu = None;
+            }
         }
 
         if let Some((map_idx, act)) = action {
@@ -2491,7 +2518,7 @@ impl WorkshopState {
 
         let mut result = None;
 
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        let card = egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(230.0);
             ui.vertical_centered(|ui| {
                 // Image
@@ -2625,8 +2652,18 @@ impl WorkshopState {
                 });
             });
         });
+        self.card_menu(ui, card.response.rect, map_idx);
 
         result
+    }
+
+    /// open the LAN menu when a card is right-clicked
+    fn card_menu(&mut self, ui: &egui::Ui, rect: egui::Rect, idx: usize) {
+        let pos = ui.input(|i| i.pointer.secondary_clicked().then(|| i.pointer.interact_pos()).flatten());
+        if let Some(pos) = pos.filter(|pos| rect.contains(*pos)) {
+            tracing::info!(idx, "workshop: card right-clicked");
+            self.lan_menu = Some((idx, pos));
+        }
     }
 
     /// The targets a map is loaded on, the workshop folder included.
@@ -2820,6 +2857,7 @@ enum CardAction {
     InstallOrDownload,
     Unload,
     DeleteCache,
+    HostLan,
 }
 
 // Every tile reserves the same slots, including the optional cache action.
@@ -2856,7 +2894,7 @@ impl ThemedTileMetrics {
         let action_height = 28.0_f32.max(ui.spacing().interact_size.y)
             .max(text_height + ui.spacing().button_padding.y * 2.0 + 2.0);
         let delete_height = (small_height + ui.spacing().button_padding.y * 2.0 + 2.0).max(ui.spacing().interact_size.y);
-        let footer_height = if details { action_height + gap + action_height } else { small_height + gap + action_height + gap + action_height + gap + delete_height };
+        let footer_height = if details { action_height } else { small_height + gap + action_height + gap + delete_height };
         let body_height = title_height + gap + small_height + gap + footer_height;
         let min_height = if card.horizontal { image_height.max(body_height) } else { image_height + gap + body_height };
         Self { size: egui::vec2(width,card.height.max(min_height + padding * 2.0)), padding,
@@ -3024,6 +3062,7 @@ impl WorkshopState {
                                         ),
                                         egui::StrokeKind::Inside,
                                     );
+                                    self.card_menu(col, rect, idx);
                                     let inner = rect.shrink(metrics.padding);
                                     let mut tile = col.new_child(
                                         egui::UiBuilder::new()

@@ -1,4 +1,4 @@
-//! Experimental: show Rocket League's own Workshop menu on the Epic build and
+//! Show Rocket League's own Workshop menu on the Epic build and
 //! fill it from a local folder. Epic has no Steam community content interface,
 //! so the menu's item list is made config-loaded and its maps are written to
 //! TARLBot.ini, an ini the game already reads. LoadAllWorkshopMapData is
@@ -405,6 +405,10 @@ pub(super) fn avatar_name(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<
     // memory size counts object refs as 8 bytes: the statement holds five
     let (vanilla_memory, patched_memory) = (182, 162);
     let header = function.serial_offset + 40;
+    // another patch (the profile pictures dispatcher) owns the function: the author names stay as the game has them
+    if upk.read_int(header + 4)? > 114 {
+        return Ok(Vec::new());
+    }
     // the statement ends just before the loop's end and the return
     let at = header + 8 + 114 - 5 - vanilla.len();
     let current = upk.image.get(at..at + vanilla.len());
@@ -756,7 +760,16 @@ fn set_live(cooked: &Path, file: &str, values: Values, on: bool) -> Result<(), S
 
 fn set_all(cooked: &Path, on: bool) -> Result<(), String> {
     set_live(cooked, PACKAGE, tagame_values, on)?;
-    set_live(cooked, ENGINE, engine_values, false)
+    // loading Engine.upk is slow and the old patch only needs undoing once
+    let marker = cooked.join("Backups").join("workshop-engine-clean");
+    if marker.is_file() {
+        return Ok(());
+    }
+    set_live(cooked, ENGINE, engine_values, false)?;
+    if fs::create_dir_all(marker.parent().unwrap_or(cooked)).is_ok() {
+        let _ = fs::write(marker, b"");
+    }
+    Ok(())
 }
 
 fn ini_path() -> Result<PathBuf, String> {
@@ -829,9 +842,12 @@ fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
     let on = host_on(cooked);
     maps.iter()
         .map(|map| {
-            let lan = super::workshop_slots::filled(cooked, &map.path).unwrap_or_else(|| map.path.clone());
+            let slot = super::workshop_slots::filled(cooked, &map.path);
+            let in_slot = slot.is_some();
+            let lan = slot.unwrap_or_else(|| map.path.clone());
             let mut flags = String::new();
-            if ticked.contains(&*map.path.to_string_lossy()) {
+            // the menu loads the slot copy of a map flagged "t", which is every map that has one
+            if in_slot || ticked.contains(&*map.path.to_string_lossy()) {
                 flags.push('t');
             }
             if on {
@@ -900,13 +916,14 @@ pub fn apply(
         maps.len(),
         maps.iter().filter(|m| !m.preview_url.is_empty()).count(),
         ui.err().map(|e| format!(" (LAN controls not added: {e})")).unwrap_or_default()
-            + &lan.err().map(|e| format!(" (peer maps not enabled: {e})")).unwrap_or_default()
-    ))
+            + &lan.err().map(|e| format!(" (peer maps not enabled: {e})")).unwrap_or_default()    ))
 }
 
 pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
     super::workshop_lan_trial::set_mode(cooked, "off")?;
     super::item_name::workshop_description(cooked, backups, false)?;
+    // before the names go back: finding the block needs LoadFileToString
+    super::workshop_host::restore(cooked)?;
     set_all(cooked, false)?;
     super::workshop_menu_ui::restore(cooked, backups)?;
     write_list(cooked, &[])?;

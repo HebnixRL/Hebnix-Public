@@ -1,4 +1,4 @@
-//! Experimental page that turns on Rocket League's own Workshop menu on the
+//! Page that turns on Rocket League's own Workshop menu on the
 //! Epic build and fills it with maps from a local folder.
 use super::lan_mutators::{self, SETTINGS};
 use super::local_import::parse_workshop_vdf;
@@ -26,6 +26,8 @@ enum Job {
 pub struct InGameMenuState {
     folder: String,
     maps: Vec<WorkshopMap>,
+    /// index of the map chosen in the list
+    selected: usize,
     install: Option<PathBuf>,
     enabled: Option<Result<bool, String>>,
     status: String,
@@ -112,16 +114,9 @@ pub fn sync_lan(cooked: &Path, connected: bool) {
     }
 }
 
-/// the game folder the tick watcher applies ticks to
-static WATCHED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
-
-/// Apply the LAN ticks made in the game's Workshop menu. The menu logs each one
-/// to Launch.log, so a thread follows the log and ticks the map in Hebnix.
-pub fn watch_ticks(cooked: &Path) {
+/// Follow the game's Launch.log for the LAN browser's sync requests.
+pub fn watch_ticks() {
     static STARTED: std::sync::Once = std::sync::Once::new();
-    if let Ok(mut watched) = WATCHED.lock() {
-        *watched = Some(cooked.to_path_buf());
-    }
     STARTED.call_once(|| {
         std::thread::spawn(|| {
             let log = dirs::document_dir().map(|d| d.join("My Games/Rocket League/TAGame/Logs/Launch.log"));
@@ -130,7 +125,6 @@ pub fn watch_ticks(cooked: &Path) {
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let Some(log) = &log else { continue };
-                let Some(cooked) = WATCHED.lock().ok().and_then(|w| w.clone()) else { continue };
                 let Ok(len) = fs::metadata(log).map(|m| m.len()) else { continue };
                 // a new game launch starts a new log
                 if len < seen {
@@ -151,7 +145,6 @@ pub fn watch_ticks(cooked: &Path) {
                 let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { continue };
                 seen += end as u64 + 1;
                 let text = String::from_utf8_lossy(&bytes[..end]);
-                apply_ticks(&cooked, &text);
                 queue_sync(&text);
             }
         });
@@ -176,48 +169,6 @@ fn queue_sync(text: &str) {
 /// the map title of a sync asked for in the game, once
 pub fn take_sync_request() -> Option<String> {
     SYNC.lock().ok()?.take()
-}
-
-/// the last tick of each map in the log text, applied together
-fn apply_ticks(cooked: &Path, text: &str) {
-    let mut last: Vec<(PathBuf, bool)> = Vec::new();
-    for line in text.lines() {
-        let Some((_, rest)) = line.split_once("HBXTICK: [GFx] ") else { continue };
-        let Some((on, path)) = rest.trim().split_once(' ') else { continue };
-        let path = PathBuf::from(path.trim());
-        last.retain(|(p, _)| *p != path);
-        last.push((path, on == "true"));
-    }
-    // the log is shared by every install, so a tick belongs to the install its map is in
-    let mut installs: Vec<(PathBuf, Vec<(PathBuf, bool)>)> = Vec::new();
-    for (path, on) in last {
-        let owner = owning_cooked(&path).unwrap_or_else(|| cooked.to_path_buf());
-        match installs.iter_mut().find(|(c, _)| *c == owner) {
-            Some((_, ticks)) => ticks.push((path, on)),
-            None => installs.push((owner, vec![(path, on)])),
-        }
-    }
-    for (cooked, ticks) in installs {
-        for (path, on) in &ticks {
-            if let Err(e) = crate::patcher::workshop_slots::set_ticked(&cooked, path, *on) {
-                crate::toast::report_failed("lan-tick", &format!("LAN tick failed: {e}"));
-                return;
-            }
-        }
-        crate::toast::report("lan-tick", "Copying ticked maps for LAN...", None, false);
-        let done = match refresh(&cooked) {
-            Ok(_) => "LAN maps updated".to_string(),
-            Err(e) => format!("LAN update failed: {e}"),
-        };
-        crate::toast::report("lan-tick", &done, None, true);
-    }
-}
-
-/// the CookedPCConsole folder a map sits under
-fn owning_cooked(map: &Path) -> Option<PathBuf> {
-    map.ancestors()
-        .find(|a| a.file_name().is_some_and(|n| n.eq_ignore_ascii_case("CookedPCConsole")))
-        .map(Path::to_path_buf)
 }
 
 fn extension(path: &Path) -> String {
@@ -320,9 +271,19 @@ fn from_steam(maps: &mut [WorkshopMap], cooked: &Path) {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    // maps from Hebnix's folder already carry everything
+    // maps from Hebnix's folder already carry everything. one request each, so a big
+    // library goes eight at a time rather than one after the other
+    let ids: Vec<String> = maps.iter().filter(|m| m.preview_url.is_empty()).map(|m| m.id.to_string()).collect();
+    let mut fetched = Vec::with_capacity(ids.len());
+    for batch in ids.chunks(8) {
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = batch.iter().map(|id| scope.spawn(|| fetch_details(id))).collect();
+            fetched.extend(jobs.into_iter().map(|job| job.join().ok().and_then(Result::ok)));
+        });
+    }
+    let mut fetched = fetched.into_iter();
     for map in maps.iter_mut().filter(|m| m.preview_url.is_empty()) {
-        let Ok(details) = fetch_details(&map.id.to_string()) else { continue };
+        let Some(Some(details)) = fetched.next() else { continue };
         if map.author.is_empty() {
             match persona(&details.creator) {
                 Some(name) => {
@@ -367,6 +328,34 @@ fn slot_for_lan(cooked: &Path, maps: &[WorkshopMap]) {
     }
 }
 
+/// Make the maps in one workshop-folder directory joinable over LAN: copy (or
+/// hardlink) them into their slots and refresh the in-game list if it is on.
+pub(super) fn host_lan(cooked: &Path, dir: &str) -> Result<(), String> {
+    let folder = workshop_menu::maps_folder(cooked).join(dir);
+    let maps = all_maps(cooked);
+    let mine: Vec<_> = maps.iter().filter(|m| m.path.starts_with(&folder)).collect();
+    if mine.is_empty() {
+        return Err("the map is not in the Workshop folder".into());
+    }
+    for map in &mine {
+        crate::patcher::workshop_slots::set_ticked(cooked, &map.path, true)?;
+    }
+    slot_for_lan(cooked, &maps);
+    refresh(cooked)?;
+    // the path a right-click in the game's list would load: the slot copy, with the host settings named last
+    let slot = mine
+        .iter()
+        .find_map(|m| crate::patcher::workshop_slots::filled(cooked, &m.path))
+        .ok_or("the map is not in a LAN slot yet (all 128 are used, or the game holds its slot)")?;
+    if workshop_menu::read_host(cooked).is_none() {
+        return Err("LAN host settings are missing, open the in-game Workshop menu settings once".into());
+    }
+    let host = workshop_menu::host_path(cooked);
+    let text = format!("{}?{}", slot.display(), host.file_name().unwrap_or_default().to_string_lossy());
+    let run = crate::patcher::workshop_host::run_file(cooked);
+    std::fs::write(&run, text).map_err(|e| format!("Could not write {}: {e}", run.display()))
+}
+
 /// Rebuild the in-game list from the folder the menu was enabled with.
 /// Returns Ok(None) when the menu is not enabled.
 pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
@@ -405,23 +394,61 @@ impl InGameMenuState {
         }
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, connected: bool, tx: &Sender<AppMsg>) {
+    /// Collect a finished job and check the game's menu state once per install.
+    pub(super) fn tick(&mut self, ctx: &egui::Context, cooked: &Path) {
+        self.poll(cooked, ctx);
+        if self.install.as_deref() != Some(cooked) && self.pending.is_none() {
+            self.install = Some(cooked.to_path_buf());
+            self.enabled = None;
+            let cooked = cooked.to_path_buf();
+            self.spawn(ctx, move || Job::Status(workshop_menu::status(&cooked)));
+        }
+    }
+
+    /// Whether the menu is enabled, None while that is still being checked.
+    pub(super) fn is_enabled(&self) -> Option<bool> {
+        match &self.enabled {
+            Some(Ok(on)) => Some(*on),
+            _ => None,
+        }
+    }
+
+    pub(super) fn busy(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Patch the game to show the menu (or take it out again) and list the maps.
+    pub(super) fn start(&mut self, ctx: &egui::Context, cooked: &Path, enable: bool, tx: &Sender<AppMsg>) {
+        if self.busy() || crate::messages::block_item_action_if_game_running(tx) {
+            return;
+        }
+        self.status = "Patching TAGame.upk...".into();
+        let (cooked, backups) = (cooked.to_path_buf(), cooked.join("Backups"));
+        if enable {
+            let folder = workshop_menu::maps_folder(&cooked);
+            let mut maps = all_maps(&cooked);
+            self.spawn(ctx, move || {
+                from_steam(&mut maps, &cooked);
+                slot_for_lan(&cooked, &maps);
+                Job::Done(workshop_menu::apply(&cooked, &backups, &folder, &maps))
+            });
+        } else {
+            self.spawn(ctx, move || Job::Done(workshop_menu::restore(&cooked, &backups)));
+        }
+    }
+
+    /// `lan_only` drops the map list and the menu patch controls, leaving the LAN hosting settings.
+    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, connected: bool, lan_only: bool, tx: &Sender<AppMsg>) {
         let ctx = ui.ctx().clone();
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        let backups = cooked.join("Backups");
-        self.poll(&cooked, &ctx);
-        if self.install.as_ref() != Some(&cooked) && self.pending.is_none() {
-            self.install = Some(cooked.clone());
-            self.enabled = None;
-            let cooked = cooked.clone();
-            self.spawn(&ctx, move || Job::Status(workshop_menu::status(&cooked)));
-        }
+        self.tick(&ctx, &cooked);
         if self.folder.is_empty() {
             self.folder = workshop_menu::maps_folder(&cooked).to_string_lossy().into_owned();
             self.maps = all_maps(&cooked);
         }
 
-        ui.heading("In-game Workshop menu (experimental)");
+        if !lan_only {
+        ui.heading("In-game Workshop menu");
         ui.label(
             "Shows Rocket League's own Workshop button on the Epic version (Play, then the \
              offline modes) and lists the maps from a local folder, such as a Steam \
@@ -441,23 +468,29 @@ impl InGameMenuState {
                 self.maps = all_maps(&cooked);
             }
         });
-        ui.label(format!("{} maps found. Tick a map to make it joinable over LAN.", self.maps.len()));
+        ui.label(format!("{} maps found.", self.maps.len()));
         let mut toggled = None;
-        egui::ScrollArea::vertical()
-            .max_height(220.0)
-            .show(ui, |ui| {
-                let ticked = crate::patcher::workshop_slots::ticked(&cooked);
-                for map in &self.maps {
-                    let slot = crate::patcher::workshop_slots::slot_of(&cooked, &map.path)
-                        .map(|slot| format!("[{slot}] "))
-                        .unwrap_or_default();
-                    let mut on = ticked.contains(&map.path.to_string_lossy().into_owned());
-                    let label = format!("{slot}{}  {}", map.title, map.path.display());
-                    if ui.checkbox(&mut on, egui::RichText::new(label).monospace()).changed() {
-                        toggled = Some((map.path.clone(), on));
-                    }
+        if !self.maps.is_empty() {
+            let ticked = crate::patcher::workshop_slots::ticked(&cooked);
+            let is_on = |map: &WorkshopMap| ticked.contains(&map.path.to_string_lossy().into_owned());
+            let name = |map: &WorkshopMap| format!("{}{}", if is_on(map) { "[LAN] " } else { "" }, map.title);
+            self.selected = self.selected.min(self.maps.len() - 1);
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("ingame_menu_maps")
+                    .selected_text(name(&self.maps[self.selected]))
+                    .show_ui(ui, |ui| {
+                        for (index, map) in self.maps.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected, index, name(map));
+                        }
+                    });
+                let map = &self.maps[self.selected];
+                let on = is_on(map);
+                let text = if on { "Stop hosting over LAN" } else { "Host over LAN" };
+                if ui.button(text).clicked() {
+                    toggled = Some((map.path.clone(), !on));
                 }
             });
+        }
             if let Some((path, on)) = toggled {
                 let cooked = cooked.clone();
                 self.spawn(&ctx, move || {
@@ -476,22 +509,10 @@ impl InGameMenuState {
                 !busy && matches!(self.enabled, Some(Ok(true))),
                 egui::Button::new("Disable"),
             );
-            if (enable.clicked() || disable.clicked())
-                && !crate::messages::block_item_action_if_game_running(tx)
-            {
-                self.status = "Patching TAGame.upk...".into();
-                let (cooked, backups) = (cooked.clone(), backups.clone());
-                if enable.clicked() {
-                    let folder = workshop_menu::maps_folder(&cooked);
-                    let mut maps = all_maps(&cooked);
-                    self.spawn(&ctx, move || {
-                        from_steam(&mut maps, &cooked);
-                        slot_for_lan(&cooked, &maps);
-                        Job::Done(workshop_menu::apply(&cooked, &backups, &folder, &maps))
-                    });
-                } else {
-                    self.spawn(&ctx, move || Job::Done(workshop_menu::restore(&cooked, &backups)));
-                }
+            if enable.clicked() {
+                self.start(&ctx, &cooked, true, tx);
+            } else if disable.clicked() {
+                self.start(&ctx, &cooked, false, tx);
             }
             if busy {
                 ui.spinner();
