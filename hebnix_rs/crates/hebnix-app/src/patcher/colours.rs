@@ -24,7 +24,7 @@ const BLUE_COLOUR_BLIND: &str = "cdcccc3d0000803ecdcc4c3f0000803fcdcccc3d6666263
 const ORANGE_DEFAULT: &str = "61c3433f70cec83e39b4c83d0000803f79e9663f7cf2703e39b4c83d0000803f26e4633f26e4633f26e4633f0000803f";
 const ORANGE_COLOUR_BLIND: &str = "cdcc4c3f6666e63ecdcccc3d0000803f0000803f6666263f000000000000803f0000803f0000803f6666663f0000803f";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColourAction {
     Apply,
     /// Car colours from a preset, applied with the current stadium and HUD settings.
@@ -53,10 +53,10 @@ pub struct ColourSettings {
     pub heatseeker_glow: bool,
     pub heatseeker_max_speed: [u8; 3],
     pub car_colours: bool,
-    pub blue_primary: [u8; 3],
-    pub blue_accent: [u8; 3],
-    pub orange_primary: [u8; 3],
-    pub orange_accent: [u8; 3],
+    pub custom_colours: Vec<[u8; 3]>,
+    /// the single colour older builds saved; moved into `custom_colours` on load
+    #[serde(skip_serializing)]
+    custom_colour: Option<[u8; 3]>,
     pub applied: bool,
 }
 
@@ -115,30 +115,35 @@ impl Default for ColourSettings {
             heatseeker_glow: false,
             heatseeker_max_speed: [255, 64, 0],
             car_colours: false,
-            blue_primary: [255, 0, 0],
-            blue_accent: [255, 0, 0],
-            orange_primary: [255, 0, 0],
-            orange_accent: [255, 0, 0],
+            custom_colours: vec![[255, 0, 0]],
+            custom_colour: None,
             applied: false,
         }
     }
 }
 
 impl ColourSettings {
+    fn migrate(&mut self) {
+        if let Some(colour) = self.custom_colour.take() {
+            self.custom_colours = vec![colour];
+        }
+    }
+
     /// Custom car cells this settings block writes, or None when car colours are off.
     pub fn car_colours_patch(&self) -> Option<CarColours> {
-        self.car_colours.then_some(CarColours {
-            blue_primary: Some(self.blue_primary),
-            blue_accent: Some(self.blue_accent),
-            orange_primary: Some(self.orange_primary),
-            orange_accent: Some(self.orange_accent),
+        self.car_colours.then(|| CarColours {
+            extra: self.custom_colours.clone(),
+            ..CarColours::default()
         })
     }
 }
 
-/// Custom car colours by palette cell. A None cell is left as the game ships it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Custom car colours. A None cell adds nothing; equal colours share one palette cell.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CarColours {
+    /// further colours, offered for every set like the four above
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<[u8; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blue_primary: Option<[u8; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +198,7 @@ impl ColoursState {
         if !backups_dir.join(BACKUP_NAME).is_file() {
             settings.applied = false;
         }
+        settings.migrate();
         self.settings = settings;
         self.reload_ball_state(backups_dir);
         self.loaded_backups_dir = Some(backups_dir.to_path_buf());
@@ -297,10 +303,25 @@ impl ColoursState {
                     ui.checkbox(&mut self.settings.car_colours, t("render-apply-custom-car-colours"));
                     ui.weak(t("render-custom-car-colours-hint"));
                     ui.add_enabled_ui(self.settings.car_colours, |ui| {
-                        colour_row(ui, &t("colours-blue-primary"), &mut self.settings.blue_primary);
-                        colour_row(ui, &t("colours-blue-accent"), &mut self.settings.blue_accent);
-                        colour_row(ui, &t("colours-orange-primary"), &mut self.settings.orange_primary);
-                        colour_row(ui, &t("colours-orange-accent"), &mut self.settings.orange_accent);
+                        let label = t("colours-custom-colour");
+                        let mut remove = None;
+                        for (index, colour) in self.settings.custom_colours.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                colour_row(ui, &label, colour);
+                                if ui.small_button("✕").clicked() {
+                                    remove = Some(index);
+                                }
+                            });
+                        }
+                        if let Some(index) = remove {
+                            self.settings.custom_colours.remove(index);
+                        }
+                        // each colour takes one palette cell, the row is only so wide
+                        if self.settings.custom_colours.len() < MAX_CUSTOM_COLOURS
+                            && ui.button("+").clicked()
+                        {
+                            self.settings.custom_colours.push([255, 0, 0]);
+                        }
                     });
                 });
 
@@ -519,7 +540,7 @@ impl ColoursState {
         std::thread::Builder::new()
             .name("colours-patcher".into())
             .spawn(move || {
-                let result = match action {
+                let result = match action.clone() {
                     ColourAction::Apply => {
                         apply(&cooked_pc, &backups_dir, &settings, settings.car_colours_patch())
                     }
@@ -602,6 +623,8 @@ impl ColoursState {
         }
     }
 }
+
+const MAX_CUSTOM_COLOURS: usize = 12;
 
 fn colour_row(ui: &mut egui::Ui, label: &str, colour: &mut [u8; 3]) {
     ui.horizontal(|ui| {
@@ -1868,16 +1891,23 @@ impl Package {
         Ok(())
     }
 
-    /// Writes custom car colours into the bottom row of the team and accent sets.
-    /// Each cell sits `from_black` places left of pure black, where the picker selects it.
+    /// Adds custom car colours to the bottom row of the team and accent sets. Each distinct
+    /// colour takes one cell, counted left from pure black, in every set so the picker
+    /// offers it for primary and accent alike.
     fn apply_car_colours(&mut self, cars: &CarColours) -> Result<(), String> {
-        let cells = [
-            ("BlueTeamV3", 1, cars.blue_primary),
-            ("OrangeTeamV3", 1, cars.orange_primary),
-            ("Accent", 1, cars.blue_accent),
-            ("Accent", 2, cars.orange_accent),
-        ];
-        let expected = cells.iter().filter(|(_, _, colour)| colour.is_some()).count();
+        let mut picked: Vec<[u8; 3]> = Vec::new();
+        for colour in [cars.blue_primary, cars.orange_primary, cars.blue_accent, cars.orange_accent]
+            .into_iter()
+            .flatten()
+            .chain(cars.extra.iter().copied())
+        {
+            if !picked.contains(&colour) {
+                picked.push(colour);
+            }
+        }
+        let required = ["BlueTeamV3", "OrangeTeamV3", "Accent"];
+        let optional = ["CustomTeam"];
+        let expected = picked.len() * required.len();
         let mut written = 0;
         for export in self.exports.clone() {
             if self.class_of(export).map(strip_suffix) != Some("CarColorSet_TA") {
@@ -1887,6 +1917,10 @@ impl Package {
                 continue;
             };
             let set = strip_suffix(object_name).to_string();
+            let counted = required.contains(&set.as_str());
+            if !counted && !optional.contains(&set.as_str()) {
+                continue;
+            }
             let props = self.parse_props(export);
             let hue = props.iter().find(|prop| prop.name == "HueCount");
             let colours = props.iter().find(|prop| prop.name == "Colors");
@@ -1903,22 +1937,24 @@ impl Package {
             )?;
             let row =
                 export.serial_offset + colours.value_offset + 4 + (colour_count - hue_count) * 16;
-            for (name, from_black, colour) in cells {
-                let Some(colour) = colour else { continue };
-                if set != name || from_black >= hue_count {
+            for (index, colour) in picked.iter().enumerate() {
+                let from_black = index + 1;
+                if from_black >= hue_count {
                     continue;
                 }
                 let base = row + (hue_count - from_black - 1) * 16;
-                write_rgb(&mut self.image, base, colour)?;
+                write_rgb(&mut self.image, base, *colour)?;
                 self.image[base + 12..base + 16].copy_from_slice(&1.0f32.to_le_bytes());
-                if let Some(index) = self
+                if let Some(chunk) = self
                     .chunks
                     .iter()
                     .position(|chunk| base >= chunk.u_off && base < chunk.u_off + chunk.u_size)
                 {
-                    self.modified_chunks.insert(index);
+                    self.modified_chunks.insert(chunk);
                 }
-                written += 1;
+                if counted {
+                    written += 1;
+                }
             }
         }
         if written != expected {
