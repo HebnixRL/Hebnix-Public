@@ -209,6 +209,7 @@ rep(r""" f'  trait slot {q("hbxTicks")} type {q("Object")} end\n')""", r""" f'  
  f'  trait slot {q("hbxCards")} type {q("Array")} end\n'
  f'  trait slot {q("hbxRows")} type {q("Array")} end\n'
  f'  trait slot {q("hbxPageLbl")} type {fq("flash.text","TextField")} end\n'
+ f'  trait slot {q("hbxFoot")} type {fq("flash.text","TextField")} end\n'
  f'  trait slot {q("hbxPage")} type {q("int")} end\n'
  f'  trait slot {q("hbxSel")} type {q("int")} end\n'
  f'  trait slot {q("hbxAsked")} type {q("Object")} end\n')""")
@@ -223,5 +224,5 @@ rep("  (CLICK_OLD,CLICK_NEW),", "  (CLICK_OLD,CLICK_NEW),\n  (WIC,WIC_NEW),")
 rep("menu='menus/WorkshopMenu.class.asasm'", r"""menu='menus/WorkshopMenu.class.asasm'
 WIC='      coerce              QName(PackageNamespace(""), "Array")\n      setlocal1\n\n      getlocal0\n      getproperty         QName(PackageNamespace(""), "workshopItemsList")\n      findpropstrict      QName(PackageNamespace("scaleform.clik.data"), "DataProvider")\n'
 WIC_NEW=WIC.replace('      getlocal0\n', f'      getlocal0\n      getlocal1\n      callproperty        {q("hbxVisible")}, 1\n      coerce              {q("Array")}\n      setlocal1\n\n      getlocal0\n', 1)""")
-rep("build('v20',{", "build('v23',{")
+rep("build('v20',{", "build('v24',{")
 open(path, 'w', encoding='utf-8').write(s)
