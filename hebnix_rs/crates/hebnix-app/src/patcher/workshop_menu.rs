@@ -87,6 +87,48 @@ pub struct WorkshopMap {
     pub preview_url: String,
 }
 
+/// A catalogue map the in-game downloader offers.
+#[derive(Clone)]
+pub struct Downloadable {
+    pub id: String,
+    pub title: String,
+    pub author: String,
+    pub preview_url: String,
+    pub downloads: u64,
+}
+
+/// The engine downloads and keeps every row's preview when the menu opens, so only the
+/// most downloaded maps get one (three pages of the grid).
+const DOWNLOAD_PREVIEWS: usize = 36;
+
+static DOWNLOADABLE: std::sync::Mutex<Vec<Downloadable>> = std::sync::Mutex::new(Vec::new());
+
+/// Remember the catalogue the in-game downloader lists (see `downloader_on`).
+pub fn set_downloadable(mut maps: Vec<Downloadable>) {
+    maps.sort_by_key(|map| (std::cmp::Reverse(map.downloads), map.title.to_lowercase()));
+    if let Ok(mut list) = DOWNLOADABLE.lock() {
+        *list = maps;
+    }
+}
+
+/// Present while the downloader is on. It only works with the menu enabled.
+const DOWNLOADER: &str = "WorkshopMenu.downloader";
+
+pub fn downloader_on(cooked: &Path) -> bool {
+    cooked.join("Backups").join(DOWNLOADER).is_file()
+}
+
+pub fn set_downloader(cooked: &Path, on: bool) -> Result<(), String> {
+    let marker = cooked.join("Backups").join(DOWNLOADER);
+    if on {
+        fs::create_dir_all(cooked.join("Backups")).map_err(|e| e.to_string())?;
+        fs::write(marker, b"on").map_err(|e| e.to_string())
+    } else {
+        let _ = fs::remove_file(marker);
+        Ok(())
+    }
+}
+
 struct Targets {
     class_flags: usize,
     config_name: usize,
@@ -859,8 +901,8 @@ fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
 }
 
 /// {"Items":[...]} for DecodeObject, field names as in DownloadedWorkshopData.
-fn list_json(maps: &[WorkshopMap], lan: &[LanFields]) -> String {
-    let items: Vec<_> = maps
+fn list_json(maps: &[WorkshopMap], lan: &[LanFields], downloads: &[Downloadable]) -> String {
+    let mut items: Vec<_> = maps
         .iter()
         .zip(lan)
         .map(|(map, lan)| {
@@ -876,6 +918,27 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields]) -> String {
             })
         })
         .collect();
+    // "D" in Filename marks a row only the menu's downloader shows; FullPath is the catalogue id it asks for
+    let mut previews = 0;
+    for map in downloads {
+        let dir = map_dir_name(&map.id);
+        if maps.iter().any(|m| m.path.parent().and_then(|p| p.file_name()).is_some_and(|n| *n == *dir)) {
+            continue;
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&map.id, &mut hash);
+        items.push(serde_json::json!({
+            "ItemID": std::hash::Hasher::finish(&hash) >> 11,
+            "Title": map.title,
+            "Description": "Download with Hebnix",
+            "AuthorName": if map.author.is_empty() { "Hebnix" } else { &map.author },
+            "ItemPath": "",
+            "Filename": "D",
+            "FullPath": map.id,
+            "PreviewURL": if previews < DOWNLOAD_PREVIEWS { &map.preview_url } else { "" },
+        }));
+        previews += 1;
+    }
     serde_json::json!({ "Items": items }).to_string()
 }
 
@@ -884,7 +947,8 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields]) -> String {
 pub fn write_list(cooked: &Path, maps: &[WorkshopMap]) -> Result<(), String> {
     let _ = fs::remove_file(cooked.parent().unwrap_or(cooked).join("HebnixWorkshop.json"));
     let lan = lan_fields(cooked, maps);
-    fs::write(list_path(cooked), list_json(maps, &lan)).map_err(|e| format!("Could not write the map list: {e}"))?;
+    let downloads = if downloader_on(cooked) { DOWNLOADABLE.lock().map(|l| l.clone()).unwrap_or_default() } else { Vec::new() };
+    fs::write(list_path(cooked), list_json(maps, &lan, &downloads)).map_err(|e| format!("Could not write the map list: {e}"))?;
     let path = ini_path()?;
     let old = fs::read_to_string(&path).unwrap_or_default();
     if let Some(parent) = path.parent() {
@@ -932,7 +996,22 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
     let _ = fs::remove_file(parked_path(cooked));
     let _ = fs::remove_dir_all(cooked.join(OLD_PREVIEWS));
     let _ = fs::remove_file(backups.join(ENABLED));
+    let _ = fs::remove_file(backups.join(DOWNLOADER));
     Ok("Workshop menu restored".into())
+}
+
+/// Put the current in-game menu movie in when the menu is on, so a newer Hebnix's
+/// downloader shows up without clicking Enable again. Skipped while the game runs.
+/// Err carries a message to show the player.
+pub fn upgrade_movie(cooked: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    if enabled_folder(&backups).is_none() {
+        return Ok(());
+    }
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Restart Rocket League to get the new Workshop menu".into());
+    }
+    super::workshop_menu_ui::apply(cooked, &backups)
 }
 
 /// Put the patch back after another feature rewrote TAGame.upk from a backup.
@@ -979,7 +1058,7 @@ mod tests {
         }];
         let lan = [LanFields { item_path: format!("{}?{HOST}", maps[0].path.display()), flags: "t".into() }];
         let out = with_section(ini, &maps, &lan);
-        let json: serde_json::Value = serde_json::from_str(&list_json(&maps, &lan)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&list_json(&maps, &lan, &[])).unwrap();
         assert_eq!(json["Items"][0]["Filename"], "t");
         assert_eq!(json["Items"][0]["FullPath"], r"E:\maps\7\n.udk");
         assert_eq!(json["Items"][0]["AuthorName"], "Local");

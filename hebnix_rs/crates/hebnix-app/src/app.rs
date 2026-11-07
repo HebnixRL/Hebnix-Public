@@ -7334,6 +7334,9 @@ impl eframe::App for HebnixApp {
         // peers' map names and the game's sync button need this on every tab, hidden or not
         let join_rl_path = self.config.settings.rl_path.clone();
         self.workshop.startup_sync(&join_rl_path);
+        self.workshop.auto_connect(&join_rl_path, &self.tx.clone(), ctx);
+        self.workshop.poll_downloads(&join_rl_path, &self.tx.clone(), ctx);
+        self.workshop.panel_mode = self.panel.active;
         self.workshop.render_join_prompt(ctx, &join_rl_path);
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
         self.render_plugin_windows(ctx);

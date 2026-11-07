@@ -146,6 +146,7 @@ pub fn watch_ticks() {
                 seen += end as u64 + 1;
                 let text = String::from_utf8_lossy(&bytes[..end]);
                 queue_sync(&text);
+                queue_downloads(&text);
             }
         });
     });
@@ -164,6 +165,23 @@ fn queue_sync(text: &str) {
         *request = Some(title);
     }
     crate::toast::report("slot-sync", "Syncing map slots...", None, false);
+}
+
+static DOWNLOADS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// the Workshop menu's downloader logs the catalogue id of each map picked
+fn queue_downloads(text: &str) {
+    let Ok(mut queue) = DOWNLOADS.lock() else { return };
+    for id in text.lines().filter_map(|line| line.split_once("HBXDL: [GFx] ").map(|(_, id)| id.trim())) {
+        if !id.is_empty() && !queue.iter().any(|queued| queued == id) {
+            queue.push(id.to_string());
+        }
+    }
+}
+
+/// catalogue ids picked in the game's downloader since the last call
+pub fn take_download_requests() -> Vec<String> {
+    DOWNLOADS.lock().map(|mut queue| std::mem::take(&mut *queue)).unwrap_or_default()
 }
 
 /// the map title of a sync asked for in the game, once
@@ -502,7 +520,7 @@ impl InGameMenuState {
         let busy = self.pending.is_some();
         ui.horizontal(|ui| {
             let enable = ui.add_enabled(
-                !busy && !self.maps.is_empty(),
+                !busy && (!self.maps.is_empty() || workshop_menu::downloader_on(&cooked)),
                 egui::Button::new("Enable / update map list"),
             );
             let disable = ui.add_enabled(
@@ -520,6 +538,24 @@ impl InGameMenuState {
         });
         if !self.status.is_empty() {
             ui.label(&self.status);
+        }
+
+        let mut downloader = workshop_menu::downloader_on(&cooked);
+        let menu_on = matches!(self.enabled, Some(Ok(true)));
+        if ui
+            .add_enabled(menu_on && !busy, egui::Checkbox::new(&mut downloader, "Map downloader in the game's Workshop menu"))
+            .on_hover_text("Press the left stick (L3) in the Workshop menu to open a grid of Hebnix's maps and download one. Needs the menu enabled.")
+            .changed()
+        {
+            let _ = workshop_menu::set_downloader(&cooked, downloader);
+            let cooked = cooked.clone();
+            self.spawn(&ctx, move || {
+                let moved = workshop_menu::upgrade_movie(&cooked);
+                Job::Done(refresh(&cooked).and_then(|_| moved).map(|_| {
+                    if downloader { "Downloader on. Press L3 in the game's Workshop menu.".into() } else { "Downloader off.".into() }
+                }))
+            });
+        }
         }
 
         if !self.lan.loaded {

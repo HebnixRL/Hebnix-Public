@@ -137,10 +137,13 @@ impl Movie {
             return Ok(());
         }
         if current != self.vanilla {
-            return Err(format!(
-                "the game's {} movie is not the version Hebnix patches (sha256 {current})",
-                self.package
-            ));
+            // an older build of our own movie: patch the pristine backup again
+            let pristine = UpkPackage::load(&backup)
+                .ok()
+                .filter(|saved| self.movie(saved).is_ok_and(|swf| digest(&swf) == self.vanilla));
+            upk = pristine.ok_or_else(|| {
+                format!("the game's {} movie is not the version Hebnix patches (sha256 {current})", self.package)
+            })?;
         }
         fs::create_dir_all(backups).map_err(|e| e.to_string())?;
         // a backup from another game build is dropped, not restored over this one

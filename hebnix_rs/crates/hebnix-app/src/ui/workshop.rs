@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -73,6 +73,21 @@ fn get_retry(url: &str, timeout: Duration) -> Result<ureq::Response, String> {
 // ureq's .timeout() caps the whole request including reading the body, so a big
 // map on a slow link died with "timed out reading response" even while bytes
 // were still coming in. downloads only time out on connect and on a stalled read.
+/// bytes of the map being downloaded (the last one started) and its size, 0 when unknown
+static MAP_DL_DONE: AtomicU64 = AtomicU64::new(0);
+static MAP_DL_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// counts what is read into MAP_DL_DONE
+struct Counting<R>(R);
+
+impl<R: Read> Read for Counting<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(buf)?;
+        MAP_DL_DONE.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
 fn get_download(url: &str) -> Result<ureq::Response, String> {
     let mut last = String::new();
     for attempt in 0..3 {
@@ -341,10 +356,12 @@ impl MapManager {
         }
 
         let resp = get_download(&url)?;
+        MAP_DL_DONE.store(0, Ordering::Relaxed);
+        MAP_DL_TOTAL.store(resp.header("Content-Length").and_then(|n| n.parse().ok()).unwrap_or(0), Ordering::Relaxed);
         let copied = std::fs::File::create(&zip_path)
             .map_err(|e| e.to_string())
             .and_then(|mut out| {
-                std::io::copy(&mut resp.into_reader(), &mut out).map_err(|e| e.to_string())
+                std::io::copy(&mut Counting(resp.into_reader()), &mut out).map_err(|e| e.to_string())
             });
         if let Err(e) = copied {
             let _ = std::fs::remove_file(&zip_path);
@@ -799,6 +816,8 @@ pub struct WorkshopState {
     pub target: String,
     pub images: HashMap<String, ImageState>,
     pub busy: HashSet<String>,
+    /// the catalogue changed, so the in-game downloader's list needs rewriting
+    downloads_stale: bool,
     pub catalog_status: String,
     pub fetched: bool,
     pub confirm_delete: Option<Value>,
@@ -886,6 +905,7 @@ impl WorkshopState {
             target: WORKSHOP_TARGET.to_string(),
             images: HashMap::new(),
             busy: HashSet::new(),
+            downloads_stale: false,
             catalog_status: t("catalog-loading-catalog").to_string(),
             fetched: false,
             confirm_delete: None,
@@ -1168,6 +1188,9 @@ impl WorkshopState {
             crate::toast::report("slot-pool", "LAN map slots created, restart Rocket League once to use them", None, true);
         }
         std::thread::spawn(move || {
+            if let Err(e) = crate::patcher::workshop_menu::upgrade_movie(&cooked) {
+                crate::toast::report("workshop-ui", &format!("[Workshop] {e}"), None, true);
+            }
             let _ = ingame_menu::refresh(&cooked);
         });
     }
