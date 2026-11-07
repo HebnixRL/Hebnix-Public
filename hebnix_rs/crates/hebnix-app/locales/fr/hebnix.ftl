@@ -744,3 +744,6 @@ speed-patch-description = Met à l'échelle les vitesses de défilement et de ro
 speed-patch-multiplier = Vitesse
 speed-patch-roundtrip-mismatch = Incohérence de l'aller-retour du patch de vitesse
 app-speed-patch = Vitesse d'animation
+
+nav-scoreboard = Tableau des scores
+scoreboard-show-mmr = Afficher le MMR

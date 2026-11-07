@@ -435,32 +435,38 @@ impl BackgroundChangerState {
             self.refresh(rl_path);
         }
         let ctx = ui.ctx().clone();
-        ui.heading(t("nav-arena-backgrounds"));
-        ui.label(t("render-keep-an-arena-s-gameplay-and"));
-        ui.small(t("render-approved-sources-are-filtered-to-keep"));
-        if let Ok(path) = crate::patcher::background_merger::custom_backgrounds_dir() {
-            ui.small(t_args(
-                "render-custom-backgrounds-are-loaded-from-path",
-                &[("path", path.display().to_string().into())],
-            ));
-        }
-        ui.add_space(8.0);
-        ui.colored_label(
-            egui::Color32::from_rgb(230, 170, 60),
-            t("render-close-rocket-league-before-applying-or"),
-        );
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(t("nav-arena-backgrounds"));
+            ui.separator();
+            ui.label(t("render-keep-an-arena-s-gameplay-and"));
+            ui.small(t("render-approved-sources-are-filtered-to-keep"));
+            if let Ok(path) = crate::patcher::background_merger::custom_backgrounds_dir() {
+                ui.small(t_args(
+                    "render-custom-backgrounds-are-loaded-from-path",
+                    &[("path", path.display().to_string().into())],
+                ));
+            }
+            ui.add_space(8.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 170, 60),
+                t("render-close-rocket-league-before-applying-or"),
+            );
+        });
         ui.add_space(12.0);
 
-        if self.installed_hosts.is_empty() {
-            ui.label(t("render-no-supported-arena-packages-were-found"));
-            if ui.button(t("render-scan-again")).clicked() {
-                self.refresh(rl_path);
+        let has_arenas = !self.installed_hosts.is_empty();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(t("render-apply-background"));
+            ui.separator();
+            if !has_arenas {
+                ui.label(t("render-no-supported-arena-packages-were-found"));
+                if ui.button(t("render-scan-again")).clicked() {
+                    self.refresh(rl_path);
+                }
+                return;
             }
-            return;
-        }
-
-        ui.group(|ui| {
-            ui.set_min_width(520.0);
             ui.label(t("render-when-you-play"));
             egui::ComboBox::from_id_salt("background_host")
                 .selected_text(Self::display_name(&self.host))
@@ -612,6 +618,10 @@ impl BackgroundChangerState {
             }
         });
 
+        if !has_arenas {
+            return;
+        }
+
         if self.apply_all_prompt {
             let targets = self.bulk_targets().len();
             let skipped = self.installed_existing_change_count();
@@ -655,54 +665,60 @@ impl BackgroundChangerState {
         }
 
         ui.add_space(10.0);
-        if self.busy {
-            ui.spinner();
-        }
-        ui.label(&self.status);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Status");
+            ui.separator();
+            if self.busy {
+                ui.spinner();
+            }
+            ui.label(&self.status);
+        });
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        let mut restore = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.heading(t("render-active-changes"));
+            ui.separator();
             if ui.button(t("btn-refresh")).clicked() {
                 self.refresh(rl_path);
             }
-        });
-
-        let mut restore = None;
-        let mut rows: Vec<_> = self
-            .active
-            .iter()
-            .map(|(host, swap)| (host.clone(), swap.donor.clone()))
-            .collect();
-        rows.sort_by(|a, b| Self::display_name(&a.0).cmp(&Self::display_name(&b.0)));
-        if rows.is_empty() {
-            ui.label(t("render-no-arena-backgrounds-are-changed"));
-        } else {
-            egui::Grid::new("active_background_changes")
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong(t("render-arena"));
-                    ui.strong(t("render-borrowed-background"));
-                    ui.end_row();
-                    for (host, donor) in rows {
-                        ui.label(Self::display_name(&host));
-                        ui.label(Self::display_name(&donor));
-                        if ui
-                            .add_enabled(!self.busy, egui::Button::new(t("app-restore")))
-                            .clicked()
-                        {
-                            restore = Some(host);
-                        }
+            let mut rows: Vec<_> = self
+                .active
+                .iter()
+                .map(|(host, swap)| (host.clone(), swap.donor.clone()))
+                .collect();
+            rows.sort_by(|a, b| Self::display_name(&a.0).cmp(&Self::display_name(&b.0)));
+            if rows.is_empty() {
+                ui.label(t("render-no-arena-backgrounds-are-changed"));
+            } else {
+                egui::Grid::new("active_background_changes")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong(t("render-arena"));
+                        ui.strong(t("render-borrowed-background"));
                         ui.end_row();
-                    }
-                });
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!self.busy, egui::Button::new(t("app-restore-all")))
-                .clicked()
-            {
-                self.launch("reset", rl_path, None, None, tx, &ctx);
+                        for (host, donor) in rows {
+                            ui.label(Self::display_name(&host));
+                            ui.label(Self::display_name(&donor));
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new(t("app-restore")))
+                                .clicked()
+                            {
+                                restore = Some(host);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new(t("app-restore-all")))
+                    .clicked()
+                {
+                    self.launch("reset", rl_path, None, None, tx, &ctx);
+                }
             }
-        }
+        });
         if let Some(host) = restore {
             self.launch("undo", rl_path, Some(host), None, tx, &ctx);
         }

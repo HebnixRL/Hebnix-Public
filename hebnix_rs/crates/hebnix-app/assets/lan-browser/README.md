@@ -10,6 +10,13 @@ with the in-game Workshop menu (`patcher/workshop_menu_ui.rs`), but only over
 the vanilla movie (sha256 `49cb7605...13ac`); the original package is kept in
 the backups folder as `.bak`.
 
+The earlier installed movie with SHA-256
+`a8b167f4e18829ff2edda6d3b7d6a063bf444f0ef8b6926aa40b6b06e84c41df`
+can also be upgraded when the package still contains the exact vanilla movie.
+The restore package is reconstructed from that verified vanilla data rather
+than saving the older modified movie as the original. Unknown hashes remain
+unsupported.
+
 Rebuild: export the vanilla movie from the package, then with RABCDAsm
 (`abcexport`, `rabcdasm`, `rabcasm`, `abcreplace`):
 

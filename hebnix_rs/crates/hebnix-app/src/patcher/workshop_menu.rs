@@ -71,13 +71,6 @@ pub fn map_dir_name(id: &str) -> String {
     format!("{MAP_DIR_PREFIX}{id}")
 }
 
-/// The folder the menu was enabled with, or None while it is disabled.
-pub fn enabled_folder(backups: &Path) -> Option<PathBuf> {
-    fs::read_to_string(backups.join(ENABLED))
-        .ok()
-        .map(|folder| PathBuf::from(folder.trim()))
-}
-
 pub struct WorkshopMap {
     pub id: u64,
     pub title: String,
@@ -719,9 +712,19 @@ fn is_patched(upk: &UpkPackage, values: Values) -> Result<bool, String> {
         .all(|(at, bytes)| upk.image[*at..*at + bytes.len()] == bytes[..]))
 }
 
-/// Whether the live packages have the Workshop menu enabled.
+/// Check the loader and menu visibility directly. The avatar patch can
+/// replace OnAvatarPersonaHandler without changing either of these hooks.
 pub fn status(cooked: &Path) -> Result<bool, String> {
-    super::profile_pictures::workshop_status(cooked, tagame_values)
+    let upk = UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?;
+    let menu = values(&upk, &locate(&upk)?, true)?;
+    if !menu.iter().all(|(at, bytes)| upk.image.get(*at..*at + bytes.len()) == Some(bytes.as_slice())) {
+        return Ok(false);
+    }
+    // The verifier accepts earlier loader implementations. If the live
+    // function differs from the validated vanilla bytes, a loader is active.
+    Ok(load_all(&upk, false)?.iter().any(|(at, bytes)| {
+        upk.image.get(*at..*at + bytes.len()) != Some(bytes.as_slice())
+    }))
 }
 
 fn set_live(cooked: &Path, file: &str, values: Values, on: bool) -> Result<(), String> {

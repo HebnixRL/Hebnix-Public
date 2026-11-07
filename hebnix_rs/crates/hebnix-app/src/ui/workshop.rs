@@ -1205,12 +1205,16 @@ impl WorkshopState {
 
     /// once per run, from any tab: move old maps, make the LAN slot placeholders
     /// (the game only indexes them at launch) and list maps by their slot copies
-    pub fn startup_sync(&mut self, rl_path: &str) {
-        if self.startup_done || rl_path.is_empty() {
+    pub fn startup_sync(&mut self, rl_path: &str, ctx: &egui::Context) {
+        if rl_path.is_empty() {
             return;
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         if !cooked.is_dir() {
+            return;
+        }
+        self.ingame_menu.tick(&cooked, ctx);
+        if self.startup_done {
             return;
         }
         self.startup_done = true;
@@ -1239,7 +1243,7 @@ impl WorkshopState {
             self.lan_synced = Some(connected);
             ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
             ingame_menu::watch_ticks(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"));
-            self.startup_sync(rl_path);
+            self.startup_sync(rl_path, ui.ctx());
         }
         self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
             &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),

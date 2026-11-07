@@ -477,8 +477,10 @@ enum HebnixSettingsTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpooferSubTab {
     Username,
+    NameBridgeTest,
     Titles,
     ProfilePictures,
+    Scoreboard,
     TitleRank,
     Friends,
     MenuTextures,
@@ -573,6 +575,7 @@ pub struct HebnixApp {
     workshop: WorkshopState,
     rlapi_panel: crate::ui::rlapi::RlApiPanel,
     auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays,
+    replay_history_patch: crate::replay_history_patch::State,
 
     hidden: bool,
     topmost: bool,
@@ -652,6 +655,8 @@ pub struct HebnixApp {
     spoofer_title_glow_color: [u8; 3],
     title_editor: titles::TitleEditorState,
     profile_pictures: crate::profile_pictures::State,
+    scoreboard: crate::scoreboard::State,
+    name_bridge: crate::name_bridge::State,
     menu_textures: menu_textures::MenuTextureState,
     spoofer_title_target: Option<String>,
     spoofer_titles: Vec<TitleSpoofSettings>,
@@ -829,13 +834,7 @@ impl HebnixApp {
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
 
-        let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering()
-            && {
-                #[cfg(target_os = "windows")]
-                { { #[cfg(target_os = "windows")] { crate::replay_history_patch::resume_operation() } #[cfg(target_os = "linux")] { None } }.is_none() && !{ #[cfg(target_os = "windows")] { crate::replay_history_patch::admin_restart_canceled() } #[cfg(target_os = "linux")] { false } } }
-                #[cfg(target_os = "linux")]
-                { true }
-            };
+        let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering();
         tracing::info!(
             hidden,
             theme = %config.settings.theme,
@@ -1091,6 +1090,7 @@ impl HebnixApp {
             workshop,
             rlapi_panel: crate::ui::rlapi::RlApiPanel::default(),
             auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays::new(&base_dir).with_refresh_client(Arc::clone(&ws_stats)),
+            replay_history_patch: Default::default(),
             hidden,
             topmost: false,
             currently_connected: false,
@@ -1162,6 +1162,8 @@ impl HebnixApp {
             spoofer_title_glow_color: spoofer_title_glow_color.unwrap_or(spoofer_title_color),
             title_editor,
             profile_pictures: crate::profile_pictures::State::new(&base_dir),
+            scoreboard: Default::default(),
+            name_bridge: Default::default(),
             menu_textures: Default::default(),
             spoofer_title_target,
             spoofer_titles,
@@ -1234,14 +1236,6 @@ impl HebnixApp {
             crate::visibility::applied(&cc.egui_ctx);
         }
 
-        if let Some(remove)={ #[cfg(target_os = "windows")] { crate::replay_history_patch::resume_operation() } #[cfg(target_os = "linux")] { None } } {
-            app.tab=Tab::Replays;
-            crate::replay_history_patch::start_operation(
-                std::path::PathBuf::from(&app.config.settings.rl_path),app.base_dir.clone(),remove,cc.egui_ctx.clone());
-        } else if { #[cfg(target_os = "windows")] { crate::replay_history_patch::admin_restart_canceled() } #[cfg(target_os = "linux")] { false } } {
-            app.tab=Tab::Replays;
-            crate::replay_history_patch::show_admin_restart_canceled();
-        }
         app
     }
 
@@ -1376,149 +1370,142 @@ impl HebnixApp {
     }
 
     fn render_replay_auto_upload_tab(&mut self, ui: &mut egui::Ui) {
-        ui.weak("Replay saving and delivery");
-        ui.label("Replay history is checked when a match ends or is left while Rocket League is open.");
-        ui.small("Background history refresh is verified. Automatic delivery after a newly completed game still needs testing.");
-        ui.colored_label(egui::Color32::YELLOW,"Experimental game-package modification. EAC compatibility is not established; a successful launch does not prove approval or safety.");
-        let bridge_installed=crate::replay_history_patch::installed(std::path::Path::new(&self.config.settings.rl_path),&self.base_dir);
-        let bridge_busy=crate::replay_history_patch::busy();
-        ui.horizontal(|ui| {
-            if bridge_installed { ui.colored_label(egui::Color32::GREEN,"Live bridge installed"); }
-            else { ui.weak("Live bridge not installed"); }
-            if bridge_busy {ui.spinner();}
-            let action=if bridge_installed {"Uninstall"} else {"Install"};
-            if ui.add_enabled(!bridge_busy,egui::Button::new(action)).clicked() {
-                self.save_config();
-                match crate::replay_history_patch::restart_as_admin(bridge_installed) {
-                    Ok(()) => {
-                        self.config.window.width=self.last_size.0;
-                        self.config.window.height=self.last_size.1;
-                        self.save_config();
-                        self.auto_upload_replays.stop();
-                        self.spoofer_mgr.shutdown();
-                        self.plugin_mgr.unload_all();
-                        self.stats.stop();
-                        self.ws_stats.stop();
-                        self.monitor.stop();
-                        self.discord_presence.stop();
-                        self.tray=None;
-                        self.workshop.suspend_multiplayer();
-                        std::process::exit(0);
-                    }
-                    Err(error)=>self.console.write(format!("[Replays] {error}")),
-                }
-            }
-        });
-        let bridge_message=crate::replay_history_patch::message();
-        if !bridge_message.is_empty() {ui.label(bridge_message);}
-        if bridge_busy {ui.ctx().request_repaint_after(Duration::from_millis(100));}
         let mut config_changed = false;
-        ui.add_enabled_ui(bridge_installed && !bridge_busy, |ui| {
-            config_changed |= ui
-                .checkbox(
-                    &mut self.config.replay_upload.save_locally,
-                    "Save replays locally",
-                )
-                .changed();
-            config_changed |= ui
-                .checkbox(
-                    &mut self.config.replay_upload.upload_enabled,
-                    "Upload to ballchasing.com",
-                )
-                .changed();
-        });
-        ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Provider:");
-                egui::ComboBox::from_id_salt("replay_upload_provider")
-                    .selected_text("ballchasing.com")
-                    .show_ui(ui, |ui| {
-                        config_changed |= ui
-                            .selectable_value(
-                                &mut self.config.replay_upload.provider,
-                                "ballchasing.com".to_string(),
-                                "ballchasing.com",
-                            )
-                            .changed();
-                    });
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Auto Save + Upload");
+            ui.separator();
+            ui.label("Replay history is checked when a match ends or is left while Rocket League is open.");
+            self.replay_history_patch.show(ui);
+            ui.add_enabled_ui(self.replay_history_patch.enabled(), |ui| {
+                config_changed |= ui
+                    .checkbox(
+                        &mut self.config.replay_upload.save_locally,
+                        "Save replays locally",
+                    )
+                    .changed();
+                config_changed |= ui
+                    .checkbox(
+                        &mut self.config.replay_upload.upload_enabled,
+                        "Upload to ballchasing.com",
+                    )
+                    .changed();
             });
+            ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Provider:");
+                    egui::ComboBox::from_id_salt("replay_upload_provider")
+                        .selected_text("ballchasing.com")
+                        .show_ui(ui, |ui| {
+                            config_changed |= ui
+                                .selectable_value(
+                                    &mut self.config.replay_upload.provider,
+                                    "ballchasing.com".to_string(),
+                                    "ballchasing.com",
+                                )
+                                .changed();
+                        });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("API key:");
+                    config_changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.config.replay_upload.api_key)
+                                .password(true)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed();
+                });
+            });
+        });
+        ui.add_space(8.0);
+        let check_now = egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Replay Details");
+            ui.separator();
             ui.horizontal_wrapped(|ui| {
-                ui.label("API key:");
+                ui.label("Replay name:");
                 config_changed |= ui
                     .add(
-                        egui::TextEdit::singleline(&mut self.config.replay_upload.api_key)
-                            .password(true)
+                        egui::TextEdit::singleline(&mut self.config.replay_upload.naming_template)
                             .desired_width(ui.available_width()),
                     )
                     .changed();
             });
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Replay name:");
+            ui.label(
+                egui::RichText::new(
+                    "Placeholders: {date}  {time}  {time24}  {winning_team}  {gamemode}  {map}  {match_guid}",
+                )
+                .small()
+                .weak(),
+            );
+            ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Visibility:");
+                    egui::ComboBox::from_id_salt("replay_upload_visibility")
+                        .selected_text(&self.config.replay_upload.visibility)
+                        .show_ui(ui, |ui| {
+                            for visibility in ["private", "unlisted", "public"] {
+                                config_changed |= ui
+                                    .selectable_value(
+                                        &mut self.config.replay_upload.visibility,
+                                        visibility.to_string(),
+                                        visibility,
+                                    )
+                                    .changed();
+                            }
+                        });
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Group ID (optional):");
+                    config_changed |= ui
+                        .text_edit_singleline(&mut self.config.replay_upload.group_id)
+                        .changed();
+                });
+            });
             config_changed |= ui
-                .add(
-                    egui::TextEdit::singleline(&mut self.config.replay_upload.naming_template)
-                        .desired_width(ui.available_width()),
+                .checkbox(
+                    &mut self.config.replay_upload.debug_logging,
+                    "Debug logging",
                 )
                 .changed();
-        });
-        ui.label(
-            egui::RichText::new(
-                "Placeholders: {date}  {time}  {time24}  {winning_team}  {gamemode}  {map}  {match_guid}",
-            )
-            .small()
-            .weak(),
-        );
-        ui.add_enabled_ui(self.config.replay_upload.upload_enabled, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Visibility:");
-                egui::ComboBox::from_id_salt("replay_upload_visibility")
-                    .selected_text(&self.config.replay_upload.visibility)
-                    .show_ui(ui, |ui| {
-                        for visibility in ["private", "unlisted", "public"] {
-                            config_changed |= ui
-                                .selectable_value(
-                                    &mut self.config.replay_upload.visibility,
-                                    visibility.to_string(),
-                                    visibility,
-                                )
-                                .changed();
-                        }
-                    });
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Group ID (optional):");
-                config_changed |= ui
-                    .text_edit_singleline(&mut self.config.replay_upload.group_id)
-                    .changed();
-            });
-        });
-        config_changed |= ui
-            .checkbox(
-                &mut self.config.replay_upload.debug_logging,
-                "Debug logging",
-            )
-            .changed();
+            ui
+                .add_enabled(
+                    self.replay_options_enabled(),
+                    egui::Button::new("Check latest matches now"),
+                )
+                .clicked()
+        }).inner;
         if config_changed {
             self.auto_upload_replays.stop();
             self.save_config();
             self.evaluate_proxies();
         }
-        ui.separator();
-        if self.config.replay_upload.upload_enabled
-            && self.config.replay_upload.api_key.trim().is_empty()
-        {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Enter a ballchasing.com API key to upload replays.",
+        if check_now {
+            self.auto_upload_replays.check(
+                &self.config.replay_upload,
+                std::path::Path::new(&self.config.settings.rl_path),
+                &self.config.rl_launch,
+                self.tx.clone(),
+                ui.ctx().clone(),
+                true,
             );
         }
-        if ui.add_enabled(self.replay_options_enabled(), egui::Button::new("Check latest matches now")).clicked() {
-            self.auto_upload_replays.check(&self.config.replay_upload,
-                std::path::Path::new(&self.config.settings.rl_path), &self.config.rl_launch,
-                self.tx.clone(), ui.ctx().clone(), true);
-        }
-        self.auto_upload_replays.show_status(ui);
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Status");
+            ui.separator();
+            if self.config.replay_upload.upload_enabled
+                && self.config.replay_upload.api_key.trim().is_empty()
+            {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Enter a ballchasing.com API key to upload replays.",
+                );
+            }
+            self.auto_upload_replays.show_status(ui);
+        });
     }
     fn process_preset_operations(
         &mut self,
@@ -2131,8 +2118,7 @@ impl HebnixApp {
 
     fn replay_options_enabled(&self) -> bool {
         self.config.replay_upload.enabled()
-            && crate::replay_history_patch::installed(std::path::Path::new(&self.config.settings.rl_path), &self.base_dir)
-            && !crate::replay_history_patch::busy()
+            && self.replay_history_patch.enabled()
     }
 
     fn sync_proxy_consumers(&mut self) {
@@ -2914,6 +2900,9 @@ impl HebnixApp {
         let replay_event = self.replay_timeline.is_replay_event(&event);
         self.replay_timeline.event(&event, &self.ws_stats);
         self.sync_proxy_consumers();
+        if !replay_event && matches!(event.event_type.as_str(), "MatchCreated" | "MatchStarted" | "UpdateState") {
+            self.auto_upload_replays.track_match(event.match_guid.as_deref());
+        }
         match event.event_type.as_str() {
             "UpdateState" => {
                 let entered_match = !self.in_match && !self.match_ended;
@@ -2922,13 +2911,13 @@ impl HebnixApp {
                     self.plugin_mgr.shared.borrow_mut().in_match = true;
                 }
                 if let Some(state) = event.update_state() {
+                    if !replay_event {
+                        self.scoreboard.update(event.match_guid.as_deref(), state);
+                    }
                     self.workshop
                         .update_workshop_map_from_stats(&state.game.arena, &self.tx);
-                    let log = (!replay_event && (entered_match || self.auto_upload_replays.needs_match_identity(event.match_guid.as_deref())))
+                    let log = (!replay_event && entered_match)
                         .then(|| hebnix_sdk::log::parse_launch_log(None, true, "INT"));
-                    if let (Some(match_guid), Some(log)) = (event.match_guid.as_deref(), log.as_ref()) {
-                        self.auto_upload_replays.track_match(match_guid, log.session.primary_id.clone());
-                    }
                     if entered_match {
                         self.discord_match = Some(crate::discord_presence::MatchInfo::from_state(
                             state,
@@ -2945,16 +2934,7 @@ impl HebnixApp {
             }
             "MatchEnded" => {
                 if !replay_event {
-                if let Some(message) = self.auto_upload_replays.submit_finished(
-                    event.match_guid.as_deref(),
-                    &self.config.replay_upload,
-                    std::path::Path::new(&self.config.settings.rl_path),
-                    &self.config.rl_launch,
-                    self.tx.clone(),
-                    ctx.clone(),
-                ) {
-                    self.console.write(message);
-                }
+                    self.auto_upload_replays.submit_finished(event.match_guid.as_deref());
                 }
                 self.in_match = false;
                 self.match_ended = true;
@@ -2964,16 +2944,8 @@ impl HebnixApp {
             }
             "MatchDestroyed" => {
                 if !replay_event {
-                if let Some(message) = self.auto_upload_replays.submit_finished(
-                    event.match_guid.as_deref(),
-                    &self.config.replay_upload,
-                    std::path::Path::new(&self.config.settings.rl_path),
-                    &self.config.rl_launch,
-                    self.tx.clone(),
-                    ctx.clone(),
-                ) {
-                    self.console.write(message);
-                }
+                self.scoreboard.end_match();
+                self.auto_upload_replays.submit_finished(event.match_guid.as_deref());
                 }
                 self.in_match = false;
                 self.match_ended = false;
@@ -2994,6 +2966,7 @@ impl HebnixApp {
     fn handle_rl_status(&mut self, rl_open: bool, api_open: bool) {
         if !rl_open || !api_open {
             self.home = home::HomeState::default();
+            self.scoreboard.end_match();
         }
         self.last_rl_open = rl_open;
         self.last_api_open = api_open;
@@ -3615,6 +3588,11 @@ impl HebnixApp {
                     );
                     ui.selectable_value(
                         &mut self.spoofer_subtab,
+                        SpooferSubTab::NameBridgeTest,
+                        "Name bridge test",
+                    );
+                    ui.selectable_value(
+                        &mut self.spoofer_subtab,
                         SpooferSubTab::Titles,
                         t("nav-titles"),
                     );
@@ -3623,6 +3601,7 @@ impl HebnixApp {
                         SpooferSubTab::ProfilePictures,
                         t("nav-profile-pictures"),
                     );
+                    ui.selectable_value(&mut self.spoofer_subtab, SpooferSubTab::Scoreboard, t("nav-scoreboard"));
                     ui.scope(|ui| {
                         ui.add_enabled_ui(false, |ui| {
                             ui.selectable_value(
@@ -3676,6 +3655,8 @@ impl HebnixApp {
                         SpooferSubTab::Titles => {
                             unreachable!("Titles uses its own scrolling columns")
                         }
+                        SpooferSubTab::Scoreboard => self.scoreboard.show(ui),
+                        SpooferSubTab::NameBridgeTest => self.name_bridge.show(ui, std::path::Path::new(&self.config.settings.rl_path)),
                         SpooferSubTab::ProfilePictures => unreachable!("Profile pictures uses its own page"),
                         SpooferSubTab::MenuTextures => {
                             unreachable!("Menu textures use their own scroll area")
@@ -5381,7 +5362,7 @@ impl HebnixApp {
                     || self.wheel_alignment.busy() || self.speed_patch.busy()
                     || self.title_patcher.busy() || self.swapper.busy()
                     || self.workshop.maintenance_busy()
-                    || crate::replay_history_patch::busy()
+                    || self.replay_history_patch.busy()
                 {
                     self.maintenance.error = Some(t("maintenance-finish-patches"));
                     return;
@@ -6880,6 +6861,9 @@ impl Drop for HebnixApp {
 
 impl eframe::App for HebnixApp {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
+        self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
+        self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
         self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
         crate::maintenance::acknowledge_update();
         if self.quitting && crate::watchdog::has_live_handoff() {
@@ -7074,7 +7058,6 @@ impl eframe::App for HebnixApp {
         };
         // peers' map names and the game's sync button need this on every tab, hidden or not
         let join_rl_path = self.config.settings.rl_path.clone();
-        self.workshop.startup_sync(&join_rl_path);
         self.workshop.render_join_prompt(ctx, &join_rl_path);
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
         self.render_plugin_windows(ctx);
@@ -7827,7 +7810,10 @@ impl HebnixApp {
                                 .show(&mut columns[0], |ui| {
                                     self.render_replay_auto_upload_tab(ui);
                                 });
-                            self.auto_upload_replays.show_history(&mut columns[1]);
+                            egui::Frame::group(columns[1].style()).show(&mut columns[1], |ui| {
+                                ui.set_width(ui.available_width());
+                                self.auto_upload_replays.show_history(ui);
+                            });
                         });
                     }
                 }

@@ -1,6 +1,9 @@
 use super::*;
 use crate::patcher::thumbnail_patcher as patches;
 
+pub(super) const ITEM_THUMBNAIL_HEIGHT: f32 = 120.0;
+pub(super) const ITEM_THUMBNAIL_CARD_HEIGHT: f32 = 208.0;
+
 #[derive(Clone)]
 struct Selection {
     file: String,
@@ -317,7 +320,7 @@ impl SwapperState {
                     ui.horizontal_top(|ui| {
                         for selection in row {
                             ui.allocate_ui_with_layout(
-                                egui::vec2(width, 208.0),
+                                egui::vec2(width, ITEM_THUMBNAIL_CARD_HEIGHT),
                                 egui::Layout::top_down(egui::Align::Center),
                                 |ui| {
                                     browser::frame(ui, false).show(ui, |ui| {
@@ -331,7 +334,7 @@ impl SwapperState {
                                                 selection.file, selection.kind
                                             ),
                                             preview,
-                                            120.0,
+                                            ITEM_THUMBNAIL_HEIGHT,
                                         );
                                         browser::name(ui, &selection.name, &selection.file);
                                         if ui

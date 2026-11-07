@@ -15,6 +15,11 @@ const CALLBACK: &str = "GFxData_Workshop_TA.OnEventImageDownloaded";
 const PATCH_VERSION: u32 = 6;
 #[path = "profile_pictures/native.rs"]
 mod native;
+#[path = "scoreboard.rs"]
+pub(crate) mod scoreboard;
+#[path = "name_bridge.rs"]
+pub(crate) mod name_bridge;
+pub(crate) static PACKAGE_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // This patch changes payload locations and unused name slots, never object
 // identities. Build its symbol table once instead of walking all 135k exports
@@ -91,7 +96,7 @@ struct Receipt {
     disabled_sha256: Option<String>,
 }
 
-fn file_digest(path: &Path) -> Result<String, String> {
+pub(crate) fn file_digest(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut digest = Sha256::new();
     let mut buffer = [0; 128 * 1024];
@@ -175,22 +180,23 @@ fn read_receipt(game: &Path) -> Result<Receipt, String> {
     serde_json::from_slice(&fs::read(receipt_path(game)).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())
 }
-pub fn installed(game: &Path) -> Result<bool, String> {
-    let path = receipt_path(game);
-    if !path.is_file() {
-        return Ok(false);
-    }
-    let receipt = read_receipt(game)?;
-    if receipt.version != PATCH_VERSION {
-        return Ok(false);
-    }
+pub(crate) fn status(game: &Path) -> Result<(bool, bool), String> {
     let source = super::game_path::resolve(&cooked(game), "TAGame.upk");
-    if receipt.enabled_sha256.as_deref() == Some(file_digest(&source)?.as_str()) {
-        return Ok(true);
-    }
     let package = UpkPackage::load(&source)?;
-    Ok(receipt.version == PATCH_VERSION && matches(&package, &receipt, true))
+    if let Ok(receipt) = read_receipt(game)
+        && !receipt.exports.is_empty()
+    {
+        let on = matches(&package, &receipt, true);
+        return Ok((on, on && receipt.version < PATCH_VERSION));
+    }
+    Ok((native::installed(&package)?, false))
 }
+
+#[cfg(test)]
+fn installed(game: &Path) -> Result<bool, String> {
+    status(game).map(|(on, _)| on)
+}
+
 fn restore_snapshot(package: &mut UpkPackage, saved: &Receipt) -> Result<(), String> {
     for item in &saved.exports {
         let (index, _) = bytes(package, &item.path)?;
@@ -288,7 +294,8 @@ fn workshop_baseline(directory: &Path) -> Result<(UpkPackage, Option<(Receipt, b
     Ok((package, Some((saved, enabled))))
 }
 
-pub(super) fn workshop_status(directory: &Path, values: WorkshopValues) -> Result<bool, String> {
+#[cfg(test)]
+fn workshop_status(directory: &Path, values: WorkshopValues) -> Result<bool, String> {
     let (package, _) = workshop_baseline(directory)?;
     Ok(values(&package, true)?
         .iter()
@@ -300,6 +307,7 @@ pub(super) fn edit_workshop(
     values: WorkshopValues,
     on: bool,
 ) -> Result<(), String> {
+    let _lock = PACKAGE_EDIT.lock().map_err(|e| e.to_string())?;
     edit_workshop_checked(directory, values, on, check_closed)
 }
 
@@ -404,6 +412,7 @@ fn edit_workshop_checked(
     Ok(())
 }
 pub fn set_enabled(game: &Path, on: bool) -> Result<String, String> {
+    let _lock = PACKAGE_EDIT.lock().map_err(|e| e.to_string())?;
     set_enabled_checked(game, on, check_closed)
 }
 fn set_enabled_checked(
@@ -444,8 +453,6 @@ fn set_enabled_checked(
             }
             .into());
         }
-    } else if !on {
-        return Ok("Native profile pictures are disabled.".into());
     }
     let mut package = UpkPackage::load(&source)?;
     timing("load and index", started);
@@ -470,8 +477,18 @@ fn set_enabled_checked(
                 return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
             }
         }
-    } else if !on {
-        return Ok("Native profile pictures are disabled.".into());
+    } else {
+        if native::installed(&package)? {
+            // An existing patch only needs the runtime on enable. Restoring
+            // its original code still requires the installation's snapshot.
+            if on {
+                return Ok("Native profile pictures are already enabled.".into());
+            }
+            return Err("The avatar patch is active, but its recovery snapshot is missing.".into());
+        }
+        if !on {
+            return Ok("Native profile pictures are disabled.".into());
+        }
     }
     // Fingerprint unchanged payloads once, rather than retaining/reloading a
     // second decompressed package. Validation still checks every export.
@@ -843,6 +860,39 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires HEBNIX_AVATAR_TEST_PACKAGE pointing to an already patched TAGame.upk"]
+    fn enable_already_patched_package_without_receipt() {
+        let source = std::env::var_os("HEBNIX_AVATAR_TEST_PACKAGE").unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "hebnix-native-avatar-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let directory = cooked(&root);
+        fs::create_dir_all(&directory).unwrap();
+        fs::create_dir_all(root.join("Binaries/Win64")).unwrap();
+        fs::write(
+            root.join("Binaries/Win64/RocketLeague.exe"),
+            b"test build fingerprint",
+        )
+        .unwrap();
+        let package = directory.join("TAGame.upk");
+        fs::copy(source, &package).unwrap();
+        let before = file_digest(&package).unwrap();
+
+        assert!(installed(&root).unwrap());
+        set_copy_enabled(&root, true).unwrap();
+        assert!(
+            set_copy_enabled(&root, false)
+                .unwrap_err()
+                .contains("snapshot is missing")
+        );
+        assert_eq!(file_digest(&package).unwrap(), before);
+        assert!(!receipt_path(&root).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires HEBNIX_AVATAR_INSPECT_GAME with enabled avatars; operates only on a temporary copy"]
     fn workshop_and_enabled_avatars_round_trip() {
         let source_root = std::env::var_os("HEBNIX_AVATAR_INSPECT_GAME").expect("game path");
@@ -1108,7 +1158,7 @@ mod tests {
                 .exports
                 .retain(|e| !omitted.iter().any(|old| old.path == e.path));
             fs::write(receipt_path(&root), serde_json::to_vec(&legacy).unwrap()).unwrap();
-            assert!(!installed(&root).unwrap());
+            assert_eq!(status(&root).unwrap(), (true, true));
             set_copy_enabled(&root, true).unwrap();
             assert!(installed(&root).unwrap());
             assert_eq!(

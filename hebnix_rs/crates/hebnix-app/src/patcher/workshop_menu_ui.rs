@@ -49,6 +49,30 @@ fn digest(swf: &[u8]) -> String {
 }
 
 impl Movie {
+    /// One earlier LAN browser build is still installed on some PCs. Its
+    /// original movie remains in the append-only package image; require the
+    /// exact vanilla digest before using it to reconstruct a restore point.
+    fn retained_vanilla(&self, upk: &UpkPackage, current: &str) -> Option<Vec<u8>> {
+        if self.package != "GFX_ServerBrowserMenu_SF.upk"
+            || current != "a8b167f4e18829ff2edda6d3b7d6a063bf444f0ef8b6926aa40b6b06e84c41df"
+        {
+            return None;
+        }
+        for (at, signature) in upk.image.windows(3).enumerate() {
+            if signature != b"GFX" && signature != b"FWS" {
+                continue;
+            }
+            let Some(header) = upk.image.get(at..at + 8) else { continue };
+            let size = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+            if size < 8 { continue; }
+            let Some(bytes) = at.checked_add(size).and_then(|end| upk.image.get(at..end)) else { continue };
+            if digest(bytes) == self.vanilla {
+                return Some(bytes.to_vec());
+            }
+        }
+        None
+    }
+
     /// where the movie sits in the package: export index, property tag offset,
     /// start of the array data and its size
     fn locate(&self, upk: &UpkPackage) -> Result<(usize, usize, usize, usize), String> {
@@ -127,7 +151,8 @@ impl Movie {
         if current == digest(self.patched) {
             return Ok(());
         }
-        if current != self.vanilla {
+        let retained = self.retained_vanilla(&upk, &current);
+        if current != self.vanilla && retained.is_none() {
             return Err(format!(
                 "the game's {} movie is not the version Hebnix patches (sha256 {current})",
                 self.package
@@ -135,7 +160,15 @@ impl Movie {
         }
         fs::create_dir_all(backups).map_err(|e| e.to_string())?;
         if !backup.is_file() {
-            fs::copy(&live, &backup).map_err(|e| format!("Could not back up {}: {e}", self.package))?;
+            if let Some(vanilla) = retained {
+                self.with_movie(&mut upk, &vanilla, &backup)?;
+                let restored = UpkPackage::load(&backup)?;
+                if digest(&self.movie(&restored)?) != self.vanilla {
+                    return Err(format!("Recovered {} failed validation", self.package));
+                }
+            } else {
+                fs::copy(&live, &backup).map_err(|e| format!("Could not back up {}: {e}", self.package))?;
+            }
         }
         let temp = cooked.join(format!("{}.workshop.tmp", self.package));
         let result = self.with_movie(&mut upk, self.patched, &temp).and_then(|()| {
@@ -188,6 +221,30 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Validate an actual legacy package without modifying the installation.
+    #[test]
+    #[ignore]
+    fn legacy_browser_upgrade_and_restore() {
+        let source = std::env::var("HEBNIX_LEGACY_BROWSER").unwrap();
+        let movie = &MOVIES[1];
+        let dir = std::env::temp_dir().join(format!("hebnix-browser-upgrade-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let live = dir.join(movie.package);
+        fs::copy(source, &live).unwrap();
+        let package = UpkPackage::load(&live).unwrap();
+        let current = digest(&movie.movie(&package).unwrap());
+        assert!(movie.retained_vanilla(&package, &current).is_some());
+        assert!(movie.retained_vanilla(&package, "unknown").is_none());
+        let backups = dir.join("Backups");
+        movie.apply(&dir, &backups).unwrap();
+        assert!(movie.status(&dir));
+        movie.apply(&dir, &backups).unwrap();
+        movie.restore(&dir, &backups).unwrap();
+        let restored = UpkPackage::load(&live).unwrap();
+        assert_eq!(digest(&movie.movie(&restored).unwrap()), movie.vanilla);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn normal_form_ignores_magic_and_length() {

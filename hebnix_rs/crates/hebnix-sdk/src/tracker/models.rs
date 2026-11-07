@@ -14,7 +14,7 @@ pub struct PlaylistRank {
     /// 0-3
     pub division_id: i64,
     pub division_name: String,
-    pub mmr: i64,
+    pub mmr: Option<i64>,
     pub matches_played: i64,
     pub placement_matches_played: i64,
     pub peak_mmr: i64,

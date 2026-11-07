@@ -1036,3 +1036,6 @@ multiplayer-rocket-league-is-starting = Rocket League is starting.
 spoofer-http-only = Uses the HTTP proxy only. The WebSocket bypass is no longer available.
 spoofer-http-proxy = HTTP Proxy
 spoofer-websocket-proxy = WebSocket Proxy
+
+nav-scoreboard = Scoreboard
+scoreboard-show-mmr = Show MMR

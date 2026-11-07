@@ -31,6 +31,7 @@ pub enum AppMsg {
         text: String,
         fraction: Option<f32>,
         done: bool,
+        failed: bool,
     },
     PluginHttpRes {
         slug: String,

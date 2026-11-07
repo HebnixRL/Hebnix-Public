@@ -504,124 +504,136 @@ impl WheelAlignmentState {
                 }
             }
         }
-        ui.heading(t("app-wheel-alignment"));
         if self.edited_root.as_deref() != Some(cooked) {
             self.refresh_edited(cooked);
         }
         let busy = self.receiver.is_some();
         let rl_open = hebnix_sdk::process::is_rocket_league_running();
         let mut action = None;
-        ui.add_enabled_ui(!busy, |ui| {
-            egui::ComboBox::from_id_salt("wheel_alignment_car")
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .selected_text(
-                    self.cars
-                        .get(self.selected)
-                        .map(|c| c.0.as_str())
-                        .unwrap_or("Load car catalog"),
-                )
-                .show_ui(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .hint_text(t("render-filter-cars")),
-                    );
-                    ui.separator();
-                    for (i, (name, _)) in self.cars.iter().enumerate() {
-                        if name.to_lowercase().contains(&self.search.to_lowercase())
-                            && ui.selectable_value(&mut self.selected, i, name).clicked()
-                        {
-                            ui.close();
-                        }
-                    }
-                });
-            let Some((_, file)) = self.cars.get(self.selected) else {
-                ui.label(t("render-car-catalog-is-not-available-yet"));
-                return;
-            };
-            let dir = record_dir(cooked, file);
-            if self.loaded.as_ref() != Some(&dir) {
-                self.settings = read(&dir.join("alignment.json"))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-                    .map(|r| r.settings)
-                    .unwrap_or_default();
-                self.loaded = Some(dir.clone());
-            }
-            ui.add(
-                egui::Slider::new(&mut self.settings.camber, -30.0..=30.0)
-                    .step_by(0.5)
-                    .text(t("render-camber-degrees")),
-            );
-            ui.weak(t("render-negative-tops-inward-positive-tops-outwa"));
-            ui.add(
-                egui::Slider::new(&mut self.settings.vertical, -15.0..=15.0)
-                    .step_by(0.25)
-                    .text(t("render-up-down")),
-            );
-            ui.weak(t("render-positive-up-negative-down-values-are"));
-            ui.add(
-                egui::Slider::new(&mut self.settings.lateral, -15.0..=15.0)
-                    .step_by(0.25)
-                    .text(t("render-left-right-track-width")),
-            );
-            ui.weak(t("render-mirrored-adjustment-positive-moves-both"));
-            if ui
-                .add_enabled(!rl_open, egui::Button::new(t("render-apply-alignment")))
-                .on_disabled_hover_text(t("render-close-rocket-league-before-changing-alig"))
-                .clicked()
-            {
-                action = Some((file.clone(), self.settings, TransactionAction::Apply));
-            }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(t("app-wheel-alignment"));
             ui.separator();
-            ui.heading(t("render-revert-settings"));
-            if ui.button(t("render-revert-to-0")).clicked() {
-                self.settings = Settings::default();
-            }
-            ui.label(t_args(
-                "render-edited-cars-edited",
-                &[("edited", (self.edited.len()).to_string().into())],
-            ));
-            egui::ScrollArea::vertical()
-                .id_salt("alignment_edited_cars")
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for (file, reverted) in &self.edited {
-                        let index = self.cars.iter().position(|(_, path)| path == file);
-                        let name = index.map(|i| self.cars[i].0.as_str()).unwrap_or(file);
-                        let label = if *reverted {
-                            format!("{name} — reverted")
-                        } else {
-                            name.to_string()
-                        };
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(index == Some(self.selected), label)
-                                .clicked()
+            ui.add_enabled_ui(!busy, |ui| {
+                egui::ComboBox::from_id_salt("wheel_alignment_car")
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .selected_text(
+                        self.cars
+                            .get(self.selected)
+                            .map(|c| c.0.as_str())
+                            .unwrap_or("Load car catalog"),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.search)
+                                .hint_text(t("render-filter-cars")),
+                        );
+                        ui.separator();
+                        for (i, (name, _)) in self.cars.iter().enumerate() {
+                            if name.to_lowercase().contains(&self.search.to_lowercase())
+                                && ui.selectable_value(&mut self.selected, i, name).clicked()
                             {
-                                if let Some(i) = index {
-                                    self.selected = i;
-                                }
+                                ui.close();
                             }
-                            if ui
-                                .add_enabled(!rl_open, egui::Button::new("X"))
-                                .on_disabled_hover_text(t(
-                                    "render-close-rocket-league-before-restoring-ali",
-                                ))
-                                .clicked()
-                            {
-                                action = Some((
-                                    file.clone(),
-                                    Settings::default(),
-                                    TransactionAction::RevertAndForget,
-                                ));
+                        }
+                    });
+                let Some((_, file)) = self.cars.get(self.selected) else {
+                    ui.label(t("render-car-catalog-is-not-available-yet"));
+                    return;
+                };
+                let dir = record_dir(cooked, file);
+                if self.loaded.as_ref() != Some(&dir) {
+                    self.settings = read(&dir.join("alignment.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+                        .map(|r| r.settings)
+                        .unwrap_or_default();
+                    self.loaded = Some(dir.clone());
+                }
+                ui.add(
+                    egui::Slider::new(&mut self.settings.camber, -30.0..=30.0)
+                        .step_by(0.5)
+                        .text(t("render-camber-degrees")),
+                );
+                ui.weak(t("render-negative-tops-inward-positive-tops-outwa"));
+                ui.add(
+                    egui::Slider::new(&mut self.settings.vertical, -15.0..=15.0)
+                        .step_by(0.25)
+                        .text(t("render-up-down")),
+                );
+                ui.weak(t("render-positive-up-negative-down-values-are"));
+                ui.add(
+                    egui::Slider::new(&mut self.settings.lateral, -15.0..=15.0)
+                        .step_by(0.25)
+                        .text(t("render-left-right-track-width")),
+                );
+                ui.weak(t("render-mirrored-adjustment-positive-moves-both"));
+                if ui
+                    .add_enabled(!rl_open, egui::Button::new(t("render-apply-alignment")))
+                    .on_disabled_hover_text(t("render-close-rocket-league-before-changing-alig"))
+                    .clicked()
+                {
+                    action = Some((file.clone(), self.settings, TransactionAction::Apply));
+                }
+            });
+        });
+        if self.cars.get(self.selected).is_some() {
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.heading(t("render-revert-settings"));
+                ui.separator();
+                ui.add_enabled_ui(!busy, |ui| {
+                    if ui.button(t("render-revert-to-0")).clicked() {
+                        self.settings = Settings::default();
+                    }
+                    ui.label(t_args(
+                        "render-edited-cars-edited",
+                        &[("edited", (self.edited.len()).to_string().into())],
+                    ));
+                    egui::ScrollArea::vertical()
+                        .id_salt("alignment_edited_cars")
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for (file, reverted) in &self.edited {
+                                let index = self.cars.iter().position(|(_, path)| path == file);
+                                let name = index.map(|i| self.cars[i].0.as_str()).unwrap_or(file);
+                                let label = if *reverted {
+                                    format!("{name} — reverted")
+                                } else {
+                                    name.to_string()
+                                };
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(index == Some(self.selected), label)
+                                        .clicked()
+                                    {
+                                        if let Some(i) = index {
+                                            self.selected = i;
+                                        }
+                                    }
+                                    if ui
+                                        .add_enabled(!rl_open, egui::Button::new("X"))
+                                        .on_disabled_hover_text(t(
+                                            "render-close-rocket-league-before-restoring-ali",
+                                        ))
+                                        .clicked()
+                                    {
+                                        action = Some((
+                                            file.clone(),
+                                            Settings::default(),
+                                            TransactionAction::RevertAndForget,
+                                        ));
+                                    }
+                                });
+                            }
+                            if self.edited.is_empty() {
+                                ui.weak(t("render-no-cars-adjusted-yet"));
                             }
                         });
-                    }
-                    if self.edited.is_empty() {
-                        ui.weak(t("render-no-cars-adjusted-yet"));
-                    }
                 });
-        });
+            });
+        }
         if let Some((file, settings, action)) = action {
             let cooked = cooked.to_path_buf();
             let (tx, rx) = mpsc::channel();
@@ -634,9 +646,15 @@ impl WheelAlignmentState {
                 ctx.request_repaint();
             });
         }
-        if busy {
-            ui.spinner();
-        }
-        ui.label(&self.status);
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Status");
+            ui.separator();
+            if busy {
+                ui.spinner();
+            }
+            ui.label(&self.status);
+        });
     }
 }

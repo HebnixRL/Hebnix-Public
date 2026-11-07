@@ -367,10 +367,10 @@ fn slot_for_lan(cooked: &Path, maps: &[WorkshopMap]) {
     }
 }
 
-/// Rebuild the in-game list from the folder the menu was enabled with.
+/// Rebuild the list for an active Workshop loader.
 /// Returns Ok(None) when the menu is not enabled.
 pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
-    if workshop_menu::enabled_folder(&cooked.join("Backups")).is_none() {
+    if !workshop_menu::status(cooked)? {
         return Ok(None);
     }
     let mut maps = all_maps(cooked);
@@ -405,17 +405,22 @@ impl InGameMenuState {
         }
     }
 
+    pub(super) fn tick(&mut self, cooked: &Path, ctx: &egui::Context) {
+        let previous = self.install.clone();
+        self.poll(previous.as_deref().unwrap_or(cooked), ctx);
+        if self.install.as_deref() != Some(cooked) && self.pending.is_none() {
+            self.install = Some(cooked.to_owned());
+            self.enabled = None;
+            let cooked = cooked.to_owned();
+            self.spawn(ctx, move || Job::Status(workshop_menu::status(&cooked)));
+        }
+    }
+
     pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, connected: bool, tx: &Sender<AppMsg>) {
         let ctx = ui.ctx().clone();
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         let backups = cooked.join("Backups");
-        self.poll(&cooked, &ctx);
-        if self.install.as_ref() != Some(&cooked) && self.pending.is_none() {
-            self.install = Some(cooked.clone());
-            self.enabled = None;
-            let cooked = cooked.clone();
-            self.spawn(&ctx, move || Job::Status(workshop_menu::status(&cooked)));
-        }
+        self.tick(&cooked, &ctx);
         if self.folder.is_empty() {
             self.folder = workshop_menu::maps_folder(&cooked).to_string_lossy().into_owned();
             self.maps = all_maps(&cooked);

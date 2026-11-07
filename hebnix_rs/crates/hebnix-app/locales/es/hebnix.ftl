@@ -744,3 +744,6 @@ speed-patch-description = Escala las velocidades de desplazamiento y giro de ski
 speed-patch-multiplier = Velocidad
 speed-patch-roundtrip-mismatch = Discrepancia en el ciclo completo del parche de velocidad
 app-speed-patch = Velocidad de animación
+
+nav-scoreboard = Marcador
+scoreboard-show-mmr = Mostrar MMR
