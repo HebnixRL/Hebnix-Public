@@ -68,6 +68,12 @@ const SCENERY_DONORS: &[(&str, &str)] = &[
     ("BG_FNI_Stadium", "Forbidden Temple (Fire & Ice) — scenery"),
 ];
 const NO_BACKGROUND: &str = "__HBNX_NO_BACKGROUND__";
+const ARENA_LOOK: &str = " — full arena look";
+
+/// The arena package behind an `arena:` donor.
+fn arena_of(donor: &str) -> Option<&str> {
+    donor.strip_prefix(crate::patcher::background_merger::ARENA_DONOR_PREFIX)
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -144,6 +150,9 @@ impl BackgroundChangerState {
                 .unwrap_or(file_name)
                 .replace(['_', '-'], " ");
         }
+        if let Some(arena) = arena_of(package) {
+            return format!("{}{ARENA_LOOK}", Self::display_name(arena));
+        }
         ARENAS
             .iter()
             .chain(SCENERY_DONORS.iter())
@@ -156,6 +165,7 @@ impl BackgroundChangerState {
         let display = Self::display_name(package);
         display
             .strip_suffix(" — scenery")
+            .or_else(|| display.strip_suffix(ARENA_LOOK))
             .unwrap_or(&display)
             .to_string()
     }
@@ -188,6 +198,14 @@ impl BackgroundChangerState {
                 custom: false,
             })
             .collect();
+        for index in &self.installed_hosts {
+            let (package, display) = ARENAS[*index];
+            self.installed_donors.push(DonorEntry {
+                package: format!("{}{package}", crate::patcher::background_merger::ARENA_DONOR_PREFIX),
+                display: format!("{display}{ARENA_LOOK}"),
+                custom: false,
+            });
+        }
         if let Ok(backgrounds) = crate::patcher::background_merger::custom_backgrounds_dir() {
             if let Ok(entries) = std::fs::read_dir(backgrounds) {
                 for path in entries.flatten().map(|entry| entry.path()) {
@@ -286,6 +304,11 @@ impl BackgroundChangerState {
             )
             .map(
                 |helper_message| match (command, host.as_deref(), donor.as_deref()) {
+                    ("apply", Some(host), Some(donor)) if arena_of(donor).is_some() => format!(
+                        "{} now looks like {}.",
+                        Self::message_name(host),
+                        Self::message_name(donor)
+                    ),
                     ("apply", Some(host), Some(donor)) => format!(
                         "{} now uses {}'s fog, sky, and background.",
                         Self::message_name(host),
@@ -564,7 +587,8 @@ impl BackgroundChangerState {
             let valid = !self.busy
                 && !self.host.is_empty()
                 && !self.donor.is_empty()
-                && (self.donor == NO_BACKGROUND || self.host != self.donor);
+                && (self.donor == NO_BACKGROUND
+                    || self.host != arena_of(&self.donor).unwrap_or(&self.donor));
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -594,7 +618,10 @@ impl BackgroundChangerState {
                     self.open_background_folder();
                 }
             });
-            if self.donor != NO_BACKGROUND {
+            if arena_of(&self.donor).is_some() {
+                ui.small(t("render-arena-look-note"));
+            }
+            if self.donor != NO_BACKGROUND && arena_of(&self.donor).is_none() {
                 let can_apply_all =
                     !self.busy && !self.donor.is_empty() && !self.bulk_targets().is_empty();
                 if ui
@@ -607,7 +634,7 @@ impl BackgroundChangerState {
                     self.apply_all_prompt = true;
                 }
             }
-            if self.host == self.donor && self.donor != NO_BACKGROUND {
+            if arena_of(&self.donor).unwrap_or(&self.donor) == self.host && self.donor != NO_BACKGROUND {
                 ui.small(t("render-choose-two-different-arenas"));
             }
         });

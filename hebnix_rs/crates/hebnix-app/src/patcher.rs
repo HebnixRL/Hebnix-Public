@@ -3,6 +3,7 @@
 //! Keeping these modules together makes the patching boundary explicit while
 //! the compatibility re-exports in main.rs preserve the existing call sites.
 pub mod background_merger;
+pub mod map_swap;
 pub mod anthem_patcher;
 pub mod backup_guard;
 pub mod delete_backups;
