@@ -227,7 +227,7 @@ console-swapper-restored =
     }.
 
 ## app.rs
-presets-presets = Presets
+presets-presets = Swapper presets
 presets-save-and-restore-named-collections-of = Save and restore named collections of your current item changes.
 presets-name = Name:
 presets-include-patches = Include patches

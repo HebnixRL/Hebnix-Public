@@ -7204,7 +7204,22 @@ impl HebnixApp {
             });
         }
         if self.items_subtab == ItemsSubTab::Loadouts {
-            self.loadouts.show(ui, &self.swapper, &mut self.presets);
+            let apply = egui::ScrollArea::vertical()
+                .id_salt("loadouts_scroll")
+                .auto_shrink([false; 2])
+                .show(ui, |ui| self.loadouts.show(ui, &self.swapper, &mut self.presets))
+                .inner;
+            if let Some(name) = apply {
+                if let Some(index) = self.presets.presets.iter().position(|p| p.name == name) {
+                    self.presets.selected = index;
+                    let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
+                        .join("TAGame")
+                        .join("CookedPCConsole");
+                    let backups_dir = cooked_pc.join("Backups");
+                    let ctx = ui.ctx().clone();
+                    self.apply_selected_preset(&cooked_pc, &backups_dir, &ctx);
+                }
+            }
             return;
         }
         let mode = match self.items_subtab {

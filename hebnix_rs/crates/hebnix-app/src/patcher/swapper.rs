@@ -1474,6 +1474,13 @@ impl SwapperState {
         self.active.len()
     }
 
+    /// Catalog name of a product, if it is in the local catalog.
+    pub fn product_name(&self, category: SwapCategory, product_id: i64) -> Option<String> {
+        let items = self.catalogs.get(&category)?;
+        let item = items.iter().find(|item| item.product_id == Some(product_id))?;
+        Some(item.name.clone())
+    }
+
     /// Swap entries for a preset: each pick shows `product` where `stock_product` is equipped.
     /// Returns the entries and the reasons picks were skipped.
     pub fn bakkes_preset_swaps(&self, picks: &[SwapPick]) -> (Vec<Value>, Vec<String>) {
