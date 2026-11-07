@@ -884,6 +884,10 @@ struct MultiplayerState {
     /// route everything through relay servers so other players never see
     /// this machine's public address (saved in multiplayer_settings.json)
     relay_only: bool,
+    /// connect again on launch until the player disconnects by hand
+    /// (saved in multiplayer_settings.json)
+    auto_connect: bool,
+    auto_connect_tried: bool,
     // multiplayer sidecar state
     sidecar: Option<Arc<TailcatSidecarHandle>>,
     tailnet_requested: bool,
@@ -940,6 +944,8 @@ impl Default for MultiplayerState {
             player_filter: String::new(),
             abandon_tailnet: false,
             relay_only: false,
+            auto_connect: false,
+            auto_connect_tried: false,
             sidecar: None,
             tailnet_requested: false,
             tunnel_ready: false,
@@ -1012,6 +1018,11 @@ impl WorkshopState {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .and_then(|settings| settings.get("relay_only").and_then(Value::as_bool))
+            .unwrap_or(false);
+        multiplayer.auto_connect = std::fs::read(manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|settings| settings.get("auto_connect").and_then(Value::as_bool))
             .unwrap_or(false);
         Self {
             manager,
@@ -1223,6 +1234,28 @@ impl WorkshopState {
         std::thread::spawn(move || {
             let _ = ingame_menu::refresh(&cooked);
         });
+    }
+
+    /// Once per run, from any tab: connect again if the player connected last time and has
+    /// not disconnected since, and keep the LAN host setting in step with the connection.
+    pub fn auto_connect(
+        &mut self,
+        rl_path: &str,
+        tx: &Sender<AppMsg>,
+        ctx: &eframe::egui::Context,
+    ) {
+        if !self.multiplayer.auto_connect_tried {
+            self.multiplayer.auto_connect_tried = true;
+            if self.multiplayer.auto_connect && !self.multiplayer.wizard_started {
+                self.multiplayer.wizard_started = true;
+                self.start_tailnet(tx, ctx);
+            }
+        }
+        let connected = self.multiplayer.tunnel_ready;
+        if self.lan_synced != Some(connected) && !rl_path.is_empty() {
+            self.lan_synced = Some(connected);
+            ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
+        }
     }
 
     /// render the tab. rl_path and rl_launch come from the app config.
@@ -1523,6 +1556,8 @@ impl WorkshopState {
                     .clicked()
                 {
                     self.multiplayer.wizard_started = true;
+                    self.multiplayer.auto_connect = true;
+                    self.save_multiplayer_settings();
                     self.start_tailnet(tx, ctx);
                 }
                 ui.add_space(10.0);
@@ -1700,6 +1735,8 @@ impl WorkshopState {
         }
 
         if stop {
+            self.multiplayer.auto_connect = false;
+            self.save_multiplayer_settings();
             self.disconnect_multiplayer(tx);
         }
         if start_relay {
@@ -1710,6 +1747,8 @@ impl WorkshopState {
     /// Back before the session is running: stop the sidecar and remove the
     /// firewall rules instead of leaving them until Hebnix closes.
     fn leave_multiplayer_setup(&mut self) {
+        self.multiplayer.auto_connect = false;
+        self.save_multiplayer_settings();
         self.multiplayer.wizard_started = false;
         self.multiplayer.pending_peer_install = None;
         self.multiplayer.setup_progress = None;
@@ -2270,7 +2309,10 @@ impl WorkshopState {
     }
 
     fn save_multiplayer_settings(&self) {
-        let settings = serde_json::json!({ "relay_only": self.multiplayer.relay_only });
+        let settings = serde_json::json!({
+            "relay_only": self.multiplayer.relay_only,
+            "auto_connect": self.multiplayer.auto_connect,
+        });
         let _ = std::fs::write(
             self.manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE),
             settings.to_string(),
