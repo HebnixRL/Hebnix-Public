@@ -34,6 +34,8 @@ pub enum AppMsg {
     WindowMode(WindowMode),
     ToggleVisibility,
     TrayToggleVisibility,
+    // controller chord: open or close the docked side panel
+    TogglePanel,
     TrayQuit,
     HotkeyCaptured(Option<String>),
     // should the main window be topmost (RL or hebnix focused)

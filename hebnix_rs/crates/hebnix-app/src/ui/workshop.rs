@@ -832,6 +832,27 @@ pub struct WorkshopState {
     share_files: Arc<AtomicBool>,
     /// the folder workshop maps go to for the attached install, set each frame
     workshop_maps: PathBuf,
+    /// drawn in the controller panel: no Menu map page, and the in-game menu page is only the
+    /// LAN settings. Set each frame by the app.
+    pub panel_mode: bool,
+}
+
+impl WorkshopState {
+    /// Controller panel: LB/RB walk the Maps sub-tabs.
+    pub fn step_view(&mut self, step: i32) {
+        let views: Vec<WorkshopView> = [
+            WorkshopView::Browse,
+            WorkshopView::Import,
+            WorkshopView::MenuMap,
+            WorkshopView::InGameMenu,
+            WorkshopView::Multiplayer,
+        ]
+        .into_iter()
+        .filter(|view| *view != WorkshopView::MenuMap || !self.panel_mode)
+        .collect();
+        let at = views.iter().position(|v| *v == self.view).unwrap_or(0) as i32;
+        self.view = views[(at + step).rem_euclid(views.len() as i32) as usize];
+    }
 }
 
 impl WorkshopState {
@@ -889,6 +910,7 @@ impl WorkshopState {
             rl_launch: crate::config::RlLaunchCfg::default(),
             share_files: Arc::new(AtomicBool::new(true)),
             workshop_maps: PathBuf::new(),
+            panel_mode: false,
         }
     }
 
@@ -1204,11 +1226,13 @@ impl WorkshopState {
                 t("render-browse-maps"),
             );
             ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
-            ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+            if !self.panel_mode {
+                ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+            }
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::InGameMenu,
-                "In-game menu (experimental)",
+                if self.panel_mode { "LAN settings" } else { "In-game menu" },
             );
             ui.selectable_value(
                 &mut self.view,
@@ -1251,8 +1275,11 @@ impl WorkshopState {
             return;
         }
         if self.view == WorkshopView::InGameMenu {
-            self.ingame_menu.render(ui, rl_path, self.multiplayer.tunnel_ready, tx);
+            self.ingame_menu.render(ui, rl_path, self.multiplayer.tunnel_ready, self.panel_mode, tx);
             return;
+        }
+        if self.view == WorkshopView::MenuMap && self.panel_mode {
+            self.view = WorkshopView::Browse;
         }
         if self.view == WorkshopView::MenuMap {
             let custom = self.cached_maps();
@@ -1358,6 +1385,7 @@ impl WorkshopState {
                             });
                         });
                     }
+                    crate::panel::follow_focus(ui);
                 });
         }
 

@@ -57,6 +57,8 @@ pub struct SettingsCfg {
     pub allow_draw_on_hebnix_focus: bool,
     pub toast_position: crate::toast::ToastPos,
     pub restrict_hotkey_to_hebnix_or_rocket_league: bool,
+    /// Controller side panel: show every page, not just the in-game ones (maps, plugins).
+    pub panel_advanced: bool,
     /// Relaunch elevated on start when requested by the user.
     pub run_as_admin: bool,
     /// Publish Hebnix/Rocket League activity to the local Discord client.
@@ -97,6 +99,7 @@ impl Default for SettingsCfg {
             allow_draw_on_hebnix_focus: true,
             toast_position: Default::default(),
             restrict_hotkey_to_hebnix_or_rocket_league: true,
+            panel_advanced: false,
             run_as_admin: false,
             discord_rich_presence: true,
             discord_rocket_league_only: false,

@@ -380,6 +380,7 @@ impl ArchiveBrowser {
                                     }
                                 });
                             }
+                            crate::panel::follow_focus(ui);
                         });
                 }
                 Some(Err(error)) => {

@@ -45,6 +45,7 @@ mod dpi_fix;
 #[path = "dpi_fix_linux.rs"]
 mod dpi_fix;
 mod epic_connection;
+mod panel;
 #[cfg(target_os = "windows")]
 mod hotkey;
 #[cfg(target_os = "linux")]

@@ -561,6 +561,7 @@ pub struct HebnixApp {
     plugin_mgr: PluginManager,
     tray: Option<Tray>,
     hotkey: Option<ToggleHotkey>,
+    panel: crate::panel::Panel,
     _secretsequence: crate::veryimportantfile::SecretSequenceListener,
 
     tab: Tab,
@@ -883,6 +884,8 @@ impl HebnixApp {
             });
         }
 
+        let panel = crate::panel::Panel::new(control_tx.clone(), cc.egui_ctx.clone());
+
         let secretsequence = crate::veryimportantfile::SecretSequenceListener::new();
         secretsequence.start();
 
@@ -1100,6 +1103,7 @@ impl HebnixApp {
             plugin_mgr,
             tray,
             hotkey,
+            panel,
             _secretsequence: secretsequence,
             tab: default_tab,
             plugins_subtab: PluginsSubTab::Installed,
@@ -2253,6 +2257,9 @@ impl HebnixApp {
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
         if !crate::visibility::begin_change(ctx, hidden) { return; }
         tracing::info!(hidden, "toggling main window visibility");
+        if hidden {
+            self.panel.leave(ctx);
+        }
         if !hidden {
             winutil::note_foreground();
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2304,6 +2311,171 @@ impl HebnixApp {
         }
 
         self.set_hidden(ctx, !self.hidden);
+    }
+
+    /// Controller chord: dock the panel beside the game, or close it again.
+    fn handle_toggle_panel(&mut self, ctx: &egui::Context) {
+        if self.panel.active {
+            self.set_hidden(ctx, true);
+            return;
+        }
+        if self
+            .config
+            .settings
+            .restrict_hotkey_to_hebnix_or_rocket_league
+            && !winutil::foreground_window_is_ours()
+            && !hebnix_sdk::process::is_rocket_league_focused()
+        {
+            return;
+        }
+        self.panel.page = None;
+        self.panel.enter(ctx);
+        if self.hidden {
+            self.set_hidden(ctx, false);
+        } else {
+            winutil::focus_main_window();
+        }
+    }
+
+    /// Move the open panel page to its previous or next sub-tab. Pages without any ignore it.
+    fn step_panel_subtab(&mut self, tab: Tab, step: i32) {
+        fn walk<T: Copy + PartialEq>(list: &[T], current: &mut T, step: i32) {
+            let at = list.iter().position(|item| item == current).unwrap_or(0) as i32;
+            *current = list[(at + step).rem_euclid(list.len() as i32) as usize];
+        }
+        match tab {
+            Tab::Workshop => self.workshop.step_view(step),
+            Tab::Plugins => {
+                let before = self.plugins_subtab;
+                walk(
+                    &[PluginsSubTab::Installed, PluginsSubTab::Browse, PluginsSubTab::Settings],
+                    &mut self.plugins_subtab,
+                    step,
+                );
+                // the page only fetches the catalogue when its own tab buttons change
+                if before != self.plugins_subtab
+                    && self.plugins_subtab == PluginsSubTab::Browse
+                    && self.install_modal.catalog.is_empty()
+                    && !self.install_modal.fetching
+                {
+                    self.fetch_hebnix_plugin();
+                }
+            }
+            Tab::Items => walk(
+                &[
+                    ItemsSubTab::Swapper,
+                    ItemsSubTab::Colours,
+                    ItemsSubTab::Active,
+                    ItemsSubTab::Presets,
+                    ItemsSubTab::Loadouts,
+                ],
+                &mut self.items_subtab,
+                step,
+            ),
+            Tab::Spoofer => walk(
+                &[
+                    SpooferSubTab::Username,
+                    SpooferSubTab::Titles,
+                    SpooferSubTab::ProfilePictures,
+                    SpooferSubTab::MenuTextures,
+                    SpooferSubTab::Friends,
+                ],
+                &mut self.spoofer_subtab,
+                step,
+            ),
+            Tab::Settings => walk(
+                &[
+                    HebnixSettingsTab::Interface,
+                    HebnixSettingsTab::Directories,
+                    HebnixSettingsTab::Discord,
+                    HebnixSettingsTab::ActionButton,
+                    HebnixSettingsTab::System,
+                ],
+                &mut self.hebnix_settings_tab,
+                step,
+            ),
+            _ => {}
+        }
+    }
+
+    /// Big-picture side panel: a list of large cards, each opening one existing page.
+    fn render_panel(&mut self, ui: &mut egui::Ui) {
+        // in-game pages first, the rest only behind the Advanced tickbox
+        let mut pages = vec![Tab::Workshop, Tab::Plugins];
+        if self.config.settings.panel_advanced {
+            pages.extend([Tab::Items, Tab::GameMods, Tab::Spoofer, Tab::Settings]);
+        }
+        let pages = &pages;
+        let ctx = ui.ctx().clone();
+        self.panel.begin_frame(&ctx);
+        let step = std::mem::take(&mut self.panel.pending_page);
+        let back = std::mem::take(&mut self.panel.pending_back);
+        if back {
+            if self.panel.page.take().is_none() {
+                self.set_hidden(&ctx, true);
+                return;
+            }
+        }
+        // LB/RB only move between the open page's sub-tabs; changing page means going back
+        if let (true, Some(index)) = (step != 0, self.panel.page) {
+            self.step_panel_subtab(pages[index.min(pages.len() - 1)], step);
+        }
+
+        if self.panel.page.is_some_and(|index| index >= pages.len()) {
+            self.panel.page = None;
+        }
+        for font in ui.style_mut().text_styles.values_mut() {
+            font.size *= 1.25;
+        }
+        let spacing = ui.spacing_mut();
+        spacing.interact_size.y = 40.0;
+        spacing.button_padding = egui::vec2(12.0, 8.0);
+        spacing.item_spacing = egui::vec2(10.0, 10.0);
+        ui.visuals_mut().selection.stroke.width = 3.0;
+
+        egui::CentralPanel::default().show(ui, |ui| match self.panel.page {
+            None => {
+                ui.heading("Hebnix");
+                ui.weak("A select   B close   L3+R3 close");
+                ui.add_space(6.0);
+                for (index, tab) in pages.iter().enumerate() {
+                    let card = ui.add_sized(
+                        [ui.available_width(), 64.0],
+                        egui::Button::new(egui::RichText::new(tab.label()).size(22.0)),
+                    );
+                    if index == 0 && ctx.memory(|m| m.focused()).is_none() {
+                        card.request_focus();
+                    }
+                    if card.clicked() {
+                        self.panel.page = Some(index);
+                    }
+                }
+                ui.add_space(6.0);
+                if ui
+                    .checkbox(&mut self.config.settings.panel_advanced, "Advanced mode")
+                    .changed()
+                {
+                    self.save_config();
+                }
+            }
+            Some(index) => {
+                self.tab = pages[index];
+                ui.horizontal(|ui| {
+                    if ui.button("< Back").clicked() {
+                        self.panel.page = None;
+                    }
+                    ui.heading(pages[index].label());
+                });
+                ui.weak("A select   B back   LB / RB sub-tab");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        self.render_current_page(ui);
+                        crate::panel::follow_focus(ui);
+                    });
+            }
+        });
     }
 
     fn force_quit(&mut self, ctx: &egui::Context) {
@@ -2686,6 +2858,7 @@ impl HebnixApp {
                 AppMsg::TrayToggleVisibility => {
                     self.set_hidden(ctx, !self.hidden);
                 }
+                AppMsg::TogglePanel => self.handle_toggle_panel(ctx),
                 AppMsg::TrayQuit => {
                     tracing::info!("handling tray quit on UI thread");
                     self.force_quit(ctx);
@@ -6320,6 +6493,9 @@ impl HebnixApp {
             Download(String),
         }
 
+        // the panel draws text and buttons larger, so the fixed-height tile has to grow with them
+        let text_scale = if self.panel.active { 1.25 } else { 1.0 };
+        let tile_height = 292.0 * text_scale + (ui.spacing().interact_size.y - 26.0).max(0.0);
         egui::ScrollArea::vertical()
             .id_salt("plugin_catalog_scroll")
             .max_height((ui.available_height() - 35.0).max(0.0))
@@ -6376,19 +6552,23 @@ impl HebnixApp {
                         .unwrap_or("");
 
 
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 292.0), egui::Sense::hover());
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), tile_height), egui::Sense::hover());
                             let mut tile = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(9.0)).layout(egui::Layout::top_down(egui::Align::Center)));
                             tile.set_clip_rect(rect.intersect(ui.clip_rect()));
                             let ui = &mut tile;
                             let width = ui.available_width();
+                            // a fixed box for every banner: an image sized to its own aspect ratio
+                            // would shrink the box and push the text and button around
+                            let (image_rect, _) = ui.allocate_exact_size(egui::vec2(width, 112.0), egui::Sense::hover());
+                            let mut image_ui = ui.new_child(egui::UiBuilder::new().max_rect(image_rect).layout(egui::Layout::centered_and_justified(egui::Direction::TopDown)));
                             match self.install_modal.images.get(banner) {
-                                Some(ImageState::Ready(bytes)) => { ui.add(egui::Image::from_bytes(format!("bytes://plugin/{banner}"), bytes.clone()).fit_to_exact_size(egui::vec2(width, 112.0))); }
-                                Some(ImageState::Loading) => { ui.allocate_ui(egui::vec2(width, 112.0), |ui| { ui.centered_and_justified(|ui| ui.spinner()); }); }
-                                _ => { ui.allocate_space(egui::vec2(width, 112.0)); }
+                                Some(ImageState::Ready(bytes)) => { image_ui.add(egui::Image::from_bytes(format!("bytes://plugin/{banner}"), bytes.clone()).max_size(image_rect.size())); }
+                                Some(ImageState::Loading) => { image_ui.spinner(); }
+                                _ => {}
                             }
                             ui.add(egui::Label::new(egui::RichText::new(format!("{name} v{version}")).strong()).truncate()).on_hover_text(name);
                             ui.add(egui::Label::new(egui::RichText::new(author).weak()).truncate());
-                            let (description_rect, _) = ui.allocate_exact_size(egui::vec2(width, 66.0), egui::Sense::hover());
+                            let (description_rect, _) = ui.allocate_exact_size(egui::vec2(width, 66.0 * text_scale), egui::Sense::hover());
                             let mut description = ui.new_child(egui::UiBuilder::new().max_rect(description_rect).layout(egui::Layout::top_down(egui::Align::Center)));
                             description.set_clip_rect(description_rect.intersect(ui.clip_rect()));
                             description.add(egui::Label::new(short_desc).wrap().halign(egui::Align::Center)).on_hover_text(hover);
@@ -6947,6 +7127,15 @@ impl Drop for HebnixApp {
 }
 
 impl eframe::App for HebnixApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if !self.panel.active {
+            return;
+        }
+        let (page, back) = crate::panel::feed(ctx, raw_input, &self.panel.pad.drain(), &mut self.panel.pending_nav);
+        self.panel.pending_page += page;
+        self.panel.pending_back |= back;
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
         crate::maintenance::acknowledge_update();
@@ -7045,7 +7234,9 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
-            if let Some(presentation) = theme::presentation(ctx) {
+            if self.panel.active {
+                self.render_panel(ui);
+            } else if let Some(presentation) = theme::presentation(ctx) {
                 self.render_themed_shell(ui, &presentation);
             } else {
             egui::CentralPanel::default().show(ui, |ui| {
