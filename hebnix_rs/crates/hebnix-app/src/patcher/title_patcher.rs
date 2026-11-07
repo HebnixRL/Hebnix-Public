@@ -1,8 +1,8 @@
 //! Local title presentation through embedded Scaleform code. No proxy or save writes.
 #[path = "title_patcher/abc.rs"]
-mod abc;
+pub(super) mod abc;
 #[path = "title_patcher/movie.rs"]
-mod movie;
+pub(super) mod movie;
 use super::{
     backup_guard,
     upk_package::{UpkPackage, strip},
@@ -242,6 +242,12 @@ pub fn apply(base: &Path, cooked: &Path, rules: &[TitleOverride]) -> Result<Stri
 }
 pub fn restore(base: &Path, cooked: &Path) -> Result<String, String> {
     run(base, cooked, None)
+}
+pub(crate) fn restore_for_uninstall(base: &Path, cooked: &Path) -> Result<(), String> {
+    if !load_manifest(&folder(base, cooked))?.entries.is_empty() {
+        restore(base, cooked)?;
+    }
+    Ok(())
 }
 fn run(base: &Path, cooked: &Path, rules: Option<&[TitleOverride]>) -> Result<String, String> {
     closed()?;

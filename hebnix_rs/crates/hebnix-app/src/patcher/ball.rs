@@ -824,7 +824,7 @@ impl PatcherState {
 
         self.render_delete_confirmation(ctx, tx);
 
-        crate::ui::browser::header(ui, t("app-ball-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-ball-textures"), |ui| {
             if ui.button(t("btn-refresh")).clicked() {
                 if self.source == PatchSource::Catalog {
                     self.catalog.refresh(ctx);

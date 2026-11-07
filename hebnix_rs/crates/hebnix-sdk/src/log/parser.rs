@@ -160,48 +160,13 @@ fn find_launch_log() -> PathBuf {
         .join("Launch.log")
 }
 
-/// Read the local account ID without network or Stats API verification.
-pub fn local_player_id() -> Option<String> {
+/// Read the local identity and display name without fetching playlists or contacting an API.
+pub fn local_player_session() -> Option<LogSessionInfo> {
     let bytes = std::fs::read(find_launch_log()).ok()?;
-    parse_primary_id(&String::from_utf8_lossy(&bytes))
+    Some(parse_session(&String::from_utf8_lossy(&bytes)))
 }
 
-fn parse_primary_id(text: &str) -> Option<String> {
-    if let Some(c) = find_last(re_primary_id(), text) {
-        return Some(format!("{}|{}|{}", &c[1], &c[2], &c[3]));
-    }
-    if let Some(c) = find_last(re_epic_id(), text).or_else(|| find_last(re_eos_id(), text)) {
-        return Some(format!("Epic|{}|0", &c[1]));
-    }
-    re_steam_id()
-        .captures(text)
-        .map(|c| format!("Steam|{}|0", &c[1]))
-}
-
-/// Parse Launch.log into session + game info. verify=true checks the Stats API
-/// before returning game data. Session information is always returned.
-pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> LogInfo {
-    let log_path = log_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(find_launch_log);
-
-    if !log_path.is_file() {
-        return LogInfo {
-            log_path: Some(log_path.to_string_lossy().to_string()),
-            ..Default::default()
-        };
-    }
-
-    let bytes = std::fs::read(&log_path).unwrap_or_default();
-    let text = String::from_utf8_lossy(&bytes).to_string();
-
-    // PsyNet config for playlist names
-    let build_id = re_build_id().captures(&text).map(|c| c[1].to_string());
-    let online_playlists = match &build_id {
-        Some(id) => get_online_playlists(&fetch_psynet_config(id, lang)),
-        None => Default::default(),
-    };
-
+fn parse_session(text: &str) -> LogSessionInfo {
     // Session info (always parsed)
     let mut session = LogSessionInfo::default();
     if let Some(c) = find_last(re_username(), &text) {
@@ -238,6 +203,120 @@ pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> Lo
         session.rich_presence = Some(c[1].trim().to_string());
         session.rich_presence_data = Some(c[2].trim().to_string());
     }
+
+    session
+}
+
+/// Read the local account ID without network or Stats API verification.
+pub fn local_player_id() -> Option<String> {
+    let bytes = std::fs::read(find_launch_log()).ok()?;
+    parse_primary_id(&String::from_utf8_lossy(&bytes))
+}
+
+fn parse_primary_id(text: &str) -> Option<String> {
+    if let Some(c) = find_last(re_primary_id(), text) {
+        return Some(format!("{}|{}|{}", &c[1], &c[2], &c[3]));
+    }
+    if let Some(c) = find_last(re_epic_id(), text).or_else(|| find_last(re_eos_id(), text)) {
+        return Some(format!("Epic|{}|0", &c[1]));
+    }
+    re_steam_id()
+        .captures(text)
+        .map(|c| format!("Steam|{}|0", &c[1]))
+}
+
+/// A join that failed because the host's map is not installed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinMismatch {
+    /// address the game tried to connect to
+    pub ip: String,
+    /// the package the game could not match
+    pub package: String,
+    /// where the line sits in the log, to tell a new attempt from an old one
+    pub at: usize,
+}
+
+/// The last failed join in the log, `None` if RL is not running.
+pub fn join_mismatch(log_path: Option<&Path>) -> Option<JoinMismatch> {
+    let log_path = log_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(find_launch_log);
+    let text = String::from_utf8_lossy(&std::fs::read(log_path).ok()?).to_string();
+    if !is_rocket_league_running() {
+        return None;
+    }
+    join_mismatch_in(&text)
+}
+
+fn join_mismatch_in(text: &str) -> Option<JoinMismatch> {
+    let mut at = 0;
+    let mut found = None;
+    for line in text.split_inclusive('\n') {
+        if let Some(rest) = line.split_once("Pending connect to '").map(|(_, r)| r) {
+            if let (Some((ip, _)), Some((_, package))) = (
+                rest.split_once('/'),
+                rest.split_once("Content mismatch (Package "),
+            ) {
+                if let Some((package, _)) = package.split_once(')') {
+                    found = Some(JoinMismatch {
+                        ip: ip.into(),
+                        package: package.into(),
+                        at,
+                    });
+                }
+            }
+        }
+        at += line.len();
+    }
+    found
+}
+
+/// The map file this player is hosting a LAN match on right now: the path on
+/// the last `LoadMap:` line, when that load listens for players. A later menu
+/// load, or any non-hosting load, means nothing is being hosted.
+pub fn hosted_map(log_path: Option<&Path>) -> Option<String> {
+    let log_path = log_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(find_launch_log);
+    let text = String::from_utf8_lossy(&std::fs::read(log_path).ok()?).to_string();
+    if !is_rocket_league_running() {
+        return None;
+    }
+    hosted_map_in(&text)
+}
+
+fn hosted_map_in(text: &str) -> Option<String> {
+    let line = text[text.rfind("LoadMap:")?..].lines().next()?;
+    let target = line.strip_prefix("LoadMap:")?.trim();
+    let (path, options) = target.split_once('?')?;
+    (options.split('?').any(|o| o == "Listen") && !path.is_empty()).then(|| path.to_string())
+}
+
+/// Parse Launch.log into session + game info. verify=true checks the Stats API
+/// before returning game data. Session information is always returned.
+pub fn parse_launch_log(log_path: Option<&Path>, verify: bool, lang: &str) -> LogInfo {
+    let log_path = log_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(find_launch_log);
+
+    if !log_path.is_file() {
+        return LogInfo {
+            log_path: Some(log_path.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+    }
+
+    let bytes = std::fs::read(&log_path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+
+    // PsyNet config for playlist names
+    let build_id = re_build_id().captures(&text).map(|c| c[1].to_string());
+    let online_playlists = match &build_id {
+        Some(id) => get_online_playlists(&fetch_psynet_config(id, lang)),
+        None => Default::default(),
+    };
+
+    let session = parse_session(&text);
 
     // Game info (only after verification)
     let mut game: Option<LogGameInfo> = None;
@@ -308,7 +387,10 @@ fn parse_game_info(
         }
     }
     if let Some(pid) = game.playlist_id {
-        game.playlist_name = online_playlists.get(&pid).cloned().or_else(|| crate::utils::playlists::known_name(pid).map(str::to_owned));
+        game.playlist_name = online_playlists
+            .get(&pid)
+            .cloned()
+            .or_else(|| crate::utils::playlists::known_name(pid).map(str::to_owned));
     }
 
     // welcomed by server (map + game class + tags)
@@ -467,4 +549,70 @@ fn extract_map_from_browse_path(path: &str) -> Option<String> {
 
 fn extract_from_browse_query(path: &str, re: &Regex) -> Option<String> {
     re.captures(path).map(|c| c[1].to_string())
+}
+
+#[cfg(test)]
+mod hosted_map_tests {
+    use super::hosted_map_in;
+
+    const HOSTING: &str = "[0064.25] Log: LoadMap: E:\\maps\\1843822064\\n.udk?Game=TAGame.GameInfo_Soccar_TA?Workshop?GameTags=BotsNone?Lan?Listen\n";
+
+    #[test]
+    fn hosting_load_gives_the_map_path() {
+        assert_eq!(
+            hosted_map_in(HOSTING).as_deref(),
+            Some("E:\\maps\\1843822064\\n.udk")
+        );
+    }
+
+    #[test]
+    fn freeplay_or_a_later_menu_load_is_not_hosting() {
+        let freeplay = "[1.0] Log: LoadMap: E:\\maps\\n.udk?Game=TAGame.GameInfo_Soccar_TA?Workshop?GameTags=Freeplay\n";
+        assert_eq!(hosted_map_in(freeplay), None);
+        let after = format!("{HOSTING}[2.0] Log: LoadMap: MENU_Main_p?closed\n");
+        assert_eq!(hosted_map_in(&after), None);
+        assert_eq!(hosted_map_in("no loads"), None);
+    }
+}
+
+#[cfg(test)]
+mod join_mismatch_tests {
+    use super::join_mismatch_in;
+
+    #[test]
+    fn finds_the_last_failed_join() {
+        let log = "[1.0] Log: Pending connect to '127.10.0.2/MENU_Main_p?Lan??NumPlayers=1' failed; Content mismatch (Package speedjumptrials1) (Error: 40) (Error: 43)
+[2.0] Log: other
+";
+        let found = join_mismatch_in(log).unwrap();
+        assert_eq!(
+            (found.ip.as_str(), found.package.as_str(), found.at),
+            ("127.10.0.2", "speedjumptrials1", 0)
+        );
+        assert_eq!(
+            join_mismatch_in(
+                "[1.0] Log: nothing here
+"
+            ),
+            None
+        );
+        let again = format!("{log}{log}");
+        assert_eq!(join_mismatch_in(&again).unwrap().at, log.len());
+    }
+}
+
+#[cfg(test)]
+mod local_session_tests {
+    use super::*;
+    #[test]
+    fn local_identity_and_name_are_paired_without_online_verification() {
+        let session = parse_session(
+            "-epicuserid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -epicusername=\"Saved Player\"\nDevOnline: Logged in as 'Spoofed Name'",
+        );
+        assert_eq!(session.username.as_deref(), Some("Saved Player"));
+        assert_eq!(
+            session.primary_id.as_deref(),
+            Some("Epic|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0")
+        );
+    }
 }

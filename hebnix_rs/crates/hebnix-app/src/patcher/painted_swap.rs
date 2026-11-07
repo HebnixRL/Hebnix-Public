@@ -660,6 +660,34 @@ fn local_colour_parameter(name: &str) -> bool {
     )
 }
 
+fn has_imported_paint_settings(package: &UpkPackage) -> Result<bool, String> {
+    for export in &package.exports {
+        if !strip(&package.class_of(export)).starts_with("ProductAsset_") {
+            continue;
+        }
+        let (props, _) = package.serialized_props(export)?;
+        for array in props
+            .iter()
+            .filter(|p| p.name == "Attributes" && p.tag_type == "ArrayProperty")
+        {
+            let at = export.serial_offset + array.value_offset;
+            let count = package.read_int(at)?;
+            if count < 0 || array.size != 4 + count as usize * 4 {
+                return Err("Invalid product attribute array".into());
+            }
+            for index in 0..count as usize {
+                let reference = package.read_int(at + 4 + index * 4)?;
+                if reference < 0
+                    && package.reference_class(reference)?.1 == "ProductAttribute_PaintSettings_TA"
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 // Prefer the asset's paint settings. Without inventory paint metadata, use
 // explicit material colour controls belonging to the visual product itself.
 fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usize, String> {
@@ -1271,6 +1299,12 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     changes.sort_by_key(|(at, _)| *at);
     changes.dedup_by_key(|(at, _)| *at);
     if changes.len() == routing_changes && insertions.is_empty() {
+        // Common wheels such as OEM keep their real paint settings/materials
+        // in Startup.upk. Their seek-free package only imports those objects;
+        // absence of local parameters does not mean the wheel is unpaintable.
+        if has_imported_paint_settings(&package)? {
+            return Err("This item's paint settings are stored in a shared game package, such as Startup.upk. Recolouring shared paint assets is not supported yet. No change was installed.".into());
+        }
         return Err("This item has no editable local colour parameters. Its colours may be fixed in textures or controlled by the game. No change was installed.".into());
     }
     if !write {
@@ -1306,4 +1340,42 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     })();
     let _ = std::fs::remove_file(temporary);
     result
+}
+
+#[cfg(test)]
+mod shared_paint_tests {
+    use super::*;
+
+    #[test]
+    fn oem_reports_shared_paint_without_installing_a_change() {
+        let Some(game) = std::env::var_os("HEBNIX_RECOLOUR_GAME_DIR") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(game);
+        let name = "WHEEL_Star_SF.upk";
+        let backup = game.join("Backups").join(format!("{name}.bak"));
+        let source = if backup.is_file() {
+            backup
+        } else {
+            game.join(name)
+        };
+        let original = std::fs::read(&source).unwrap();
+        let package = UpkPackage::load(&source).unwrap();
+        assert!(has_imported_paint_settings(&package).unwrap());
+        let audit = inspect_paint(&source, name, SwapPaint::Crimson).unwrap_err();
+        assert!(audit.contains("shared game package"), "{audit}");
+        let root = std::env::temp_dir().join(format!("hebnix-oem-paint-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let destination = root.join(name);
+        let sentinel = b"previous installed content";
+        std::fs::write(&destination, sentinel).unwrap();
+        let error =
+            recolour_for_target(&source, &destination, name, SwapPaint::Crimson).unwrap_err();
+        assert_eq!(error, audit);
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_file(destination).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 }

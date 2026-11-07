@@ -607,6 +607,114 @@ fn local_selected_title(
 
 /// Returns None for ABCs without the game's title API. Existing indices remain
 /// valid: only new pool entries and complete, validated method bodies are added.
+/// A call with no arguments and no result, run at the end of a method.
+#[derive(Clone, Copy)]
+pub(in crate::patcher) enum Call<'a> {
+    /// `this.name()`
+    This(&'a str),
+    /// `Class.name()` on a static method of another class, given as `package:Class`.
+    Static { class: &'a str, name: &'a str },
+}
+
+const RETURN_VOID: u8 = 0x47;
+const GET_LOCAL_0: u8 = 0xd0;
+const GET_LEX: u8 = 0x60;
+const CALL_PROP_VOID: u8 = 0x4f;
+
+/// Insert `calls` just before the final `returnvoid` of `class.method` (an
+/// instance method; `class` is `package:Class`). Every name used is already in
+/// the ABC, so no constant pool changes: a method's own trait name is a
+/// multiname that calls it. Branches stay valid because they are relative and
+/// the insert point is the last instruction. Returns None when the movie has
+/// no such class.
+pub(in crate::patcher) fn append_calls(
+    data: &[u8],
+    class: &str,
+    method: &str,
+    calls: &[Call<'_>],
+) -> Result<Option<(Vec<u8>, usize)>> {
+    let abc = Abc::parse(data)?;
+    let Some(owner) = abc
+        .classes
+        .iter()
+        .find(|c| abc.name(c.name).is_ok_and(|n| n.full == class))
+    else {
+        return Ok(None);
+    };
+    let trait_method = |traits: &[Trait], name: &str| {
+        traits
+            .iter()
+            .find(|t| (1..=3).contains(&t.kind) && abc.name(t.name).is_ok_and(|n| n.local == name))
+            .copied_name_and_method()
+    };
+    let (_, id) = trait_method(&owner.fields, method).ok_or_else(|| format!("{class} has no method {method}"))?;
+    let body = abc
+        .bodies
+        .iter()
+        .find(|b| b.id == id)
+        .ok_or("Method has no body")?;
+    if body.exceptions != 0 {
+        return Err(format!("{class}.{method} has exception handlers"));
+    }
+    let code = &data[body.code.clone()];
+    if code.last() != Some(&RETURN_VOID) {
+        return Err(format!("{class}.{method} does not end in returnvoid"));
+    }
+    let mut inserted = Vec::new();
+    for call in calls {
+        match *call {
+            Call::This(name) => {
+                let (multiname, _) = trait_method(&owner.fields, name)
+                    .ok_or_else(|| format!("{class} has no method {name}"))?;
+                inserted.push(GET_LOCAL_0);
+                op(&mut inserted, CALL_PROP_VOID, multiname);
+                put(&mut inserted, 0);
+            }
+            Call::Static { class: target, name } => {
+                let target = abc
+                    .classes
+                    .iter()
+                    .find(|c| abc.name(c.name).is_ok_and(|n| n.full == target))
+                    .ok_or_else(|| format!("Missing class {target}"))?;
+                let (multiname, _) = trait_method(&target.statics, name)
+                    .ok_or_else(|| format!("Missing static method {name}"))?;
+                op(&mut inserted, GET_LEX, target.name);
+                op(&mut inserted, CALL_PROP_VOID, multiname);
+                put(&mut inserted, 0);
+            }
+        }
+    }
+    if code.ends_with(&[&inserted[..], &[RETURN_VOID]].concat()) {
+        return Err(format!("{class}.{method} already has these calls"));
+    }
+    let mut new_code = code[..code.len() - 1].to_vec();
+    new_code.extend(&inserted);
+    new_code.push(RETURN_VOID);
+    let mut rebuilt = Vec::new();
+    put(&mut rebuilt, body.id);
+    // Each call leaves at most a class and a receiver on the operand stack.
+    put(&mut rebuilt, body.stack.max(2));
+    put(&mut rebuilt, body.locals);
+    put(&mut rebuilt, body.init_scope);
+    put(&mut rebuilt, body.max_scope);
+    put(&mut rebuilt, new_code.len());
+    rebuilt.extend(&new_code);
+    rebuilt.extend(&data[body.code.end..body.span.end]);
+    let mut out = data[..body.span.start].to_vec();
+    out.extend(rebuilt);
+    out.extend(&data[body.span.end..]);
+    Ok(Some((out, 1)))
+}
+
+trait NameAndMethod {
+    fn copied_name_and_method(self) -> Option<(usize, usize)>;
+}
+impl NameAndMethod for Option<&Trait> {
+    fn copied_name_and_method(self) -> Option<(usize, usize)> {
+        self.and_then(|t| t.method.map(|m| (t.name, m)))
+    }
+}
+
 pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<u8>, usize)>> {
     let abc = Abc::parse(data)?;
     let Some(api) = abc.classes.iter().find(|class| {

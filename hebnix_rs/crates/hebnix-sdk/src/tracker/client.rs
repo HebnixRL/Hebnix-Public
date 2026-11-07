@@ -127,7 +127,7 @@ impl TrackerClient {
         let response = match agent.get(&url)
             .set("X-App-Token", &token)
             .set("Accept", "application/json")
-            .set("User-Agent", "Hebnix/2.2.6")
+            .set("User-Agent", concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
             .timeout(self.timeout)
             .call()
         {
@@ -267,8 +267,7 @@ fn parse_rank(value: &Value, playlist_id: i64) -> PlaylistRank {
         mmr: value
             .get("mmr")
             .and_then(number_f64)
-            .map(|mmr| mmr.round() as i64)
-            .unwrap_or(0),
+            .map(|mmr| mmr.round() as i64),
         matches_played: value
             .get("matches_played")
             .and_then(number_i64)

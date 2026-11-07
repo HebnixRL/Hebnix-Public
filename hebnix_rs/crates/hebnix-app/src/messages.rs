@@ -99,6 +99,14 @@ pub enum AppMsg {
         text: String,
         style: crate::toast::ToastStyle,
     },
+    // file work with a bar, see toast::report
+    Progress {
+        key: String,
+        text: String,
+        fraction: Option<f32>,
+        done: bool,
+        failed: bool,
+    },
     // http result, slug picks the plugin that asked
     PluginHttpRes {
         slug: String,
@@ -166,6 +174,8 @@ pub enum AppMsg {
     ChangelogFetched {
         result: Result<Option<crate::update::ChangelogEntry>, String>,
     },
+    AppUpdateReady { staged: std::path::PathBuf },
+    MaintenanceFinished { result: Result<(), String> },
     AppUpdateFailed {
         error: String,
     },

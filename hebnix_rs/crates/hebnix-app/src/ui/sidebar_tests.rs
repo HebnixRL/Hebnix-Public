@@ -40,8 +40,8 @@ fn frame(ctx: &egui::Context, p: &theme::Presentation, labels: &[String],
                     p.brand(ui);
                     egui::ScrollArea::vertical().id_salt("test_sidebar_pages").auto_shrink([false,false])
                         .show(ui, |ui| {
-                            for label in ["Console","Workshop","Spoofer","Colours","Items","Settings","Plugins","Replays","About"] {
-                                p.nav_item(ui,false,label,label,Some(ui.available_width()));
+                            for tab in super::Tab::ALL {
+                                p.nav_item(ui,false,tab.config_key(),&tab.label(),Some(ui.available_width()));
                             }
                         });
                 }
@@ -255,7 +255,7 @@ fn sidebar_header_is_text_and_page_icons_render_as_images() {
         }
     }
     let image_count:usize=output.output.shapes.iter().map(|s|images(&s.shape)).sum();
-    assert_eq!(image_count,10,"Expected nine navigation icons and bell, with no header image");
+    assert_eq!(image_count,super::Tab::ALL.len()+1,"Expected one icon per navigation page and the bell, with no header image");
     let _=text_pos(&output.output,"Hebnix");
 }
 
