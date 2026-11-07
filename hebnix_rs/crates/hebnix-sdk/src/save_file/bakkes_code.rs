@@ -65,7 +65,10 @@ impl Bits<'_> {
         if self.read(1)? == 1 {
             team.colors = Some((self.rgb()?, self.rgb()?));
         }
-        team.wheel_team = self.read(6)? as u8;
+        // version 2 codes have no wheel team field
+        if version >= 3 {
+            team.wheel_team = self.read(6)? as u8;
+        }
         Ok(team)
     }
 }
@@ -192,8 +195,8 @@ pub fn decode(code: &str) -> Result<Code, String> {
     let version = bits.read(6)? as u8;
     let size = bits.read(10)? as usize;
     let crc = bits.read(8)? as u8;
-    if !(3..=4).contains(&version) {
-        return Err(format!("code version {version} is not supported, only 3 and 4"));
+    if !(2..=4).contains(&version) {
+        return Err(format!("code version {version} is not supported, only 2 to 4"));
     }
     // BakkesMod pads codes with one extra zero byte when the bits end on a byte boundary
     if size > data.len() || data.len() > size + 1 {
@@ -242,6 +245,18 @@ mod tests {
         assert_eq!(code.version, 4);
         let items: Vec<_> = code.blue.items.iter().map(|i| (i.slot, i.product_id, i.paint)).collect();
         assert_eq!(items, [(0, 4284, 0), (2, 2827, 3), (3, 32, 0)]);
+        assert!(code.orange.is_none());
+    }
+
+    #[test]
+    fn version_2_codes_have_no_wheel_team() {
+        // preset "black infinium" from an old presets.data export
+        let code = decode("AgXnB0yGgLBRhyEZDwEAAgYHBwE=").unwrap();
+        assert_eq!(code.version, 2);
+        let items: Vec<_> = code.blue.items.iter().map(|i| (i.slot, i.product_id, i.paint)).collect();
+        assert_eq!(items, [(0, 403, 0), (2, 2614, 3), (3, 4498, 3)]);
+        assert_eq!(code.blue.colors, Some(([0, 0, 1], [131, 131, 131])));
+        assert_eq!(code.blue.wheel_team, 0);
         assert!(code.orange.is_none());
     }
 
