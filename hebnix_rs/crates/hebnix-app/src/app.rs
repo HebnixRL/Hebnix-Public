@@ -2307,7 +2307,8 @@ impl HebnixApp {
             return;
         }
         self.panel.page = None;
-        self.panel.enter(ctx);
+        let settings = &self.config.settings;
+        self.panel.enter(ctx, crate::panel::Look { left: settings.panel_left, width: settings.panel_width, animate: settings.panel_animate });
         if self.hidden {
             self.set_hidden(ctx, false);
         } else {
@@ -2388,6 +2389,7 @@ impl HebnixApp {
         self.panel.begin_frame(&ctx);
         let step = std::mem::take(&mut self.panel.pending_page);
         let back = std::mem::take(&mut self.panel.pending_back);
+        let list_page = std::mem::take(&mut self.panel.pending_list_page);
         if back {
             if self.panel.page.take().is_none() {
                 self.set_hidden(&ctx, true);
@@ -2397,6 +2399,9 @@ impl HebnixApp {
         // LB/RB only move between the open page's sub-tabs; changing page means going back
         if let (true, Some(index)) = (step != 0, self.panel.page) {
             self.step_panel_subtab(pages[index.min(pages.len() - 1)], step);
+        }
+        if list_page != 0 && self.panel.page.is_some_and(|index| pages.get(index) == Some(&Tab::Workshop)) {
+            self.workshop.step_browse_page(list_page);
         }
 
         if self.panel.page.is_some_and(|index| index >= pages.len()) {
@@ -2414,7 +2419,7 @@ impl HebnixApp {
         egui::CentralPanel::default().show(ui, |ui| match self.panel.page {
             None => {
                 ui.heading("Hebnix");
-                ui.weak("A select   B close   L3+R3 close");
+                crate::plugins::gamepad_icons::prompt_row(ui, &[(&["south"], "Select"), (&["east"], "Close"), (&["l3", "r3"], "Close")]);
                 ui.add_space(6.0);
                 for (index, tab) in pages.iter().enumerate() {
                     let card = ui.add_sized(
@@ -2444,7 +2449,11 @@ impl HebnixApp {
                     }
                     ui.heading(pages[index].label());
                 });
-                ui.weak("A select   B back   LB / RB sub-tab");
+                let mut prompts: Vec<(&[&'static str], &str)> = vec![(&["south"], "Select"), (&["east"], "Back"), (&["l1", "r1"], "Sub-tab")];
+                if pages[index] == Tab::Workshop {
+                    prompts.push((&["l2", "r2"], "Page"));
+                }
+                crate::plugins::gamepad_icons::prompt_row(ui, &prompts);
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
@@ -4881,6 +4890,27 @@ impl HebnixApp {
                                         self.save_config();
                                     }
                                 });
+                                ui.add_space(12.0);
+                                ui.strong("Controller panel");
+                                ui.weak("Opened with L3 + R3 beside the game.");
+                                let mut panel_changed = false;
+                                ui.horizontal(|ui| {
+                                    crate::i18n::layout::settings_label(ui, label_w, "Opens from".to_string());
+                                    panel_changed |= ui.selectable_value(&mut self.config.settings.panel_left, true, "Left").changed();
+                                    panel_changed |= ui.selectable_value(&mut self.config.settings.panel_left, false, "Right").changed();
+                                });
+                                ui.horizontal(|ui| {
+                                    crate::i18n::layout::settings_label(ui, label_w, "Width".to_string());
+                                    panel_changed |= ui
+                                        .add(egui::Slider::new(&mut self.config.settings.panel_width, 0.2..=0.5).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                                        .on_hover_text("Share of the game window the panel covers")
+                                        .changed();
+                                });
+                                panel_changed |= ui.checkbox(&mut self.config.settings.panel_animate, "Slide in like a drawer").changed();
+                                panel_changed |= ui.checkbox(&mut self.config.settings.panel_advanced, "Show every page (Advanced mode)").changed();
+                                if panel_changed {
+                                    self.save_config();
+                                }
                             }
 
                             HebnixSettingsTab::Directories => {
@@ -7097,9 +7127,10 @@ impl eframe::App for HebnixApp {
         if !self.panel.active {
             return;
         }
-        let (page, back) = crate::panel::feed(ctx, raw_input, &self.panel.pad.drain(), &mut self.panel.pending_nav);
+        let (page, back, list_page) = crate::panel::feed(ctx, raw_input, &self.panel.pad.drain(), &mut self.panel.pending_nav);
         self.panel.pending_page += page;
         self.panel.pending_back |= back;
+        self.panel.pending_list_page += list_page;
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {

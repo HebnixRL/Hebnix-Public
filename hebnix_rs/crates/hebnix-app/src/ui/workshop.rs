@@ -1091,6 +1091,14 @@ impl WorkshopState {
         self.valid.len().div_ceil(self.page_size).max(1)
     }
 
+    /// Controller L2 / R2: move the map browser `step` pages, when it is the open view.
+    pub fn step_browse_page(&mut self, step: i32) {
+        if self.view == WorkshopView::Browse {
+            let last = self.total_pages() as i64 - 1;
+            self.page = (self.page as i64 + i64::from(step)).clamp(0, last) as usize;
+        }
+    }
+
     /// kick off the async catalog fetch (once at startup)
     pub fn fetch_catalog(&mut self, tx: Sender<AppMsg>, ctx: eframe::egui::Context) {
         if self.fetched {

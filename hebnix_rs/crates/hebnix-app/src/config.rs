@@ -59,6 +59,12 @@ pub struct SettingsCfg {
     pub restrict_hotkey_to_hebnix_or_rocket_league: bool,
     /// Controller side panel: show every page, not just the in-game ones (maps, plugins).
     pub panel_advanced: bool,
+    /// Controller side panel: dock on the left edge instead of the right.
+    pub panel_left: bool,
+    /// Controller side panel width, as a share of the game window (0.2 to 0.5).
+    pub panel_width: f32,
+    /// Controller side panel: slide in like a drawer.
+    pub panel_animate: bool,
     /// Relaunch elevated on start when requested by the user.
     pub run_as_admin: bool,
     /// Publish Hebnix/Rocket League activity to the local Discord client.
@@ -100,6 +106,9 @@ impl Default for SettingsCfg {
             toast_position: Default::default(),
             restrict_hotkey_to_hebnix_or_rocket_league: true,
             panel_advanced: false,
+            panel_left: false,
+            panel_width: 0.30,
+            panel_animate: true,
             run_as_admin: false,
             discord_rich_presence: true,
             discord_rocket_league_only: false,
