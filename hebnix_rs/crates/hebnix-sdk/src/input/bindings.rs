@@ -9,6 +9,12 @@ use crate::input::dinput::{
     is_dinput_raw_pressed, start_dinput_monitor,
 };
 use crate::input::keyboard::is_key_pressed;
+
+/// raw codes for the dualsense touchpad/mute buttons (read via winmm on
+/// windows, see dinput.rs). no DINPUT_BUTTONS slot, so they're bound as
+/// "dinput_raw" like paddles. high bits keep them clear of gilrs' raw codes.
+pub const DS5_TOUCHPAD_CODE: u32 = 0xD5_000D;
+pub const DS5_MUTE_CODE: u32 = 0xD5_000E;
 use crate::input::xinput::{XINPUT_BUTTON_DISPLAY, get_xinput_state};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,7 +194,11 @@ fn legacy_ds4_to_dinput(raw_button: u32) -> u32 {
 pub fn get_button_display(controller_type: &str, raw_button: u32) -> String {
     if controller_type == "dinput_raw" {
         // paddles/misc buttons gilrs can't name semantically - see dinput.rs
-        format!("Extra 0x{raw_button:X}")
+        match raw_button {
+            DS5_TOUCHPAD_CODE => "Touchpad".to_string(),
+            DS5_MUTE_CODE => "Mute".to_string(),
+            _ => format!("Extra 0x{raw_button:X}"),
+        }
     } else if controller_type == "dinput" {
         DINPUT_BUTTONS
             .get(raw_button as usize)

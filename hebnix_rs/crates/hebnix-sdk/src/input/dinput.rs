@@ -6,9 +6,14 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gilrs::{Gamepad, GamepadId, GilrsBuilder};
+use super::bindings::{DS5_MUTE_CODE, DS5_TOUCHPAD_CODE};
+use windows::Win32::Media::Multimedia::{
+    JOY_RETURNBUTTONS, JOY_RETURNPOV, JOYCAPSW, JOYINFOEX, joyGetDevCapsW, joyGetNumDevs,
+    joyGetPosEx,
+};
 
 // gilrs 0.10.10 vendors a snapshot of SDL_GameControllerDB that's missing
 // newer controllers (e.g. no "8BitDo Ultimate 2" entry, only the older
@@ -287,6 +292,63 @@ fn read_pressed(gamepad: &Gamepad) -> HashSet<&'static str> {
         .collect()
 }
 
+// gilrs 0.10's windows backend (Windows.Gaming.Input) never reports the
+// DualSense at all, while winmm sees it fine, so it's read from there instead.
+// winmm id of a connected dualsense, if any
+fn find_winmm_ds5() -> Option<u32> {
+    (0..unsafe { joyGetNumDevs() }).find(|&id| {
+        let mut caps = JOYCAPSW::default();
+        let ok = unsafe { joyGetDevCapsW(id as usize, &mut caps, size_of::<JOYCAPSW>() as u32) } == 0;
+        let (vid, pid) = (caps.wMid, caps.wPid);
+        ok && vid == SONY_VID
+            && SONY_PIDS.contains(&(pid, PsGen::Ds5))
+            && read_winmm_ds5(id).is_some()
+    })
+}
+
+// (named buttons, raw codes) held, None once the pad is unplugged
+fn read_winmm_ds5(id: u32) -> Option<(HashSet<&'static str>, HashSet<u32>)> {
+    // dinput button order of the dualsense, same as the SDL db's windows PS5 entry
+    const BUTTONS: [&str; 13] = [
+        "west", "south", "east", "north", "l1", "r1", "l2", "r2", "select", "start", "l3", "r3",
+        "mode",
+    ];
+    let mut info = JOYINFOEX {
+        dwSize: size_of::<JOYINFOEX>() as u32,
+        dwFlags: (JOY_RETURNBUTTONS | JOY_RETURNPOV) as u32,
+        ..Default::default()
+    };
+    if unsafe { joyGetPosEx(id, &mut info) } != 0 {
+        return None;
+    }
+    let mut pressed: HashSet<&'static str> = BUTTONS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| info.dwButtons & (1 << i) != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    // hat in hundredths of a degree clockwise from up, 0xFFFF when centred
+    if info.dwPOV <= 36000 {
+        let octant = (info.dwPOV / 4500) % 8;
+        for (name, dirs) in [
+            ("dpad_up", [7, 0, 1]),
+            ("dpad_right", [1, 2, 3]),
+            ("dpad_down", [3, 4, 5]),
+            ("dpad_left", [5, 6, 7]),
+        ] {
+            if dirs.contains(&octant) {
+                pressed.insert(name);
+            }
+        }
+    }
+    let raw = [(13, DS5_TOUCHPAD_CODE), (14, DS5_MUTE_CODE)]
+        .into_iter()
+        .filter(|(bit, _)| info.dwButtons & (1 << bit) != 0)
+        .map(|(_, code)| code)
+        .collect();
+    Some((pressed, raw))
+}
+
 /// spawn the bg thread that reads controller state and reconnects on drop.
 /// safe to call twice.
 pub fn start_dinput_monitor() {
@@ -311,6 +373,8 @@ fn monitor_loop() {
     };
 
     let mut active: Option<GamepadId> = None;
+    let mut ds5: Option<u32> = None;
+    let mut last_ds5_scan: Option<Instant> = None;
 
     loop {
         // drain pending events so gilrs' internal state is current, pick up
@@ -355,9 +419,24 @@ fn monitor_loop() {
             }
             None => {
                 active = None;
-                set_layout(None, None);
-                pressed_set().lock().unwrap().clear();
-                raw_pressed_set().lock().unwrap().clear();
+                // scanning walks every winmm slot, so only once a second
+                if ds5.is_none() && last_ds5_scan.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                    ds5 = find_winmm_ds5();
+                    last_ds5_scan = Some(Instant::now());
+                }
+                match ds5.and_then(read_winmm_ds5) {
+                    Some((pressed, raw)) => {
+                        set_layout(Some(Layout::PlayStation), Some(PsGen::Ds5));
+                        *pressed_set().lock().unwrap() = pressed;
+                        *raw_pressed_set().lock().unwrap() = raw;
+                    }
+                    None => {
+                        ds5 = None;
+                        set_layout(None, None);
+                        pressed_set().lock().unwrap().clear();
+                        raw_pressed_set().lock().unwrap().clear();
+                    }
+                }
             }
         }
 
