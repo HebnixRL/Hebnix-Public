@@ -836,11 +836,11 @@ impl SteamDownloader {
                 egui::ScrollArea::vertical()
                     .max_height(140.0)
                     .stick_to_bottom(true)
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         for line in &shared.log {
                             ui.small(line);
                         }
-                    });
+                    }));
             }
         }
         // hand a finished map over exactly once

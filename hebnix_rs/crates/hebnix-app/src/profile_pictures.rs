@@ -617,7 +617,7 @@ impl State {
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, game: &Path) {
         egui::ScrollArea::vertical()
             .id_salt("profile_pictures_page")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.heading("Profile Pictures");
                 ui.label("Choose a picture to share with other Hebnix players.");
                 ui.label(egui::RichText::new("Click a picture under Recent pictures to upload it as your avatar.").strong());
@@ -701,7 +701,7 @@ impl State {
                         ui.label(&self.status);
                     }
                 }
-            });
+            }));
     }
 }
 #[cfg(test)]

@@ -223,7 +223,7 @@ impl ColoursState {
         egui::ScrollArea::vertical()
             .id_salt("colours_page")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.heading(t("nav-game-colours"));
                 ui.label(t("render-stadium-hud-and-garage-palette-colours"));
                 ui.add_space(12.0);
@@ -388,7 +388,7 @@ impl ColoursState {
                         &[("backup", BACKUP_NAME.to_string().into())],
                     ));
                 });
-            });
+            }));
         requested
     }
 
@@ -402,7 +402,7 @@ impl ColoursState {
         egui::ScrollArea::vertical()
             .id_salt("ball_appearance_page")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.heading(t("nav-ball-shape"));
@@ -531,7 +531,7 @@ impl ColoursState {
                         ui.colored_label(colour, &self.status);
                     }
                 });
-            });
+            }));
         requested
     }
 

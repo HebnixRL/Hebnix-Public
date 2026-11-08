@@ -133,7 +133,7 @@ impl ConsoleState {
                     .id_salt("console_scroll")
                     .auto_shrink([false, false])
                     .stick_to_bottom(self.stick_to_bottom)
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         for line in &self.lines {
                             ui.add(
@@ -141,7 +141,7 @@ impl ConsoleState {
                                     .wrap(),
                             );
                         }
-                    });
+                    }));
             });
         self.stick_to_bottom = false;
 

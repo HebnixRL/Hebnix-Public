@@ -1716,7 +1716,7 @@ impl BoostPatcherState {
         egui::ScrollArea::vertical()
             .id_salt("patcher_boosts_scroll")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, boost) in row.iter().enumerate() {
@@ -1842,7 +1842,7 @@ impl BoostPatcherState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
 
         if let Some(boost_to_delete) = self.confirm_delete.clone() {
             let mut close = false;

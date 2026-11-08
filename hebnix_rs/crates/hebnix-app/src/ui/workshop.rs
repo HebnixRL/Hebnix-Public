@@ -1396,7 +1396,7 @@ impl WorkshopState {
             egui::ScrollArea::vertical()
                 .id_salt("workshop_grid")
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     let grid_width = ui.available_width();
                     ui.set_width(grid_width);
                     for row in indices.chunks(column_count) {
@@ -1425,7 +1425,7 @@ impl WorkshopState {
                         });
                     }
                     crate::panel::follow_focus(ui);
-                });
+                }));
         }
 
         if let Some((map_idx, pos)) = self.lan_menu {
@@ -2187,7 +2187,7 @@ impl WorkshopState {
                 .id_salt("workshop_players")
                 .max_height(320.0)
                 .auto_shrink([false, true])
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     let mut shown = 0;
                     for offer in offers
                         .iter()
@@ -2212,7 +2212,7 @@ impl WorkshopState {
                     if shown == 0 && !offers.is_empty() {
                         ui.small(t("maps-in-use-no-players-match-that-search"));
                     }
-                });
+                }));
 
             let transfer = &self.multiplayer.map_transfer;
             let total = transfer.total.load(Ordering::Relaxed);
@@ -3060,7 +3060,7 @@ impl WorkshopState {
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("workshop_theme_details_scroll")
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             self.themed_image(
                                 ui,
                                 selected,
@@ -3085,7 +3085,7 @@ impl WorkshopState {
                             if let Some(a) = self.themed_map_actions(ui, selected, None) {
                                 action = Some((selected, a));
                             }
-                        });
+                        }));
                 });
         }
         egui::CentralPanel::default()
@@ -3094,7 +3094,7 @@ impl WorkshopState {
                 egui::ScrollArea::vertical()
                     .id_salt("workshop_grid")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         let card = &p.components.map_card;
                         let columns = column_count;
                         let width = ((ui.available_width()
@@ -3184,7 +3184,7 @@ impl WorkshopState {
                             });
                             ui.add_space(8.0);
                         }
-                    });
+                    }));
             });
         action
     }

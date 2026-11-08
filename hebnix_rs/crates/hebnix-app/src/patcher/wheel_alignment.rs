@@ -594,7 +594,7 @@ impl WheelAlignmentState {
                     egui::ScrollArea::vertical()
                         .id_salt("alignment_edited_cars")
                         .max_height(200.0)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             for (file, reverted) in &self.edited {
                                 let index = self.cars.iter().position(|(_, path)| path == file);
                                 let name = index.map(|i| self.cars[i].0.as_str()).unwrap_or(file);
@@ -630,7 +630,7 @@ impl WheelAlignmentState {
                             if self.edited.is_empty() {
                                 ui.weak(t("render-no-cars-adjusted-yet"));
                             }
-                        });
+                        }));
                 });
             });
         }

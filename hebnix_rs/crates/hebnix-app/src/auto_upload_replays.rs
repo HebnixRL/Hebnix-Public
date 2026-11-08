@@ -409,7 +409,7 @@ impl AutoUploadReplays {
         }
         egui::ScrollArea::vertical()
             .id_salt("replay_upload_history")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for entry in self.history.iter().take(20) {
                     ui.horizontal_wrapped(|ui| {
                         ui.monospace(&entry.match_guid);
@@ -426,7 +426,7 @@ impl AutoUploadReplays {
                     }
                     ui.separator();
                 }
-            });
+            }));
     }
 }
 

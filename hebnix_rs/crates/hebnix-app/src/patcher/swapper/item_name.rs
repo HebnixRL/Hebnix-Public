@@ -652,7 +652,7 @@ impl SwapperState {
         let height = browser::tile_height(ui).max(super::thumbnail_patcher::ITEM_THUMBNAIL_CARD_HEIGHT);
         egui::ScrollArea::vertical()
             .id_salt("item-name-grid")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in entries
                     .iter()
                     .skip(start)
@@ -770,6 +770,6 @@ impl SwapperState {
                         }
                     });
                 }
-            });
+            }));
     }
 }

@@ -2457,10 +2457,10 @@ impl HebnixApp {
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         self.render_current_page(ui);
                         crate::panel::follow_focus(ui);
-                    });
+                    }));
             }
         });
     }
@@ -3819,7 +3819,7 @@ impl HebnixApp {
         theme::secondary_navigation(ui, "spoofer_settings_list").show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("spoofer_settings_names")
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     ui.selectable_value(
                         &mut self.spoofer_subtab,
                         SpooferSubTab::Username,
@@ -3861,7 +3861,7 @@ impl HebnixApp {
                             t("spoofer-friends"),
                         );
                     });
-                });
+                }));
         });
 
         egui::CentralPanel::default()
@@ -3887,7 +3887,7 @@ impl HebnixApp {
                 egui::ScrollArea::vertical()
                     .id_salt("spoofer_settings_view")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| match self.spoofer_subtab {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| match self.spoofer_subtab {
                         SpooferSubTab::Username => {
                             unreachable!("Name uses its own centered scroll area")
                         }
@@ -3993,7 +3993,7 @@ impl HebnixApp {
                                     egui::ScrollArea::vertical()
                                         .id_salt("friends_scroll")
                                         .auto_shrink([false, false])
-                                        .show(ui, |ui| {
+                                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                                             for (_id, state) in friends_vec {
                                                 ui.horizontal(|ui| {
                                                     if ui.checkbox(&mut state.enabled, "").changed()
@@ -4022,7 +4022,7 @@ impl HebnixApp {
                                                     }
                                                 });
                                             }
-                                        });
+                                        }));
 
                                     if any_interaction {
                                         self.save_friends();
@@ -4054,7 +4054,7 @@ impl HebnixApp {
 
                                     egui::ScrollArea::vertical().id_salt("ranks_scroll").show(
                                         ui,
-                                        |ui| {
+                                        |ui| crate::panel::followed(ui, |ui| {
                                             for &(id, fallback_name) in RANK_SPOOF_PLAYLISTS {
                                                 let name =
                                                     hebnix_sdk::utils::playlists::known_name(
@@ -4133,7 +4133,7 @@ impl HebnixApp {
                                 });
                             });
                         }
-                    });
+                    }));
             });
     }
 
@@ -4282,7 +4282,7 @@ impl HebnixApp {
         egui::ScrollArea::vertical()
             .id_salt("plugins_list")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for plugin in &self.plugin_mgr.plugins {
                     if let Some(err) = &plugin.load_error {
                         ui.horizontal(|ui| {
@@ -4346,7 +4346,7 @@ impl HebnixApp {
                         ui.label(t("plugins-no-plugins-installed-drop-a-plugin"));
                     });
                 }
-            });
+            }));
 
         for (slug, enabled) in toggles {
             let display = self
@@ -4639,7 +4639,7 @@ impl HebnixApp {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("hebnix_settings_names")
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.selectable_value(
                             &mut self.hebnix_settings_tab,
                             HebnixSettingsTab::Interface,
@@ -4665,7 +4665,7 @@ impl HebnixApp {
                             HebnixSettingsTab::ActionButton,
                             t("settings-nav-action-button"),
                         );
-                    });
+                    }));
             });
 
         egui::CentralPanel::default()
@@ -4674,7 +4674,7 @@ impl HebnixApp {
                 egui::ScrollArea::vertical()
                     .id_salt("hebnix_settings_view")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.heading(match self.hebnix_settings_tab {
                             HebnixSettingsTab::Interface => t("nav-settings-appearance"),
                             HebnixSettingsTab::Directories => t("nav-files-folders"),
@@ -5489,7 +5489,7 @@ impl HebnixApp {
                                 self.render_spoofer_certificate_settings(ui);
                             }
                         }
-                    });
+                    }));
             });
     }
 
@@ -5575,13 +5575,13 @@ impl HebnixApp {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("plugin_settings_names")
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         for (slug, name) in &with_settings {
                             if ui.selectable_label(*slug == selected, name).clicked() {
                                 self.selected_settings_plugin = Some(slug.clone());
                             }
                         }
-                    });
+                    }));
             });
 
         let display_name = with_settings
@@ -5596,7 +5596,7 @@ impl HebnixApp {
                 egui::ScrollArea::vertical()
                     .id_salt("plugin_settings_view")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.heading(t_args(
                             "plugin-settings-display-name-configuration",
                             &[("display_name", display_name.to_string().into())],
@@ -5607,7 +5607,7 @@ impl HebnixApp {
                                 "[Console] Error rendering settings for {display_name}: {e}"
                             ));
                         }
-                    });
+                    }));
             });
     }
 
@@ -6495,7 +6495,7 @@ impl HebnixApp {
         egui::ScrollArea::vertical()
             .id_salt("plugin_catalog_scroll")
             .max_height((ui.available_height() - 35.0).max(0.0))
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if total_items == 0 {
                     ui.add_space(20.0);
                     ui.centered_and_justified(|ui| {
@@ -6602,7 +6602,7 @@ impl HebnixApp {
                     });
                     ui.add_space(12.0);
                 }
-            });
+            }));
         let display_page = if total_pages == 0 {
             0
         } else {
@@ -7024,7 +7024,7 @@ impl HebnixApp {
 
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             if let Err(e) = self.plugin_mgr.render_window(&slug, ui) {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
@@ -7034,7 +7034,7 @@ impl HebnixApp {
                                     ),
                                 );
                             }
-                        });
+                        }));
                 });
 
                 if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
@@ -7381,7 +7381,7 @@ impl HebnixApp {
             theme::secondary_navigation(ui, "items_categories").show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("items_category_pages")
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         if self.items_subtab == ItemsSubTab::Colours {
                             self.swapper.render_recolour_categories(ui);
                         } else {
@@ -7393,14 +7393,14 @@ impl HebnixApp {
                                 );
                             }
                         }
-                    });
+                    }));
             });
         }
         if self.items_subtab == ItemsSubTab::Loadouts {
             let apply = egui::ScrollArea::vertical()
                 .id_salt("loadouts_scroll")
                 .auto_shrink([false; 2])
-                .show(ui, |ui| self.loadouts.show(ui, &self.swapper, &mut self.presets))
+                .show(ui, |ui| crate::panel::followed(ui, |ui| self.loadouts.show(ui, &self.swapper, &mut self.presets)))
                 .inner;
             if let Some(name) = apply {
                 if let Some(index) = self.presets.presets.iter().position(|p| p.name == name) {
@@ -7451,7 +7451,7 @@ impl HebnixApp {
             theme::secondary_navigation(ui, "studio_navigation").show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("studio_pages")
-                    .show(ui, |ui| match section {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| match section {
                         StudioSection::CustomAssets => {
                             for (value, key) in [
                                 (PatcherSubTab::Car, "nav-car-models"),
@@ -7493,7 +7493,7 @@ impl HebnixApp {
                             );
                         }
                         StudioSection::Active => unreachable!(),
-                    });
+                    }));
             });
         }
         self.render_editor_content(ui, self.items_mode);
@@ -7507,7 +7507,7 @@ impl HebnixApp {
     ) {
         egui::ScrollArea::vertical()
             .id_salt("active_item_swaps")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.heading(t("nav-active"));
                 let count = self.swapper.active_count(backups_dir);
                 ui.horizontal(|ui| {
@@ -7535,7 +7535,7 @@ impl HebnixApp {
                 }
                 self.swapper
                     .render_active_swaps(ui, cooked_pc, backups_dir, &self.tx);
-            });
+            }));
     }
 
     fn render_editor_content(&mut self, ui: &mut egui::Ui, mode: ItemsMode) {
@@ -7675,7 +7675,7 @@ impl HebnixApp {
                             egui::ScrollArea::vertical()
                                 .id_salt("active_upk_studio")
                                 .auto_shrink([false, false])
-                                .show(ui, |ui| {
+                                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                                     ui.heading(t("nav-active"));
                                     let active_count =
                                         usize::from(self.patcher_ball.active_ball.is_some())
@@ -7944,7 +7944,7 @@ impl HebnixApp {
                                             }
                                         });
                                     }
-                                });
+                                }));
                         }
                         PatcherSubTab::Presets => {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
@@ -7980,7 +7980,7 @@ impl HebnixApp {
                 } else if mode == ItemsMode::SpeedPatch {
                     egui::ScrollArea::vertical()
                         .id_salt("items_speed_patch")
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             if self.speed_patch.render(
                                 ui,
                                 &mut self.config.speed_patch,
@@ -7990,7 +7990,7 @@ impl HebnixApp {
                             ) {
                                 self.save_config();
                             }
-                        });
+                        }));
                 } else if mode == ItemsMode::GoalExplosion {
                     self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
                     ui.add_space(16.0);
@@ -8153,7 +8153,7 @@ impl HebnixApp {
                         ui.add_space(10.0);
                         egui::ScrollArea::vertical().id_salt("theme_nav_scroll")
                             .auto_shrink([false, false])
-                            .show(ui, |ui| self.render_themed_navigation(ui, p, true));
+                            .show(ui, |ui| crate::panel::followed(ui, |ui| self.render_themed_navigation(ui, p, true)));
                     }
                 });
             }

@@ -305,7 +305,7 @@ impl SwapperState {
         let start = self.thumbnail_editor.page * page_size;
         egui::ScrollArea::vertical()
             .id_salt("thumbnail-patcher-items")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in entries
                     .iter()
                     .skip(start)
@@ -353,7 +353,7 @@ impl SwapperState {
                         }
                     });
                 }
-            });
+            }));
     }
 
     fn render_thumbnail_selection(
@@ -485,7 +485,7 @@ impl SwapperState {
         }
         egui::ScrollArea::vertical()
             .id_salt("thumbnail-patcher-active")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for package in packages {
                     for patch in package.patches {
                         ui.push_id((&package.file, patch.export), |ui| {
@@ -530,7 +530,7 @@ impl SwapperState {
                         });
                     }
                 }
-            });
+            }));
     }
 }
 

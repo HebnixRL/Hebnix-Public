@@ -667,7 +667,7 @@ impl AnthemPatcherState {
             if self.editor.is_some() {
                 egui::ScrollArea::vertical()
                     .id_salt("anthem_editor")
-                    .show(ui, |ui| self.render_editor(ui, cooked));
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| self.render_editor(ui, cooked)));
             } else {
                 self.render_list(ui, cooked, owned_ids);
             }
@@ -800,7 +800,7 @@ impl AnthemPatcherState {
         let preview_height = (row_height - 92.0).clamp(40.0, 200.0);
         egui::ScrollArea::vertical()
             .id_salt("anthem_list")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in entries
                     .iter()
                     .skip(self.page * page_size)
@@ -855,7 +855,7 @@ impl AnthemPatcherState {
                         }
                     });
                 }
-            });
+            }));
     }
     fn render_editor(&mut self, ui: &mut egui::Ui, cooked: &Path) {
         let ctx = ui.ctx().clone();

@@ -264,7 +264,7 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
                     .id_salt("home_live_scoreboard")
                     .max_height(height)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.heading(t("home-live-match"));
                         if connected && let Some(state) = &home.snapshot {
                             ui.heading(match_clock(Some((
@@ -321,7 +321,7 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
                                 "home-match-hint"
                             }));
                         }
-                    });
+                    }));
             },
         );
         ui.allocate_ui_with_layout(
@@ -334,7 +334,7 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
                     .id_salt("home_match_events")
                     .max_height(ui.available_height().max(0.0))
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         if !connected || home.events.is_empty() {
                             ui.label(t("home-no-events"));
                         } else {
@@ -346,7 +346,7 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
                                 });
                             }
                         }
-                    });
+                    }));
             },
         );
     });
@@ -420,7 +420,7 @@ impl HebnixApp {
                     .id_salt("home_active_plugins")
                     .max_height(ui.available_height().max(0.0))
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         let plugins: Vec<_> = self
                             .plugin_mgr
                             .plugins
@@ -455,7 +455,7 @@ impl HebnixApp {
                                 });
                             });
                         }
-                    });
+                    }));
             }
             HomeTab::Maps => {
                 if ui.button(t("home-install-map")).clicked() {
@@ -466,7 +466,7 @@ impl HebnixApp {
                     .id_salt("home_active_maps")
                     .max_height(ui.available_height().max(0.0))
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         let mut maps = self
                             .workshop
                             .manager
@@ -481,7 +481,7 @@ impl HebnixApp {
                             let name = map.get("name").and_then(|v| v.as_str()).unwrap_or(&target);
                             ui.label(name);
                         }
-                    });
+                    }));
             }
             HomeTab::Swaps => {
                 if ui.button(t("home-swap-items")).clicked() {
@@ -496,13 +496,13 @@ impl HebnixApp {
                     .id_salt("home_active_swaps")
                     .max_height(ui.available_height().max(0.0))
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         if self.swapper.active_count(&backups_dir) == 0 {
                             ui.label(t("home-no-swaps"));
                         }
                         self.swapper
                             .render_active_swaps(ui, &cooked_pc, &backups_dir, &self.tx);
-                    });
+                    }));
             }
         }
     }

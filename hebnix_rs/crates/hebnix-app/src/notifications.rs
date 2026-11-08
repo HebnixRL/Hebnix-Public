@@ -47,9 +47,9 @@ pub fn render_popup(ctx: &egui::Context, notification: &Notification) -> bool {
         ui.separator();
         egui::ScrollArea::vertical()
             .max_height((ctx.content_rect().height() * 0.6).max(80.0))
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.add(egui::Label::new(&notification.message).wrap());
-            });
+            }));
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if let Some(url) = notification.link_url() {

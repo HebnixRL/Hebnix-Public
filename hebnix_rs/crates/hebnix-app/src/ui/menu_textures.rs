@@ -164,7 +164,7 @@ impl HebnixApp {
         egui::ScrollArea::vertical()
             .id_salt("menu_textures_page")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.heading("Menu Textures (experimental)");
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
@@ -380,7 +380,7 @@ impl HebnixApp {
                         });
                     }
                 });
-            });
+            }));
     }
 }
 

@@ -738,7 +738,7 @@ impl CarPatcherState {
         egui::ScrollArea::vertical()
             .id_salt("car_patcher_local")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(columns) {
                     ui.columns(columns, |uis| {
                         for (column, car) in row.iter().enumerate() {
@@ -750,7 +750,7 @@ impl CarPatcherState {
                         }
                     });
                 }
-            });
+            }));
         if let Some((car, action)) = action {
             let result = match action {
                 TileAction::Apply => self.apply(&car, cooked_pc, backups_dir, tx, config),

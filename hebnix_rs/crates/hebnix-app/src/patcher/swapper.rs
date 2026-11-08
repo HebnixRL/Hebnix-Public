@@ -1431,7 +1431,7 @@ impl SwapperState {
         egui::ScrollArea::vertical()
             .id_salt("recolour_items")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(columns) {
                     ui.columns(columns, |columns| {
                         for (column, &index) in row.iter().enumerate() {
@@ -1466,7 +1466,7 @@ impl SwapperState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
     }
 
     pub fn active_count(&mut self, backups_dir: &Path) -> usize {
@@ -1909,7 +1909,7 @@ impl SwapperState {
         egui::ScrollArea::vertical()
             .id_salt(("swapper_walkthrough_targets", category))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, &target_index) in row.iter().enumerate() {
@@ -1941,7 +1941,7 @@ impl SwapperState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
 
         if apply {
             let Some(target_index) = self.walkthrough_target else {
@@ -2376,7 +2376,7 @@ impl SwapperState {
             egui::ScrollArea::vertical()
                 .id_salt(("swapper_walkthrough_sources", category))
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     for row in visible.chunks(column_count) {
                         ui.columns(column_count, |columns| {
                             for (column, &source_index) in row.iter().enumerate() {
@@ -2411,14 +2411,14 @@ impl SwapperState {
                         });
                         ui.add_space(6.0);
                     }
-                });
+                }));
             return owned_filter_requested;
         }
         let mut action: Option<(usize, usize, bool, SwapPaint, f32)> = None;
         egui::ScrollArea::vertical()
             .id_salt(("swapper_grid", category))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, &source_index) in row.iter().enumerate() {
@@ -2632,7 +2632,7 @@ impl SwapperState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
         if let Some((source_index, target_index, restoring, paint, speed)) = action {
             if crate::messages::block_item_action_if_game_running(tx) {
                 return owned_filter_requested;
@@ -2961,11 +2961,11 @@ mod theme_content_space_tests {
             ui.horizontal(|ui|{for label in ["Item Swapper","Item Spawner","Animation Speed","Wheel Alignment","Ball Appearance"] {let _=ui.selectable_label(label=="Item Swapper",label);}});
             ui.separator();
             theme::secondary_navigation(ui,"space_test_categories").show(ui,|ui| {
-                egui::ScrollArea::vertical().auto_shrink([false,false]).show(ui,|ui| {
+                egui::ScrollArea::vertical().auto_shrink([false,false]).show(ui,|ui| crate::panel::followed(ui, |ui| {
                     for label in ["Ball Patcher","Boost Patcher","Decal Patcher","Car Patcher"] {let _=ui.selectable_label(false,label);}
                     ui.separator();
                     for category in SwapCategory::ALL {let _=ui.selectable_label(category==SwapCategory::Bodies,category.label());}
-                });
+                }));
             });
             egui::CentralPanel::default().frame(crate::i18n::layout::subtab_content_frame()).show(ui,|ui| {
                 assert!(!swapper.render_tab(ui,SwapCategory::Bodies,&cooked,&backups,&tx,&HashSet::new()));

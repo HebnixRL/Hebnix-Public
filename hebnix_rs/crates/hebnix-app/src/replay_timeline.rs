@@ -1146,7 +1146,7 @@ impl ReplayTimeline {
         ui.label(&self.status);
         let editor_height =
             (ui.available_height() - if self.metadata.is_some() { 205.0 } else { 0.0 }).max(60.0);
-        egui::ScrollArea::vertical().id_salt("replay_timeline_editor").max_height(editor_height).auto_shrink([false,false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("replay_timeline_editor").max_height(editor_height).auto_shrink([false,false]).show(ui, |ui| crate::panel::followed(ui, |ui| {
             if !self.full_replay || self.metadata.is_none() {
                 ui.heading("Waiting for a replay");
                 ui.label("Open a replay in Rocket League, then return here. Timeline controls become available while you are watching it.");
@@ -1173,7 +1173,7 @@ impl ReplayTimeline {
                     self.edit_keyframe(ui, frame, ready && !self.playing);
                 } else { ui.label("Select a frame and add a keyframe, or select a diamond to edit its commands."); }
             }
-        });
+        }));
         ui.separator();
         if self.metadata.is_some() {
             self.canvas(ui, ws, ready);

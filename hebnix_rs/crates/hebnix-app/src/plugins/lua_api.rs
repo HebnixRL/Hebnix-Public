@@ -4210,9 +4210,9 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                     let height = height.unwrap_or(260.0).max(48.0);
                     egui::ScrollArea::vertical()
                         .max_height(height)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             ui.monospace(&display_text);
-                        });
+                        }));
                 });
                 Ok(())
             })?,
@@ -4427,13 +4427,13 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                     .max_height(max_height.max(20.0))
                     .auto_shrink([false, true])
                     .stick_to_bottom(true)
-                    .show(outer, |inner| {
+                    .show(outer, |inner| crate::panel::followed(inner, |inner| {
                         with_ui_scope(inner, || {
                             if let Err(e) = f.call::<()>(ui_tbl.clone()) {
                                 tracing::warn!("plugin ui.scroll_area callback error: {e}");
                             }
                         });
-                    });
+                    }));
             });
             Ok(())
         })?,

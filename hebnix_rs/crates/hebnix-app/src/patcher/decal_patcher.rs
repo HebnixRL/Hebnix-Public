@@ -3598,7 +3598,7 @@ impl DecalPatcherState {
                 .id_salt("patcher_active_decals_scroll")
                 .min_scrolled_height(0.0)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     if self.active_decals.is_empty() {
                         ui.weak(t("tab-no-active-decal-patches"));
                         return;
@@ -3671,7 +3671,7 @@ impl DecalPatcherState {
                             ui.separator();
                         });
                     }
-                });
+                }));
         });
         restore
     }
@@ -3892,7 +3892,7 @@ impl DecalPatcherState {
                     .id_salt("patcher_decals_scroll")
                     .min_scrolled_height(0.0)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         if visible.is_empty() {
                             ui.add_space(20.0);
                             ui.vertical_centered(|ui| {
@@ -4173,7 +4173,7 @@ impl DecalPatcherState {
                             });
                             ui.add_space(6.0);
                         }
-                    });
+                    }));
             },
         );
 
@@ -4468,7 +4468,7 @@ impl DecalPatcherState {
                         .id_salt("available_decals")
                         .auto_shrink([false, false])
                         .max_height(400.0)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             if filtered.is_empty() {
                                 ui.label(
                                     egui::RichText::new(t("tab-legacy-no-decals-found"))
@@ -4551,7 +4551,7 @@ impl DecalPatcherState {
                                 });
                                 ui.add_space(6.0);
                             }
-                        });
+                        }));
                 },
             );
 

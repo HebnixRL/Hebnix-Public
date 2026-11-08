@@ -797,7 +797,7 @@ impl HebnixApp {
             .max_height(list_height)
             .min_scrolled_height(list_height)
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if self.spoofer_titles.is_empty() {
                     ui.weak("No title replacements added yet");
                 }
@@ -915,7 +915,7 @@ impl HebnixApp {
                         ui.separator();
                     });
                 }
-            });
+            }));
         if let Some(index) = edit {
             self.switch_title_editor(Some(index));
             *changed = true;
@@ -976,7 +976,7 @@ impl HebnixApp {
                 self.title_editor.restore_confirmation = true;
             }
         });
-        egui::ScrollArea::vertical().id_salt("titles_patch_status").min_scrolled_height(0.0).max_height(ui.available_height().max(0.0)).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("titles_patch_status").min_scrolled_height(0.0).max_height(ui.available_height().max(0.0)).auto_shrink([false, false]).show(ui, |ui| crate::panel::followed(ui, |ui| {
             if !closed { ui.weak(if self.first_status { "Checking whether Rocket League is running…" } else { "Close Rocket League to Apply or Restore." }); }
             else if let Some(error) = validation { if !self.spoofer_titles.is_empty() { ui.label(error); } }
             if self.title_patcher.busy() {
@@ -1001,7 +1001,7 @@ impl HebnixApp {
                     self.title_patcher.status = "Could not restart as administrator.".into();
                 }
             }
-        });
+        }));
     }
 
     fn render_title_restore_confirmation(&mut self, ctx: &egui::Context) {

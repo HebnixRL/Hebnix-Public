@@ -122,6 +122,14 @@ pub fn follow_focus(ui: &egui::Ui) {
     }
 }
 
+/// A scroll area's content with `follow_focus` after it. A scroll target only reaches the
+/// area it was set in, so nested areas (a page's own list inside the panel) each need this.
+pub fn followed<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let inner = add(ui);
+    follow_focus(ui);
+    inner
+}
+
 /// Pad poller. The chord always works; the other buttons only queue while the panel is open,
 /// so playing the game never wakes the UI.
 pub struct Pad {

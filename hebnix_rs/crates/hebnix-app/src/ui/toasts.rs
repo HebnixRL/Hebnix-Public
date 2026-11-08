@@ -96,7 +96,7 @@ impl ToastView {
             .id_salt("toast_view")
             .max_height((ui.ctx().content_rect().height() - 230.0).clamp(100.0, 460.0))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if center.history().next().is_none() {
                     ui.label(t("toast-empty"));
                     return;
@@ -134,7 +134,7 @@ impl ToastView {
                         self.open.insert(toast.id);
                     }
                 }
-            });
+            }));
     }
 }
 
