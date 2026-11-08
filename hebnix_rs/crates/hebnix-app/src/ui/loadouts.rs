@@ -154,12 +154,13 @@ impl LoadoutsPanel {
         let apply = egui::Frame::group(ui.style())
             .show(ui, |ui| self.show_import(ui, swapper, presets))
             .inner;
-        ui.add_space(8.0);
-        self.show_list(ui);
+        // under the buttons that caused it, not below a long list where it goes unseen
         if !self.message.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.label(&self.message);
         }
+        ui.add_space(8.0);
+        self.show_list(ui);
         apply
     }
 
@@ -170,6 +171,11 @@ impl LoadoutsPanel {
         presets: &mut PresetStore,
     ) -> Option<String> {
         ui.strong(t("loadouts-import-title"));
+        // presets live in the save file, which the game rewrites while it runs
+        let game_closed = !hebnix_sdk::process::is_rocket_league_running();
+        if !game_closed {
+            ui.colored_label(ui.visuals().warn_fg_color, t("loadouts-close-game"));
+        }
         let Some(code) = self.code.clone() else {
             ui.label(t("loadouts-import-hint"));
             ui.add(
@@ -179,7 +185,7 @@ impl LoadoutsPanel {
                     .hint_text(t("loadouts-import-placeholder")),
             );
             let filled = !self.input.trim().is_empty();
-            if ui.add_enabled(filled, egui::Button::new(t("loadouts-import"))).clicked() {
+            if ui.add_enabled(filled && game_closed, egui::Button::new(t("loadouts-import"))).clicked() {
                 self.read_input();
             }
             return None;
@@ -259,10 +265,10 @@ impl LoadoutsPanel {
         let mut action = None;
         ui.horizontal(|ui| {
             let primary = egui::Button::new(t("loadouts-import-apply")).fill(ui.visuals().selection.bg_fill);
-            if ui.add_enabled(ready, primary).clicked() {
+            if ui.add_enabled(ready && game_closed, primary).clicked() {
                 action = Some(true);
             }
-            if ui.add_enabled(ready, egui::Button::new(t("loadouts-import-only"))).clicked() {
+            if ui.add_enabled(ready && game_closed, egui::Button::new(t("loadouts-import-only"))).clicked() {
                 action = Some(false);
             }
             if ui.button(t("loadouts-cancel")).clicked() {

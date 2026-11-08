@@ -300,7 +300,9 @@ pub fn loadout_export_bakkes(position: usize) -> Result<String, String> {
 }
 
 pub fn apply_loadout_edit(edit: &loadout_edit::Edit) -> Result<String, String> {
-    require_closed()?;
+    if hebnix_sdk::process::detector::rocket_league_running_checked()? {
+        return Err(crate::i18n::t("loadouts-close-game"));
+    }
     let path = main_save()?;
     let changed = execute(&[path.clone()], "loadout", require_closed, |raw| {
         loadout_edit::plan(raw, edit)

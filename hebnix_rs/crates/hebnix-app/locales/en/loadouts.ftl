@@ -47,6 +47,7 @@ loadouts-one-bakkes-code = Paste one BakkesMod code at a time.
 loadouts-bakkes-summary = BakkesMod code · { $count } items
 loadouts-import-apply = Import and apply
 loadouts-import-only = Import only
+loadouts-close-game = Close Rocket League to import or change loadouts. They are saved in the game's save file, which it rewrites while running.
 loadouts-cancel = Cancel
 loadouts-list-title = Your loadouts
 loadouts-bakkes-apply-hint = Apply it from Swapper presets.
