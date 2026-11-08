@@ -1417,7 +1417,7 @@ impl HebnixApp {
         ui.add_space(8.0);
         self.chat_export.render(ui, &cooked_pc, &backups_dir);
         ui.add_space(8.0);
-        if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.instant_suite_mode) {
+        if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.instant_suite_mode, &mut self.config.game_mods.instant_suite_map) {
             self.save_config();
         }
         ui.add_space(8.0);
@@ -3174,6 +3174,7 @@ impl HebnixApp {
             "MatchEnded" => {
                 if !replay_event {
                     self.auto_upload_replays.submit_finished(event.match_guid.as_deref());
+                    crate::patcher::instant_suite::match_ended();
                 }
                 self.in_match = false;
                 self.match_ended = true;
@@ -4123,7 +4124,7 @@ impl HebnixApp {
                                                 });
                                                 ui.add_space(4.0);
                                             }
-                                        },
+                                        }),
                                     );
 
                                     if changed {
@@ -7334,6 +7335,9 @@ impl eframe::App for HebnixApp {
         // peers' map names and the game's sync button need this on every tab, hidden or not
         let join_rl_path = self.config.settings.rl_path.clone();
         self.workshop.auto_connect(&join_rl_path, &self.tx.clone(), ctx);
+        // Instant Suite's action can change mid-game: the winner movie asks Hebnix each match
+        let cooked_pc = PathBuf::from(&join_rl_path).join("TAGame").join("CookedPCConsole");
+        self.instant_suite.tick(&cooked_pc, &cooked_pc.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
         self.workshop.poll_downloads(&join_rl_path, &self.tx.clone(), ctx);
         self.workshop.panel_mode = self.panel.active;
         self.workshop.render_join_prompt(ctx, &join_rl_path);

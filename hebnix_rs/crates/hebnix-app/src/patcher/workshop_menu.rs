@@ -112,6 +112,15 @@ pub fn downloadable_preview(id: &str) -> Option<String> {
     list.iter().find(|map| map.id == id).map(|map| map.preview_url.clone()).filter(|url| !url.is_empty())
 }
 
+/// The map Instant Suite loads after a match, flagged "n" in the list (see instant_suite).
+static NEXT: std::sync::Mutex<PathBuf> = std::sync::Mutex::new(PathBuf::new());
+
+pub fn set_next(map: &Path) {
+    if let Ok(mut next) = NEXT.lock() {
+        *next = map.to_path_buf();
+    }
+}
+
 /// Present while the downloader is on. It only works with the menu enabled.
 const DOWNLOADER: &str = "WorkshopMenu.downloader";
 
@@ -893,6 +902,7 @@ struct LanFields {
 fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
     let ticked = super::workshop_slots::ticked(cooked);
     let on = host_on(cooked);
+    let next = NEXT.lock().map(|n| n.clone()).unwrap_or_default();
     maps.iter()
         .map(|map| {
             let slot = super::workshop_slots::filled(cooked, &map.path);
@@ -905,6 +915,9 @@ fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
             }
             if on {
                 flags.push('h');
+            }
+            if map.path == next {
+                flags.push('n');
             }
             LanFields { item_path: format!("{}?{HOST}", lan.display()), flags }
         })

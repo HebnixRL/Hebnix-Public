@@ -9,13 +9,13 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
-struct Movie {
-    package: &'static str,
-    export: &'static str,
+pub(super) struct Movie {
+    pub(super) package: &'static str,
+    pub(super) export: &'static str,
     /// the patched movie, built from the vanilla one (see assets/*/README.md)
-    patched: &'static [u8],
+    pub(super) patched: &'static [u8],
     /// sha256 of the vanilla movie this was built from
-    vanilla: &'static str,
+    pub(super) vanilla: &'static str,
 }
 
 const MOVIES: [Movie; 2] = [
@@ -119,7 +119,7 @@ impl Movie {
     }
 
     /// whether the live package holds the patched movie
-    fn status(&self, cooked: &Path) -> bool {
+    pub(super) fn status(&self, cooked: &Path) -> bool {
         UpkPackage::load(&game_path::resolve(cooked, self.package))
             .and_then(|upk| self.movie(&upk))
             .is_ok_and(|swf| digest(&swf) == digest(self.patched))
@@ -152,7 +152,7 @@ impl Movie {
     /// Put the patched movie in, keeping the original package in the backups
     /// folder. A movie that is neither the vanilla one nor ours (a game update) is
     /// left alone, since the patch was built against the vanilla one.
-    fn apply(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
+    pub(super) fn apply(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
         let live = game_path::resolve(cooked, self.package);
         let mut upk = UpkPackage::load(&live)?;
         let backup = self.backup_path(backups);
@@ -168,7 +168,7 @@ impl Movie {
                 .filter(|saved| self.movie(saved).is_ok_and(|swf| digest(&swf) == self.vanilla));
             upk = pristine.ok_or_else(|| {
                 format!(
-                    "{} has a Workshop menu Hebnix can't update, and Hebnix has no clean copy to start from. Disable the menu, verify the game files in your launcher, then enable it again.",
+                    "{} has a menu Hebnix can't update, and Hebnix has no clean copy to start from. Turn it off in Hebnix, verify the game files in your launcher, then turn it on again.",
                     self.package
                 )
             })?;
@@ -204,7 +204,7 @@ impl Movie {
     }
 
     /// Put the original package back. Nothing to do when the movie is not ours.
-    fn restore(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
+    pub(super) fn restore(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
         let backup = self.backup_path(backups);
         if !self.status(cooked) {
             let _ = fs::remove_file(backup);

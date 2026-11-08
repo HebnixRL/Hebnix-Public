@@ -188,8 +188,10 @@ pub struct GameModsCfg {
     pub forfeit_pad: String,
     pub celebration_pad: String,
     pub bots_freeplay_pad: String,
-    /// What Instant Suite does when a match ends: requeue, freeplay or menu.
+    /// What Instant Suite does when a match ends: requeue, freeplay, menu or workshop.
     pub instant_suite_mode: String,
+    /// The map Instant Suite's workshop action loads, by path.
+    pub instant_suite_map: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

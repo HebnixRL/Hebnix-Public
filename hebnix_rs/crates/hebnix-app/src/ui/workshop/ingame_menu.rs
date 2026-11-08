@@ -323,7 +323,7 @@ fn from_steam(maps: &mut [WorkshopMap], cooked: &Path) {
 }
 
 /// The maps in the game's mods folder.
-fn all_maps(cooked: &Path) -> Vec<WorkshopMap> {
+pub(crate) fn all_maps(cooked: &Path) -> Vec<WorkshopMap> {
     scan(&workshop_menu::maps_folder(cooked))
 }
 
@@ -370,7 +370,7 @@ pub(super) fn host_lan(cooked: &Path, dir: &str) -> Result<(), String> {
 
 /// Rebuild the list for an active Workshop loader.
 /// Returns Ok(None) when the menu is not enabled.
-pub(super) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
+pub(crate) fn refresh(cooked: &Path) -> Result<Option<usize>, String> {
     if !workshop_menu::status(cooked)? {
         return Ok(None);
     }

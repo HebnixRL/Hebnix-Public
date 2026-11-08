@@ -1,87 +1,86 @@
 //! Instant Suite. When a match ends Rocket League shows the winner prompt
-//! (GFX_WinnerMenu_SF, prompts.WinnerPrompt). Its showPodiumSpotlight runs once
-//! the game reaches the podium, so Hebnix appends one call to it, chosen by the mode:
+//! (GFX_WinnerMenu_SF, prompts.WinnerPrompt). As it announces the winner, the
+//! patched movie asks Hebnix's preview server what to do (see
+//! assets/instant-suite/README.md), so the action can change while the game
+//! runs. Hebnix only answers right after the Stats API's MatchEnded:
 //!
 //!   requeue   this.onQuickRequeue()            queue again, as the Play Again button does
 //!   freeplay  this.handleFreeplayRequest()     go to freeplay, as the Free Play button does
 //!   menu      Shell.ExitToMainMenu()           leave to the main menu
+//!   workshop  Workshop.LoadWorkshopMap(path)   load the picked map from the in-game Workshop list
 //!
-//! The edit is ActionScript bytecode in the package's SwfMovie, built from names
-//! the movie already has. The movie's original export payload goes to
-//! Backups/InstantSuite to restore it.
-use super::title_patcher::{abc, movie};
+//! With Hebnix closed nothing happens. Switching the patch on or off still needs
+//! the game closed, since it rewrites the package.
 use super::upk_package::{UpkPackage, strip};
+use super::workshop_menu_ui::Movie;
 use super::{backup_guard, game_path};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::{Duration, Instant};
 
 const PACKAGE: &str = "GFX_WinnerMenu_SF.upk";
-const CLASS: &str = "prompts:WinnerPrompt";
-const METHOD: &str = "showPodiumSpotlight";
 
-pub const MODES: [&str; 3] = ["requeue", "freeplay", "menu"];
+const MOVIE: Movie = Movie {
+    package: PACKAGE,
+    export: "GFX_WinnerMenu.WinnerMenu",
+    patched: include_bytes!("../../assets/instant-suite/winner_menu_ui.swf"),
+    vanilla: "28f28cd0d1f94f3d4926a381a903514b4b14d69b90ad73a1676cd1b19cf60069",
+};
+
+pub const MODES: [&str; 4] = ["requeue", "freeplay", "menu", "workshop"];
 pub const DEFAULT_MODE: &str = "requeue";
 
-fn calls(mode: &str) -> Result<Vec<abc::Call<'static>>, String> {
-    Ok(match mode {
-        "requeue" => vec![abc::Call::This("onQuickRequeue")],
-        "freeplay" => vec![abc::Call::This("handleFreeplayRequest")],
-        "menu" => vec![abc::Call::Static { class: "tagame.api:Shell", name: "ExitToMainMenu" }],
-        other => return Err(format!("Unknown Instant Suite mode {other}")),
-    })
+/// What the movie is told: the PNG width it reads, 0 for nothing.
+static CODE: AtomicU8 = AtomicU8::new(0);
+/// When the Stats API last said a match ended. The movie only gets an answer
+/// right after one, so a winner left over from an earlier match does nothing.
+static ENDED: Mutex<Option<Instant>> = Mutex::new(None);
+const ENDED_FOR: Duration = Duration::from_secs(30);
+/// The movie asks as the winner shows, the same moment MatchEnded is sent: wait this long for it.
+const WAIT_FOR_END: Duration = Duration::from_secs(3);
+
+pub fn match_ended() {
+    if let Ok(mut ended) = ENDED.lock() {
+        *ended = Some(Instant::now());
+    }
 }
 
-/// `payload` of the movie export with the mode's call appended, or None when
-/// this export is not the winner prompt's movie.
-fn patched_payload(upk: &UpkPackage, index: usize, mode: &str) -> Result<Option<Vec<u8>>, String> {
-    let export = &upk.exports[index];
-    if !matches!(strip(&upk.class_of(export)), "SwfMovie" | "GFxMovieInfo") {
-        return Ok(None);
-    }
-    let (props, _) = upk.serialized_props(export)?;
-    let Some(raw) = props.iter().find(|p| p.name == "RawData" && p.tag_type == "ArrayProperty") else {
-        return Ok(None);
-    };
-    let original = payload(upk, index);
-    let start = raw.value_offset;
-    let array = original.get(start..start + raw.size).ok_or("Invalid movie array")?;
-    let len = super::upk_package::read_i32(array, 0)?;
-    if len < 0 || len as usize + 4 != array.len() {
-        return Err("Unsupported movie array framing".into());
-    }
-    if raw.value_offset != raw.tag_offset + 24 {
-        return Err("Unsupported movie property tag".into());
-    }
-    let calls = calls(mode)?;
-    let edit = |abc_bytes: &[u8]| abc::append_calls(abc_bytes, CLASS, METHOD, &calls);
-    let Some((movie, _)) = movie::rewrite(&array[4..], &edit)? else {
-        return Ok(None);
-    };
-    let mut out = original[..start].to_vec();
-    out[raw.tag_offset + 16..raw.tag_offset + 20].copy_from_slice(&((movie.len() + 4) as u32).to_le_bytes());
-    out.extend_from_slice(&(movie.len() as u32).to_le_bytes());
-    out.extend(movie);
-    out.extend_from_slice(&original[start + raw.size..]);
-    Ok(Some(out))
+fn ended_recently() -> bool {
+    ENDED.lock().ok().and_then(|e| *e).is_some_and(|at| at.elapsed() < ENDED_FOR)
 }
 
-fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
-    let export = &upk.exports[index];
-    upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec()
-}
-
-/// Patch the winner prompt's movie. Returns the export index and its vanilla payload.
-fn apply(upk: &mut UpkPackage, mode: &str) -> Result<(usize, Vec<u8>), String> {
-    for index in 0..upk.exports.len() {
-        if let Some(patched) = patched_payload(upk, index, mode)? {
-            let original = payload(upk, index);
-            upk.replace_export_payload(index, &patched)?;
-            return Ok((index, original));
+/// The width of the image the preview server answers the movie with, or None
+/// to answer 404 so the winner screen stays. Blocks up to WAIT_FOR_END.
+pub fn served_width() -> Option<u32> {
+    let asked = Instant::now();
+    while !ended_recently() {
+        if asked.elapsed() >= WAIT_FOR_END {
+            return None;
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    Err(format!("{CLASS} was not found in {PACKAGE}"))
+    // used once: the podium asks again later in the same match
+    if let Ok(mut ended) = ENDED.lock() {
+        *ended = None;
+    }
+    match CODE.load(Ordering::Relaxed) {
+        0 => None,
+        n => Some(u32::from(n)),
+    }
 }
 
+/// Whether the preview server must run for Instant Suite.
+pub fn wanted() -> bool {
+    CODE.load(Ordering::Relaxed) != 0
+}
+
+fn code(mode: &str) -> u8 {
+    MODES.iter().position(|m| *m == mode).map_or(0, |i| i as u8 + 1)
+}
+
+/// The byte-patched movie of earlier builds: its state and vanilla payload.
 #[derive(Serialize, Deserialize)]
 struct Saved {
     build: String,
@@ -97,14 +96,9 @@ fn read_saved(backups: &Path) -> Option<Saved> {
     serde_json::from_slice(&std::fs::read(folder(backups).join("state.json")).ok()?).ok()
 }
 
-/// The active mode, or None when Instant Suite is off.
-pub fn mode(backups: &Path) -> Option<String> {
-    read_saved(backups).map(|s| s.mode)
-}
-
 fn ensure_closed() -> Result<(), String> {
     if hebnix_sdk::process::is_rocket_league_running() {
-        Err("Close Rocket League before changing Instant Suite.".into())
+        Err("Close Rocket League before switching Instant Suite on or off.".into())
     } else {
         Ok(())
     }
@@ -126,6 +120,11 @@ fn install(cooked: &Path, live: &Path, upk: &UpkPackage) -> Result<(), String> {
     copied.map(|_| ()).map_err(|e| format!("Could not write {PACKAGE}: {e}"))
 }
 
+fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
+    let export = &upk.exports[index];
+    upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec()
+}
+
 /// Index of the SwfMovie export, the same in both copies.
 fn upk_export(upk: &UpkPackage) -> usize {
     (0..upk.exports.len())
@@ -138,39 +137,11 @@ fn upk_export(upk: &UpkPackage) -> usize {
         .unwrap_or(0)
 }
 
-/// Turn Instant Suite on with `mode`, or change its mode.
-pub fn enable(cooked: &Path, backups: &Path, mode: &str) -> Result<(), String> {
-    ensure_closed()?;
-    calls(mode)?;
-    let live = game_path::resolve(cooked, PACKAGE);
-    let dir = folder(backups);
-    let mut upk = UpkPackage::load(&live)?;
-    let build = backup_guard::build_id(cooked)?;
-    if let Some(saved) = read_saved(backups) {
-        // Changing mode: start again from the vanilla payload.
-        if saved.build != build {
-            return Err("The Instant Suite backup belongs to another game build. Verify the game files.".into());
-        }
-        let original = std::fs::read(dir.join("original.bin")).map_err(|e| e.to_string())?;
-        upk.replace_export_payload(saved.export, &original)?;
-    }
-    let (export, original) = apply(&mut upk, mode)?;
-    install(cooked, &live, &upk)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    if read_saved(backups).is_none() {
-        std::fs::write(dir.join("original.bin"), original).map_err(|e| e.to_string())?;
-    }
-    let saved = Saved { build, mode: mode.into(), export };
-    std::fs::write(dir.join("state.json"), serde_json::to_vec(&saved).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
-}
-
-/// Turn Instant Suite off.
-pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
+/// Put the vanilla movie back over an earlier build's byte patch.
+fn restore_legacy(cooked: &Path, backups: &Path) -> Result<(), String> {
     let Some(saved) = read_saved(backups) else {
         return Ok(());
     };
-    ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if saved.build != backup_guard::build_id(cooked)? {
@@ -183,11 +154,39 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Page state: the job writing the package.
+/// Whether Instant Suite is on, in this build's form or an earlier one's.
+fn status(cooked: &Path, backups: &Path) -> bool {
+    read_saved(backups).is_some() || MOVIE.status(cooked)
+}
+
+/// Turn Instant Suite on.
+pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
+    ensure_closed()?;
+    restore_legacy(cooked, backups)?;
+    MOVIE.apply(cooked, backups)
+}
+
+/// Turn Instant Suite off.
+pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
+    if !status(cooked, backups) {
+        return Ok(());
+    }
+    ensure_closed()?;
+    restore_legacy(cooked, backups)?;
+    MOVIE.restore(cooked, backups)
+}
+
+/// Page state: whether the patch is in, and the job writing the package.
 #[derive(Default)]
 pub struct State {
-    job: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    job: Option<std::sync::mpsc::Receiver<Result<bool, String>>>,
     status: String,
+    on: Option<bool>,
+    /// an earlier build's byte patch, replaced once the game is closed
+    legacy: Option<bool>,
+    /// the in-game Workshop menu's state and its maps, read when the Workshop action is shown
+    maps: Option<(bool, Vec<super::workshop_menu::WorkshopMap>)>,
+    flagged: Option<String>,
 }
 
 impl State {
@@ -195,56 +194,108 @@ impl State {
         self.job.is_some()
     }
 
-    /// Draw the toggle and mode picker. Returns true when `mode` changed.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, mode_setting: &mut String) -> bool {
-        use crate::i18n::t;
-        use eframe::egui;
+    fn spawn(&mut self, job: impl FnOnce() -> Result<bool, String> + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+        });
+    }
+
+    /// Every frame: keep what the movie is told and the Workshop list's "n" flag
+    /// in step with the settings.
+    pub fn tick(&mut self, cooked: &Path, backups: &Path, mode: &str, map: &str) {
         if let Some(job) = &self.job {
             match job.try_recv() {
-                Ok(result) => {
-                    self.status = result.unwrap_or_else(|e| e);
+                Ok(Ok(on)) => {
+                    self.on = Some(on);
+                    self.job = None;
+                }
+                Ok(Err(error)) => {
+                    self.status = error;
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
+        if self.on.is_none() && !self.busy() && cooked.is_dir() {
+            let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
+            self.legacy = Some(read_saved(&backups).is_some());
+            self.spawn(move || Ok(status(&cooked, &backups)));
+        }
+        if self.legacy == Some(true) && self.on == Some(true) && !self.busy() && !hebnix_sdk::process::is_rocket_league_running() {
+            self.legacy = Some(false);
+            let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
+            self.spawn(move || enable(&cooked, &backups).map(|()| true));
+        }
+        let on = self.on == Some(true) && self.legacy != Some(true);
+        CODE.store(if on { code(mode) } else { 0 }, Ordering::Relaxed);
+        let flag = if on && mode == "workshop" { map } else { "" };
+        if self.flagged.as_deref() != Some(flag) {
+            self.flagged = Some(flag.to_string());
+            super::workshop_menu::set_next(Path::new(flag));
+            let cooked = cooked.to_path_buf();
+            std::thread::spawn(move || drop(crate::ui::workshop::ingame_menu::refresh(&cooked)));
+        }
+    }
+
+    /// Draw the toggle, the action picker and, for a Workshop map, the map picker.
+    /// Returns true when a setting changed.
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, mode_setting: &mut String, map_setting: &mut String) -> bool {
+        use crate::i18n::t;
+        use eframe::egui;
         if !MODES.contains(&mode_setting.as_str()) {
             *mode_setting = DEFAULT_MODE.into();
         }
-        let active = mode(backups);
-        let on = active.is_some();
+        let on = self.on == Some(true);
         let mut want = on;
         let mut changed = false;
-        ui.add_enabled_ui(!self.busy(), |ui| {
+        ui.add_enabled_ui(!self.busy() && self.on.is_some(), |ui| {
             ui.checkbox(&mut want, t("game-mod-instant-suite")).on_hover_text(t("game-mod-instant-suite-description"));
-            ui.label(t("game-mod-instant-suite-description"));
+        });
+        ui.label(t("game-mod-instant-suite-description"));
+        ui.horizontal(|ui| {
+            ui.label(t("game-mod-instant-suite-mode"));
+            egui::ComboBox::from_id_salt("instant_suite_mode")
+                .selected_text(t(&format!("game-mod-instant-suite-mode-{mode_setting}")))
+                .show_ui(ui, |ui| {
+                    for option in MODES {
+                        changed |= ui
+                            .selectable_value(mode_setting, option.to_string(), t(&format!("game-mod-instant-suite-mode-{option}")))
+                            .changed();
+                    }
+                });
+        });
+        if mode_setting == "workshop" {
+            let (menu_on, maps) = self.maps.get_or_insert_with(|| {
+                (super::workshop_menu::status(cooked).unwrap_or(false), crate::ui::workshop::ingame_menu::all_maps(cooked))
+            });
+            if !*menu_on {
+                ui.colored_label(ui.visuals().warn_fg_color, t("game-mod-instant-suite-needs-menu"));
+            }
+            let mut reload = false;
+            let picked = maps.iter().find(|m| m.path == Path::new(map_setting.as_str())).map(|m| m.title.clone());
             ui.horizontal(|ui| {
-                ui.label(t("game-mod-instant-suite-mode"));
-                egui::ComboBox::from_id_salt("instant_suite_mode")
-                    .selected_text(t(&format!("game-mod-instant-suite-mode-{mode_setting}")))
+                ui.label(t("game-mod-instant-suite-map"));
+                egui::ComboBox::from_id_salt("instant_suite_map")
+                    .selected_text(picked.unwrap_or_else(|| t("game-mod-instant-suite-pick-map")))
                     .show_ui(ui, |ui| {
-                        for option in MODES {
-                            changed |= ui
-                                .selectable_value(mode_setting, option.to_string(), t(&format!("game-mod-instant-suite-mode-{option}")))
-                                .changed();
+                        for map in maps.iter() {
+                            let path = map.path.to_string_lossy().into_owned();
+                            changed |= ui.selectable_value(map_setting, path, &map.title).changed();
                         }
                     });
+                reload = ui.small_button(t("game-mod-instant-suite-reload-maps")).clicked();
             });
-        });
-        if want != on || (changed && on) {
-            let (cooked, backups, mode_now) = (cooked.to_path_buf(), backups.to_path_buf(), mode_setting.clone());
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.job = Some(rx);
+            if reload {
+                self.maps = None;
+            }
+        }
+        if want != on {
+            let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
             self.status.clear();
-            std::thread::spawn(move || {
-                let result = if !want {
-                    restore(&cooked, &backups).map(|_| t("game-mod-instant-suite-off"))
-                } else {
-                    enable(&cooked, &backups, &mode_now).map(|_| t("game-mod-instant-suite-on"))
-                };
-                let _ = tx.send(result);
-            });
+            self.spawn(move || if want { enable(&cooked, &backups).map(|()| true) } else { restore(&cooked, &backups).map(|()| false) });
         }
         if self.busy() {
             ui.spinner();
@@ -259,40 +310,50 @@ impl State {
 mod tests {
     use super::*;
 
-    /// Patch a copy of the real winner-menu package for each mode, reload it
-    /// and check the movie changed and parses. Run with HEBNIX_WINNER_UPK set
-    /// to a vanilla GFX_WinnerMenu_SF.upk.
     #[test]
-    #[ignore]
-    fn real_package() {
-        let source = std::env::var("HEBNIX_WINNER_UPK").unwrap();
-        for mode in MODES {
-            let mut upk = UpkPackage::load(Path::new(&source)).unwrap();
-            let (index, original) = apply(&mut upk, mode).unwrap();
-            assert_ne!(payload(&upk, index), original);
-            let out = std::env::temp_dir().join(format!("hebnix_instant_{mode}.upk"));
-            upk.save_fast(&out).unwrap();
-            let reloaded = UpkPackage::load(&out).unwrap();
-            // Keep the patched copies for inspection when asked.
-            match std::env::var("HEBNIX_WINNER_KEEP") {
-                Ok(dir) => {
-                    let _ = std::fs::copy(&out, Path::new(&dir).join(format!("{mode}.upk")));
-                    let _ = std::fs::remove_file(out);
-                }
-                Err(_) => {
-                    let _ = std::fs::remove_file(out);
-                }
-            }
-            assert_eq!(payload(&reloaded, index), payload(&upk, index));
-            // A second pass must refuse to stack on the patched movie.
-            let mut again = reloaded;
-            assert!(apply(&mut again, mode).is_err());
-        }
+    fn answers_only_once_after_a_match_end() {
+        CODE.store(2, Ordering::Relaxed);
+        match_ended();
+        assert_eq!(served_width(), Some(2));
+        // the same match's podium asks again: no second action
+        let asked = Instant::now();
+        assert_eq!(served_width(), None);
+        assert!(asked.elapsed() >= WAIT_FOR_END);
+        CODE.store(0, Ordering::Relaxed);
     }
 
     #[test]
-    fn unknown_mode_is_rejected() {
-        assert!(calls("nothing").is_err());
-        assert!(MODES.iter().all(|m| calls(m).is_ok()));
+    fn every_mode_has_its_own_width() {
+        let codes: Vec<u8> = MODES.iter().map(|m| code(m)).collect();
+        assert_eq!(codes, [1, 2, 3, 4]);
+        assert_eq!(code("nothing"), 0);
+    }
+
+    /// Switch Instant Suite on and off over a copy of the real package. Run with
+    /// HEBNIX_WINNER_UPK set to a vanilla GFX_WinnerMenu_SF.upk.
+    #[test]
+    #[ignore]
+    fn apply_and_restore_on_a_copy() {
+        let source = std::env::var("HEBNIX_WINNER_UPK").unwrap();
+        let root = std::env::temp_dir().join(format!("hebnix-winner-{}", std::process::id()));
+        let dir = root.join("TAGame").join("CookedPCConsole");
+        let backups = dir.join("Backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        // backups are tied to the game build, read from the exe
+        std::fs::create_dir_all(root.join("Binaries").join("Win64")).unwrap();
+        std::fs::write(root.join("Binaries").join("Win64").join("RocketLeague.exe"), b"build").unwrap();
+        std::fs::copy(&source, dir.join(PACKAGE)).unwrap();
+        MOVIE.apply(&dir, &backups).unwrap();
+        assert!(status(&dir, &backups));
+        MOVIE.restore(&dir, &backups).unwrap();
+        assert!(!status(&dir, &backups));
+        assert_eq!(std::fs::read(dir.join(PACKAGE)).unwrap(), std::fs::read(&source).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn embedded_movie_is_not_the_vanilla_one() {
+        assert_eq!(&MOVIE.patched[..3], b"FWS");
+        assert!(MOVIE.patched.windows(6).any(|w| w == b"hbxAsk"));
     }
 }

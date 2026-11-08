@@ -25,7 +25,7 @@ mod archive;
 mod banner_image;
 mod background_changer;
 mod hosted;
-mod ingame_menu;
+pub(crate) mod ingame_menu;
 mod lan_mutators;
 mod menu_map;
 mod local_import;
@@ -980,7 +980,7 @@ impl WorkshopState {
             return;
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        if crate::patcher::workshop_menu::downloader_on(&cooked) {
+        if crate::patcher::workshop_menu::downloader_on(&cooked) || crate::patcher::instant_suite::wanted() {
             crate::preview_server::start(&self.manager.cache_dir);
         }
         if std::mem::take(&mut self.downloads_stale) && crate::patcher::workshop_menu::downloader_on(&cooked) {
