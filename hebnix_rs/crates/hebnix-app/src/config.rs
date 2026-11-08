@@ -175,6 +175,10 @@ pub struct GameModsCfg {
     pub celebration_key: String,
     /// Rocket League key name the bots in freeplay command is bound to.
     pub bots_freeplay_key: String,
+    /// Controller buttons (XboxTypeS_ names without the prefix) for the same commands, empty for none.
+    pub forfeit_pad: String,
+    pub celebration_pad: String,
+    pub bots_freeplay_pad: String,
     /// What Instant Suite does when a match ends: requeue, freeplay or menu.
     pub instant_suite_mode: String,
 }

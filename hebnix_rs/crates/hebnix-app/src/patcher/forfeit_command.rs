@@ -230,8 +230,17 @@ const NEIGHBOUR: &str = "Action=\"ReadyUp\"";
 /// Actions earlier builds bound: the donor's own action, then one the game has no command for.
 pub const LEGACY: [&str; 2] = ["ShowControllerApplet", "Forfeit"];
 
-/// `ini` with the Forfeit binding set to `key`, or removed when `key` is None.
-fn with_binding(ini: &str, action: &str, legacy: &[&str], key: Option<&str>) -> String {
+/// Controller buttons a command can be bound to: (Rocket League's XboxTypeS_ name, dinput icon name).
+pub const PAD_BUTTONS: [(&str, &str); 16] = [
+    ("A", "south"), ("B", "east"), ("X", "west"), ("Y", "north"),
+    ("LeftShoulder", "l1"), ("RightShoulder", "r1"), ("LeftTrigger", "l2"), ("RightTrigger", "r2"),
+    ("LeftThumbStick", "l3"), ("RightThumbStick", "r3"), ("Back", "select"), ("Start", "start"),
+    ("DPad_Up", "dpad_up"), ("DPad_Down", "dpad_down"), ("DPad_Left", "dpad_left"), ("DPad_Right", "dpad_right"),
+];
+
+/// `ini` with the command bound to `key` and the controller button `pad`, or
+/// without each one that is None.
+fn with_binding(ini: &str, action: &str, legacy: &[&str], key: Option<&str>, pad: Option<&str>) -> String {
     let tag = format!("Action=\"{action}\"");
     let nl = if ini.contains("
 ") { "
@@ -239,9 +248,12 @@ fn with_binding(ini: &str, action: &str, legacy: &[&str], key: Option<&str>) -> 
 " };
     let mut out = Vec::new();
     let mut added = false;
+    // the controller presets list the same action under both of these
+    let mut pad_added = [false; 2];
     for line in ini.lines() {
         if line.trim_start().starts_with('[') {
             added = false;
+            pad_added = [false; 2];
         }
         if line.contains(&tag) || legacy.iter().any(|old| line.contains(&format!("Action=\"{old}\""))) {
             continue;
@@ -250,6 +262,12 @@ fn with_binding(ini: &str, action: &str, legacy: &[&str], key: Option<&str>) -> 
         if let Some(key) = key.filter(|_| !added && line.trim_start().starts_with("PCBindings") && line.contains(NEIGHBOUR)) {
             out.push(format!("PCBindings=( {tag}, Key=\"{key}\" )"));
             added = true;
+        }
+        for (done, prefix) in pad_added.iter_mut().zip(["GamepadBindings", "SteamInputBindings"]) {
+            if let Some(pad) = pad.filter(|_| !*done && line.trim_start().starts_with(prefix) && line.contains(NEIGHBOUR)) {
+                out.push(format!("{prefix}=( {tag}, Key=\"XboxTypeS_{pad}\" )"));
+                *done = true;
+            }
         }
     }
     let mut text = out.join(nl);
@@ -261,22 +279,87 @@ fn with_binding(ini: &str, action: &str, legacy: &[&str], key: Option<&str>) -> 
 
 /// Remove the key binding.
 pub fn unbind() -> Result<(), String> {
-    set_binding(&action(), &LEGACY, None)
+    set_binding(&action(), &LEGACY, None, None)
 }
 
-/// Bind the command to `key` in TAInput.ini, or unbind it with None.
-pub fn set_binding(action: &str, legacy: &[&str], key: Option<&str>) -> Result<(), String> {
+/// Bind the command to `key` and the controller button `pad` in TAInput.ini; None unbinds each.
+pub fn set_binding(action: &str, legacy: &[&str], key: Option<&str>, pad: Option<&str>) -> Result<(), String> {
     let path = hebnix_sdk::utils::paths::documents_dir()
         .map(|d| d.join("My Games/Rocket League/TAGame/Config/TAInput.ini"))
         .ok_or("Could not find the Documents folder")?;
     let Ok(ini) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    let updated = with_binding(&ini, action, legacy, key);
+    let updated = with_binding(&ini, action, legacy, key, pad);
     if updated == ini {
         return Ok(());
     }
     std::fs::write(&path, updated).map_err(|e| format!("Could not write TAInput.ini: {e}"))
+}
+
+/// The picker waiting for a button press (its id) and, once pressed, the button.
+static CAPTURE: std::sync::Mutex<Option<(String, Option<Option<String>>)>> = std::sync::Mutex::new(None);
+
+/// `pad` as the setting the binding takes: None for no button.
+pub fn pad_setting(pad: &str) -> Option<&str> {
+    Some(pad).filter(|pad| !pad.is_empty())
+}
+
+/// Controller button picker: press "Bind controller" and then a button, shown with its
+/// prompt icon. Returns true when `pad` changed. `pad` holds a PAD_BUTTONS name, empty for none.
+pub fn pad_picker(ui: &mut eframe::egui::Ui, id: &str, pad: &mut String) -> bool {
+    use crate::i18n::t;
+    let mut changed = false;
+    let mut capture = CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((owner, Some(result))) = capture.as_ref() {
+        if owner == id {
+            if let Some(button) = result {
+                changed = *pad != *button;
+                *pad = button.clone();
+            }
+            *capture = None;
+        }
+    }
+    let waiting = capture.as_ref().is_some_and(|(owner, _)| owner == id);
+    ui.horizontal(|ui| {
+        ui.label(t("game-mod-controller-button"));
+        if waiting {
+            ui.spinner();
+            ui.label(t("game-mod-press-a-button"));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        match PAD_BUTTONS.iter().find(|(name, _)| *name == pad.as_str()) {
+            Some((name, icon)) => {
+                if !crate::plugins::gamepad_icons::prompt_icon(ui, icon, 22.0) {
+                    ui.label(*name);
+                }
+            }
+            None => {
+                ui.weak(t("game-mod-no-controller-button"));
+            }
+        }
+        if ui.add_enabled(capture.is_none(), eframe::egui::Button::new(t("game-mod-bind-controller"))).clicked() {
+            *capture = Some((id.to_string(), None));
+            let (id, ctx) = (id.to_string(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let button = hebnix_sdk::input::detect_any_hotkey(Some(std::time::Duration::from_secs(6)))
+                    .filter(|bind| bind.is_controller)
+                    .and_then(|bind| crate::plugins::gamepad_icons::dinput_name_for(&bind))
+                    .and_then(|icon| PAD_BUTTONS.iter().find(|(_, i)| *i == icon))
+                    .map(|(name, _)| name.to_string());
+                if let Ok(mut capture) = CAPTURE.lock() {
+                    *capture = Some((id, Some(button)));
+                }
+                ctx.request_repaint();
+            });
+        }
+        if !pad.is_empty() && ui.button(t("game-mod-clear-controller")).clicked() {
+            pad.clear();
+            changed = true;
+        }
+    });
+    changed
 }
 
 /// Page state: the job writing the package.
@@ -292,7 +375,7 @@ impl State {
     }
 
     /// Draw the toggle and key picker. Returns true when `key` changed.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String) -> bool {
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String, pad: &mut String) -> bool {
         use crate::i18n::t;
         use eframe::egui;
         if let Some(job) = &self.job {
@@ -322,9 +405,10 @@ impl State {
                     }
                 });
             });
+            key_changed |= pad_picker(ui, "forfeit_pad", pad);
         });
         if want != on || (key_changed && on) {
-            let (cooked, backups, key) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone());
+            let (cooked, backups, key, pad) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone(), pad.clone());
             let (tx, rx) = std::sync::mpsc::channel();
             self.job = Some(rx);
             self.status.clear();
@@ -332,7 +416,7 @@ impl State {
                 let result = if !want {
                     restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-forfeit-off"))
                 } else {
-                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &LEGACY, Some(&key))).map(|_| t("game-mod-forfeit-on"))
+                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &LEGACY, Some(&key), pad_setting(&pad))).map(|_| t("game-mod-forfeit-on"))
                 };
                 let _ = tx.send(result);
             });
@@ -381,13 +465,23 @@ PCBindings=( Action=\"ReadyUp\", Key=\"X\" )
 [B]
 PCBindings=( Action=\"ReadyUp\", Key=\"Spacebar\" )
 ";
-        let bound = with_binding(ini, ACTION, &[], Some("F9"));
+        let bound = with_binding(ini, ACTION, &[], Some("F9"), None);
         assert_eq!(bound.matches("Action=\"Checkpoint_1\"").count(), 2);
         assert!(bound.contains("Spacebar\" )
 PCBindings=( Action=\"Checkpoint_1\", Key=\"F9\" )
 "));
-        assert_eq!(with_binding(&bound, ACTION, &[], Some("F8")).matches("Key=\"F8\"").count(), 2);
-        assert_eq!(with_binding(&bound, ACTION, &[], None), ini);
+        assert_eq!(with_binding(&bound, ACTION, &[], Some("F8"), None).matches("Key=\"F8\"").count(), 2);
+        assert_eq!(with_binding(&bound, ACTION, &[], None, None), ini);
+    }
+
+    #[test]
+    fn controller_binding_goes_after_each_pad_ready_up() {
+        let ini = "[A]\nPCBindings=( Action=\"ReadyUp\", Key=\"Spacebar\" )\nGamepadBindings=( Action=\"ReadyUp\", Key=\"XboxTypeS_A\" )\nSteamInputBindings=( Action=\"ReadyUp\", Key=\"XboxTypeS_A\" )\n";
+        let bound = with_binding(ini, ACTION, &[], Some("F9"), Some("DPad_Up"));
+        assert!(bound.contains("GamepadBindings=( Action=\"Checkpoint_1\", Key=\"XboxTypeS_DPad_Up\" )"));
+        assert!(bound.contains("SteamInputBindings=( Action=\"Checkpoint_1\", Key=\"XboxTypeS_DPad_Up\" )"));
+        assert_eq!(bound.matches("Checkpoint_1").count(), 3);
+        assert_eq!(with_binding(&bound, ACTION, &[], None, None), ini);
     }
 
     /// Patch a copy of the real package, reload it and look for the command.

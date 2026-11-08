@@ -2,7 +2,7 @@
 //! a block of the dispatcher (dispatcher.rs) with a key action of its own
 //! (actions.rs).
 use super::celebration::{call_of, context, jump, land, object};
-use super::forfeit_command::{KEYS, set_binding};
+use super::forfeit_command::{KEYS, pad_picker, pad_setting, set_binding};
 use super::script_patch::Script;
 use super::upk_package::UpkPackage;
 use super::{actions, backup_guard, dispatcher, game_path};
@@ -171,7 +171,7 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
 
 /// Unbind the key, for uninstall.
 pub fn unbind() -> Result<(), String> {
-    set_binding(&action(), &[], None)
+    set_binding(&action(), &[], None, None)
 }
 
 /// Page state: the job writing the package.
@@ -187,7 +187,7 @@ impl State {
     }
 
     /// Draw the toggle and key picker. Returns true when `key` changed.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String) -> bool {
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String, pad: &mut String) -> bool {
         use crate::i18n::t;
         use eframe::egui;
         if let Some(job) = &self.job {
@@ -217,9 +217,10 @@ impl State {
                     }
                 });
             });
+            key_changed |= pad_picker(ui, "bots_freeplay_pad", pad);
         });
         if want != on || (key_changed && on) {
-            let (cooked, backups, key) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone());
+            let (cooked, backups, key, pad) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone(), pad.clone());
             let (tx, rx) = std::sync::mpsc::channel();
             self.job = Some(rx);
             self.status.clear();
@@ -227,7 +228,7 @@ impl State {
                 let result = if !want {
                     restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-bots-freeplay-off"))
                 } else {
-                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &[], Some(&key))).map(|_| t("game-mod-bots-freeplay-on"))
+                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &[], Some(&key), pad_setting(&pad))).map(|_| t("game-mod-bots-freeplay-on"))
                 };
                 let _ = tx.send(result);
             });

@@ -311,7 +311,7 @@ fn effective_backend() -> Backend {
 /// the dinput canonical button name for a bind, regardless of which backend
 /// it was originally captured on - None for dinput_raw (paddles/misc
 /// buttons), which have no cross-backend equivalent to translate through.
-fn dinput_name_for(bind: &HotkeyBind) -> Option<&'static str> {
+pub fn dinput_name_for(bind: &HotkeyBind) -> Option<&'static str> {
     match bind.controller_type.as_str() {
         "xinput" => hebnix_sdk::input::xinput_mask_to_dinput_name(bind.controller_button as u16),
         "dinput" => hebnix_sdk::input::DINPUT_BUTTONS
@@ -365,7 +365,12 @@ pub fn bind_icon(bind: &HotkeyBind) -> Option<(&'static [u8], String)> {
     if !bind.is_controller {
         return None;
     }
-    let key = dinput_name_for(bind)?;
+    icon_for(dinput_name_for(bind)?)
+}
+
+/// (svg bytes, cache key) for a button by its dinput canonical name ("south",
+/// "l1", "dpad_up"...), in the set of whichever controller is connected.
+pub fn icon_for(key: &'static str) -> Option<(&'static [u8], String)> {
     match effective_backend() {
         Backend::XInput => {
             let xkey = xinput_icon_key_from_dinput(key)?;
@@ -392,4 +397,34 @@ pub fn bind_icon(bind: &HotkeyBind) -> Option<(&'static [u8], String)> {
             .find(|(k, _)| *k == key)
             .map(|(k, b)| (*b, format!("din_{k}"))),
     }
+}
+
+/// Draw a button's prompt icon `size` points tall. False when the connected
+/// controller has no icon for it, so the caller can show text instead.
+pub fn prompt_icon(ui: &mut eframe::egui::Ui, key: &'static str, size: f32) -> bool {
+    let Some((bytes, cache_key)) = icon_for(key) else {
+        return false;
+    };
+    let uri = format!("bytes://gamepad-icon/{cache_key}.svg");
+    ui.add(eframe::egui::Image::from_bytes(uri, bytes).fit_to_exact_size(eframe::egui::vec2(size, size)));
+    true
+}
+
+/// A row of button prompts: each group's button icons (or their names) followed by its action.
+/// Labels never wrap: a page can leave text wrapping on, and a wrapped label in a row
+/// lands on top of its neighbours.
+pub fn prompt_row(ui: &mut eframe::egui::Ui, prompts: &[(&[&'static str], &str)]) {
+    use eframe::egui::{Label, RichText, TextStyle};
+    ui.horizontal(|ui| {
+        let size = ui.text_style_height(&TextStyle::Body) + 4.0;
+        for (keys, action) in prompts {
+            for key in *keys {
+                if !prompt_icon(ui, key, size) {
+                    ui.add(Label::new(RichText::new(key.to_uppercase()).strong()).extend());
+                }
+            }
+            ui.add(Label::new(RichText::new(*action).weak()).extend());
+            ui.add_space(10.0);
+        }
+    });
 }

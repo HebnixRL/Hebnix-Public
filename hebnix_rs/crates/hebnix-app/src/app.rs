@@ -1411,7 +1411,7 @@ impl HebnixApp {
         ui.add_space(8.0);
         let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
         let backups_dir = cooked_pc.join("Backups");
-        if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key) {
+        if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
             self.save_config();
         }
         ui.add_space(8.0);
@@ -1421,20 +1421,12 @@ impl HebnixApp {
             self.save_config();
         }
         ui.add_space(8.0);
-        if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key) {
+        if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
             self.save_config();
         }
         ui.add_space(8.0);
-        if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key) {
+        if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
             self.save_config();
-        }
-        ui.add_space(16.0);
-        ui.heading(t("game-mods-coming-soon"));
-        for id in ["font-swapper", "freeplay-checkpoint", "quickvoice"] {
-            ui.add_enabled_ui(false, |ui| {
-                ui.checkbox(&mut false, t(&format!("game-mod-{id}")))
-                    .on_disabled_hover_text(t(&format!("game-mod-{id}-description")));
-            });
         }
     }
 
