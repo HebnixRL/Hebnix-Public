@@ -1,13 +1,15 @@
-//! Chat export. Rocket League shows every chat message through
-//! HUDBase_TA.AddChatMessage(GFxChatMessage GFxMessage). The patch adds
+//! Chat export. Quick chats and the join/leave notices reach the screen through
+//! HUDBase_TA.AddChatMessage(GFxChatMessage GFxMessage); typed text chat goes
+//! through GFxData_TextModerationManager_TA.HandleMessageReceived, which builds
+//! a GFxChatMessage local `NewMessage`. The patch adds
 //!
-//!     LogInternal("HBXCHAT" $ Tab $ GFxMessage.PlayerName $ Tab $ GFxMessage.Message);
+//!     LogInternal("HBXCHAT" $ Tab $ Message.PlayerName $ Tab $ Message.Message);
 //!
-//! before that function returns, which the game writes to Launch.log as a
-//! `ScriptLog:` line. `watch` follows the log and appends each message to
+//! before each of those functions returns, which the game writes to Launch.log
+//! as a `ScriptLog:` line. `watch` follows the log and appends each message to
 //! chat.jsonl in Hebnix's folder, one JSON object per line, for plugins to read.
-//! The function is relocated, so Hebnix keeps its original payload in
-//! Backups/ChatExport and puts it back to restore. Colours rebuilds TAGame.upk
+//! The functions are relocated, so Hebnix keeps their original payloads in
+//! Backups/ChatExport and puts them back to restore. Colours rebuilds TAGame.upk
 //! from a pristine copy and calls `reapply`.
 use super::script_patch::{Script, replace_script};
 use super::upk_package::UpkPackage;
@@ -18,8 +20,23 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const PACKAGE: &str = "TAGame.upk";
-const FUNCTION: &str = "HUDBase_TA.AddChatMessage";
-const PARAMETER: &str = "HUDBase_TA.AddChatMessage.GFxMessage";
+/// A function that shows a chat message, and where it keeps the GFxChatMessage.
+struct Target {
+    function: &'static str,
+    /// The parameter or local holding the message.
+    message: &'static str,
+    /// How the script reads it: by-reference parameter or local variable.
+    read: u8,
+}
+
+const TARGETS: [Target; 2] = [
+    Target { function: "HUDBase_TA.AddChatMessage", message: "HUDBase_TA.AddChatMessage.GFxMessage", read: PARAMETER_READ },
+    Target {
+        function: "GFxData_TextModerationManager_TA.HandleMessageReceived",
+        message: "GFxData_TextModerationManager_TA.HandleMessageReceived.NewMessage",
+        read: LOCAL_READ,
+    },
+];
 const MESSAGE_STRUCT: &str = "GFxData_Chat_TA.GFxChatMessage";
 const PLAYER_NAME: &str = "GFxData_Chat_TA.GFxChatMessage.PlayerName";
 const MESSAGE: &str = "GFxData_Chat_TA.GFxChatMessage.Message";
@@ -36,6 +53,8 @@ const STRING: u8 = 0x1f;
 const MEMBER: u8 = 0x35;
 /// A by-reference parameter, how AddChatMessage reads GFxMessage.
 const PARAMETER_READ: u8 = 0x46;
+/// A local variable, how HandleMessageReceived reads NewMessage.
+const LOCAL_READ: u8 = 0x2b;
 const END_PARMS: u8 = 0x16;
 /// The two optional LogInternal parameters, left empty.
 const EMPTY: u8 = 0x48;
@@ -44,22 +63,22 @@ fn text(script: &mut Script, value: &str) {
     script.raw(&[STRING]).raw(value.as_bytes()).raw(&[0x00]);
 }
 
-/// `GFxMessage.<field>` in the shape of the game's own reads of the struct.
-fn member(script: &mut Script, field: i32, structure: i32, parameter: i32) {
-    script.raw(&[MEMBER]).object(field).object(structure).raw(&[0x00, 0x00, PARAMETER_READ]).object(parameter);
+/// `<message>.<field>` in the shape of the game's own reads of the struct.
+fn member(script: &mut Script, field: i32, structure: i32, read: u8, message: i32) {
+    script.raw(&[MEMBER]).object(field).object(structure).raw(&[0x00, 0x00, read]).object(message);
 }
 
 /// The log call, built like GameEvent_TA.InitGame's
 /// `LogInternal("MatchTypeClass=(" $ x $ ")")`.
-fn statement(parameter: i32, structure: i32, name: i32, message: i32) -> Script {
+fn statement(read: u8, parameter: i32, structure: i32, name: i32, message: i32) -> Script {
     let mut out = Script::new();
     out.raw(&[LOG, CONCAT, CONCAT, CONCAT]);
     text(&mut out, MARKER);
-    member(&mut out, name, structure, parameter);
+    member(&mut out, name, structure, read, parameter);
     out.raw(&[END_PARMS]);
     text(&mut out, "\t");
     out.raw(&[END_PARMS]);
-    member(&mut out, message, structure, parameter);
+    member(&mut out, message, structure, read, parameter);
     out.raw(&[END_PARMS, EMPTY, EMPTY, END_PARMS]);
     out
 }
@@ -68,9 +87,9 @@ fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
     upk.find_object(path).ok_or_else(|| format!("{path} was not found"))
 }
 
-fn function_index(upk: &UpkPackage) -> Result<usize, String> {
-    object(upk, FUNCTION).and_then(|index| {
-        usize::try_from(index - 1).map_err(|_| format!("{FUNCTION} is not an export"))
+fn function_index(upk: &UpkPackage, target: &Target) -> Result<usize, String> {
+    object(upk, target.function).and_then(|index| {
+        usize::try_from(index - 1).map_err(|_| format!("{} is not an export", target.function))
     })
 }
 
@@ -79,7 +98,8 @@ fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
     upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec()
 }
 
-fn is_patched(upk: &UpkPackage, index: usize) -> Result<bool, String> {
+fn is_patched(upk: &UpkPackage, target: &Target) -> Result<bool, String> {
+    let index = function_index(upk, target)?;
     Ok(Script::of_function(&payload(upk, index))?
         .bytes()
         .windows(MARKER.len())
@@ -87,31 +107,59 @@ fn is_patched(upk: &UpkPackage, index: usize) -> Result<bool, String> {
 }
 
 /// Add the log call before the function returns.
-pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
-    let index = function_index(upk)?;
-    if is_patched(upk, index)? {
-        return Err(format!("{FUNCTION} already exports chat"));
-    }
+fn apply_target(upk: &mut UpkPackage, target: &Target) -> Result<(), String> {
+    let index = function_index(upk, target)?;
     let call = statement(
-        object(upk, PARAMETER)?,
+        target.read,
+        object(upk, target.message)?,
         object(upk, MESSAGE_STRUCT)?,
         object(upk, PLAYER_NAME)?,
         object(upk, MESSAGE)?,
     );
     let mut script = Script::of_function(&payload(upk, index))?;
     if !script.bytes().ends_with(&END) {
-        return Err(format!("{FUNCTION} changed layout in this Rocket League version"));
+        return Err(format!("{} changed layout in this Rocket League version", target.function));
     }
     script.split_off(END.len());
     script.append(&call).raw(&END);
-    replace_script(upk, FUNCTION, &script)
+    replace_script(upk, target.function, &script)
+}
+
+/// Patch every target that is not patched yet.
+pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
+    for target in &TARGETS {
+        if !is_patched(upk, target)? {
+            apply_target(upk, target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether each target is patched.
+fn states(upk: &UpkPackage) -> Result<Vec<bool>, String> {
+    TARGETS.iter().map(|target| is_patched(upk, target)).collect()
 }
 
 #[derive(Serialize, Deserialize)]
 struct Saved {
     build: String,
-    /// AddChatMessage's export payload before the patch.
+    /// AddChatMessage's export payload before the patch (the first version
+    /// of this feature saved only that one).
+    #[serde(default)]
     original: Vec<u8>,
+    /// Export payload of each patched function before the patch, by function.
+    #[serde(default)]
+    originals: Vec<(String, Vec<u8>)>,
+}
+
+impl Saved {
+    fn original_of(&self, function: &str) -> Option<&[u8]> {
+        self.originals
+            .iter()
+            .find(|(name, _)| name == function)
+            .map(|(_, bytes)| bytes.as_slice())
+            .or_else(|| (function == TARGETS[0].function && !self.original.is_empty()).then_some(self.original.as_slice()))
+    }
 }
 
 fn saved_path(backups: &Path) -> PathBuf {
@@ -139,8 +187,10 @@ fn ensure_closed() -> Result<(), String> {
 fn install(cooked: &Path, live: &Path, upk: &UpkPackage, patched: bool) -> Result<(), String> {
     let temp = cooked.join("TAGame.upk.chat.tmp");
     upk.save_fast(&temp)?;
-    let check = UpkPackage::load(&temp).and_then(|saved| function_index(&saved).and_then(|i| is_patched(&saved, i)));
-    if check != Ok(patched) {
+    let check = UpkPackage::load(&temp)
+        .and_then(|saved| states(&saved))
+        .map(|states| states.iter().all(|state| *state == patched));
+    if check != Ok(true) {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("Staged {PACKAGE} failed validation: {check:?}"));
     }
@@ -154,11 +204,23 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
-    let index = function_index(&upk)?;
-    if is_patched(&upk, index)? {
+    if states(&upk)?.iter().all(|state| *state) {
         return Ok(());
     }
-    let saved = Saved { build: backup_guard::build_id(cooked)?, original: payload(&upk, index) };
+    let build = backup_guard::build_id(cooked)?;
+    // an install from before text chat was exported has AddChatMessage saved already
+    let mut saved = read_saved(backups).filter(|saved| saved.build == build).unwrap_or(Saved {
+        build,
+        original: Vec::new(),
+        originals: Vec::new(),
+    });
+    for target in &TARGETS {
+        if !is_patched(&upk, target)? {
+            let original = payload(&upk, function_index(&upk, target)?);
+            saved.originals.retain(|(name, _)| name != target.function);
+            saved.originals.push((target.function.to_string(), original));
+        }
+    }
     apply(&mut upk)?;
     install(cooked, &live, &upk, true)?;
     let path = saved_path(backups);
@@ -174,12 +236,18 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
-    let index = function_index(&upk)?;
-    if is_patched(&upk, index)? {
+    if states(&upk)?.iter().any(|state| *state) {
         if saved.build != backup_guard::build_id(cooked)? {
             return Err("The chat export backup belongs to another game build. Verify the game files.".into());
         }
-        upk.replace_export_payload(index, &saved.original)?;
+        for target in &TARGETS {
+            if is_patched(&upk, target)? {
+                let original = saved
+                    .original_of(target.function)
+                    .ok_or_else(|| format!("No saved copy of {}. Verify the game files.", target.function))?;
+                upk.replace_export_payload(function_index(&upk, target)?, original)?;
+            }
+        }
         install(cooked, &live, &upk, false)?;
     }
     let _ = std::fs::remove_dir_all(backups.join("ChatExport"));
@@ -193,8 +261,7 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
     }
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
-    let index = function_index(&upk)?;
-    if is_patched(&upk, index)? {
+    if states(&upk)?.iter().all(|state| *state) {
         return Ok(());
     }
     ensure_closed()?;
@@ -328,7 +395,7 @@ mod tests {
 
     #[test]
     fn statement_is_a_log_call_over_two_struct_member_reads() {
-        let script = statement(100, 200, 300, 400);
+        let script = statement(PARAMETER_READ, 100, 200, 300, 400);
         let mut expected = vec![0xe7, 0xf8, 0xf8, 0xf8, 0x1f];
         expected.extend_from_slice(b"HBXCHAT\t");
         expected.push(0x00);
@@ -370,7 +437,7 @@ mod tests {
         upk.save_fast(&out).unwrap();
         let reloaded = UpkPackage::load(&out).unwrap();
         let _ = std::fs::remove_file(out);
-        assert!(is_patched(&reloaded, function_index(&reloaded).unwrap()).unwrap());
+        assert!(states(&reloaded).unwrap().iter().all(|state| *state));
     }
 
     /// Enable then restore on a temp copy of the real package, which must be
@@ -388,17 +455,19 @@ mod tests {
         std::fs::write(root.join("TAGame/Binaries/Win64/RocketLeague.exe"), b"exe").unwrap();
         std::fs::copy(&source, cooked.join("TAGame.upk")).unwrap();
         let load = || UpkPackage::load(&cooked.join("TAGame.upk")).unwrap();
-        let vanilla = {
+        let vanilla: Vec<Vec<u8>> = {
             let upk = load();
-            payload(&upk, function_index(&upk).unwrap())
+            TARGETS.iter().map(|t| payload(&upk, function_index(&upk, t).unwrap())).collect()
         };
         enable(&cooked, &backups).unwrap();
         let upk = load();
-        assert!(enabled(&backups) && is_patched(&upk, function_index(&upk).unwrap()).unwrap());
+        assert!(enabled(&backups) && states(&upk).unwrap().iter().all(|state| *state));
         restore(&cooked, &backups).unwrap();
         let upk = load();
         assert!(!enabled(&backups));
-        assert_eq!(payload(&upk, function_index(&upk).unwrap()), vanilla);
+        for (t, original) in TARGETS.iter().zip(&vanilla) {
+            assert_eq!(&payload(&upk, function_index(&upk, t).unwrap()), original);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
