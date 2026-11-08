@@ -14,19 +14,19 @@ pub(super) const TARGETS: [&str; 7] = [
     "GFxData_Persona_TA.HandleGetAvatar",
 ];
 
-fn text(value: &str) -> Code {
+pub(super) fn text(value: &str) -> Code {
     let mut code = Code::raw(&[0x1f]);
     code.bytes.extend(value.as_bytes());
     code.bytes.push(0);
     code
 }
-fn call(package: &UpkPackage, function: &str, args: Code) -> Result<Code, String> {
+pub(super) fn call(package: &UpkPackage, function: &str, args: Code) -> Result<Code, String> {
     Ok(Code::raw(&[0x1c])
         .reference(object(package, function)?)
         .then(args)
         .then(Code::raw(&[0x16])))
 }
-fn virtual_call(package: &UpkPackage, function: &str, args: Code) -> Result<Code, String> {
+pub(super) fn virtual_call(package: &UpkPackage, function: &str, args: Code) -> Result<Code, String> {
     Ok(Code::raw(&[0x1b])
         .then(name(package, function)?)
         .then(args)
@@ -169,7 +169,7 @@ fn friend_picture_persona(package: &UpkPackage, persona: Code) -> Result<Code, S
     conditional(condition_not_none(persona), source, Code::raw(&[0x2a]))
 }
 
-fn conditional(condition: Code, yes: Code, no: Code) -> Result<Code, String> {
+pub(super) fn conditional(condition: Code, yes: Code, no: Code) -> Result<Code, String> {
     // UE3 EX_Conditional stores expanded expression lengths, not serialized
     // byte lengths. Both arms have their own following expression size.
     let yes_skip = u16::try_from(yes.memory()).map_err(|_| "Conditional too large")?;
@@ -215,6 +215,8 @@ fn ensure_names(package: &mut UpkPackage) -> Result<Vec<(String, String)>, Strin
     for (index, name) in package.names.iter().enumerate() {
         if [
             "TransformedLeftX",
+            "SpecialEventData",
+            "loadFileToString",
             "LoadFileToString",
             "TargetFind",
             "ImportJSON",
@@ -638,6 +640,15 @@ fn function_body(package: &UpkPackage, path: &str) -> Result<Vec<u8>, String> {
     let e = &package.exports[object(package, path)? as usize - 1];
     let storage = package.read_int(e.serial_offset + 44)? as usize;
     Ok(package.image[e.serial_offset + 48..e.serial_offset + 48 + storage].to_vec())
+}
+
+pub(super) fn installed(package: &UpkPackage) -> Result<bool, String> {
+    let (_, persona) = bytes(package, PERSONA)?;
+    let (_, callback) = bytes(package, CALLBACK)?;
+    let endpoint = text(PREFIX);
+    Ok([persona, callback].iter().all(|payload| {
+        payload.windows(endpoint.bytes.len()).any(|window| window == endpoint.bytes.as_slice())
+    }))
 }
 
 fn match_avatar_fallback(package: &UpkPackage, original: &[u8]) -> Result<Code, String> {

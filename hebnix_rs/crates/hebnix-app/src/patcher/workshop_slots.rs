@@ -1,8 +1,7 @@
 //! fixed package names for LAN custom maps. the engine only resolves a package
 //! by a name it indexed at launch, so every PC keeps the same pool of hbx_slotNN
-//! placeholders. the host swaps a ticked map into its slot's file, the joiner
-//! swaps that slot to the same map while the game runs. a second file under the
-//! slot's name would be loaded into the same package and crash the game.
+//! placeholders. the host loads a map under a slot name, the joiner swaps that
+//! slot to the same map while the game runs.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -115,23 +114,30 @@ fn link_or_copy(src: &Path, dst: &Path, key: &str, label: &str) -> Result<(), St
 /// the hosted file is a slot copy; the map it stands for
 pub fn original(hosted: &Path) -> Option<PathBuf> {
     let dir = hosted.parent()?;
-    let state_dir = if dir.file_name()? == HOST_DIR {
-        dir.to_path_buf()
-    } else if dir.file_name()?.eq_ignore_ascii_case("CookedPCConsole") {
-        dir.parent()?.join(HOST_DIR)
-    } else {
-        return None;
-    };
-    let stem = hosted.file_stem()?.to_string_lossy().into_owned();
-    if !is_slot(&stem) {
+    if dir.file_name()? != HOST_DIR {
         return None;
     }
-    read_state(&state_dir).remove(&stem).map(PathBuf::from)
+    let stem = hosted.file_stem()?.to_string_lossy().into_owned();
+    read_state(dir).remove(&stem).map(PathBuf::from)
 }
 
-/// the slot file a map was given, which holds the map once it is ticked
+/// the slot copy path a map was given, which only exists once the map is ticked
 pub fn reserved(cooked: &Path, map: &Path) -> Option<PathBuf> {
-    slot_of(cooked, map).map(|slot| cooked.join(format!("{slot}.upk")))
+    let slot = slot_of(cooked, map)?;
+    let host = host_dir(cooked).join(format!("{slot}.udk"));
+    (same_file(&host, map) && same_file(&cooked.join(format!("{slot}.upk")), map))
+        .then_some(host)
+}
+
+/// A host slot is usable only when both copies hold the selected map.
+pub fn filled(cooked: &Path, map: &Path) -> Option<PathBuf> {
+    reserved(cooked, map)
+}
+
+/// Incoming slot protection rejects conflicting peers rather than unticking
+/// local maps, so joining never requires an untick-driven menu refresh.
+pub fn take_unticked() -> bool {
+    false
 }
 
 /// the slot a map was given, for display
@@ -145,25 +151,7 @@ pub struct HostReport {
     pub errors: Vec<String>,
 }
 
-/// the slot is missing or still the placeholder it started as
-fn is_placeholder(cooked: &Path, slot: &str) -> bool {
-    let dest = cooked.join(format!("{slot}.upk"));
-    let Ok(have) = fs::metadata(&dest) else { return true };
-    fs::metadata(cooked.join(PLACEHOLDER)).is_ok_and(|p| p.len() == have.len())
-}
-
-/// the slot holds some other map than `map`
-fn taken(cooked: &Path, slot: &str, map: &Path) -> bool {
-    !is_placeholder(cooked, slot) && !same_file(&cooked.join(format!("{slot}.upk")), map)
-}
-
-/// the slot file, only once it really holds the map. hosting a slot that still
-/// holds its placeholder loads an empty world and the game dies spawning the player
-pub fn filled(cooked: &Path, map: &Path) -> Option<PathBuf> {
-    reserved(cooked, map).filter(|slot| same_file(slot, map))
-}
-
-/// reserve a slot for every listed map and swap the ticked ones into theirs, so
+/// reserve a slot for every listed map and copy the ticked ones into theirs, so
 /// a right-click can load the map under a package name every player has ready.
 /// maps keep a slot until they are removed; unticked maps are never copied.
 /// more maps than slots leave the extra ones without.
@@ -179,13 +167,9 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
     let listed: Vec<String> = maps.iter().map(|m| m.path.to_string_lossy().into_owned()).collect();
     state.retain(|slot, path| {
         // the old two digit slot names are dropped with their copies
-        // a slot another map took (a synced host map) is the map's no more, it gets a new one below
-        let keep = is_slot(slot) && listed.contains(path) && !taken(cooked, slot, Path::new(path));
+        let keep = is_slot(slot) && listed.contains(path);
         if !keep {
             let _ = fs::remove_file(dir.join(format!("{slot}.udk")));
-            if is_slot(slot) && same_file(&cooked.join(format!("{slot}.upk")), Path::new(path)) {
-                release(cooked, slot);
-            }
         }
         keep
     });
@@ -193,12 +177,7 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
         let path = map.path.to_string_lossy().into_owned();
         let slot = match state.iter().find(|(_, p)| **p == path) {
             Some((slot, _)) => slot.clone(),
-            None => match (1..=SLOTS)
-                .map(slot_name)
-                .filter(|s| !state.contains_key(s))
-                .find(|s| is_placeholder(cooked, s))
-                .or_else(|| (1..=SLOTS).map(slot_name).find(|s| !state.contains_key(s)))
-            {
+            None => match (1..=SLOTS).map(slot_name).find(|s| !state.contains_key(s)) {
                 Some(slot) => slot,
                 None => {
                     report.skipped += 1;
@@ -206,15 +185,9 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
                 }
             },
         };
-        let dest = cooked.join(format!("{slot}.upk"));
+        let dest = dir.join(format!("{slot}.udk"));
         if !ticked.contains(&path) {
-            // a right-click in the game loads the slot copy, so every map gets one where a
-            // hardlink is free (NTFS). only a slot still holding its placeholder is taken.
-            let placeholder = fs::metadata(cooked.join(PLACEHOLDER)).map(|m| m.len()).ok();
-            let free = dest.exists() && fs::metadata(&dest).map(|m| m.len()).ok() == placeholder && !same_file(&dest, &map.path);
-            if free && fs::remove_file(&dest).is_ok() && fs::hard_link(&map.path, &dest).is_err() {
-                release(cooked, &slot);
-            }
+            let _ = fs::remove_file(&dest);
             state.insert(slot, path);
             continue;
         }
@@ -231,20 +204,24 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
             match copied {
                 Ok(()) => crate::toast::report(&key, &format!("{} is ready for LAN ({slot})", map.title), None, true),
                 Err(e) => {
-                    crate::toast::report_failed(&key, &format!("LAN slot failed for {}: {e}", map.title));
+                    crate::toast::report(&key, &format!("LAN slot failed for {}: {e}", map.title), None, true);
                     report.errors.push(e);
                     state.remove(&slot);
                     continue;
                 }
             }
         }
-        state.insert(slot, path);
-    }
-    // copies kept here by older builds
-    for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-        if entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("udk")) {
-            let _ = fs::remove_file(entry.path());
+        // LAN resolves packages by bare name as well as the explicit Workshop
+        // path. Keep both files consistent; this alone does not resolve the
+        // duplicate NetIndex failures seen when hosting some renamed maps.
+        if let Err(e) = place(cooked, &slot, &map.path, &map.title) {
+            report.errors.push(e.clone());
+            crate::toast::report(&format!("slot-{slot}"), &e, None, true);
+            let _ = fs::remove_file(&dest);
+            state.remove(&slot);
+            continue;
         }
+        state.insert(slot, path);
     }
     if let Ok(text) = serde_json::to_string_pretty(&state) {
         let _ = fs::write(dir.join(STATE), text);
@@ -265,7 +242,7 @@ pub fn ensure_pool(cooked: &Path) -> usize {
 }
 
 pub enum Placed {
-    /// the player's own ticked copy of the same map already stands in the slot
+    /// The slot already contains the player's own ticked map.
     Own,
     Ready,
     Swapped,
@@ -273,38 +250,24 @@ pub enum Placed {
     Restart,
 }
 
-static UNTICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// whether joining a map unticked one of the player's own, so the in-game list needs a refresh; once
-pub fn take_unticked() -> bool {
-    UNTICKED.swap(false, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// swap a slot to the host's map, unticking the player's own map if it was in the slot.
-/// fails while the game has the slot loaded.
+/// swap a slot to the host's map. fails while the game has the slot loaded.
 pub fn place(cooked: &Path, slot: &str, map: &Path, title: &str) -> Result<Placed, String> {
     if !is_slot(slot) {
         return Err(format!("{slot} is not a map slot"));
     }
-    let dest = cooked.join(format!("{slot}.upk"));
-    if let Some(own) = read_state(&host_dir(cooked)).remove(slot).map(PathBuf::from) {
-        // the slot is the player's own while ticked, even if its swap has not happened yet
-        if ticked(cooked).contains(own.to_string_lossy().as_ref()) {
-            if same_file(&own, map) {
-                return Ok(Placed::Own);
-            }
-            set_ticked(cooked, &own, false)?;
-            UNTICKED.store(true, std::sync::atomic::Ordering::Relaxed);
-            let name = own.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            crate::toast::report("slot-unticked", &format!("Unticked {name} to join {title}, it was in {slot}"), None, true);
-        } else if !same_file(&own, map) {
-            // the player's own map loses the slot and gets another on the next refresh
-            UNTICKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let own = local_host_map(cooked, slot);
+    if let Some(host) = &own {
+        // Size/mtime is only a copy freshness hint, not map identity: distinct
+        // packages can have the same length and timestamp.
+        let source = original(&host).and_then(|p| fs::canonicalize(p).ok());
+        if source.is_none() || source != fs::canonicalize(map).ok() {
+            return Err(format!("{slot} is reserved for a local LAN map; untick it before joining a different map in this slot"));
         }
     }
+    let dest = cooked.join(format!("{slot}.upk"));
     let existed = dest.exists();
     if existed && same_file(&dest, map) {
-        return Ok(Placed::Ready);
+        return Ok(if own.is_some() { Placed::Own } else { Placed::Ready });
     }
     let key = format!("slot-{slot}");
     let label = format!("Loading {title} into {slot}");
@@ -314,7 +277,7 @@ pub fn place(cooked: &Path, slot: &str, map: &Path, title: &str) -> Result<Place
     }
     if let Err(e) = link_or_copy(map, &dest, &key, &label) {
         release(cooked, slot);
-        crate::toast::report_failed(&key, &format!("Could not load {title}: {e}"));
+        crate::toast::report(&key, &format!("Could not load {title}: {e}"), None, true);
         return Err(e);
     }
     let text = if existed {
@@ -326,13 +289,25 @@ pub fn place(cooked: &Path, slot: &str, map: &Path, title: &str) -> Result<Place
     Ok(if existed { Placed::Swapped } else { Placed::Restart })
 }
 
-/// put the placeholder back, unless the game still holds the slot
+fn local_host_map(cooked: &Path, slot: &str) -> Option<PathBuf> {
+    let dir = host_dir(cooked);
+    let state = read_state(&dir);
+    let path = state.get(slot)?;
+    let host = dir.join(format!("{slot}.udk"));
+    (ticked(cooked).contains(path) && host.is_file()).then_some(host)
+}
+
+/// Restore the local host map, or the placeholder, unless the game holds it.
 pub fn release(cooked: &Path, slot: &str) {
+    let source = local_host_map(cooked, slot).unwrap_or_else(|| cooked.join(PLACEHOLDER));
     let dest = cooked.join(format!("{slot}.upk"));
+    if same_file(&source, &dest) {
+        return;
+    }
     if dest.exists() && fs::remove_file(&dest).is_err() {
         return;
     }
-    let _ = fs::copy(cooked.join(PLACEHOLDER), dest);
+    let _ = link_or_copy(&source, &dest, &format!("slot-{slot}"), "Restoring LAN slot");
 }
 
 #[cfg(test)]
@@ -367,50 +342,38 @@ mod tests {
         let originals: Vec<_> = maps.iter().map(|m| m.path.clone()).collect();
         // every map reserves a slot, but nothing is copied until ticked
         assert_eq!(assign_host(&cooked, &maps).errors.len(), 0);
-        assert_eq!(reserved(&cooked, &originals[0]), Some(cooked.join("hbx_slot001.upk")));
-        assert_eq!(reserved(&cooked, &originals[1]), Some(cooked.join("hbx_slot002.upk")));
-        assert!(!cooked.join("hbx_slot001.upk").exists());
+        let dir = host_dir(&cooked);
+        assert_eq!(reserved(&cooked, &originals[0]), None);
+        assert_eq!(reserved(&cooked, &originals[1]), None);
+        assert!(!dir.join("hbx_slot001.udk").exists());
         for path in &originals {
             set_ticked(&cooked, path, true).unwrap();
         }
         assert_eq!(assign_host(&cooked, &maps).errors.len(), 0);
+        assert_eq!(reserved(&cooked, &originals[1]), Some(dir.join("hbx_slot002.udk")));
+        assert_eq!(filled(&cooked, &originals[1]), Some(dir.join("hbx_slot002.udk")));
+        assert!(matches!(place(&cooked, "hbx_slot002", &originals[1], "Own map"), Ok(Placed::Own)));
+        assert_eq!(fs::read(dir.join("hbx_slot002.udk")).unwrap(), b"two");
         assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
-        assert_eq!(original(&cooked.join("hbx_slot002.upk")), Some(originals[1].clone()));
+        release(&cooked, "hbx_slot002");
+        assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
+        assert!(place(&cooked, "hbx_slot002", &originals[0], "Conflicting peer").is_err());
+        assert!(!take_unticked());
+        assert!(ticked(&cooked).contains(originals[1].to_string_lossy().as_ref()));
+        assert_eq!(original(&dir.join("hbx_slot002.udk")), Some(originals[1].clone()));
         assert_eq!(slot_of(&cooked, &originals[0]).as_deref(), Some("hbx_slot001"));
 
-        // unticking keeps the copy, every map with a slot stays loadable from it
+        // unticking drops the copy and keeps the reserved name
         set_ticked(&cooked, &originals[1], false).unwrap();
         assign_host(&cooked, &maps);
-        assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
+        assert!(!dir.join("hbx_slot002.udk").exists());
         assert_eq!(slot_of(&cooked, &originals[1]).as_deref(), Some("hbx_slot002"));
         // dropping the first map frees its slot and keeps the second's
         let maps = vec![WorkshopMap { path: originals[1].clone(), ..map("two") }];
         assign_host(&cooked, &maps);
-        assert!(!cooked.join("hbx_slot001.upk").exists());
+        assert!(!dir.join("hbx_slot001.udk").exists());
         assert_eq!(slot_of(&cooked, &originals[0]), None);
         assert_eq!(slot_of(&cooked, &originals[1]).as_deref(), Some("hbx_slot002"));
-    }
-
-    #[test]
-    fn own_ticked_slot_is_replaced_by_a_hosts_map() {
-        let game = temp("own").join("TAGame");
-        let cooked = game.join("CookedPCConsole");
-        fs::write(cooked.join(PLACEHOLDER), b"placeholder").unwrap();
-        let mine = game.join("mine.udk");
-        fs::write(&mine, b"my own map").unwrap();
-        let maps = vec![WorkshopMap { id: 1, title: "mine".into(), author: String::new(), description: String::new(), path: mine.clone(), preview_url: String::new() }];
-        set_ticked(&cooked, &mine, true).unwrap();
-        assert_eq!(assign_host(&cooked, &maps).errors.len(), 0);
-        // the same map from a peer is already there; a different one unticks yours and takes the slot
-        assert!(matches!(place(&cooked, "hbx_slot001", &mine, "Mine"), Ok(Placed::Own)));
-        assert!(!take_unticked());
-        let other = game.join("other.udk");
-        fs::write(&other, b"someone else's bigger map").unwrap();
-        assert!(place(&cooked, "hbx_slot001", &other, "Other").is_ok());
-        assert!(take_unticked());
-        assert!(!ticked(&cooked).contains(mine.to_string_lossy().as_ref()));
-        assert_eq!(fs::read(cooked.join("hbx_slot001.upk")).unwrap(), b"someone else's bigger map");
-        assert_eq!(fs::read(&mine).unwrap(), b"my own map");
     }
 
     #[test]

@@ -7,10 +7,6 @@ mod replay_scan;
 mod replay_timeline;
 mod replay_source;
 mod replay_history_log;
-#[cfg(target_os = "windows")]
-mod replay_history_patch;
-#[cfg(target_os = "linux")]
-#[path = "replay_history_patch_linux.rs"]
 mod replay_history_patch;
 mod patcher;
 mod ball {
@@ -81,6 +77,8 @@ mod patch_core {
 }
 mod plugins;
 mod profile_pictures;
+mod scoreboard;
+mod name_bridge;
 mod presets;
 #[cfg(target_os = "windows")]
 mod rl_launch;
@@ -395,9 +393,7 @@ fn main() -> eframe::Result {
         ])
         .with_min_inner_size([app::MIN_WIDTH, app::MIN_HEIGHT])
         .with_transparent(!window_state::safe_rendering())
-        .with_visible(!cfg.settings.start_in_tray || window_state::safe_rendering()
-            || replay_history_patch::resume_operation().is_some()
-            || replay_history_patch::admin_restart_canceled());
+        .with_visible(!cfg.settings.start_in_tray || window_state::safe_rendering());
     if let Some(icon) = load_window_icon(&base_dir) {
         viewport = viewport.with_icon(icon);
     }

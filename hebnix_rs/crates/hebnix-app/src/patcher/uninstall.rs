@@ -21,9 +21,8 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
             return Err("Rocket League changed since the backups were made. Verify game files before uninstalling; backups have been kept.".into());
         }
     }
-    #[cfg(windows)]
-    if base.join("live-history-install.json").exists() {
-        crate::replay_history_patch::uninstall(game, base)?;
+    if crate::replay_history_patch::installed(game).unwrap_or(false) {
+        crate::replay_history_patch::set_enabled(game, false)?;
     }
     let background = base.join("state/background_changer");
     if background.join("background_swaps.json").exists() {
@@ -31,6 +30,13 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     }
     if super::menu_map::active(&cooked)?.is_some() {
         super::menu_map::restore(&cooked)?;
+    }
+    let scoreboard = super::profile_pictures::scoreboard::installed(game);
+    if scoreboard.is_ok_and(|options| options.show_mmr || options.unanonymize) {
+        super::profile_pictures::scoreboard::set_options(game, Default::default())?;
+    }
+    if super::profile_pictures::name_bridge::recorded(game) {
+        super::profile_pictures::name_bridge::set_enabled(game, false)?;
     }
     super::title_patcher::restore_for_uninstall(base, &cooked)?;
     if !backups.exists() {

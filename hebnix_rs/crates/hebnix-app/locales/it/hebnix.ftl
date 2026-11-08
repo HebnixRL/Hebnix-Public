@@ -744,3 +744,6 @@ speed-patch-description = Scala le velocità di scorrimento e rotazione di skin 
 speed-patch-multiplier = Velocità
 speed-patch-roundtrip-mismatch = Discrepanza nel ciclo completo della patch di velocità
 app-speed-patch = Velocità animazione
+
+nav-scoreboard = Tabellone
+scoreboard-show-mmr = Mostra MMR

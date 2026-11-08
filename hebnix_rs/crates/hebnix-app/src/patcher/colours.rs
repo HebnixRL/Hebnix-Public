@@ -228,8 +228,10 @@ impl ColoursState {
                 ui.label(t("render-stadium-hud-and-garage-palette-colours"));
                 ui.add_space(12.0);
 
-                ui.vertical(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.heading(t("render-stadium-colours"));
+                    ui.separator();
                     ui.checkbox(
                         &mut self.settings.stadium_colours,
                         t("render-apply-stadium-colours"),
@@ -258,8 +260,10 @@ impl ColoursState {
                 });
 
                 ui.add_space(10.0);
-                ui.vertical(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.heading(t("render-hud-colours"));
+                    ui.separator();
                     ui.checkbox(
                         &mut self.settings.hud_colours,
                         t("render-apply-hud-colours"),
@@ -288,8 +292,10 @@ impl ColoursState {
                 });
 
                 ui.add_space(10.0);
-                ui.vertical(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.heading(t("render-extended-colour-palette"));
+                    ui.separator();
                     ui.checkbox(
                         &mut self.settings.extended_palette,
                         t("render-add-pure-white-to-pure-black"),
@@ -298,8 +304,10 @@ impl ColoursState {
                 });
 
                 ui.add_space(10.0);
-                ui.vertical(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.heading(t("render-custom-car-colours"));
+                    ui.separator();
                     ui.checkbox(&mut self.settings.car_colours, t("render-apply-custom-car-colours"));
                     ui.weak(t("render-custom-car-colours-hint"));
                     ui.add_enabled_ui(self.settings.car_colours, |ui| {
@@ -326,8 +334,10 @@ impl ColoursState {
                 });
 
                 ui.add_space(10.0);
-                ui.vertical(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.heading(t("render-heatseeker-ball-glow"));
+                    ui.separator();
                     ui.checkbox(
                         &mut self.settings.heatseeker_glow,
                         t("render-override-the-maximum-speed-glow-locally"),
@@ -343,36 +353,41 @@ impl ColoursState {
                 });
 
                 ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new(t("render-apply-colours")))
-                        .clicked()
-                    {
-                        requested = Some(ColourAction::Apply);
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.busy && (self.settings.applied || restore_available),
-                            egui::Button::new(t("ball-restore-original")),
-                        )
-                        .clicked()
-                    {
-                        requested = Some(ColourAction::Restore);
-                    }
-                    if self.busy {
-                        ui.spinner();
-                    }
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.heading("Status");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!self.busy, egui::Button::new(t("render-apply-colours")))
+                            .clicked()
+                        {
+                            requested = Some(ColourAction::Apply);
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.busy && (self.settings.applied || restore_available),
+                                egui::Button::new(t("ball-restore-original")),
+                            )
+                            .clicked()
+                        {
+                            requested = Some(ColourAction::Restore);
+                        }
+                        if self.busy {
+                            ui.spinner();
+                        }
+                    });
+                    let colour = if self.error {
+                        egui::Color32::from_rgb(0xe7, 0x4c, 0x3c)
+                    } else {
+                        ui.visuals().text_color()
+                    };
+                    ui.colored_label(colour, &self.status);
+                    ui.weak(t_args(
+                        "render-pristine-backup-backup-name",
+                        &[("backup", BACKUP_NAME.to_string().into())],
+                    ));
                 });
-                let colour = if self.error {
-                    egui::Color32::from_rgb(0xe7, 0x4c, 0x3c)
-                } else {
-                    ui.visuals().text_color()
-                };
-                ui.colored_label(colour, &self.status);
-                ui.weak(t_args(
-                    "render-pristine-backup-backup-name",
-                    &[("backup", BACKUP_NAME.to_string().into())],
-                ));
             });
         requested
     }
@@ -388,125 +403,134 @@ impl ColoursState {
             .id_salt("ball_appearance_page")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.heading(t("nav-ball-shape"));
-                ui.label(t("ball-appearance-change-the-ball-s-shape-locally"));
-                ui.weak(t(
-                    "ball-appearance-experimental-visual-swap-collision-and-p",
-                ));
-                ui.add_space(12.0);
-                ui.add_enabled_ui(!self.busy, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(t("ball-appearance-original-ball"));
-                        egui::ComboBox::from_id_salt("ball_visual_source")
-                            .selected_text(super::ball_visual::BALLS[self.ball_source].0)
-                            .show_ui(ui, |ui| {
-                                for (index, (label, _)) in
-                                    super::ball_visual::BALLS.iter().enumerate()
-                                {
-                                    ui.selectable_value(&mut self.ball_source, index, *label);
-                                }
-                            });
-                        ui.label(t("ball-appearance-replace-appearance-with"));
-                        egui::ComboBox::from_id_salt("ball_visual_donor")
-                            .selected_text(super::ball_visual::BALLS[self.ball_donor].0)
-                            .show_ui(ui, |ui| {
-                                for (index, (label, _)) in
-                                    super::ball_visual::BALLS.iter().enumerate()
-                                {
-                                    ui.add_enabled_ui(index != self.ball_source, |ui| {
-                                        ui.selectable_value(&mut self.ball_donor, index, *label);
-                                    });
-                                }
-                            });
-                    });
-                    let colour_support =
-                        super::ball_visual::colour_texture(self.ball_source, self.ball_donor)
-                            .is_some();
-                    ui.add_enabled_ui(colour_support, |ui| {
-                        ui.checkbox(
-                            &mut self.ball_colours,
-                            t("ball-appearance-include-replacement-colours-experimental"),
-                        );
-                    });
-                    if colour_support {
-                        ui.weak(t(
-                            "ball-appearance-copies-the-colour-texture-special-shader",
-                        ));
-                    } else {
-                        ui.weak(t(
-                            "ball-appearance-colours-are-available-for-normal-selecte",
-                        ));
-                    }
-                    let active = self
-                        .ball_swaps
-                        .iter()
-                        .find(|swap| swap.source == self.ball_source);
-                    if let Some(swap) = active {
-                        ui.label(t_args(
-                            "ball-appearance-applied-super-super2",
-                            &[
-                                (
-                                    "original",
-                                    (super::ball_visual::BALLS[swap.source].0)
-                                        .to_string()
-                                        .into(),
-                                ),
-                                (
-                                    "replacement",
-                                    (super::ball_visual::BALLS[swap.donor].0).to_string().into(),
-                                ),
-                            ],
-                        ));
-                        ui.weak(t(
-                            "ball-appearance-restore-this-ball-before-choosing-anothe",
-                        ));
-                    }
-                    if let Some(error) = &self.ball_state_error {
-                        ui.colored_label(egui::Color32::RED, error);
-                    }
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                active.is_none()
-                                    && self.ball_source != self.ball_donor
-                                    && self.ball_state_error.is_none(),
-                                egui::Button::new(t("ball-appearance-apply-ball-appearance")),
-                            )
-                            .clicked()
-                        {
-                            requested = Some(ColourAction::ApplyBall {
-                                source: self.ball_source,
-                                donor: self.ball_donor,
-                                colours: self.ball_colours && colour_support,
-                            });
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.heading(t("nav-ball-shape"));
+                    ui.separator();
+                    ui.label(t("ball-appearance-change-the-ball-s-shape-locally"));
+                    ui.weak(t(
+                        "ball-appearance-experimental-visual-swap-collision-and-p",
+                    ));
+                    ui.add_space(12.0);
+                    ui.add_enabled_ui(!self.busy, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(t("ball-appearance-original-ball"));
+                            egui::ComboBox::from_id_salt("ball_visual_source")
+                                .selected_text(super::ball_visual::BALLS[self.ball_source].0)
+                                .show_ui(ui, |ui| {
+                                    for (index, (label, _)) in
+                                        super::ball_visual::BALLS.iter().enumerate()
+                                    {
+                                        ui.selectable_value(&mut self.ball_source, index, *label);
+                                    }
+                                });
+                            ui.label(t("ball-appearance-replace-appearance-with"));
+                            egui::ComboBox::from_id_salt("ball_visual_donor")
+                                .selected_text(super::ball_visual::BALLS[self.ball_donor].0)
+                                .show_ui(ui, |ui| {
+                                    for (index, (label, _)) in
+                                        super::ball_visual::BALLS.iter().enumerate()
+                                    {
+                                        ui.add_enabled_ui(index != self.ball_source, |ui| {
+                                            ui.selectable_value(&mut self.ball_donor, index, *label);
+                                        });
+                                    }
+                                });
+                        });
+                        let colour_support =
+                            super::ball_visual::colour_texture(self.ball_source, self.ball_donor)
+                                .is_some();
+                        ui.add_enabled_ui(colour_support, |ui| {
+                            ui.checkbox(
+                                &mut self.ball_colours,
+                                t("ball-appearance-include-replacement-colours-experimental"),
+                            );
+                        });
+                        if colour_support {
+                            ui.weak(t(
+                                "ball-appearance-copies-the-colour-texture-special-shader",
+                            ));
+                        } else {
+                            ui.weak(t(
+                                "ball-appearance-colours-are-available-for-normal-selecte",
+                            ));
                         }
-                        if ui
-                            .add_enabled(
-                                active.is_some() && self.ball_state_error.is_none(),
-                                egui::Button::new(t("ball-appearance-restore-ball-appearance")),
-                            )
-                            .clicked()
-                        {
-                            requested = Some(ColourAction::RestoreBall {
-                                source: self.ball_source,
-                            });
+                        let active = self
+                            .ball_swaps
+                            .iter()
+                            .find(|swap| swap.source == self.ball_source);
+                        if let Some(swap) = active {
+                            ui.label(t_args(
+                                "ball-appearance-applied-super-super2",
+                                &[
+                                    (
+                                        "original",
+                                        (super::ball_visual::BALLS[swap.source].0)
+                                            .to_string()
+                                            .into(),
+                                    ),
+                                    (
+                                        "replacement",
+                                        (super::ball_visual::BALLS[swap.donor].0).to_string().into(),
+                                    ),
+                                ],
+                            ));
+                            ui.weak(t(
+                                "ball-appearance-restore-this-ball-before-choosing-anothe",
+                            ));
                         }
+                        if let Some(error) = &self.ball_state_error {
+                            ui.colored_label(egui::Color32::RED, error);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    active.is_none()
+                                        && self.ball_source != self.ball_donor
+                                        && self.ball_state_error.is_none(),
+                                    egui::Button::new(t("ball-appearance-apply-ball-appearance")),
+                                )
+                                .clicked()
+                            {
+                                requested = Some(ColourAction::ApplyBall {
+                                    source: self.ball_source,
+                                    donor: self.ball_donor,
+                                    colours: self.ball_colours && colour_support,
+                                });
+                            }
+                            if ui
+                                .add_enabled(
+                                    active.is_some() && self.ball_state_error.is_none(),
+                                    egui::Button::new(t("ball-appearance-restore-ball-appearance")),
+                                )
+                                .clicked()
+                            {
+                                requested = Some(ColourAction::RestoreBall {
+                                    source: self.ball_source,
+                                });
+                            }
+                        });
                     });
                 });
                 ui.add_space(8.0);
-                if self.busy {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(&self.status);
-                    });
-                } else {
-                    let colour = if self.error {
-                        egui::Color32::from_rgb(0xe7, 0x4c, 0x3c)
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.heading("Status");
+                    ui.separator();
+                    if self.busy {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(&self.status);
+                        });
                     } else {
-                        ui.visuals().text_color()
-                    };
-                    ui.colored_label(colour, &self.status);
-                }
+                        let colour = if self.error {
+                            egui::Color32::from_rgb(0xe7, 0x4c, 0x3c)
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.colored_label(colour, &self.status);
+                    }
+                });
             });
         requested
     }

@@ -18,7 +18,6 @@ const UPLOAD_RETRY_SECS: u64 = 2 * 60 * 60;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
-    enabled: bool,
     imported_owner: Option<String>,
     history: Vec<String>,
     selected: Option<String>,
@@ -58,7 +57,7 @@ mod pending_upload_tests {
     }
 }
 enum Completion {
-    Started(Option<service::Runtime>, bool),
+    Started(bool, bool, Result<Option<service::Runtime>, String>),
     Enabled(bool, Option<service::Runtime>),
     Imported(String),
     Uploaded { owner: String, id: String },
@@ -69,7 +68,8 @@ pub(crate) struct State {
     settings: Settings,
     runtime: Option<service::Runtime>,
     pending: Option<mpsc::Receiver<Result<Completion, String>>>,
-    initialized: bool,
+    game: PathBuf,
+    enabled: bool,
     needs_update: bool,
     status: String,
     error: bool,
@@ -133,7 +133,8 @@ impl State {
             settings,
             runtime: None,
             pending: None,
-            initialized: false,
+            game: PathBuf::new(),
+            enabled: false,
             needs_update: false,
             status: String::new(),
             error: false,
@@ -222,19 +223,22 @@ impl State {
         });
     }
     pub(crate) fn tick(&mut self, ctx: &egui::Context, game: &Path) {
-        if !self.initialized {
-            self.initialized = true;
-            if self.settings.enabled {
+        if self.game != game && self.pending.is_none() {
+            self.game = game.to_owned();
+            self.enabled = false;
+            self.runtime = None;
+            self.needs_update = false;
+            if !game.as_os_str().is_empty() {
                 let game = game.to_owned();
                 let pictures = self.pictures();
                 self.spawn(ctx, "", move || {
-                    if !crate::patcher::profile_pictures::installed(&game)? {
-                        return Ok(Completion::Started(None, true));
-                    }
-                    Ok(Completion::Started(
-                        Some(service::Runtime::start(&pictures)?),
-                        false,
-                    ))
+                    let (on, needs_update) = crate::patcher::profile_pictures::status(&game)?;
+                    let runtime = if on {
+                        service::Runtime::start(&pictures).map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    Ok(Completion::Started(on, needs_update, runtime))
                 });
             }
         }
@@ -335,17 +339,24 @@ impl State {
         if let Some(result) = result {
             self.pending = None;
             match result {
-                Ok(Completion::Started(runtime, needs_update)) => {
-                    self.runtime = runtime;
+                Ok(Completion::Started(on, needs_update, runtime)) => {
+                    self.enabled = on;
                     self.needs_update = needs_update;
-                    self.status = if needs_update {
-                        "Close Rocket League to update avatar support.".into()
-                    } else {
-                        String::new()
-                    };
+                    match runtime {
+                        Ok(runtime) => {
+                            self.runtime = runtime;
+                            if needs_update {
+                                self.status = "Close Rocket League to update avatar support.".into();
+                            }
+                        }
+                        Err(error) => {
+                            self.error = true;
+                            self.status = error;
+                        }
+                    }
                 }
                 Ok(Completion::Enabled(enabled, runtime)) => {
-                    self.settings.enabled = enabled;
+                    self.enabled = enabled;
                     if !enabled || runtime.is_some() {
                         self.runtime = runtime;
                     }
@@ -615,10 +626,10 @@ impl State {
                 let running = hebnix_sdk::process::is_rocket_league_running();
                 ui.columns(2, |columns| {
                     let left = &mut columns[0];
-                    let mut enabled = self.settings.enabled;
+                    let mut enabled = self.enabled;
                     if left
                         .add_enabled(
-                            !busy && !running,
+                            !busy && !running && !game.as_os_str().is_empty(),
                             egui::Checkbox::new(&mut enabled, "Show player profile pictures"),
                         )
                         .on_disabled_hover_text("Close Rocket League to change avatar support.")
@@ -628,7 +639,7 @@ impl State {
                     }
                     left.add_space(8.0);
                     self.account_picker(left, running, busy);
-                    if self.settings.enabled
+                    if self.enabled
                         && self.needs_update
                         && left
                             .add_enabled(
@@ -639,7 +650,7 @@ impl State {
                     {
                         self.set_enabled(left.ctx(), game, true);
                     }
-                    if self.settings.enabled
+                    if self.enabled
                         && self.runtime.is_none()
                         && !self.needs_update
                         && !busy
@@ -648,8 +659,9 @@ impl State {
                         let pictures = self.pictures();
                         self.spawn(left.ctx(), "Connecting…", move || {
                             Ok(Completion::Started(
-                                Some(service::Runtime::start(&pictures)?),
+                                true,
                                 false,
+                                service::Runtime::start(&pictures).map(Some),
                             ))
                         });
                     }
