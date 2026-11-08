@@ -64,6 +64,7 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     let _ = super::bots_freeplay::unbind();
     let _ = super::forfeit_command::unbind();
     super::chat_export::restore(&cooked, &backups)?;
+    super::lan_commands::restore(&cooked, &backups)?;
     super::instant_suite::restore(&cooked, &backups)?;
     super::colours::restore_for_uninstall(&cooked, &backups)?;
     // Nested feature snapshots may include older changes to the same package.

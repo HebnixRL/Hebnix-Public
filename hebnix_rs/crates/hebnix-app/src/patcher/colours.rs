@@ -899,6 +899,7 @@ fn apply(
     crate::patcher::celebration::reapply(cooked_pc, backups_dir)?;
     crate::patcher::bots_freeplay::reapply(cooked_pc, backups_dir)?;
     crate::patcher::chat_export::reapply(cooked_pc, backups_dir)?;
+    crate::patcher::lan_commands::reapply(cooked_pc, backups_dir)?;
     let mut saved = settings.clone();
     saved.applied = true;
     save_state(backups_dir, &saved)
@@ -942,6 +943,7 @@ fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
     crate::patcher::forfeit_command::reapply(cooked_pc, backups_dir)?;
     crate::patcher::celebration::reapply(cooked_pc, backups_dir)?;
     crate::patcher::chat_export::reapply(cooked_pc, backups_dir)?;
+    crate::patcher::lan_commands::reapply(cooked_pc, backups_dir)?;
     save_state(backups_dir, &ColourSettings::default())
 }
 

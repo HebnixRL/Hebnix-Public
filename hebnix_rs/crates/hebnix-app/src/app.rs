@@ -696,6 +696,7 @@ pub struct HebnixApp {
     bots_freeplay: crate::patcher::bots_freeplay::State,
     delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
+    lan_commands: crate::patcher::lan_commands::State,
     chat_paste: crate::patcher::chat_paste::State,
     instant_suite: crate::patcher::instant_suite::State,
     swapper: crate::swapper::SwapperState,
@@ -1226,6 +1227,7 @@ impl HebnixApp {
             bots_freeplay: Default::default(),
             delete_backups: Default::default(),
             chat_export: Default::default(),
+            lan_commands: Default::default(),
             chat_paste: Default::default(),
             instant_suite: Default::default(),
             swapper,
@@ -1418,6 +1420,8 @@ impl HebnixApp {
         }
         ui.add_space(8.0);
         self.chat_export.render(ui, &cooked_pc, &backups_dir);
+        ui.add_space(8.0);
+        self.lan_commands.render(ui, &cooked_pc, &backups_dir);
         ui.add_space(8.0);
         self.chat_paste.render(ui, &cooked_pc, &backups_dir);
         ui.add_space(8.0);
@@ -5627,7 +5631,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
                     || self.title_patcher.busy() || self.swapper.busy()
                     || self.workshop.maintenance_busy()
                     || self.replay_history_patch.busy()
