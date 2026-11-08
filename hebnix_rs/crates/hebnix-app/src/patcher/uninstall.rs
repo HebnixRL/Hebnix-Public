@@ -76,6 +76,8 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     super::heatseeker::restore(&cooked, &backups)?;
     restore_ball_regions(&backups, &cooked)?;
     restore_packages(&backups, &cooked)?;
+    // the boost backup may have been taken with the patched HUD movie in it
+    super::chat_paste::restore(&cooked, &backups)?;
     Ok(())
 }
 

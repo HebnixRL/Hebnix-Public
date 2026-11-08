@@ -1229,7 +1229,7 @@ pub fn patch_boost_meter(
 
     let final_out = repack_package(&package)?;
     fs::write(&upk_path, &final_out).map_err(|e| format!("Failed to write patched UPK: {}", e))?;
-    Ok(())
+    crate::patcher::chat_paste::reapply(Path::new(game_dir), Path::new(backup_dir))
 }
 
 #[derive(Deserialize)]
@@ -1457,7 +1457,12 @@ impl BoostPatcherState {
             let backup_gfx = backups_dir_clone.join(format!("{}.bak", GFX_UPK));
             if backup_gfx.exists() && fs::copy(&backup_gfx, &cooked_pc_clone.join(GFX_UPK)).is_ok()
             {
-                let _ = local_tx.send(BoostOp::Restored);
+                let _ = local_tx.send(
+                    match crate::patcher::chat_paste::reapply(&cooked_pc_clone, &backups_dir_clone) {
+                        Ok(()) => BoostOp::Restored,
+                        Err(error) => BoostOp::Error(error),
+                    },
+                );
             } else {
                 let _ = local_tx.send(BoostOp::Error("No backup found to restore.".into()));
             }

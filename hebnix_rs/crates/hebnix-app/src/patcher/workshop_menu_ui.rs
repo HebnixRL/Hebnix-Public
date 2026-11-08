@@ -44,7 +44,7 @@ fn normal(swf: &[u8]) -> Vec<u8> {
     swf
 }
 
-fn digest(swf: &[u8]) -> String {
+pub(super) fn digest(swf: &[u8]) -> String {
     Sha256::digest(normal(swf)).iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -91,7 +91,7 @@ impl Movie {
         Ok((index, raw.tag_offset, raw.value_offset, raw.size))
     }
 
-    fn movie(&self, upk: &UpkPackage) -> Result<Vec<u8>, String> {
+    pub(super) fn movie(&self, upk: &UpkPackage) -> Result<Vec<u8>, String> {
         let (index, _, value, size) = self.locate(upk)?;
         let export = &upk.exports[index];
         let bytes = &upk.image[export.serial_offset..export.serial_offset + export.serial_size];
@@ -102,7 +102,7 @@ impl Movie {
     }
 
     /// the package with the movie swapped, saved to a new file
-    fn with_movie(&self, upk: &mut UpkPackage, swf: &[u8], out: &Path) -> Result<(), String> {
+    pub(super) fn with_movie(&self, upk: &mut UpkPackage, swf: &[u8], out: &Path) -> Result<(), String> {
         let (index, tag, value, size) = self.locate(upk)?;
         let export = &upk.exports[index];
         let old = upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec();
