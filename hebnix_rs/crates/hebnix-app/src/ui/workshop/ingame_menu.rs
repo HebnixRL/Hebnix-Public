@@ -36,8 +36,6 @@ pub struct InGameMenuState {
 }
 
 /// Hebnix's own flags, as URL options after the settings. The game ignores them.
-const ALWAYS: &str = "?HbxAlways";
-const AUTO: &str = "?HbxAuto";
 
 const BOTS: [&str; 5] = ["BotsNone", "BotsEasy", "BotsMedium", "BotsHard", "BotsUnfair"];
 /// Options after the game tags, as Rocket Plugin hosts with.
@@ -50,8 +48,6 @@ const LISTEN: &str = "?Playtest?NumPublicConnections=10?NumOpenPublicConnections
 #[derive(Default)]
 struct LanHost {
     loaded: bool,
-    always: bool,
-    auto: bool,
     team_size: usize,
     bots: usize,
     /// chosen option of each game setting in `lan_mutators::SETTINGS`
@@ -64,8 +60,6 @@ impl LanHost {
     fn load(&mut self, cooked: &Path) {
         self.loaded = true;
         let text = workshop_menu::read_host(cooked).unwrap_or_default();
-        self.always = text.contains(ALWAYS);
-        self.auto = text.contains(AUTO);
         let tags = text.split('?').next().unwrap_or_default();
         (self.team_size, self.bots) = (3, 0);
         let mut rest = Vec::new();
@@ -90,26 +84,26 @@ impl LanHost {
             .collect();
         tags.push(BOTS[self.bots].to_string());
         tags.push(format!("PlayerCount{}", self.team_size * 2));
-        let flags = [(self.always, ALWAYS), (self.auto, AUTO)];
-        let flags: String = flags.iter().filter(|(set, _)| *set).map(|(_, flag)| *flag).collect();
-        format!("{}{LISTEN}{flags}", tags.join(","))
+        format!("{}{LISTEN}", tags.join(","))
     }
 
-    /// Write the settings and switch the host file on or off to match.
-    fn sync(&self, cooked: &Path, connected: bool) -> Result<bool, String> {
-        workshop_menu::store_host(cooked, &self.file_text(), self.always || (self.auto && connected))
+    /// Write the settings. Only the menu's own Host LAN button uses them: a plain pick
+    /// always starts freeplay (older builds could make every pick host).
+    fn sync(&self, cooked: &Path) -> Result<bool, String> {
+        workshop_menu::store_host(cooked, &self.file_text(), false)
     }
 }
 
-/// Switch LAN hosting for a connection change, whichever tab is showing.
-pub fn sync_lan(cooked: &Path, connected: bool) {
+/// Rewrite the host settings on a connection change, whichever tab is showing, which
+/// also clears the always/auto hosting older builds saved.
+pub fn sync_lan(cooked: &Path, _connected: bool) {
     if !cooked.is_dir() {
         return;
     }
     let mut lan = LanHost::default();
     lan.load(cooked);
     // the map list tells the menu whether a plain pick hosts
-    if let Ok(true) = lan.sync(cooked, connected) {
+    if let Ok(true) = lan.sync(cooked) {
         let _ = refresh(cooked);
     }
 }
@@ -456,7 +450,7 @@ impl InGameMenuState {
     }
 
     /// `lan_only` drops the map list and the menu patch controls, leaving the LAN hosting settings.
-    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, connected: bool, lan_only: bool, tx: &Sender<AppMsg>) {
+    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, _connected: bool, lan_only: bool, tx: &Sender<AppMsg>) {
         let ctx = ui.ctx().clone();
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         self.tick(&cooked, &ctx);
@@ -487,41 +481,12 @@ impl InGameMenuState {
             }
         });
         ui.label(format!("{} maps found.", self.maps.len()));
-        let mut toggled = None;
-        if !self.maps.is_empty() {
-            let ticked = crate::patcher::workshop_slots::ticked(&cooked);
-            let is_on = |map: &WorkshopMap| ticked.contains(&map.path.to_string_lossy().into_owned());
-            let name = |map: &WorkshopMap| format!("{}{}", if is_on(map) { "[LAN] " } else { "" }, map.title);
-            self.selected = self.selected.min(self.maps.len() - 1);
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("ingame_menu_maps")
-                    .selected_text(name(&self.maps[self.selected]))
-                    .show_ui(ui, |ui| {
-                        for (index, map) in self.maps.iter().enumerate() {
-                            ui.selectable_value(&mut self.selected, index, name(map));
-                        }
-                    });
-                let map = &self.maps[self.selected];
-                let on = is_on(map);
-                let text = if on { "Stop hosting over LAN" } else { "Host over LAN" };
-                if ui.button(text).clicked() {
-                    toggled = Some((map.path.clone(), !on));
-                }
-            });
-        }
-            if let Some((path, on)) = toggled {
-                let cooked = cooked.clone();
-                self.spawn(&ctx, move || {
-                    let done = crate::patcher::workshop_slots::set_ticked(&cooked, &path, on).and_then(|()| refresh(&cooked));
-                    Job::Done(done.map(|_| if on { "Map ticked for LAN.".into() } else { "Map unticked for LAN.".into() }))
-                });
-            }
         ui.add_space(6.0);
         let busy = self.pending.is_some();
         ui.horizontal(|ui| {
             let enable = ui.add_enabled(
                 !busy && (!self.maps.is_empty() || workshop_menu::downloader_on(&cooked)),
-                egui::Button::new("Enable / update map list"),
+                egui::Button::new("Enable"),
             );
             let disable = ui.add_enabled(
                 !busy && matches!(self.enabled, Some(Ok(true))),
@@ -562,18 +527,14 @@ impl InGameMenuState {
             self.lan.load(&cooked);
         }
         ui.add_space(10.0);
-        ui.strong("Host LAN matches from the Workshop menu");
+        ui.strong("LAN match settings");
         ui.label(
-            "When on, picking a map in the in-game Workshop menu hosts a LAN match on it \
-             with these settings instead of freeplay. Players join from Rocket League's LAN \
-             browser and need the same map. Works while the game runs.",
+            "Used when you press Host LAN in the in-game Workshop menu. Players join from \
+             Rocket League's LAN browser and need the same map. Works while the game runs.",
         );
         let lan = &mut self.lan;
-        let mut changed = ui.checkbox(&mut lan.always, "Always host a LAN match when I pick a map").changed();
-        changed |= ui
-            .checkbox(&mut lan.auto, "Host a LAN match while connected to Hebnix multiplayer")
-            .changed();
-        ui.add_enabled_ui(lan.always || lan.auto, |ui| {
+        let mut changed = false;
+        {
             ui.horizontal(|ui| {
                 ui.label("Team size");
                 egui::ComboBox::from_id_salt("workshop_lan_team_size")
@@ -615,9 +576,9 @@ impl InGameMenuState {
                     changed = true;
                 }
             });
-        });
+        }
         if changed {
-            match lan.sync(&cooked, connected) {
+            match lan.sync(&cooked) {
                 Err(e) => self.status = e,
                 Ok(true) => drop(refresh(&cooked)),
                 Ok(false) => {}
@@ -638,23 +599,15 @@ mod tests {
         let cooked = std::env::temp_dir().join("hebnix_lan_host_test").join("TAGame").join("CookedPCConsole");
         std::fs::create_dir_all(&cooked).unwrap();
         let (picks, extra) = super::lan_mutators::parse("10Minutes,Ball_Puck,Lan".split(','));
-        let host = super::LanHost { team_size: 2, bots: 3, picks, extra: extra.join(","), auto: true, ..Default::default() };
-        assert_eq!(host.file_text(), format!("10Minutes,Ball_Puck,Lan,BotsHard,PlayerCount4{}{}", super::LISTEN, super::AUTO));
-        // auto hosting follows the connection; the settings survive being parked
-        host.sync(&cooked, false).unwrap();
+        let host = super::LanHost { team_size: 2, bots: 3, picks, extra: extra.join(","), ..Default::default() };
+        assert_eq!(host.file_text(), format!("10Minutes,Ball_Puck,Lan,BotsHard,PlayerCount4{}", super::LISTEN));
+        // the settings are kept for the Host LAN button, and a plain pick never hosts
+        host.sync(&cooked).unwrap();
         assert!(!crate::patcher::workshop_menu::host_on(&cooked));
-        host.sync(&cooked, true).unwrap();
-        assert!(crate::patcher::workshop_menu::host_on(&cooked));
-        host.sync(&cooked, false).unwrap();
         let mut back = super::LanHost::default();
         back.load(&cooked);
-        assert!(back.auto && !back.always && back.team_size == 2 && back.bots == 3 && back.extra == "Lan");
+        assert!(back.team_size == 2 && back.bots == 3 && back.extra == "Lan");
         assert_eq!(back.picks, host.picks);
-        let off = super::LanHost { auto: false, always: true, ..Default::default() };
-        off.sync(&cooked, false).unwrap();
-        back.load(&cooked);
-        assert!(!back.auto && back.always);
-        assert!(crate::patcher::workshop_menu::host_on(&cooked));
         crate::patcher::workshop_menu::set_host(&cooked, None).unwrap();
         let _ = std::fs::remove_dir_all(cooked.parent().unwrap().parent().unwrap());
     }
