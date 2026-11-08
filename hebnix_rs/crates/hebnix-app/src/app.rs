@@ -5655,24 +5655,17 @@ impl HebnixApp {
             credits_row(ui, &[
                 ("Built by", None),
                 ("Hebbins", Some("https://github.com/Hebbins")),
-                ("&", None),
+                ("·", None),
                 ("nixvio64", Some("https://github.com/nixvio64")),
+                ("&", None),
+                ("xplodingeggo", Some("https://github.com/xplodingeggo")),
             ]);
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("Contributors to Hebnix for Linux:").weak());
+            ui.label(egui::RichText::new("Hebnix contributors:").weak());
             credits_row(ui, &[
-                ("xplodingeggo", Some("https://github.com/xplodingeggo")),
-                ("·", None),
                 ("rlyvision", Some("https://github.com/rlyvision")),
                 ("·", None),
                 ("noxygalaxy", Some("https://github.com/noxygalaxy")),
-            ]);
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Contributors to Hebnix for Windows:").weak());
-            credits_row(ui, &[
-                ("xplodingeggo", Some("https://github.com/xplodingeggo")),
-                ("·", None),
-                ("rlyvision", Some("https://github.com/rlyvision")),
                 ("·", None),
                 ("FoxyNoxy", Some("https://github.com/F0xyN0xy")),
             ]);

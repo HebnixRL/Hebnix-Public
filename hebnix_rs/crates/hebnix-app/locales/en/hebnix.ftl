@@ -719,10 +719,6 @@ about-version-app-version-a-safe-eac = Version { $version }
     
     A safe, EAC-compliant Mod Loader for Rocket League with integrated Spoofer & Item Changer.
     
-    hebnix.com
-    
-    Built by Hebbins & nixvio64.
-    
     Press { $hotkey } to show/hide Hebnix.
 statsapi-notice-couldn-t-write-the-file-err = Couldn't write the file:
     { $err }

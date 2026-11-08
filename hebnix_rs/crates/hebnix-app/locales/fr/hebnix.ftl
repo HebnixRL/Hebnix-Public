@@ -519,10 +519,6 @@ about-version-app-version-a-safe-eac =
 
     Un chargeur de mods sûr et conforme à EAC pour Rocket League, avec Spoofer et changeur d'objets intégrés.
 
-    hebnix.com
-
-    Créé par Hebbins et nixvio64.
-
     Appuyez sur { $hotkey } pour afficher/masquer Hebnix.
 statsapi-notice-couldn-t-write-the-file-err =
     Impossible d'écrire le fichier :
