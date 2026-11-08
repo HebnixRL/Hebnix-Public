@@ -76,9 +76,10 @@ gridmake = ops(J(
     SP('getlocal 3', 'buttonMode', 'pushtrue'),
     SP('getlocal 3', 'mouseChildren', 'pushfalse'),
     CV('getlocal 3', 'addEventListener', 'pushstring "click"', GP(T, 'hbxCardClick')),
-    card_text(8, PV_H + 12, PV_W, 46, 19, WHITE, ROW_TITLE),
-    card_text(8, PV_H + 58, PV_W, 22, 14, WHITE, ROW_DESC),
-    card_text(8, PV_H + 78, PV_W, 22, 14, WHITE, ROW_AUTHOR),
+    CV('getlocal 3', 'addEventListener', 'pushstring "rollOver"', GP(T, 'hbxCardOver')),
+    card_text(8, PV_H + 10, PV_W, 46, 18, WHITE, ROW_TITLE),
+    card_text(8, PV_H + 54, PV_W, 22, 13, WHITE, ROW_DESC),
+    card_text(8, PV_H + 76, PV_W, 22, 13, WHITE, ROW_AUTHOR),
     f'findpropstrict {IL}', f'constructprop {IL}, 0', 'setlocal 7',
     f'findpropstrict {SPRITE}', f'constructprop {SPRITE}, 0', 'setlocal 8',
     GP('getlocal 8', 'graphics'), 'setlocal 6',
@@ -117,6 +118,7 @@ griddraw = ops(J(
     'LNOTASK:', GP('getlocal3', 'Description'), 'convert_s', 'setlocal 12',
     'LSET:',
     CP('getlocal2', 'getChildAt', N(1)), 'getlocal 12', f'setproperty {q("text")}',
+    f'getlex {fq("projectx.utils","TextFieldUtils")}', CP('getlocal2', 'getChildAt', N(1)), f'callpropvoid {q("truncate")}, 1',
     GP('getlocal3', 'Preview'), 'iffalse LNOPV',
     GP('getlocal3', 'Preview'), 'convert_s', 'setlocal 13', 'jump LPV',
     'LNOPV:', 'pushstring ""', 'setlocal 13',
@@ -138,9 +140,6 @@ griddraw = ops(J(
     CV('getlocal 5', 'drawRect', N(0), N(0), N(CARD_W), N(CARD_H)),
     CV('getlocal 5', 'endFill'),
     CV('getlocal 5', 'lineStyle'),
-    CV('getlocal 5', 'beginFill', 'pushint 664120', N(1)),
-    CV('getlocal 5', 'drawRect', N(8), N(8), N(PV_W), N(PV_H)),
-    CV('getlocal 5', 'endFill'),
     'LNEXT:', 'inclocal_i 1',
     'LCOND:', 'getlocal1', N(PER), 'iflt LBODY',
     'getlocal 6', N(PER - 1), 'add', N(PER), 'divide', 'convert_i', 'setlocal 11',
@@ -196,6 +195,14 @@ cardclick = ops(J(
     'getlocal2', N(0), 'iflt LEND',
     CV(T, 'hbxGridSet', GP(T, 'hbxPage'), 'getlocal2'),
     CV(T, 'hbxGridGo'),
+    'LEND:'))
+
+# the pointer over a card selects it, like hovering a row in the game's own list
+cardover = ops(J(
+    GP(T, 'hbxCards'), GP('getlocal1', 'currentTarget'), f'callproperty {BI("indexOf")}, 1', 'convert_i', 'setlocal2',
+    'getlocal2', N(0), 'iflt LEND',
+    'getlocal2', GP(T, 'hbxSel'), 'ifeq LEND',
+    CV(T, 'hbxGridSet', GP(T, 'hbxPage'), 'getlocal2'),
     'LEND:'))
 
 def SETPAGE(dp, ds):

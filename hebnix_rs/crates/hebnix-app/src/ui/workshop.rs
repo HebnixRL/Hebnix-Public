@@ -959,6 +959,7 @@ impl WorkshopState {
                     id: id_of(map),
                     title: str_of(map, "name", "").to_string(),
                     author: str_of(map, "author", "").to_string(),
+                    description: str_of(map, "short_description", "").trim().to_string(),
                     preview_url: match str_of(map, "banner_path", "") {
                         "" => String::new(),
                         banner => banner_url_and_cache_rel(banner).0,

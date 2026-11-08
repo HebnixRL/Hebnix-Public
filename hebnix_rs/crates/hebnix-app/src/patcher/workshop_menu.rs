@@ -86,6 +86,7 @@ pub struct Downloadable {
     pub id: String,
     pub title: String,
     pub author: String,
+    pub description: String,
     pub preview_url: String,
     pub downloads: u64,
 }
@@ -939,13 +940,16 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields], downloads: &[Downloadable]
         items.push(serde_json::json!({
             "ItemID": std::hash::Hasher::finish(&hash) >> 11,
             "Title": map.title,
-            // the downloader grid shows this under the title
-            "Description": match map.downloads {
-                0 => "Download with Hebnix".to_string(),
-                1 => "1 download".to_string(),
-                n => format!("{n} downloads"),
-            },
-            "AuthorName": if map.author.is_empty() { "Hebnix" } else { &map.author },
+            "Description": map.description,
+            // the downloader grid shows "Submitted by" and this, so the count rides along
+            "AuthorName": format!(
+                "{}  -  {}",
+                if map.author.is_empty() { "Hebnix" } else { &map.author },
+                match map.downloads {
+                    1 => "1 download".to_string(),
+                    n => format!("{n} downloads"),
+                }
+            ),
             "ItemPath": "",
             "Filename": "D",
             "FullPath": map.id,
@@ -1021,8 +1025,9 @@ pub fn upgrade_movie(cooked: &Path) -> Result<(), String> {
     if !status(cooked).unwrap_or(false) {
         return Ok(());
     }
+    // the game holds the package; the next start with it closed puts the new menu in
     if hebnix_sdk::process::is_rocket_league_running() {
-        return Err("Restart Rocket League to get the new Workshop menu".into());
+        return Ok(());
     }
     super::workshop_menu_ui::apply(cooked, &backups)
 }

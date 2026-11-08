@@ -1,6 +1,6 @@
-//! Serves small baseline-JPEG thumbnails of catalogue banners on localhost for the game's
-//! Workshop menu. The game downloads every row's PreviewURL itself when the menu opens, and
-//! the raw banners (1080p, progressive JPEGs) were too much for it. Thumbnails are made
+//! Serves small PNG thumbnails of catalogue banners on localhost for the game's Workshop
+//! menu. The game downloads every row's PreviewURL itself when the menu opens, and the raw
+//! banners (1080p, progressive JPEGs) were too much for it. Thumbnails are made
 //! on the first request (or ahead of time, see `warm`) and kept in the cache folder.
 
 use std::io::{Read, Write};
@@ -18,7 +18,7 @@ const MAX_BANNER_BYTES: u64 = 12 * 1024 * 1024;
 
 /// the address the game downloads a map's preview from
 pub fn url(id: &str) -> String {
-    format!("http://127.0.0.1:{PORT}/p/{id}.jpg")
+    format!("http://127.0.0.1:{PORT}/p/{id}.png")
 }
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -73,11 +73,11 @@ fn serve(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
         .lines()
         .next()
         .and_then(|line| line.strip_prefix("GET /p/"))
-        .and_then(|rest| rest.split(".jpg").next())
+        .and_then(|rest| rest.split(".png").next())
         .filter(|id| !id.is_empty() && id.len() < 32 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
     match id.and_then(|id| thumbnail(dir, id)) {
         Some(bytes) => {
-            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len())?;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len())?;
             stream.write_all(&bytes)
         }
         None => stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
@@ -85,7 +85,7 @@ fn serve(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
 }
 
 fn thumbnail(dir: &Path, id: &str) -> Option<Vec<u8>> {
-    let path: PathBuf = dir.join(format!("{id}.{WIDTH}x{HEIGHT}.jpg"));
+    let path: PathBuf = dir.join(format!("{id}.{WIDTH}x{HEIGHT}.png"));
     if let Ok(bytes) = std::fs::read(&path) {
         return Some(bytes);
     }
@@ -108,15 +108,18 @@ fn thumbnail(dir: &Path, id: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// the image fitted into a dark 16:9 frame, as a baseline JPEG
+/// the image fitted into a 16:9 frame whose spare edges are transparent, so the card's own
+/// colour shows there, as a PNG
 fn letterboxed(raw: &[u8]) -> Option<Vec<u8>> {
     let image = image::load_from_memory(raw).ok()?;
-    let fitted = image.thumbnail(WIDTH, HEIGHT).to_rgb8();
-    let mut canvas = image::RgbImage::from_pixel(WIDTH, HEIGHT, image::Rgb([4, 16, 28]));
+    let fitted = image.thumbnail(WIDTH, HEIGHT).to_rgba8();
+    let mut canvas = image::RgbaImage::new(WIDTH, HEIGHT);
     let (x, y) = ((WIDTH - fitted.width()) / 2, (HEIGHT - fitted.height()) / 2);
     image::imageops::overlay(&mut canvas, &fitted, i64::from(x), i64::from(y));
     let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82).encode_image(&canvas).ok()?;
+    image::DynamicImage::ImageRgba8(canvas)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .ok()?;
     Some(out)
 }
 
@@ -125,15 +128,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thumbnail_is_a_16_9_baseline_jpeg() {
+    fn thumbnail_is_16_9_with_transparent_bars() {
         let mut source = Vec::new();
         image::DynamicImage::ImageRgb8(image::RgbImage::new(400, 100))
             .write_to(&mut std::io::Cursor::new(&mut source), image::ImageFormat::Png)
             .unwrap();
         let out = letterboxed(&source).unwrap();
-        let decoded = image::load_from_memory(&out).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgba8();
         assert_eq!((decoded.width(), decoded.height()), (WIDTH, HEIGHT));
-        // SOF2 marks a progressive JPEG
-        assert!(!out.windows(2).any(|w| w == [0xFF, 0xC2]));
+        // a 4:1 image leaves bars above and below, the middle row is the picture
+        assert_eq!(decoded.get_pixel(WIDTH / 2, 0)[3], 0);
+        assert_eq!(decoded.get_pixel(WIDTH / 2, HEIGHT / 2)[3], 255);
     }
 }

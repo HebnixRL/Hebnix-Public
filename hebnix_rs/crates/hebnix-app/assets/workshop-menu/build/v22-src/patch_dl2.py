@@ -196,6 +196,7 @@ rep(" +method('hbxInputChanged',[],inputchg,4,1))", """ +method('hbxInputChanged
  +method('hbxGridSet',['null','null'],gridset,5,6)
  +method('hbxGridGo',[],gridgo,5,3)
  +method('hbxCardClick',['null'],cardclick,5,3)
+ +method('hbxCardOver',['null'],cardover,5,3)
  +method('hbxGridKey',['null','null','null'],gridkey,8,6)
  +method('hbxTyping',[],typing,4,2,ret='*')
  +method('hbxGridOpen',[],gridopen,10,3)
@@ -225,5 +226,5 @@ rep("  (CLICK_OLD,CLICK_NEW),", "  (CLICK_OLD,CLICK_NEW),\n  (WIC,WIC_NEW),")
 rep("menu='menus/WorkshopMenu.class.asasm'", r"""menu='menus/WorkshopMenu.class.asasm'
 WIC='      coerce              QName(PackageNamespace(""), "Array")\n      setlocal1\n\n      getlocal0\n      getproperty         QName(PackageNamespace(""), "workshopItemsList")\n      findpropstrict      QName(PackageNamespace("scaleform.clik.data"), "DataProvider")\n'
 WIC_NEW=WIC.replace('      getlocal0\n', f'      getlocal0\n      getlocal1\n      callproperty        {q("hbxVisible")}, 1\n      coerce              {q("Array")}\n      setlocal1\n\n      getlocal0\n', 1)""")
-rep("build('v20',{", "build('v25',{")
+rep("build('v20',{", "build('v26',{")
 open(path, 'w', encoding='utf-8').write(s)
