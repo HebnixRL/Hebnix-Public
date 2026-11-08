@@ -939,7 +939,12 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields], downloads: &[Downloadable]
         items.push(serde_json::json!({
             "ItemID": std::hash::Hasher::finish(&hash) >> 11,
             "Title": map.title,
-            "Description": "Download with Hebnix",
+            // the downloader grid shows this under the title
+            "Description": match map.downloads {
+                0 => "Download with Hebnix".to_string(),
+                1 => "1 download".to_string(),
+                n => format!("{n} downloads"),
+            },
             "AuthorName": if map.author.is_empty() { "Hebnix" } else { &map.author },
             "ItemPath": "",
             "Filename": "D",

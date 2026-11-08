@@ -189,9 +189,9 @@ rep(" +method('hbxInputChanged',[],inputchg,4,1))", """ +method('hbxInputChanged
  +method('hbxToggleDl',[],toggledl,4,1)
  +method('hbxDlKey',['null'],dlkey,2,2)
  +method('hbxDownload',['null'],download,8,2)
- +method('hbxMkText',['null']*7,mktext,6,10,ret='*')
- +method('hbxGridMake',[],gridmake,10,9)
- +method('hbxGridDraw',[],griddraw,10,14)
+ +method('hbxMkText',['null']*8,mktext,6,11,ret='*')
+ +method('hbxGridMake',[],gridmake,11,10)
+ +method('hbxGridDraw',[],griddraw,10,16)
  +method('hbxGridRows',[],gridrows,6,6)
  +method('hbxGridSet',['null','null'],gridset,5,6)
  +method('hbxGridGo',[],gridgo,5,3)
@@ -199,7 +199,7 @@ rep(" +method('hbxInputChanged',[],inputchg,4,1))", """ +method('hbxInputChanged
  +method('hbxGridKey',['null','null','null'],gridkey,8,6)
  +method('hbxTyping',[],typing,4,2,ret='*')
  +method('hbxGridOpen',[],gridopen,10,3)
- +method('hbxGridClose',[],gridclose,5,1)
+ +method('hbxGridClose',[],gridclose,6,1)
  +method('hbxKeyboard',[],keyboard,8,1)
  +method('hbxKbDone',['null'],kbdone,5,2))""")
 rep(r""" f'  trait slot {q("hbxTicks")} type {q("Object")} end\n')""", r""" f'  trait slot {q("hbxTicks")} type {q("Object")} end\n'
@@ -210,6 +210,7 @@ rep(r""" f'  trait slot {q("hbxTicks")} type {q("Object")} end\n')""", r""" f'  
  f'  trait slot {q("hbxRows")} type {q("Array")} end\n'
  f'  trait slot {q("hbxPageLbl")} type {fq("flash.text","TextField")} end\n'
  f'  trait slot {q("hbxFoot")} type {fq("flash.text","TextField")} end\n'
+ f'  trait slot {q("hbxBgSave")} type {q("Array")} end\n'
  f'  trait slot {q("hbxPage")} type {q("int")} end\n'
  f'  trait slot {q("hbxSel")} type {q("int")} end\n'
  f'  trait slot {q("hbxAsked")} type {q("Object")} end\n')""")
@@ -224,5 +225,5 @@ rep("  (CLICK_OLD,CLICK_NEW),", "  (CLICK_OLD,CLICK_NEW),\n  (WIC,WIC_NEW),")
 rep("menu='menus/WorkshopMenu.class.asasm'", r"""menu='menus/WorkshopMenu.class.asasm'
 WIC='      coerce              QName(PackageNamespace(""), "Array")\n      setlocal1\n\n      getlocal0\n      getproperty         QName(PackageNamespace(""), "workshopItemsList")\n      findpropstrict      QName(PackageNamespace("scaleform.clik.data"), "DataProvider")\n'
 WIC_NEW=WIC.replace('      getlocal0\n', f'      getlocal0\n      getlocal1\n      callproperty        {q("hbxVisible")}, 1\n      coerce              {q("Array")}\n      setlocal1\n\n      getlocal0\n', 1)""")
-rep("build('v20',{", "build('v24',{")
+rep("build('v20',{", "build('v25',{")
 open(path, 'w', encoding='utf-8').write(s)

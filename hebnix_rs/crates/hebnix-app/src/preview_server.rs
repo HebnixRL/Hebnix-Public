@@ -11,8 +11,9 @@ use std::sync::{Mutex, Once, OnceLock};
 use std::time::Duration;
 
 pub const PORT: u16 = 47853;
-// the grid shows previews at 100x100, and the engine keeps every row's texture in memory
-const SIZE: u32 = 128;
+// the grid shows 16:9 previews about this size, and the engine keeps every row's texture in memory
+const WIDTH: u32 = 224;
+const HEIGHT: u32 = 126;
 const MAX_BANNER_BYTES: u64 = 12 * 1024 * 1024;
 
 /// the address the game downloads a map's preview from
@@ -84,7 +85,7 @@ fn serve(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
 }
 
 fn thumbnail(dir: &Path, id: &str) -> Option<Vec<u8>> {
-    let path: PathBuf = dir.join(format!("{id}.{SIZE}.jpg"));
+    let path: PathBuf = dir.join(format!("{id}.{WIDTH}x{HEIGHT}.jpg"));
     if let Ok(bytes) = std::fs::read(&path) {
         return Some(bytes);
     }
@@ -107,12 +108,12 @@ fn thumbnail(dir: &Path, id: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// the image fitted into a dark square, as a baseline JPEG
+/// the image fitted into a dark 16:9 frame, as a baseline JPEG
 fn letterboxed(raw: &[u8]) -> Option<Vec<u8>> {
     let image = image::load_from_memory(raw).ok()?;
-    let fitted = image.thumbnail(SIZE, SIZE).to_rgb8();
-    let mut canvas = image::RgbImage::from_pixel(SIZE, SIZE, image::Rgb([4, 16, 28]));
-    let (x, y) = ((SIZE - fitted.width()) / 2, (SIZE - fitted.height()) / 2);
+    let fitted = image.thumbnail(WIDTH, HEIGHT).to_rgb8();
+    let mut canvas = image::RgbImage::from_pixel(WIDTH, HEIGHT, image::Rgb([4, 16, 28]));
+    let (x, y) = ((WIDTH - fitted.width()) / 2, (HEIGHT - fitted.height()) / 2);
     image::imageops::overlay(&mut canvas, &fitted, i64::from(x), i64::from(y));
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 82).encode_image(&canvas).ok()?;
@@ -124,14 +125,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thumbnail_is_a_square_baseline_jpeg() {
+    fn thumbnail_is_a_16_9_baseline_jpeg() {
         let mut source = Vec::new();
         image::DynamicImage::ImageRgb8(image::RgbImage::new(400, 100))
             .write_to(&mut std::io::Cursor::new(&mut source), image::ImageFormat::Png)
             .unwrap();
         let out = letterboxed(&source).unwrap();
         let decoded = image::load_from_memory(&out).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (SIZE, SIZE));
+        assert_eq!((decoded.width(), decoded.height()), (WIDTH, HEIGHT));
         // SOF2 marks a progressive JPEG
         assert!(!out.windows(2).any(|w| w == [0xFF, 0xC2]));
     }
