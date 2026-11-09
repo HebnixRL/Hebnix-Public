@@ -6952,6 +6952,11 @@ impl HebnixApp {
         for (slug, win) in active_plugins {
             let viewport_id = egui::ViewportId::from_hash_of(("plugin_window", &slug));
             let should_be_visible = win.shown(focus_ok);
+            // Wayland ignores with_visible(false) on always-on-top viewports and leaves a
+            // blank undismissable box; not showing the viewport destroys the surface.
+            if cfg!(target_os = "linux") && !should_be_visible {
+                continue;
+            }
             let size = [
                 win.width.resolve(mon_w, ppp),
                 win.height.resolve(mon_h, ppp),
