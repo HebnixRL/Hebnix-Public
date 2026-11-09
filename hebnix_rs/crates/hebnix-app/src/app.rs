@@ -2275,6 +2275,15 @@ impl HebnixApp {
             // The tray's hidden menu window is also ours. A process-level
             // focus check must not mistake that helper for the main window.
             winutil::focus_main_window();
+            // The viewport is unmapped until the compositor processes Visible(true),
+            // so the focus request above can miss it; retry shortly after it maps.
+            #[cfg(target_os = "linux")]
+            std::thread::spawn(|| {
+                for ms in [60u64, 140, 300, 600] {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    winutil::focus_main_window();
+                }
+            });
         }
 
         ctx.request_repaint();
