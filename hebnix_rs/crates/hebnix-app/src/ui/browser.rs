@@ -45,7 +45,7 @@ pub(crate) fn tile_height(ui: &egui::Ui) -> f32 {
 
 pub(crate) fn header(ui: &mut egui::Ui, title: String, actions: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal_top(|ui| {
-        ui.heading(title);
+        crate::theme::page_heading(ui, title);
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
             egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),

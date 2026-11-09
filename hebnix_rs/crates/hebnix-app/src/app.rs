@@ -4049,7 +4049,7 @@ impl HebnixApp {
                             });
                         }
                         SpooferSubTab::TitleRank => {
-                            ui.heading(t("spoofer-rank-spoofing"));
+                            crate::theme::page_heading(ui, t("spoofer-rank-spoofing"));
                             ui.add_space(8.0);
 
                             ui.weak(spoofer::WEBSOCKET_UNAVAILABLE);
@@ -5676,7 +5676,7 @@ impl HebnixApp {
         }
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.heading(t("about-hebnix"));
+            crate::theme::page_heading(ui, t("about-hebnix"));
             ui.add_space(10.0);
             ui.label(t_args(
                 "about-version-app-version-a-safe-eac",
