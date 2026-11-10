@@ -6,9 +6,35 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_RL_PATH: &str = r"C:\Program Files\Epic Games\rocketleague";
-pub const DEFAULT_STATSAPI_PATH: &str =
-    r"C:\Program Files\Epic Games\rocketleague\TAGame\Config\DefaultStatsAPI.ini";
+/// default Rocket League install dir: the Epic path on Windows, the Steam
+/// library path on Linux (`~/.steam/steam/steamapps/common/rocketleague`).
+#[cfg(not(target_os = "linux"))]
+pub fn default_rl_path() -> String {
+    r"C:\Program Files\Epic Games\rocketleague".to_string()
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_rl_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".steam/steam/steamapps/common/rocketleague")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn default_statsapi_path() -> String {
+    r"C:\Program Files\Epic Games\rocketleague\TAGame\Config\DefaultStatsAPI.ini".to_string()
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_statsapi_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".steam/steam/steamapps/common/rocketleague/TAGame/Config/DefaultStatsAPI.ini")
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -58,6 +84,11 @@ pub struct SettingsCfg {
     pub toast_position: crate::toast::ToastPos,
     pub restrict_hotkey_to_hebnix_or_rocket_league: bool,
     pub panel_enabled: bool,
+    /// overlay font file stem from fonts/ (empty = bundled default)
+    pub overlay_font: String,
+    /// overlay regular / bold weights, only used by variable fonts
+    pub overlay_font_weight: u32,
+    pub overlay_font_bold_weight: u32,
     /// Controller side panel: show every page, not just the in-game ones (maps, plugins).
     pub panel_advanced: bool,
     /// Controller side panel: dock on the left edge instead of the right.
@@ -97,15 +128,18 @@ impl Default for SettingsCfg {
             window_opacity: 0.96,
             start_in_tray: false,
             close_to_tray: false,
-            rl_path: DEFAULT_RL_PATH.to_string(),
+            rl_path: default_rl_path(),
             rl_path_confirmed: false,
-            statsapi_path: DEFAULT_STATSAPI_PATH.to_string(),
+            statsapi_path: default_statsapi_path(),
             suppress_left_alerts: false,
             suppress_fullscreen_warning: false,
             suppress_statsapi_rate_warning: false,
             allow_draw_on_hebnix_focus: true,
             toast_position: Default::default(),
             restrict_hotkey_to_hebnix_or_rocket_league: true,
+            overlay_font: String::new(),
+            overlay_font_weight: 400,
+            overlay_font_bold_weight: 700,
             panel_advanced: false,
             panel_enabled: true,
             panel_left: false,

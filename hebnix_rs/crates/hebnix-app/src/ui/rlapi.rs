@@ -90,7 +90,7 @@ impl RlApiPanel {
         status: &str,
     ) -> Option<Action> {
         let mut action = None;
-        ui.heading(t("app-rlapi"));
+        crate::theme::page_heading(ui, t("app-rlapi"));
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(

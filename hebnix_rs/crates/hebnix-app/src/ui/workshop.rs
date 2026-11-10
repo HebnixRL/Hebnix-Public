@@ -1536,7 +1536,7 @@ impl WorkshopState {
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
                     multiplayer_icon(ui);
-                    ui.heading(t("multiplayer-workshop-multiplayer"));
+                    crate::theme::page_heading(ui, t("multiplayer-workshop-multiplayer"));
                     ui.separator();
                     let width = ui.available_width().min(560.0);
                     ui.allocate_ui_with_layout(
@@ -1583,12 +1583,12 @@ impl WorkshopState {
 
         if ui.available_width() >= 700.0 {
             ui.horizontal(|ui| {
-                ui.heading(t("multiplayer-workshop-multiplayer"));
+                crate::theme::page_heading(ui, t("multiplayer-workshop-multiplayer"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), multiplayer_help_button);
             });
         } else {
             ui.horizontal_wrapped(|ui| {
-                ui.heading(t("multiplayer-workshop-multiplayer"));
+                crate::theme::page_heading(ui, t("multiplayer-workshop-multiplayer"));
                 multiplayer_help_button(ui);
             });
         }

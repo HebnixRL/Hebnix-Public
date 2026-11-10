@@ -125,6 +125,12 @@ settings-theme-label = Theme:
 settings-import-themes = Import Themes
 settings-open-fonts-folder = Open Fonts Folder
 settings-opacity-label = Window Opacity:
+settings-overlay-font-label = Overlay font:
+settings-overlay-font-default = Default
+settings-overlay-font-weight-label = Overlay font weight:
+settings-overlay-font-weight-hint = Only for variable fonts (like Lexend-VariableFont_wght). Bold is what plugins draw with bold = true.
+settings-overlay-font-weight-regular = Regular
+settings-overlay-font-weight-bold = Bold
 console-themes-rescanned = Themes directory rescanned and updated.
 console-theme-changed = Theme changed to '{ $theme }'.
 console-theme-failed = Theme '{ $theme }' failed to load. Defaulted to Dark mode. Check theme_errors.txt

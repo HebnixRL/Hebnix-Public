@@ -180,6 +180,14 @@ fn legacy_id() -> egui::Id {
 pub fn presentation(ctx: &egui::Context) -> Option<Arc<Presentation>> {
     ctx.data_mut(|data| data.get_temp::<Arc<Presentation>>(active_id()))
 }
+/// Render a page or subtab title according to the active theme's layout setting.
+/// Legacy themes retain their existing headings.
+pub fn page_heading(ui: &mut egui::Ui, title: impl Into<egui::RichText>) {
+    if presentation(ui.ctx()).is_none_or(|p| p.layout.show_page_heading) {
+        ui.heading(title);
+    }
+}
+
 /// Validation is also used by the ZIP installer; unsupported versions never silently degrade.
 pub fn parse_theme(text: &str) -> Result<ThemeFile, String> {
     let value: toml::Value =
