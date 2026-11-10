@@ -7447,6 +7447,7 @@ impl eframe::App for HebnixApp {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
+                    Self::render_window_grip(ui);
                     for tab in Tab::ALL {
                         if tab == Tab::Home {
                             if ui.add(egui::Button::image(egui::Image::new(egui::include_image!("../assets/navigation/home.svg"))
@@ -7462,6 +7463,7 @@ impl eframe::App for HebnixApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        Self::render_window_close(ui);
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
                         ui.label(
                             egui::RichText::new(&self.status_text)
@@ -8398,6 +8400,31 @@ impl HebnixApp {
             .small().color(self.status_color)).wrap());
     }
 
+    /// The window has no OS titlebar: this grip drags it (Super+click not needed).
+    fn render_window_grip(ui: &mut egui::Ui) {
+        let (grip_rect, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), egui::Sense::drag());
+        let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Drag window");
+        if grip.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        let dot = ui.visuals().weak_text_color();
+        for row in 0..3 {
+            for col in 0..2 {
+                let offset = egui::vec2(4.0 + col as f32 * 5.0, 5.0 + row as f32 * 7.0);
+                ui.painter().circle_filled(grip_rect.left_top() + offset, 1.4, dot);
+            }
+        }
+    }
+
+    /// Close button; goes through the same close path as the window manager's close.
+    fn render_window_close(ui: &mut egui::Ui) {
+        let close = egui::Button::new(egui::RichText::new("×").size(20.0).strong())
+            .min_size(egui::vec2(28.0, 28.0));
+        if ui.add(close).on_hover_text("Close").clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     fn render_themed_shell(&mut self, ui: &mut egui::Ui, p: &theme::Presentation) {
         theme::show_shell(ui, p, |ui, part| match part {
             theme::ShellPart::Navigation(true) => {
@@ -8414,6 +8441,7 @@ impl HebnixApp {
             }
             theme::ShellPart::Navigation(false) => {
                 theme::toolbar(ui, |ui| {
+                    Self::render_window_grip(ui);
                     self.render_themed_navigation(ui, p, false);
                     ui.add_space(8.0);
                     p.toolbar_actions(ui, |ui| {
@@ -8421,6 +8449,7 @@ impl HebnixApp {
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
                         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                             .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
+                        Self::render_window_close(ui);
                     });
                 });
             }
