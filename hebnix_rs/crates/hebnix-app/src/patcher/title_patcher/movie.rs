@@ -22,6 +22,13 @@ pub(in crate::patcher) fn rewrite(
     raw: &[u8],
     edit: &dyn Fn(&[u8]) -> Result<Option<(Vec<u8>, usize)>>,
 ) -> Result<Option<(Vec<u8>, usize)>> {
+    rewrite_blocks(raw, &mut |_, data| edit(data))
+}
+
+fn rewrite_blocks(
+    raw: &[u8],
+    edit: &mut impl FnMut(&[u8], &[u8]) -> Result<Option<(Vec<u8>, usize)>>,
+) -> Result<Option<(Vec<u8>, usize)>> {
     if raw.len() < 9 {
         return Err("Truncated title UI movie".into());
     }
@@ -83,7 +90,7 @@ pub(in crate::patcher) fn rewrite(
                 .ok_or("Invalid DoABC name")?
                 + 4;
             let abc_start = nul + 1;
-            if let Some((abc, count)) = edit(&data[abc_start..])? {
+            if let Some((abc, count)) = edit(&data[..abc_start], &data[abc_start..])? {
                 let len = abc_start + abc.len();
                 output.extend_from_slice(&((82u16 << 6) | 63).to_le_bytes());
                 output.extend_from_slice(&(len as u32).to_le_bytes());
@@ -118,4 +125,34 @@ pub(in crate::patcher) fn rewrite(
         output = encoded;
     }
     Ok(Some((output, changed)))
+}
+
+/// Undo one patch's ABC edits while keeping the other methods and movie tags.
+pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+    fn blocks(raw: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut blocks = Vec::new();
+        rewrite_blocks(raw, &mut |header, data| {
+            blocks.push((header.to_vec(), data.to_vec()));
+            Ok(None)
+        })?;
+        Ok(blocks)
+    }
+
+    let before = blocks(before)?;
+    let after = blocks(after)?;
+    let mut edits = before.iter().zip(&after);
+    let result = rewrite_blocks(live, &mut |header, data| {
+        let Some(((old_header, old), (new_header, new))) = edits.next() else {
+            return Err("Unexpected ABC block in shared UI movie".into());
+        };
+        if header != old_header || header != new_header {
+            return Err("ABC block order changed in shared UI movie".into());
+        }
+        let result = abc::revert(data, old, new)?;
+        Ok(result.map(|data| (data, 1)))
+    })?;
+    if before.len() != after.len() || edits.next().is_some() {
+        return Err("ABC blocks are missing from shared UI movie".into());
+    }
+    Ok(result)
 }

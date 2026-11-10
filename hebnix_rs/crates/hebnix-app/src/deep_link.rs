@@ -180,6 +180,14 @@ pub fn take_pending_theme_ids(base_dir: &Path) -> Vec<String> {
     take_pending_ids(base_dir, "theme", THEME_PREFIX)
 }
 
+fn catalog_matches(entry: &serde_json::Value, id: &str) -> bool {
+    entry.get("plugin_id").and_then(serde_json::Value::as_str) == Some(id)
+        || entry.get("id").is_some_and(|value| {
+            value.as_str() == Some(id)
+                || value.as_u64().is_some_and(|number| number.to_string() == id)
+        })
+}
+
 fn catalog_item(endpoint: &str, id: &str) -> Result<serde_json::Value, String> {
     let catalog: serde_json::Value = ureq::AgentBuilder::new()
         .try_proxy_from_env(false)
@@ -193,13 +201,7 @@ fn catalog_item(endpoint: &str, id: &str) -> Result<serde_json::Value, String> {
     catalog
         .as_array()
         .and_then(|entries| {
-            entries.iter().find(|entry| {
-                entry
-                    .get("plugin_id")
-                    .or_else(|| entry.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some(id)
-            })
+            entries.iter().find(|entry| catalog_matches(entry, id))
         })
         .cloned()
         .ok_or_else(|| format!("Item ID {id} was not found in the Hebnix catalog."))
@@ -277,6 +279,18 @@ pub fn install_theme(
     Ok((name, author))
 }
 
+pub(crate) fn import_theme_zip(path: &Path, themes_dir: &Path, fonts_dir: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_THEME_DOWNLOAD + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_THEME_DOWNLOAD {
+        return Err("Theme archive exceeds the 50 MB limit".into());
+    }
+    install_theme_zip(&bytes, themes_dir, fonts_dir)
+}
+
 fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Result<(), String> {
     let reader = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(reader).map_err(|error| error.to_string())?;
@@ -328,10 +342,11 @@ fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Resul
         if extension.eq_ignore_ascii_case("toml") {
             validate_theme(&contents)?;
         }
-        files.push((
-            asset_destination.unwrap_or(destination.join(safe_filename(filename, extension)?)),
-            contents,
-        ));
+        let mut path = asset_destination.unwrap_or(destination.join(safe_filename(filename, extension)?));
+        if extension.eq_ignore_ascii_case("toml") {
+            path.set_extension("toml");
+        }
+        files.push((path, contents));
     }
     if theme_count == 0 {
         return Err("Theme archive does not contain a TOML theme file".to_string());
@@ -369,7 +384,7 @@ fn safe_filename<'a>(value: &'a str, expected_extension: &str) -> Result<&'a str
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected_extension));
-    (is_single_component && extension_matches)
+    (is_single_component && extension_matches && !value.contains([':', '\\', '/']))
         .then_some(value)
         .ok_or_else(|| format!("Unsafe theme filename '{value}'"))
 }
@@ -377,6 +392,15 @@ fn safe_filename<'a>(value: &'a str, expected_extension: &str) -> Result<&'a str
 #[cfg(test)]
 mod theme_archive_tests {
     use super::*;
+
+    #[test]
+    fn matches_numeric_and_string_catalog_ids() {
+        assert!(catalog_matches(&serde_json::json!({"id": 381}), "381"));
+        assert!(catalog_matches(&serde_json::json!({"id": "381"}), "381"));
+        assert!(catalog_matches(&serde_json::json!({"id": 5, "plugin_id": "abc"}), "abc"));
+        assert!(catalog_matches(&serde_json::json!({"id": 381, "plugin_id": ""}), "381"));
+        assert!(!catalog_matches(&serde_json::json!({"id": 381}), "382"));
+    }
 
     #[test]
     fn install_worker_delivers_both_link_types_once_and_keeps_polling() {

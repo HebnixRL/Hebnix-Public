@@ -15,11 +15,13 @@ fn saved_tabs_survive_the_studio_reorganisation() {
     for tab in Tab::ALL {
         assert_eq!(Tab::from_config_key(tab.config_key()), tab);
     }
-    assert_eq!(Tab::ALL.len(), 11);
+    assert_eq!(Tab::ALL.len(), 12);
     assert_eq!(Tab::ALL[0], Tab::Home);
     assert_eq!(Tab::ALL[1], Tab::Workshop);
     assert_eq!(Tab::ALL[2], Tab::Items);
     assert_eq!(Tab::ALL[3], Tab::Patcher);
+    assert_eq!(Tab::ALL[4], Tab::Freeplay);
+    assert_eq!(Tab::ALL[5], Tab::GameMods);
     let settings = Tab::ALL.iter().position(|tab| *tab == Tab::Settings).unwrap();
     assert_eq!(Tab::ALL[settings + 1], Tab::Console);
     assert_eq!(Tab::from_config_key("unknown"), Tab::Home);
@@ -33,13 +35,9 @@ fn game_file_tools_share_the_studio_sections() {
         ItemsMode::ItemNames.section(),
         Some(StudioSection::CustomAssets)
     );
-    assert_eq!(ItemsMode::SpeedPatch.section(), Some(StudioSection::Tools));
+    assert_eq!(ItemsMode::SpeedPatch.section(), Some(StudioSection::Appearance));
     assert_eq!(
         ItemsMode::GameColours.section(),
-        Some(StudioSection::Appearance)
-    );
-    assert_eq!(
-        ItemsMode::ArenaBackgrounds.section(),
         Some(StudioSection::Appearance)
     );
     assert_eq!(ItemsMode::Manage.section(), Some(StudioSection::Active));

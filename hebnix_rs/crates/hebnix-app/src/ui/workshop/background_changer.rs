@@ -7,6 +7,7 @@ use eframe::egui;
 use serde::Deserialize;
 
 use crate::messages::AppMsg;
+use crate::patcher::background_merger::SCENERY_DONORS;
 
 const ARENAS: &[(&str, &str)] = &[
     ("Stadium_P", "DFH Stadium"),
@@ -55,18 +56,6 @@ const ARENAS: &[(&str, &str)] = &[
     ("FF_Dusk_P", "Estadio Vida"),
 ];
 
-const SCENERY_DONORS: &[(&str, &str)] = &[
-    ("ShatterShot_VFX", "Core 707 — scenery"),
-    (
-        "BG_Stadium_10A_P",
-        "DFH Stadium (10th Anniversary) — scenery",
-    ),
-    ("BG_NeoTokyo_Arcade", "Neo Tokyo (Arcade) — scenery"),
-    ("BG_NeoTokyo_Hax", "Neo Tokyo (Hacked) — scenery"),
-    ("BG_Woods_Day_P", "Drift Woods (Day) — scenery"),
-    ("UtopiaStadium_P", "Utopia Coliseum — scenery"),
-    ("BG_FNI_Stadium", "Forbidden Temple (Fire & Ice) — scenery"),
-];
 const NO_BACKGROUND: &str = "__HBNX_NO_BACKGROUND__";
 const ARENA_LOOK: &str = " — full arena look";
 
@@ -310,7 +299,7 @@ impl BackgroundChangerState {
                         Self::message_name(donor)
                     ),
                     ("apply", Some(host), Some(donor)) => format!(
-                        "{} now uses {}'s fog, sky, and background.",
+                        "{} now uses {}'s background.",
                         Self::message_name(host),
                         Self::message_name(donor)
                     ),
@@ -368,44 +357,49 @@ impl BackgroundChangerState {
         std::thread::spawn(move || {
             let mut applied = 0usize;
             let mut failed = 0usize;
-            for (index, host) in targets.iter().enumerate() {
-                let result = crate::patcher::background_merger::run(
-                    "apply",
-                    &cooked,
-                    &state,
-                    Some(host),
-                    Some(&donor),
-                );
-                let message = match result {
-                    Ok(_) => {
-                        applied += 1;
-                        format!(
-                            "Applied {} to {} ({}/{}).",
-                            Self::message_name(&donor),
-                            Self::message_name(host),
-                            index + 1,
-                            total
-                        )
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        let message = format!(
-                            "Could not apply {} to {} ({}/{}): {error}",
-                            Self::message_name(&donor),
-                            Self::message_name(host),
-                            index + 1,
-                            total
-                        );
-                        if error.starts_with("Close Rocket League") {
-                            let _ = tx.send(AppMsg::BackgroundChangerDone(Err(message)));
-                            ctx.request_repaint();
-                            return;
+            let mut skipped = skipped;
+            let result = crate::patcher::background_merger::apply_all(
+                &cooked,
+                &state,
+                &targets,
+                &donor,
+                |index, host, result| {
+                    let message = match result {
+                        Ok(true) => {
+                            applied += 1;
+                            format!(
+                                "Applied {} to {} ({}/{}).",
+                                Self::message_name(&donor),
+                                Self::message_name(host),
+                                index + 1,
+                                total
+                            )
                         }
-                        message
-                    }
-                };
-                let _ = tx.send(AppMsg::BackgroundChangerProgress(message));
+                        Ok(false) => {
+                            skipped += 1;
+                            format!("Skipped {} ({}/{}), which already has a background change.",
+                                Self::message_name(host), index + 1, total)
+                        }
+                        Err(error) => {
+                            failed += 1;
+                            format!(
+                                "Could not apply {} to {} ({}/{}): {error}",
+                                Self::message_name(&donor),
+                                Self::message_name(host),
+                                index + 1,
+                                total
+                            )
+                        }
+                    };
+                    let _ = tx.send(AppMsg::BackgroundChangerProgress(message));
+                    ctx.request_repaint();
+                },
+            );
+            if let Err(error) = result {
+                let message = format!("{error} Applied to {applied} maps before stopping.");
+                let _ = tx.send(AppMsg::BackgroundChangerDone(Err(message)));
                 ctx.request_repaint();
+                return;
             }
             let summary = format!(
                 "Applied {} to {applied} maps; skipped {skipped} existing changes; {failed} failed.",
@@ -463,18 +457,8 @@ impl BackgroundChangerState {
             ui.heading(t("nav-arena-backgrounds"));
             ui.separator();
             ui.label(t("render-keep-an-arena-s-gameplay-and"));
-            ui.small(t("render-approved-sources-are-filtered-to-keep"));
-            if let Ok(path) = crate::patcher::background_merger::custom_backgrounds_dir() {
-                ui.small(t_args(
-                    "render-custom-backgrounds-are-loaded-from-path",
-                    &[("path", path.display().to_string().into())],
-                ));
-            }
             ui.add_space(8.0);
-            ui.colored_label(
-                egui::Color32::from_rgb(230, 170, 60),
-                t("render-close-rocket-league-before-applying-or"),
-            );
+            ui.weak(t("render-close-rocket-league-before-applying-or"));
         });
         ui.add_space(12.0);
 

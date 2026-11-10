@@ -14,9 +14,9 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HISTORY_FILE: &str = "replay_upload_history.json";
-const QUEUE_FILE: &str = "replay_pending_matches.json";
 const MAX_REPLAY_BYTES: u64 = 100 * 1024 * 1024;
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
+const MATCH_TIMEOUT: Duration = Duration::from_secs(180);
 const HISTORY_JOB: &str = "__replay_history_check__";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +51,12 @@ struct TrackedMatch {
     match_guid: String,
 }
 
+#[derive(Clone)]
+struct QueuedMatch {
+    guid: String,
+    deadline: Instant,
+}
+
 pub struct AutoUploadReplays {
     base_dir: PathBuf,
     running: bool,
@@ -60,8 +66,8 @@ pub struct AutoUploadReplays {
     generation: Arc<AtomicU64>,
     retry_at: Option<Instant>,
     checking_match: bool,
-    live_match_guid: Option<String>,
-    queued: VecDeque<String>,
+    seen_matches: HashSet<String>,
+    queued: VecDeque<QueuedMatch>,
     watch_start: SystemTime,
     active_config: Option<ReplayUploadCfg>,
     refresh_client: Option<Arc<hebnix_sdk::stats::WsStatsClient>>,
@@ -73,26 +79,6 @@ impl AutoUploadReplays {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        let state: Value = std::fs::read(base_dir.join(QUEUE_FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or(Value::Null);
-        let saved: Vec<String> = serde_json::from_value(if state.is_array() {
-            state.clone()
-        } else {
-            state["matches"].clone()
-        })
-        .unwrap_or_default();
-        let mut seen = HashSet::new();
-        let queued = saved
-            .into_iter()
-            .filter_map(|guid| match_guid(&guid))
-            .filter(|guid| seen.insert(guid.clone()))
-            .collect();
-        let watch_start = state["capture_started_at"]
-            .as_u64()
-            .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
-            .unwrap_or_else(SystemTime::now);
         Self {
             base_dir: base_dir.to_path_buf(),
             running: false,
@@ -102,9 +88,9 @@ impl AutoUploadReplays {
             generation: Arc::new(AtomicU64::new(0)),
             retry_at: None,
             checking_match: false,
-            live_match_guid: None,
-            queued,
-            watch_start,
+            seen_matches: HashSet::new(),
+            queued: VecDeque::new(),
+            watch_start: SystemTime::now(),
             active_config: None,
             refresh_client: None,
         }
@@ -121,7 +107,7 @@ impl AutoUploadReplays {
             if !self.running {
                 self.running = true;
                 self.retry_at = None;
-                self.status = "Waiting for a match to end or be left".into();
+                self.status = "Waiting for a live match".into();
             }
         } else if self.running {
             self.stop();
@@ -133,7 +119,6 @@ impl AutoUploadReplays {
         self.running = false;
         self.pending.clear();
         self.checking_match = false;
-        self.live_match_guid = None;
         self.retry_at = None;
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.status = "Disabled".into();
@@ -141,8 +126,15 @@ impl AutoUploadReplays {
     pub fn track_match(&mut self, guid: Option<&str>) {
         if self.running
             && let Some(guid) = guid.and_then(match_guid)
+            && self.seen_matches.insert(guid.clone())
         {
-            self.live_match_guid = Some(guid);
+            if self.queued.is_empty() {
+                self.retry_at = None;
+            }
+            self.queued.push_back(QueuedMatch {
+                guid,
+                deadline: Instant::now() + MATCH_TIMEOUT,
+            });
         }
     }
 
@@ -155,8 +147,20 @@ impl AutoUploadReplays {
         ctx: egui::Context,
         force: bool,
     ) {
-        if !self.running || !self.pending.is_empty() || (!force && self.queued.is_empty()) {
+        if !self.running || !self.pending.is_empty() {
             return;
+        }
+        let now = Instant::now();
+        let before = self.queued.len();
+        self.queued.retain(|queued| queued.deadline > now);
+        if self.queued.is_empty() && !force {
+            if before != 0 {
+                self.status = "Replay check timed out".into();
+            }
+            return;
+        }
+        if let Some(deadline) = self.queued.iter().map(|queued| queued.deadline).min() {
+            ctx.request_repaint_after(deadline.saturating_duration_since(now));
         }
         if !force
             && let Some(delay) = self
@@ -188,34 +192,26 @@ impl AutoUploadReplays {
             self.status = "Enter a ballchasing.com API key".into();
             return;
         }
-        // A repeated end/leave event may requeue a match already delivered.
         let original_count = self.queued.len();
-        self.queued.retain(|guid| {
+        self.queued.retain(|queued| {
             !self.history.iter().any(|done| {
-                match_guid(&done.match_guid).as_ref() == Some(guid)
+                match_guid(&done.match_guid).as_ref() == Some(&queued.guid)
                     && completed(done, config, local_dir.as_deref())
             })
         });
         if self.queued.is_empty() && !force {
             if original_count != 0 {
-                match self.save_queue() {
-                    Ok(()) => self.status = "Waiting for a match to end or be left".into(),
-                    Err(error) => self.status = format!("Could not persist replay queue: {error}"),
-                }
+                self.status = "Waiting for a live match".into();
             }
             return;
         }
         let target = self.queued.front().cloned();
-        if let Err(error) = self.save_queue() {
-            self.status = format!("Could not persist replay queue: {error}");
-            return;
-        }
         let job_id = format!("{HISTORY_JOB}{}", self.generation.load(Ordering::Acquire));
         self.pending.insert(job_id.clone());
         self.checking_match = target.is_some();
         self.status = target.as_ref().map_or_else(
             || "Checking replay history".into(),
-            |guid| format!("Checking match {guid} · {} queued", self.queued.len()),
+            |queued| format!("Checking match {} · {} queued", queued.guid, self.queued.len()),
         );
         let game_path = game_path.to_path_buf();
         let watch_start = self.watch_start;
@@ -254,7 +250,7 @@ impl AutoUploadReplays {
                         source_directory.as_deref(),
                         game_replays.as_deref(),
                         watch_start,
-                        target.as_deref(),
+                        None,
                         &history,
                         Arc::clone(&generation),
                         expected_generation,
@@ -265,7 +261,7 @@ impl AutoUploadReplays {
                     &game_path,
                     local_dir.clone(),
                     &history,
-                    target.as_deref(),
+                    target.as_ref(),
                     watch_start
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -275,7 +271,8 @@ impl AutoUploadReplays {
                 );
                 let result = match result {
                     Ok(Some(entry)) => Ok(Some(entry)),
-                    Ok(None) if target.is_none() => Ok(None),
+                    other if target.is_some() => other,
+                    Ok(None) => Ok(None),
                     other => match local() {
                         Ok(None) => other,
                         result => result,
@@ -293,30 +290,6 @@ impl AutoUploadReplays {
             self.status = format!("Could not start replay worker: {error}");
         }
     }
-    pub fn submit_finished(&mut self, event_guid: Option<&str>) {
-        if !self.running {
-            return;
-        }
-        let Some(guid) = event_guid
-            .and_then(match_guid)
-            .or_else(|| self.live_match_guid.clone())
-        else {
-            return;
-        };
-        if self.live_match_guid.as_ref() == Some(&guid) {
-            self.live_match_guid = None;
-        }
-        if !self.queued.contains(&guid) {
-            if self.queued.is_empty() {
-                self.retry_at = None;
-            }
-            self.queued.push_back(guid);
-            if let Err(error) = self.save_queue() {
-                self.status = format!("Could not persist pending replay: {error}");
-            }
-        }
-    }
-
     pub fn finish_upload(&mut self, result: UploadResult) {
         if !self.pending.remove(&result.match_guid) {
             return;
@@ -341,18 +314,15 @@ impl AutoUploadReplays {
                 if let Err(error) = self.save_history() {
                     self.status
                         .push_str(&format!(" · Could not save replay history: {error}"));
-                } else if delivered {
-                    self.queued.retain(|queued| queued != &guid);
+                }
+                if delivered {
+                    self.queued.retain(|queued| queued.guid != guid);
                     self.retry_at = None;
-                    if let Err(error) = self.save_queue() {
-                        self.status
-                            .push_str(&format!(" · Could not save replay queue: {error}"));
-                    }
                 }
             }
             Ok(None) => {
                 self.status = if self.queued.is_empty() {
-                    "Up to date · waiting for a match to end or be left".into()
+                    "Up to date · waiting for a live match".into()
                 } else {
                     format!(
                         "{} match(es) queued · retrying automatically",
@@ -379,18 +349,9 @@ impl AutoUploadReplays {
         // Windows rename cannot replace an existing file; MoveFileExW can.
         replace_file(&temporary, &self.base_dir.join(HISTORY_FILE))
     }
-    fn save_queue(&self) -> Result<(), String> {
-        let temporary = self.base_dir.join("replay_pending_matches.tmp");
-        std::fs::write(
-            &temporary,
-            serde_json::to_vec_pretty(&serde_json::json!({"matches":self.queued,"capture_started_at":self.watch_start.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()})).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        replace_file(&temporary, &self.base_dir.join(QUEUE_FILE))
-    }
     pub fn show_status(&self, ui: &mut egui::Ui) {
         ui.label("Saves and uploads replays from finished matches.");
-        ui.small("Queued matches are checked automatically while Rocket League is open.");
+        ui.small("Each live match is checked in match history for up to three minutes from detection.");
         ui.add_space(8.0);
         ui.label(&self.status);
         if !self.pending.is_empty() {
@@ -517,7 +478,7 @@ fn recover_next(
     game_path: &Path,
     local_dir: Option<PathBuf>,
     history: &[UploadHistoryEntry],
-    target: Option<&str>,
+    target: Option<&QueuedMatch>,
     capture_since: i64,
     generation: Arc<AtomicU64>,
     expected_generation: u64,
@@ -525,44 +486,23 @@ fn recover_next(
     if generation.load(Ordering::Acquire) != expected_generation {
         return Err("Stopped".into());
     }
-    let read = || -> Result<Option<(Value, String)>, String> {
-        let response = crate::replay_source::match_history(game_path, None)?;
-        Ok(next_match(
-            &response,
-            config,
-            local_dir.as_deref(),
-            history,
-            target,
-            capture_since,
-        )
-        .map(|entry| {
-            (
-                entry.clone(),
-                response["LocalPlayerID"].as_str().unwrap_or("").to_owned(),
-            )
-        }))
-    };
-    let mut found = read();
-    if target.is_some() {
-        // The export can arrive after the first refresh, especially on leave.
-        // Retry selection only, so a delivery error cannot trigger a second upload.
-        for _ in 0..3 {
-            if matches!(&found, Ok(Some(_))) {
-                break;
-            }
-            std::thread::sleep(Duration::from_secs(1));
-            if generation.load(Ordering::Acquire) != expected_generation {
-                return Err("Stopped".into());
-            }
-            if !hebnix_sdk::process::is_rocket_league_running() {
-                break;
-            }
-            found = read();
-        }
+    if target.is_some_and(|queued| Instant::now() >= queued.deadline) {
+        return Ok(None);
     }
-    let Some((entry, player)) = found? else {
+    let response = crate::replay_source::match_history(game_path, None)?;
+    let Some(entry) = next_match(
+        &response,
+        config,
+        local_dir.as_deref(),
+        history,
+        target.map(|queued| queued.guid.as_str()),
+        capture_since,
+    ) else {
         return Ok(None);
     };
+    if target.is_some_and(|queued| Instant::now() >= queued.deadline) {
+        return Ok(None);
+    }
     let guid = entry["Match"]["MatchGUID"]
         .as_str()
         .and_then(match_guid)
@@ -578,7 +518,7 @@ fn recover_next(
         generation,
         expected_generation,
     };
-    let title = render_replay_title(&job.naming_template, &entry);
+    let title = render_replay_title(&job.naming_template, entry);
     let mut result = download_and_upload(
         &job,
         entry["ReplayUrl"]
@@ -587,7 +527,7 @@ fn recover_next(
         &title,
     )?;
     result.recorded_at = entry["Match"]["RecordStartTimestamp"].as_i64().unwrap_or(0);
-    result.player_id = player;
+    result.player_id = response["LocalPlayerID"].as_str().unwrap_or("").to_owned();
     Ok(Some(result))
 }
 
@@ -1175,32 +1115,59 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const FIRST: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const SECOND: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
     #[test]
     fn a_match_queued_during_a_check_gets_the_next_turn() {
-        let base =
-            std::env::temp_dir().join(format!("hebnix-replay-queue-{}", rand::random::<u64>()));
-        let mut replays = AutoUploadReplays::new(&base);
-        replays.queued.push_back("first".into());
+        let mut replays = AutoUploadReplays::new(Path::new(""));
+        replays.sync(true, true, true);
+        replays.track_match(Some(FIRST));
         replays.pending.insert(HISTORY_JOB.into());
         replays.checking_match = true;
 
-        replays.queued.push_back("second".into());
+        replays.track_match(Some(SECOND));
         replays.finish_upload(UploadResult {
             match_guid: HISTORY_JOB.into(),
             result: Ok(None),
         });
 
         assert_eq!(
-            replays.queued,
-            VecDeque::from(["second".to_owned(), "first".to_owned()])
+            replays.queued.iter().map(|queued| queued.guid.as_str()).collect::<Vec<_>>(),
+            [SECOND, FIRST]
         );
         assert!(replays.pending.is_empty());
         assert!(replays.retry_at.is_some());
     }
 
     #[test]
-    fn automatic_check_waits_for_the_finished_match() {
-        const FINISHED: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    fn timed_out_live_match_is_not_requeued_by_later_updates() {
+        let mut replays = AutoUploadReplays::new(Path::new(""));
+        replays.sync(true, true, true);
+        replays.track_match(Some(FIRST));
+        let deadline = Instant::now();
+        replays.queued[0].deadline = deadline;
+        replays.track_match(Some(FIRST));
+        assert_eq!(replays.queued.len(), 1);
+        assert_eq!(replays.queued[0].deadline, deadline);
+
+        let (tx, _) = crossbeam_channel::unbounded();
+        replays.check(
+            &ReplayUploadCfg::default(),
+            Path::new(""),
+            &RlLaunchCfg::default(),
+            tx,
+            egui::Context::default(),
+            false,
+        );
+        replays.track_match(Some(FIRST));
+        assert!(replays.queued.is_empty());
+        assert!(replays.pending.is_empty());
+        assert_eq!(replays.status, "Replay check timed out");
+    }
+
+    #[test]
+    fn automatic_check_waits_for_the_tracked_guid() {
         let config = ReplayUploadCfg::default();
         let replay = |guid: &str, timestamp| {
             json!({
@@ -1214,15 +1181,15 @@ mod tests {
         };
         let mut response = json!({
             "LocalPlayerID": "player",
-            "Matches": [replay("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", 100)]
+            "Matches": [replay(SECOND, 300)]
         });
-        assert!(next_match(&response, &config, None, &[], Some(FINISHED), 200).is_none());
+        assert!(next_match(&response, &config, None, &[], Some(FIRST), 200).is_none());
 
         response["Matches"]
             .as_array_mut()
             .unwrap()
-            .push(replay(FINISHED, 300));
-        let found = next_match(&response, &config, None, &[], Some(FINISHED), 200).unwrap();
-        assert_eq!(found["Match"]["MatchGUID"].as_str(), Some(FINISHED));
+            .push(replay(FIRST, 100));
+        let found = next_match(&response, &config, None, &[], Some(FIRST), 200).unwrap();
+        assert_eq!(found["Match"]["MatchGUID"].as_str(), Some(FIRST));
     }
 }

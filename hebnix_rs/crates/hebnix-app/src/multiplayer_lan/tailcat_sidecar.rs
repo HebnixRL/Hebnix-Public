@@ -35,7 +35,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
-    /// the sidecar's id for this player (random per session)
+    /// the directory's node ID for this player
     pub id: String,
     /// this player's loopback alias, where their map sync is reached
     pub tailnet_ip: String,
@@ -47,6 +47,7 @@ pub struct PeerInfo {
 #[derive(Debug, Clone)]
 pub struct PeerLink {
     pub name: String,
+    pub alias: Option<std::net::IpAddr>,
     /// "direct", "relay <region>" or "unreachable"
     pub path: String,
     pub latency_ms: Option<f64>,
@@ -94,7 +95,12 @@ impl TailcatSidecarHandle {
     /// Starts the sidecar and waits until it has announced itself to the
     /// directory. `relay_only` sends everything through relay servers (the
     /// "Hide my IP" setting).
-    pub fn spawn(player_name: &str, relay_only: bool, tx: Sender<AppMsg>) -> Result<Self, String> {
+    pub fn spawn(
+        player_name: &str,
+        node_id: &str,
+        relay_only: bool,
+        tx: Sender<AppMsg>,
+    ) -> Result<Self, String> {
         let key = super::directory_key()?;
         let binary = find_binary()?;
         let mut command = Command::new(&binary);
@@ -105,7 +111,8 @@ impl TailcatSidecarHandle {
             .arg(format!("-directory={}", super::directory_url()))
             .arg(format!("-name={player_name}"))
             // not a flag, so it doesn't show up in process listings
-            .env("HEBNIX_DIRECTORY_KEY", key);
+            .env("HEBNIX_DIRECTORY_KEY", key)
+            .env("HEBNIX_WORKSHOP_NODE_ID", node_id);
         hide_console_window(&mut command);
         let mut child = command
             .stdin(Stdio::piped())
@@ -181,6 +188,7 @@ fn spawn_event_reader(
         .name("tailcat-events".into())
         .spawn(move || {
             let mut reported_ready = false;
+            let mut initial_roster = true;
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else {
                     break;
@@ -211,17 +219,28 @@ fn spawn_event_reader(
                                 peers.remove(&event.id);
                             }
                         }
-                        let _ = tx.send(AppMsg::TailcatPeer { name, online });
+                        // The first announce emits the existing peers too. Its
+                        // events precede the first periodic status snapshot.
+                        if !initial_roster {
+                            let _ = tx.send(AppMsg::TailcatPeer {
+                                id: event.id,
+                                name,
+                                online,
+                            });
+                        }
                     }
                     "status" => {
+                        initial_roster = false;
                         let mut links = Vec::new();
                         if let Ok(mut peers) = peers.lock() {
                             for peer in &event.peers {
-                                if let Some(known) = peers.get_mut(&peer.id) {
+                                let alias = peers.get_mut(&peer.id).and_then(|known| {
                                     known.online = peer.path != "unreachable";
-                                }
+                                    known.tailnet_ip.parse().ok()
+                                });
                                 links.push(PeerLink {
                                     name: peer_label(&peer.name, &peer.id),
+                                    alias,
                                     path: peer.path.clone(),
                                     latency_ms: peer.latency_ms,
                                 });

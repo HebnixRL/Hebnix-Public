@@ -335,6 +335,7 @@ impl SwapperState {
                                             ),
                                             preview,
                                             ITEM_THUMBNAIL_HEIGHT,
+                                            true,
                                         );
                                         browser::name(ui, &selection.name, &selection.file);
                                         if ui
@@ -371,7 +372,7 @@ impl SwapperState {
             ui.vertical(|ui| {
                 ui.set_width(110.0);
                 ui.label(t("thumbnail-patcher-current"));
-                browser::preview(ui, "editor-current", preview, 100.0);
+                browser::preview(ui, "editor-current", preview, 100.0, false);
             });
             if let Some(png) = self.thumbnail_editor.replacement.clone() {
                 ui.vertical(|ui| {
@@ -382,6 +383,7 @@ impl SwapperState {
                         "editor-replacement",
                         browser::Preview::Ready(png),
                         100.0,
+                        false,
                     );
                 });
             }
@@ -507,6 +509,7 @@ impl SwapperState {
                                             &format!("patched/{}|{}", package.file, patch.export),
                                             preview,
                                             100.0,
+                                            false,
                                         );
                                     });
                                     ui.vertical(|ui| {

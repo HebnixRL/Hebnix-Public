@@ -20,6 +20,8 @@ use std::{
 };
 
 const API: &str = "https://req.hebnix.com/player";
+const UPLOAD_LOOKUP: &str = "https://pubapi.hebnix.com/rocket-profiles/images";
+const PROFILE_USER_AGENT: &str = concat!("Hebnix/", env!("CARGO_PKG_VERSION"));
 // Match the plugin HTTP client: the public image host rejects requests with
 // no User-Agent before they reach the upload/file endpoints.
 const AVATAR_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -138,19 +140,13 @@ impl Resolver {
         let profile = Client::builder()
             .redirect(Policy::none())
             // the profile service rejects requests without a registered app User-Agent (HTTP 427)
-            .user_agent(concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| e.to_string())?;
-        let image = Client::builder()
-            .redirect(Policy::limited(3))
-            .user_agent(AVATAR_USER_AGENT)
+            .user_agent(PROFILE_USER_AGENT)
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
             profile,
-            image,
+            image: avatar_client()?,
             cache: Mutex::new(HashMap::new()),
             pictures: None,
         })
@@ -215,11 +211,21 @@ impl Resolver {
                 }
             }
         }
-        self.fetch_remote(id, API)
+        self.fetch_player_avatar(id, 128)
     }
-    fn fetch_remote(&self, id: &Identity, api: &str) -> Result<Vec<u8>, String> {
+    fn fetch_player_avatar(&self, id: &Identity, size: u32) -> Result<Vec<u8>, String> {
+        // Epic uploads are indexed separately from the tracker profile.
+        // Prefer the shared upload so another Hebnix user can see it even
+        // when the tracker has no record for the account.
+        if id.platform == "epic" && valid_epic(&id.account) {
+            if let Ok(Some(url)) = lookup_uploaded_avatar(&self.image, UPLOAD_LOOKUP, &id.account) {
+                if let Ok(bytes) = download_avatar(&self.image, &url, size) {
+                    return Ok(bytes);
+                }
+            }
+        }
         let token = hebnix_sdk::req_auth::app_token()?;
-        self.fetch_remote_with_token(id, api, &token)
+        self.fetch_remote_size(id, API, &token, size)
     }
     fn profile_request(
         &self,
@@ -233,14 +239,6 @@ impl Resolver {
             .header("Accept", "application/json")
             .header("X-App-Token", token)
     }
-    fn fetch_remote_with_token(
-        &self,
-        id: &Identity,
-        api: &str,
-        token: &str,
-    ) -> Result<Vec<u8>, String> {
-        self.fetch_remote_size(id, api, token, 128)
-    }
     fn fetch_remote_size(
         &self,
         id: &Identity,
@@ -252,27 +250,69 @@ impl Resolver {
             .profile_request(id, api, token)
             .send()
             .map_err(|_| "Profile service unavailable")?;
+        let status = response.status().as_u16();
         let profile: Value = serde_json::from_slice(&limited(response, MAX_PROFILE)?)
             .map_err(|_| "Invalid profile response")?;
-        let avatar = avatar_url(&profile).ok_or("No avatar available")?;
-        self.download(avatar, size)
-    }
-    fn download(&self, avatar: &str, size: u32) -> Result<Vec<u8>, String> {
-        let parsed = reqwest::Url::parse(avatar).map_err(|_| "Invalid avatar URL")?;
-        if parsed.scheme() != "https"
-            || parsed.host_str().is_none()
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-        {
-            return Err("Avatar URL must use HTTPS".into());
+        if api == API {
+            hebnix_sdk::req_auth::observe_response(status, &profile);
         }
-        let image = self
-            .image
-            .get(parsed)
-            .send()
-            .map_err(|_| "Avatar download failed")?;
-        normalize_size(&limited(image, MAX_IMAGE)?, size)
+        let avatar = avatar_url(&profile).ok_or("No avatar available")?;
+        download_avatar(&self.image, avatar, size)
     }
+}
+
+fn avatar_client() -> Result<Client, String> {
+    Client::builder()
+        .redirect(Policy::limited(3))
+        .user_agent(AVATAR_USER_AGENT)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn upload_image_url(url: &str) -> String {
+    url.replace("/rocket-profiles/files/", "/files/rocket-profiles/")
+}
+
+fn lookup_uploaded_avatar(client: &Client, endpoint: &str, account: &str) -> Result<Option<String>, String> {
+    let response = client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "platform_ids": [account.to_ascii_lowercase()] }).to_string())
+        .send()
+        .map_err(|_| "Shared avatar lookup unavailable")?;
+    let body: Value = serde_json::from_slice(&limited(response, MAX_PROFILE)?)
+        .map_err(|_| "Invalid shared avatar lookup response")?;
+    let images = body.get("images").and_then(Value::as_array)
+        .ok_or("Invalid shared avatar lookup response")?;
+    Ok(images.iter().find_map(|entry| {
+        let id = entry.get("platform_id")?.as_str()?;
+        if !id.eq_ignore_ascii_case(account) {
+            return None;
+        }
+        let url = entry.get("image")?.as_str()?.trim();
+        (!url.is_empty()).then(|| upload_image_url(url))
+    }))
+}
+
+fn download_avatar(client: &Client, avatar: &str, size: u32) -> Result<Vec<u8>, String> {
+    let parsed = reqwest::Url::parse(avatar).map_err(|_| "Invalid avatar URL")?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("Avatar URL must use HTTPS".into());
+    }
+    let image = client
+        .get(parsed)
+        .send()
+        .map_err(|_| "Avatar download failed")?;
+    normalize_size(&limited(image, MAX_IMAGE)?, size)
+}
+
+pub(crate) fn download_profile_avatar(avatar: &str) -> Result<Vec<u8>, String> {
+    download_avatar(&avatar_client()?, avatar, 128)
 }
 
 fn decode_path(path: &str) -> Result<String, String> {
@@ -376,7 +416,7 @@ pub(super) fn valid_upload_id(id: &str) -> bool {
 }
 pub(super) fn account_picture(platform: &str, id: &str) -> Result<Vec<u8>, String> {
     let identity = Identity::parse(&format!("{platform}|{id}|0"))?;
-    Resolver::new()?.fetch_remote_size(&identity, API, &hebnix_sdk::req_auth::app_token()?, 250)
+    Resolver::new()?.fetch_player_avatar(&identity, 250)
 }
 fn avatar_url(profile: &Value) -> Option<&str> {
     profile
@@ -419,7 +459,7 @@ fn upload_to(endpoint: &str, account: &str, jpeg: Vec<u8>) -> Result<String, Str
     body.get("image")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(|s| s.replace("/rocket-profiles/files/", "/files/rocket-profiles/"))
+        .map(upload_image_url)
         .ok_or_else(|| "Upload response did not contain an image URL.".into())
 }
 
@@ -493,7 +533,7 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
     #[test]
-    fn every_platform_uses_the_profile_service_and_null_keeps_default() {
+    fn tracker_fallback_uses_platform_routes_and_null_keeps_default() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}/player", listener.local_addr().unwrap());
         let server = thread::spawn(move || {
@@ -511,7 +551,10 @@ mod tests {
                     request.extend_from_slice(&buffer[..n]);
                 }
                 let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
-                assert!(!request.contains("user-agent:"));
+                assert!(request.contains(&format!(
+                    "user-agent: {}\r\n",
+                    PROFILE_USER_AGENT.to_ascii_lowercase()
+                )));
                 assert!(request.contains("x-app-token: test-token\r\n"));
                 paths.push(request.lines().next().unwrap().to_string());
                 reply(
@@ -533,7 +576,7 @@ mod tests {
         ] {
             assert_eq!(
                 resolver
-                    .fetch_remote_with_token(&Identity::parse(primary).unwrap(), &api, "test-token")
+                    .fetch_remote_size(&Identity::parse(primary).unwrap(), &api, "test-token", 128)
                     .unwrap_err(),
                 "No avatar available"
             );
@@ -543,6 +586,48 @@ mod tests {
             ["epic", "steam", "psn", "xboxone", "switch"]
                 .map(|p| format!("get /player/{p}/account http/1.1"))
         );
+    }
+
+    #[test]
+    fn epic_upload_lookup_uses_matching_account_and_fixes_file_route() {
+        use std::io::{BufRead, BufReader};
+
+        let account = "abcdef0123456789abcdef0123456789";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/rocket-profiles/images", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut request = BufReader::new(&mut stream);
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert_eq!(line, "POST /rocket-profiles/images HTTP/1.1\r\n");
+            let mut length = 0;
+            loop {
+                line.clear();
+                assert!(request.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(!line.to_ascii_lowercase().starts_with("x-app-token:"));
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            request.read_exact(&mut body).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), serde_json::json!({
+                "platform_ids": [account]
+            }));
+            let body = serde_json::json!({ "images": [
+                { "platform_id": "unrelated", "image": "https://pubapi.hebnix.com/other.jpg" },
+                { "platform_id": account, "image": "https://pubapi.hebnix.com/rocket-profiles/files/avatar.jpg" },
+            ]});
+            reply(&mut stream, "200 OK", "application/json", body.to_string().as_bytes());
+        });
+        let url = lookup_uploaded_avatar(&avatar_client().unwrap(), &endpoint, &account.to_ascii_uppercase()).unwrap();
+        assert_eq!(url.as_deref(), Some("https://pubapi.hebnix.com/files/rocket-profiles/avatar.jpg"));
+        server.join().unwrap();
     }
     #[test]
     fn partial_alpha_is_blended_against_black() {

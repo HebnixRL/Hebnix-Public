@@ -649,7 +649,7 @@ impl SwapperState {
             ui.weak(t("item-name-empty"));
         }
         let start = self.name_editor.page * page_size;
-        let height = browser::tile_height(ui).max(super::thumbnail_patcher::ITEM_THUMBNAIL_CARD_HEIGHT);
+        let height = super::thumbnail_patcher::ITEM_THUMBNAIL_CARD_HEIGHT;
         egui::ScrollArea::vertical()
             .id_salt("item-name-grid")
             .show(ui, |ui| crate::panel::followed(ui, |ui| {
@@ -723,6 +723,7 @@ impl SwapperState {
                                                 &format!("name/{}", label.section),
                                                 preview,
                                                 super::thumbnail_patcher::ITEM_THUMBNAIL_HEIGHT,
+                                                true,
                                             );
                                             let current =
                                                 self.name_editor.current(&label.section, "Label");

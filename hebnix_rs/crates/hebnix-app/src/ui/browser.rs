@@ -38,9 +38,26 @@ pub(crate) fn columns(ui: &egui::Ui, minimum: f32) -> usize {
     )
 }
 
-pub(crate) fn tile_height(ui: &egui::Ui) -> f32 {
-    ((ui.available_height() - ui.spacing().item_spacing.y * (ROWS - 1) as f32) / ROWS as f32)
-        .clamp(164.0, 260.0)
+pub(crate) const TILE_HEIGHT: f32 = 208.0;
+
+/// Fill the preview rectangle without stretching the source image.
+pub(crate) fn cover_image<'a>(
+    ui: &egui::Ui,
+    image: egui::Image<'a>,
+    size: egui::Vec2,
+) -> egui::Image<'a> {
+    let mut uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+    if let Some(source) = image.load_for_size(ui.ctx(), size).ok().and_then(|poll| poll.size()) {
+        let source_ratio = source.x / source.y;
+        let viewport_ratio = size.x / size.y;
+        let visible = egui::vec2(
+            (viewport_ratio / source_ratio).min(1.0),
+            (source_ratio / viewport_ratio).min(1.0),
+        );
+        let center = egui::pos2(0.5, 0.5);
+        uv = egui::Rect::from_center_size(center, visible);
+    }
+    image.uv(uv).maintain_aspect_ratio(false).fit_to_exact_size(size)
 }
 
 pub(crate) fn header(ui: &mut egui::Ui, title: String, actions: impl FnOnce(&mut egui::Ui)) {
@@ -324,49 +341,45 @@ mod layout_tests {
                         }
                     }
                     if tab == 3 {
-                        let labels: Vec<_> = output
-                            .shapes
-                            .iter()
-                            .filter_map(|shape| match &shape.shape {
-                                egui::Shape::Text(text)
-                                    if text.galley.text().starts_with("Custom car ") =>
-                                {
-                                    Some((text.visual_bounding_rect(), shape.clip_rect))
-                                }
-                                _ => None,
-                            })
-                            .collect();
                         let columns = columns_for_width(width - 16.0 - 6.0, 8.0, 224.0);
-                        assert_eq!(
-                            labels.len(),
-                            columns * ROWS,
-                            "Three full car rows at {theme}/{width}"
-                        );
-                        for (rect, clip) in labels {
-                            assert!(
-                                clip.expand(1.0).contains_rect(rect),
-                                "Car label clipped at {theme}/{width}: {rect:?} / {clip:?}"
+                        let visible = |output: &egui::FullOutput, label: &str| {
+                            output.shapes.iter().any(|shape| match &shape.shape {
+                                egui::Shape::Text(text) => text.galley.text() == label
+                                    && shape.clip_rect.expand(1.0)
+                                        .contains_rect(text.visual_bounding_rect()),
+                                _ => false,
+                            })
+                        };
+                        assert!(visible(&output, "Custom car 00"), "{theme}/{width}");
+
+                        // A shorter viewport should hide later rows and allow scrolling to them.
+                        let last = format!("Custom car {:02}", columns * ROWS - 1);
+                        for frame in 0..4 {
+                            output = ctx.run_ui(
+                                egui::RawInput {
+                                    screen_rect: Some(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO, egui::vec2(width, 510.0),
+                                    )),
+                                    ..Default::default()
+                                },
+                                |ui| {
+                                    egui::CentralPanel::default().show(ui, |ui| {
+                                        if frame == 2 {
+                                            let id = ui.make_persistent_id(egui::IdSalt::new("car_patcher_local"));
+                                            let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+                                            state.offset.y = 2000.0;
+                                            state.store(&ctx, id);
+                                        }
+                                        car.render_tab(ui, &ctx, &cooked, &backups, &tx, &mut config);
+                                    });
+                                },
                             );
-                        }
-                        for shape in &output.shapes {
-                            if let egui::Shape::Text(text) = &shape.shape {
-                                if text.galley.text() == t("ball-apply")
-                                    || text.galley.text() == t("presets-delete")
-                                    || text.galley.text() == "Octane"
-                                {
-                                    assert!(
-                                        shape
-                                            .clip_rect
-                                            .expand(1.0)
-                                            .contains_rect(text.visual_bounding_rect()),
-                                        "Car footer clipped at {theme}/{width}: {} {:?} / {:?}",
-                                        text.galley.text(),
-                                        text.visual_bounding_rect(),
-                                        shape.clip_rect
-                                    );
-                                }
+                            if frame == 1 {
+                                assert!(visible(&output, "Custom car 00"), "{theme}/{width}");
+                                assert!(!visible(&output, &last), "{theme}/{width}");
                             }
                         }
+                        assert!(visible(&output, &last), "Last car unreachable at {theme}/{width}");
                     }
                 }
             }

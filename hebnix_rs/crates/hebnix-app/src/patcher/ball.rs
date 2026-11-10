@@ -361,7 +361,7 @@ impl PatcherState {
                             continue;
                         }
                         let live_path = cooked_pc_clone.join(&live_file_name);
-                        match fs::copy(&backup, &live_path) {
+                        match fs::read(&backup).map_err(|error| error.to_string()).and_then(|bytes| super::upk_history::install_linked(&cooked_pc_clone, &live_path, &bytes, "Restore ball textures")) {
                             Ok(_) => restored += 1,
                             Err(error) => errors.push(format!("{live_name}.upk: {error}")),
                         }
@@ -942,15 +942,13 @@ impl PatcherState {
                                 |ui| {
                                     ui.set_min_height(190.0);
                                     ui.vertical_centered(|ui| {
-                                        let size = egui::vec2(120.0, 90.0);
+                                        let size = egui::vec2(ui.available_width(), 120.0);
                                         if let Some(bytes) = &ball.image_bytes {
-                                            ui.add(
-                                                egui::Image::from_bytes(
-                                                    format!("bytes://ball/{}", ball.name),
-                                                    bytes.clone(),
-                                                )
-                                                .fit_to_exact_size(size),
+                                            let image = egui::Image::from_bytes(
+                                                format!("bytes://ball/{}", ball.name),
+                                                bytes.clone(),
                                             );
+                                            ui.add(crate::ui::browser::cover_image(ui, image, size));
                                         } else {
                                             ui.add_sized(
                                                 size,

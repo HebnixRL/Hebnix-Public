@@ -166,6 +166,110 @@ pub fn local_player_session() -> Option<LogSessionInfo> {
     Some(parse_session(&String::from_utf8_lossy(&bytes)))
 }
 
+/// Read match context once StatsAPI has reported a live match.
+pub fn local_match_context() -> Option<(Option<String>, LogGameInfo)> {
+    let bytes = std::fs::read(find_launch_log()).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    Some((
+        parse_primary_id(&text),
+        parse_game_info(since_last_menu_load(&text), true, &Default::default()),
+    ))
+}
+
+/// Match identity from the join that led to the current map, without a
+/// network request. Unknown sessions remain unknown rather than inheriting
+/// the playlist of an earlier match.
+pub fn current_match_playlist() -> Option<i64> {
+    let bytes = std::fs::read(find_launch_log()).ok()?;
+    match_playlist_at_last_load(&String::from_utf8_lossy(&bytes))
+}
+
+fn recent_launch_log() -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(find_launch_log()).ok()?;
+    let start = file.metadata().ok()?.len().saturating_sub(256 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The current map URL, provided no new travel is pending.
+pub fn current_map_url() -> Option<String> {
+    let recent = recent_launch_log()?;
+    if recent.contains("Log: LoadMap: ") {
+        current_map_from_log(&recent)
+    } else {
+        let bytes = std::fs::read(find_launch_log()).ok()?;
+        current_map_from_log(&String::from_utf8_lossy(&bytes))
+    }
+}
+
+fn current_map_from_log(log: &str) -> Option<String> {
+    let (_, load) = log.rsplit_once("Log: LoadMap: ")?;
+    let (url, events) = load.split_once('\n')?;
+    (!events.contains("DevNet: Browse:")).then(|| url.trim().to_owned())
+}
+
+/// True once the requested map has finished loading, unless another travel
+/// has already started. The caller supplies the unique URL for its request.
+pub fn map_load_finished(expected_url: &str) -> bool {
+    recent_launch_log().is_some_and(|log| {
+        log.rsplit_once("Log: LoadMap: ")
+            .and_then(|(_, load)| load.split_once('\n'))
+            .is_some_and(|(url, events)| {
+                url.trim().eq_ignore_ascii_case(expected_url)
+                    && events.contains("Finished loading level:")
+                    && !events.contains("DevNet: Browse:")
+            })
+    })
+}
+
+fn match_playlist_at_last_load(text: &str) -> Option<i64> {
+    let (before, load) = text.rsplit_once("LoadMap: ")?;
+    let url = load.lines().next()?.split_whitespace().next()?;
+    let map = url.split('?').next()?;
+    if map.eq_ignore_ascii_case("MENU_Main_p") || map.starts_with("JoinGameTransition") {
+        return None;
+    }
+    if last_map_load_is_offline(text) {
+        return Some(0);
+    }
+    let boundary = before.rmatch_indices("LoadMap: ").find_map(|(at, marker)| {
+        let map = &before[at + marker.len()..];
+        (!map.starts_with("JoinGameTransition")).then_some(at)
+    }).unwrap_or(0);
+    let join = &before[boundary..];
+    let join = join.rfind("JoinGame: StartJoin").map_or(join, |at| &join[at..]);
+    let private = join.lines().next().is_some_and(|line| {
+        line.starts_with("JoinGame: StartJoin") && line.contains("MatchType=JMT_Private")
+    });
+    let playlist = join.lines()
+        .rev()
+        .filter(|line| line.contains("TryToPlayOnlineWithAntiCheat") || line.contains("JoinGame: StartJoin"))
+        .find_map(|line| re_playlist_id().captures(line)?.get(1)?.as_str().parse().ok());
+    if private && !matches!(playlist, Some(22 | 34)) {
+        return Some(6);
+    }
+    playlist
+}
+
+#[cfg(test)]
+#[test]
+fn playlist_is_scoped_to_the_join_for_the_loaded_map() {
+    let private = "Log: LoadMap: MENU_Main_p\n\
+        JoinGame: StartJoin JoinSettings=((MatchType=JMT_Private,PlaylistId=6))\n\
+        Log: LoadMap: JoinGameTransition?game=TAGame.GameInfo_Transition_TA\n\
+        Log: LoadMap: 127.0.0.1:9005/music_p?GameTags=Ball_God";
+    assert_eq!(match_playlist_at_last_load(private), Some(6));
+    assert_eq!(match_playlist_at_last_load(&private.replace(",PlaylistId=6", "")), Some(6));
+    assert_eq!(match_playlist_at_last_load(&format!("{private}\nLog: LoadMap: music_p")), None);
+    assert_eq!(match_playlist_at_last_load(&format!("{private}\nLog: LoadMap: music_p?Offline")), Some(0));
+    let tournament = format!("{private}\nOnline: TryToPlayOnlineWithAntiCheat PlaylistId=(34)\nLog: LoadMap: 127.0.0.1:9005/music_p");
+    assert_eq!(match_playlist_at_last_load(&tournament), Some(34));
+}
+
 fn parse_session(text: &str) -> LogSessionInfo {
     // Session info (always parsed)
     let mut session = LogSessionInfo::default();

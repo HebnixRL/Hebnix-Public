@@ -30,7 +30,7 @@ const MOVIE: Movie = Movie {
 };
 
 pub const MODES: [&str; 4] = ["requeue", "freeplay", "menu", "workshop"];
-pub const DEFAULT_MODE: &str = "requeue";
+pub const DEFAULT_MODE: &str = "nothing";
 
 /// What the movie is told: the PNG width it reads, 0 for nothing.
 static CODE: AtomicU8 = AtomicU8::new(0);
@@ -41,33 +41,46 @@ const ENDED_FOR: Duration = Duration::from_secs(30);
 /// The movie asks as the winner shows, the same moment MatchEnded is sent: wait this long for it.
 const WAIT_FOR_END: Duration = Duration::from_secs(3);
 
-pub fn match_ended() {
-    if let Ok(mut ended) = ENDED.lock() {
-        *ended = Some(Instant::now());
+fn permits_match(playlist: Option<i64>, private: bool, tournaments: bool) -> bool {
+    match playlist {
+        Some(6) => private,
+        Some(22 | 34) => tournaments,
+        Some(id) => id >= 0,
+        None => false,
     }
 }
 
-fn ended_recently() -> bool {
-    ENDED.lock().ok().and_then(|e| *e).is_some_and(|at| at.elapsed() < ENDED_FOR)
+pub fn match_ended(private: bool, tournaments: bool) {
+    let allowed = wanted()
+        && permits_match(hebnix_sdk::log::current_match_playlist(), private, tournaments);
+    if let Ok(mut ended) = ENDED.lock() {
+        *ended = allowed.then(Instant::now);
+    }
+}
+
+pub fn clear_match_end() {
+    if let Ok(mut ended) = ENDED.lock() {
+        *ended = None;
+    }
 }
 
 /// The width of the image the preview server answers the movie with, or None
 /// to answer 404 so the winner screen stays. Blocks up to WAIT_FOR_END.
 pub fn served_width() -> Option<u32> {
     let asked = Instant::now();
-    while !ended_recently() {
+    loop {
+        // Take the event while holding the lock so simultaneous requests
+        // cannot both trigger the winner action.
+        if ENDED.lock().ok().and_then(|mut e| e.take()).is_some_and(|at| at.elapsed() < ENDED_FOR) {
+            return match CODE.load(Ordering::Relaxed) {
+                0 => None,
+                n => Some(u32::from(n)),
+            };
+        }
         if asked.elapsed() >= WAIT_FOR_END {
             return None;
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
-    // used once: the podium asks again later in the same match
-    if let Ok(mut ended) = ENDED.lock() {
-        *ended = None;
-    }
-    match CODE.load(Ordering::Relaxed) {
-        0 => None,
-        n => Some(u32::from(n)),
     }
 }
 
@@ -162,6 +175,7 @@ fn status(cooked: &Path, backups: &Path) -> bool {
 /// Turn Instant Suite on.
 pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
+    backup_guard::check_install(cooked, backups)?;
     restore_legacy(cooked, backups)?;
     MOVIE.apply(cooked, backups)
 }
@@ -172,6 +186,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
         return Ok(());
     }
     ensure_closed()?;
+    backup_guard::check_install(cooked, backups)?;
     restore_legacy(cooked, backups)?;
     MOVIE.restore(cooked, backups)
 }
@@ -242,10 +257,12 @@ impl State {
 
     /// Draw the toggle, the action picker and, for a Workshop map, the map picker.
     /// Returns true when a setting changed.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, mode_setting: &mut String, map_setting: &mut String) -> bool {
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, settings: &mut crate::config::GameModsCfg) -> bool {
         use crate::i18n::t;
         use eframe::egui;
-        if !MODES.contains(&mode_setting.as_str()) {
+        let mode_setting = &mut settings.instant_suite_mode;
+        let map_setting = &mut settings.instant_suite_map;
+        if mode_setting != DEFAULT_MODE && !MODES.contains(&mode_setting.as_str()) {
             *mode_setting = DEFAULT_MODE.into();
         }
         let on = self.on == Some(true);
@@ -254,13 +271,18 @@ impl State {
         ui.add_enabled_ui(!self.busy() && self.on.is_some(), |ui| {
             ui.checkbox(&mut want, t("game-mod-instant-suite")).on_hover_text(t("game-mod-instant-suite-description"));
         });
+        ui.separator();
         ui.label(t("game-mod-instant-suite-description"));
+        ui.horizontal(|ui| {
+            changed |= ui.toggle_value(&mut settings.instant_suite_private, t("game-mod-instant-suite-private")).changed();
+            changed |= ui.toggle_value(&mut settings.instant_suite_tournaments, t("game-mod-instant-suite-tournaments")).changed();
+        });
         ui.horizontal(|ui| {
             ui.label(t("game-mod-instant-suite-mode"));
             egui::ComboBox::from_id_salt("instant_suite_mode")
                 .selected_text(t(&format!("game-mod-instant-suite-mode-{mode_setting}")))
                 .show_ui(ui, |ui| {
-                    for option in MODES {
+                    for option in std::iter::once(DEFAULT_MODE).chain(MODES) {
                         changed |= ui
                             .selectable_value(mode_setting, option.to_string(), t(&format!("game-mod-instant-suite-mode-{option}")))
                             .changed();
@@ -313,7 +335,7 @@ mod tests {
     #[test]
     fn answers_only_once_after_a_match_end() {
         CODE.store(2, Ordering::Relaxed);
-        match_ended();
+        *ENDED.lock().unwrap() = Some(Instant::now());
         assert_eq!(served_width(), Some(2));
         // the same match's podium asks again: no second action
         let asked = Instant::now();
@@ -323,10 +345,25 @@ mod tests {
     }
 
     #[test]
+    fn restricted_playlists_require_their_own_opt_in() {
+        assert!(!permits_match(None, true, true));
+        assert!(!permits_match(Some(6), false, true));
+        assert!(permits_match(Some(6), true, false));
+        for id in [22, 34] {
+            assert!(!permits_match(Some(id), true, false));
+            assert!(permits_match(Some(id), false, true));
+        }
+        assert!(permits_match(Some(13), false, false));
+        assert!(permits_match(Some(0), false, false));
+    }
+
+    #[test]
     fn every_mode_has_its_own_width() {
         let codes: Vec<u8> = MODES.iter().map(|m| code(m)).collect();
         assert_eq!(codes, [1, 2, 3, 4]);
         assert_eq!(code("nothing"), 0);
+        assert_eq!(DEFAULT_MODE, "nothing");
+        assert_eq!(crate::config::GameModsCfg::default().instant_suite_mode, "nothing");
     }
 
     /// Switch Instant Suite on and off over a copy of the real package. Run with

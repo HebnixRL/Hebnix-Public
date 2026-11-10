@@ -12,6 +12,9 @@ use std::ops::Range;
 pub enum Edit {
     Rename { position: usize, name: String },
     Delete { position: usize },
+    Move { from: usize, to: usize, expected: Vec<u32> },
+    Equip { position: usize, changes: Vec<(usize, usize, u64, u64)> },
+    Update { position: usize, name: String, changes: Vec<(usize, usize, u64, u64)>, colours: [[u8; 2]; 2], expected: Preset },
     Import(Vec<Preset>),
 }
 
@@ -35,6 +38,18 @@ pub fn plan(raw: &[u8], edit: &Edit) -> Result<Option<Vec<u8>>, String> {
     let changed = match edit {
         Edit::Rename { position, name } => rename(&mut doc, *position, name)?,
         Edit::Delete { position } => delete(&mut doc, *position)?,
+        Edit::Move { from, to, expected } => {
+            if set_refs(&doc)? != *expected { return Err("The preset order changed; reopen the move dialog.".into()); }
+            move_preset(&mut doc, *from, *to)?
+        },
+        Edit::Equip { position, changes } => equip(&mut doc, *position, changes)?,
+        Edit::Update { position, name, changes, colours, expected } => {
+            if export_preset(raw, *position)? != *expected { return Err("The preset changed; reopen the editor.".into()); }
+            let renamed = rename(&mut doc, *position, name)?;
+            let equipped = equip(&mut doc, *position, changes)?;
+            let recoloured = update_colours(&mut doc, *position, *colours, expected)?;
+            renamed || equipped || recoloured
+        },
         Edit::Import(presets) => import(&mut doc, presets)?,
     };
     if !changed {
@@ -45,6 +60,115 @@ pub fn plan(raw: &[u8], edit: &Edit) -> Result<Option<Vec<u8>>, String> {
         return Err("loadout edit verification failed".into());
     }
     Ok(Some(bytes))
+}
+
+fn update_colours(doc: &mut Document, position: usize, colours: [[u8; 2]; 2], expected: &Preset) -> Result<bool, String> {
+    let previous = expected.teams.each_ref().map(|team| [team.team_color, team.custom_color]);
+    if colours == previous {
+        return Ok(false);
+    }
+    let set = *set_refs(doc)?.get(position).ok_or("no such preset")? as usize;
+    let set_obj = doc.objects.get(set).ok_or("invalid preset reference")?;
+    if set_obj.kind != "TAGame.LoadoutSet_TA" {
+        return Err("invalid preset type".into());
+    }
+    let mut loadouts = array_u32(&set_obj.bytes, "Loadouts")?;
+    if loadouts.len() != 2 {
+        return Err("unsupported loadout set shape".into());
+    }
+    if loadouts[0] == loadouts[1] && colours[0] != colours[1] {
+        let shared = doc.objects.get(loadouts[1] as usize).ok_or("invalid loadout reference")?;
+        if shared.kind != "TAGame.Loadout_TA" {
+            return Err("invalid loadout type".into());
+        }
+        loadouts[1] = push_object(doc, "TAGame.Loadout_TA", shared.bytes.clone());
+        set_array(&mut doc.objects[set].bytes, "Loadouts", &loadouts)?;
+    }
+    for (team, loadout) in loadouts.into_iter().enumerate() {
+        if colours[team] == previous[team] {
+            continue;
+        }
+        let obj = doc.objects.get_mut(loadout as usize).ok_or("invalid loadout reference")?;
+        if obj.kind != "TAGame.Loadout_TA" {
+            return Err("invalid loadout type".into());
+        }
+        write_team_paint(&mut obj.bytes, &[
+            ("TeamColorID", i64::from(colours[team][0])),
+            ("CustomColorID", i64::from(colours[team][1])),
+        ])?;
+    }
+    Ok(true)
+}
+
+pub fn preset_order(raw: &[u8]) -> Result<Vec<u32>, String> {
+    set_refs(&Document::read(raw)?)
+}
+
+/// Owned inventory instances, with their product IDs, from the same save as the presets.
+pub fn owned_instances(raw: &[u8]) -> Result<Vec<(i32, u64, u64, i64)>, String> {
+    let doc = Document::read(raw)?;
+    let mut items = Vec::new();
+    for (key, index) in inventory_index(&doc)? {
+        let product_obj = &doc.objects[index];
+        let attributes = if span(&product_obj.bytes, "Attributes").is_ok() { array_u32(&product_obj.bytes, "Attributes")? } else { Vec::new() };
+        if attributes.iter().any(|&id| {
+                doc.objects.get(id as usize).is_some_and(|o| o.kind == "TAGame.ProductAttribute_Blueprint_TA")
+            }) { continue; }
+        let paint = attributes.iter().filter_map(|&id| doc.objects.get(id as usize))
+            .find(|o| o.kind == "TAGame.ProductAttribute_Painted_TA")
+            .map(|o| read_scalar(&o.bytes, "PaintID")).transpose()?.unwrap_or(0);
+        let id = scalar_or_zero(&doc.objects[index].bytes, "ProductID")?;
+        let upper = u64::from_str_radix(&key[..16], 16).map_err(|_| "invalid instance ID")?;
+        let lower = u64::from_str_radix(&key[16..], 16).map_err(|_| "invalid instance ID")?;
+        if id > 0 && id <= i32::MAX as i64 && (upper != 0 || lower != 0) {
+            items.push((id as i32, upper, lower, paint));
+        }
+    }
+    Ok(items)
+}
+
+fn equip(doc: &mut Document, position: usize, changes: &[(usize, usize, u64, u64)]) -> Result<bool, String> {
+    if changes.is_empty() { return Ok(false); }
+    let set = *set_refs(doc)?.get(position).ok_or("no such preset")? as usize;
+    let set_obj = doc.objects.get(set).ok_or("invalid preset reference")?;
+    if set_obj.kind != "TAGame.LoadoutSet_TA" { return Err("invalid preset type".into()); }
+    let loadouts = array_u32(&set_obj.bytes, "Loadouts")?;
+    if loadouts.len() != 2 { return Err("unsupported loadout set shape".into()); }
+    let inventory = inventory_index(doc)?;
+    for &(team, slot, upper, lower) in changes {
+        if team >= 2 || slot >= SLOTS { return Err("invalid team or slot".into()); }
+        let key = format!("{upper:016x}{lower:016x}");
+        let index = *inventory.get(&key).ok_or("item is no longer owned by this account")?;
+        let product = scalar_or_zero(&doc.objects[index].bytes, "ProductID")?;
+        if product <= 0 || product > i32::MAX as i64 { return Err("invalid owned product".into()); }
+        let obj = doc.objects.get_mut(loadouts[team] as usize).ok_or("invalid loadout reference")?;
+        if obj.kind != "TAGame.Loadout_TA" { return Err("invalid loadout type".into()); }
+        let mut products = array_u32(&obj.bytes, "Products")?;
+        let mut instances = instance_array(&obj.bytes)?;
+        if products.len() != SLOTS || instances.len() != SLOTS { return Err("unsupported loadout slot count".into()); }
+        products[slot] = product as u32;
+        instances[slot] = (upper, lower);
+        set_array(&mut obj.bytes, "Products", &products)?;
+        let mut payload = (SLOTS as u32).to_le_bytes().to_vec();
+        for (upper, lower) in instances { payload.extend(instance_blob(upper, lower)); }
+        let (props, _) = fields(&obj.bytes)?;
+        let f = field(&props, "OnlineProducts128", "ArrayProperty")?;
+        replace_field(&mut obj.bytes, f, &payload);
+    }
+    Ok(true)
+}
+
+fn move_preset(doc: &mut Document, from: usize, to: usize) -> Result<bool, String> {
+    let mut refs = set_refs(doc)?;
+    if from >= refs.len() || to >= refs.len() {
+        return Err("no such preset position".into());
+    }
+    if from == to { return Ok(false); }
+    let value = refs.remove(from);
+    refs.insert(to, value);
+    let profile = profile_index(doc)?;
+    set_array(&mut doc.objects[profile].bytes, "LoadoutSets", &refs)?;
+    Ok(true)
 }
 
 /// Read-only: the preset at `position` as a share code.
@@ -312,29 +436,24 @@ fn build_loadout(template: &[u8], team: &Team, preset: &Preset) -> Result<Vec<u8
     let (props, _) = fields(&b)?;
     let f = field(&props, "OnlineProducts128", "ArrayProperty")?;
     replace_field(&mut b, f, &payload);
-    // UE3 omits default-valued fields, so a zero may be absent: insert only nonzero ones.
-    let (props, _) = fields(&b)?;
-    let f = field(&props, "TeamPaint", "StructProperty")?;
-    let mut paint = b[f.payload.clone()].to_vec();
-    for (name, value) in [
+    write_team_paint(&mut b, &[
         ("TeamColorID", team.team_color as i64),
         ("CustomColorID", team.custom_color as i64),
         ("TeamFinishID", team.team_finish as i64),
         ("CustomFinishID", team.custom_finish as i64),
-    ] {
-        if span(&paint, name).is_ok() {
-            write_scalar(&mut paint, name, value)?;
-        } else if value != 0 {
-            insert_property(
-                &mut paint,
-                name,
-                "IntProperty",
-                &(value as i32).to_le_bytes(),
-            )?;
-        }
-    }
-    replace_field(&mut b, f, &paint);
+    ])?;
     Ok(b)
+}
+
+fn write_team_paint(data: &mut Vec<u8>, updates: &[(&str, i64)]) -> Result<(), String> {
+    let (props, _) = fields(data)?;
+    let f = field(&props, "TeamPaint", "StructProperty")?;
+    let mut paint = data[f.payload.clone()].to_vec();
+    for &(name, value) in updates {
+        put_scalar(&mut paint, name, value)?;
+    }
+    replace_field(data, f, &paint);
+    Ok(())
 }
 
 fn scalar_or_zero(data: &[u8], name: &str) -> Result<i64, String> {
@@ -638,4 +757,95 @@ fn attribute_pair(doc: &Document, index: usize) -> Result<(String, String), Stri
         },
     };
     Ok((key.to_string(), value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty() -> Vec<u8> { write_ue3("None") }
+    fn obj(kind: &str, index: u32, bytes: Vec<u8>) -> Object {
+        Object { kind: kind.into(), index, bytes }
+    }
+
+    #[test]
+    fn changing_team_colours_preserves_the_other_team_and_paint_finishes() {
+        let mut profile = empty();
+        append_array(&mut profile, "LoadoutSets", &[1]).unwrap();
+        let mut set = empty();
+        append_array(&mut set, "Loadouts", &[2, 2]).unwrap();
+        let mut paint = empty();
+        put_scalar(&mut paint, "TeamFinishID", 43).unwrap();
+        let mut loadout = write_ue3("TeamPaint");
+        loadout.extend(write_ue3("StructProperty"));
+        loadout.extend((paint.len() as u32).to_le_bytes());
+        loadout.extend(0u32.to_le_bytes());
+        loadout.extend(write_ue3("TeamPaint"));
+        loadout.extend(paint);
+        loadout.extend(empty());
+        let mut doc = Document { header: vec![], root: empty(), tail: vec![], objects: vec![
+            obj("TAGame.ProfileLoadoutSave_TA", 0, profile),
+            obj("TAGame.LoadoutSet_TA", 1, set),
+            obj("TAGame.Loadout_TA", 2, loadout.clone()),
+        ]};
+        assert!(update_colours(&mut doc, 0, [[0, 0], [19, 12]], &Preset::default()).unwrap());
+        assert_eq!(array_u32(&doc.objects[1].bytes, "Loadouts").unwrap(), [2, 3]);
+        assert_eq!(doc.objects[2].bytes, loadout);
+        let orange = &doc.objects[3].bytes;
+        let paint = &orange[span(orange, "TeamPaint").unwrap().1];
+        assert_eq!(read_scalar(paint, "TeamColorID").unwrap(), 19);
+        assert_eq!(read_scalar(paint, "CustomColorID").unwrap(), 12);
+        assert_eq!(read_scalar(paint, "TeamFinishID").unwrap(), 43);
+    }
+
+    #[test]
+    fn moving_presets_preserves_equipped_reference_and_objects() {
+        let mut profile = empty();
+        append_array(&mut profile, "LoadoutSets", &[1, 2, 3, 4]).unwrap();
+        insert_property(&mut profile, "EquippedLoadoutSet", "ObjectProperty", &2u32.to_le_bytes()).unwrap();
+        let mut doc = Document { header: vec![], root: empty(), tail: vec![], objects: vec![obj("TAGame.ProfileLoadoutSave_TA", 0, profile)] };
+        assert!(move_preset(&mut doc, 0, 3).unwrap());
+        assert_eq!(set_refs(&doc).unwrap(), vec![2, 3, 4, 1]);
+        assert_eq!(read_scalar(&doc.objects[0].bytes, "EquippedLoadoutSet").unwrap(), 2);
+        assert_eq!(doc.objects.len(), 1);
+        assert!(!move_preset(&mut doc, 1, 1).unwrap());
+        assert!(move_preset(&mut doc, 0, 4).is_err());
+    }
+
+    #[test]
+    fn equipping_checks_ownership_and_updates_both_slot_arrays() {
+        let mut root = empty();
+        append_array(&mut root, "OnlineProducts", &[4]).unwrap();
+        let mut profile = empty();
+        append_array(&mut profile, "LoadoutSets", &[1]).unwrap();
+        let mut set = empty();
+        append_array(&mut set, "Loadouts", &[2, 3]).unwrap();
+        let mut loadout = empty();
+        append_array(&mut loadout, "Products", &[0; SLOTS]).unwrap();
+        let mut instances = (SLOTS as u32).to_le_bytes().to_vec();
+        for _ in 0..SLOTS { instances.extend(instance_blob(0, 0)); }
+        insert_property(&mut loadout, "OnlineProducts128", "ArrayProperty", &instances).unwrap();
+        let mut product = empty();
+        insert_property(&mut product, "ProductID", "IntProperty", &42u32.to_le_bytes()).unwrap();
+        let instance = instance_blob(7, 9);
+        let mut instance_field = write_ue3("InstanceID");
+        instance_field.extend(write_ue3("StructProperty"));
+        instance_field.extend((instance.len() as u32).to_le_bytes());
+        instance_field.extend(0u32.to_le_bytes());
+        instance_field.extend(write_ue3("ProductInstanceID"));
+        instance_field.extend(instance);
+        product.splice(0..0, instance_field);
+        let mut doc = Document { header: vec![], root, tail: vec![], objects: vec![
+            obj("TAGame.ProfileLoadoutSave_TA", 0, profile),
+            obj("TAGame.LoadoutSet_TA", 1, set),
+            obj("TAGame.Loadout_TA", 2, loadout.clone()),
+            obj("TAGame.Loadout_TA", 3, loadout),
+            obj("TAGame.OnlineProduct_TA", 4, product),
+        ]};
+        assert!(equip(&mut doc, 0, &[(0, 2, 7, 9)]).unwrap());
+        assert_eq!(array_u32(&doc.objects[2].bytes, "Products").unwrap()[2], 42);
+        assert_eq!(instance_array(&doc.objects[2].bytes).unwrap()[2], (7, 9));
+        assert_eq!(array_u32(&doc.objects[3].bytes, "Products").unwrap()[2], 0);
+        assert!(equip(&mut doc, 0, &[(0, 2, 7, 10)]).is_err());
+    }
 }

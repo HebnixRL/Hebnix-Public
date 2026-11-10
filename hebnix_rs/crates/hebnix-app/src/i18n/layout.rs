@@ -10,6 +10,14 @@ pub fn subtab_content_frame() -> egui::Frame {
     })
 }
 
+/// Frame a full-width section inside a page or scroll area.
+pub fn bordered_panel(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        content(ui);
+    });
+}
+
 /// Reserve one label column while keeping the text against its left edge.
 pub fn settings_label(
     ui: &mut egui::Ui,

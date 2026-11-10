@@ -33,6 +33,13 @@ const MOVIES: [Movie; 2] = [
     },
 ];
 
+pub(super) fn managed_movie(file: &str, upk: &UpkPackage, index: usize) -> Option<&'static Movie> {
+    MOVIES.iter().find(|movie| {
+        file.eq_ignore_ascii_case(movie.package)
+            && upk.find_object(movie.export) == i32::try_from(index + 1).ok()
+    })
+}
+
 /// the movie as the uncompressed FWS form, with its length field matching its size
 fn normal(swf: &[u8]) -> Vec<u8> {
     let mut swf = swf.to_vec();
@@ -45,27 +52,65 @@ fn normal(swf: &[u8]) -> Vec<u8> {
 }
 
 pub(super) fn digest(swf: &[u8]) -> String {
-    Sha256::digest(normal(swf)).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(normal(swf))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 impl Movie {
-    /// One earlier LAN browser build is still installed on some PCs. Its
-    /// original movie remains in the append-only package image; require the
-    /// exact vanilla digest before using it to reconstruct a restore point.
-    fn retained_vanilla(&self, upk: &UpkPackage, current: &str) -> Option<Vec<u8>> {
-        if self.package != "GFX_ServerBrowserMenu_SF.upk"
-            || current != "a8b167f4e18829ff2edda6d3b7d6a063bf444f0ef8b6926aa40b6b06e84c41df"
-        {
-            return None;
+    fn menu_only(&self) -> Result<Option<&'static [u8]>, String> {
+        if self.package != MOVIES[0].package {
+            return Ok(None);
         }
+        static MENU_ONLY: std::sync::OnceLock<Result<Vec<u8>, String>> = std::sync::OnceLock::new();
+        MENU_ONLY
+            .get_or_init(|| {
+                super::title_patcher::movie::rewrite(
+                    self.patched,
+                    &super::title_patcher::abc::disable_workshop_downloader,
+                )?
+                .map(|(movie, _)| movie)
+                .ok_or_else(|| "Workshop downloader method was not found".into())
+            })
+            .as_deref()
+            .map(Some)
+            .map_err(Clone::clone)
+    }
+
+    fn is_patched(&self, current: &str) -> bool {
+        current == digest(self.patched)
+            || self
+                .menu_only()
+                .ok()
+                .flatten()
+                .is_some_and(|swf| current == digest(swf))
+    }
+
+    pub(super) fn has_known_movie(&self, upk: &UpkPackage) -> bool {
+        self.movie(upk).is_ok_and(|swf| {
+            let current = digest(&swf);
+            current == self.vanilla || self.is_patched(&current)
+        })
+    }
+
+    /// Append-only updates can leave the original movie in the package.
+    /// Only recover bytes that match this patch's exact vanilla digest.
+    fn retained_vanilla(&self, upk: &UpkPackage) -> Option<Vec<u8>> {
         for (at, signature) in upk.image.windows(3).enumerate() {
             if signature != b"GFX" && signature != b"FWS" {
                 continue;
             }
-            let Some(header) = upk.image.get(at..at + 8) else { continue };
+            let Some(header) = upk.image.get(at..at + 8) else {
+                continue;
+            };
             let size = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
-            if size < 8 { continue; }
-            let Some(bytes) = at.checked_add(size).and_then(|end| upk.image.get(at..end)) else { continue };
+            if size < 8 {
+                continue;
+            }
+            let Some(bytes) = at.checked_add(size).and_then(|end| upk.image.get(at..end)) else {
+                continue;
+            };
             if digest(bytes) == self.vanilla {
                 return Some(bytes.to_vec());
             }
@@ -78,8 +123,9 @@ impl Movie {
     fn locate(&self, upk: &UpkPackage) -> Result<(usize, usize, usize, usize), String> {
         let index = upk
             .find_object(self.export)
-            .ok_or_else(|| format!("{} not found in {}", self.export, self.package))? as usize
-            - 1;
+            .and_then(|object| usize::try_from(object).ok()?.checked_sub(1))
+            .filter(|&index| index < upk.exports.len())
+            .ok_or_else(|| format!("{} not found in {}", self.export, self.package))?;
         let (props, _) = upk.serialized_props(&upk.exports[index])?;
         let raw = props
             .iter()
@@ -102,10 +148,16 @@ impl Movie {
     }
 
     /// the package with the movie swapped, saved to a new file
-    pub(super) fn with_movie(&self, upk: &mut UpkPackage, swf: &[u8], out: &Path) -> Result<(), String> {
+    pub(super) fn with_movie(
+        &self,
+        upk: &mut UpkPackage,
+        swf: &[u8],
+        out: &Path,
+    ) -> Result<(), String> {
         let (index, tag, value, size) = self.locate(upk)?;
         let export = &upk.exports[index];
-        let old = upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec();
+        let old =
+            upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec();
         let mut swf = normal(swf);
         swf[..3].copy_from_slice(b"GFX");
         let len = swf.len() as u32;
@@ -122,7 +174,7 @@ impl Movie {
     pub(super) fn status(&self, cooked: &Path) -> bool {
         UpkPackage::load(&game_path::resolve(cooked, self.package))
             .and_then(|upk| self.movie(&upk))
-            .is_ok_and(|swf| digest(&swf) == digest(self.patched))
+            .is_ok_and(|swf| self.is_patched(&digest(&swf)))
     }
 
     /// one marker per movie, so one movie's check can't vouch for the other's backup
@@ -139,61 +191,97 @@ impl Movie {
     fn backup_path(&self, backups: &Path) -> std::path::PathBuf {
         let old = backups.join(self.package);
         let backup = backups.join(format!("{}.bak", self.package));
-        if old.is_file() {
-            if backup.is_file() {
-                let _ = fs::remove_file(old);
-            } else {
-                let _ = fs::rename(old, &backup);
-            }
+        if old.is_file() && !backup.is_file() {
+            let _ = fs::rename(old, &backup);
         }
         backup
     }
 
-    /// Put the patched movie in, keeping the original package in the backups
-    /// folder. A movie that is neither the vanilla one nor ours (a game update) is
-    /// left alone, since the patch was built against the vanilla one.
+    fn clean_movie(&self, path: &Path) -> Option<Vec<u8>> {
+        let package = UpkPackage::load(path).ok()?;
+        let movie = self.movie(&package).ok()?;
+        (digest(&movie) == self.vanilla).then_some(movie)
+    }
+
+    /// Recover only the movie, keeping the live package's other exports.
     pub(super) fn apply(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
         let live = game_path::resolve(cooked, self.package);
         let mut upk = UpkPackage::load(&live)?;
         let backup = self.backup_path(backups);
-        let current = digest(&self.movie(&upk)?);
-        if current == digest(self.patched) {
+        let current = self.movie(&upk)?;
+        let current_hash = digest(&current);
+        let desired = if super::workshop_menu::downloader_on(cooked) {
+            self.patched
+        } else {
+            self.menu_only()?.unwrap_or(self.patched)
+        };
+        let already_current = current_hash == digest(desired);
+        if already_current
+            && backup_guard::check(cooked, backups, &self.marker(), |name| self.is_backup(name))
+                .is_ok()
+            && self.clean_movie(&backup).is_some()
+        {
             return Ok(());
         }
-        let retained = self.retained_vanilla(&upk, &current);
-        if current != self.vanilla && retained.is_none() {
-            // an older build of our own movie: patch the pristine backup again
-            let pristine = UpkPackage::load(&backup)
-                .ok()
-                .filter(|saved| self.movie(saved).is_ok_and(|swf| digest(&swf) == self.vanilla));
-            upk = pristine.ok_or_else(|| {
-                format!(
-                    "{} has a menu Hebnix can't update, and Hebnix has no clean copy to start from. Turn it off in Hebnix, verify the game files in your launcher, then turn it on again.",
-                    self.package
-                )
-            })?;
+        let vanilla = if current_hash == self.vanilla {
+            Some(current)
+        } else {
+            self.clean_movie(&backup)
+                .or_else(|| self.clean_movie(&backups.join(self.package)))
+                .or_else(|| self.retained_vanilla(&upk))
+                .or_else(|| {
+                    let (index, _, offset, _) = self.locate(&upk).ok()?;
+                    let movie = super::title_patcher::legacy_workshop_movie(
+                        cooked, self.package, &upk, index, offset,
+                    )?;
+                    (digest(&movie) == self.vanilla).then_some(movie)
+                })
+                .or_else(|| self.clean_movie(&super::title_patcher::original_movie_package(cooked, self.package)))
         }
-        fs::create_dir_all(backups).map_err(|e| e.to_string())?;
-        // a backup from another game build is dropped, not restored over this one
+        .ok_or_else(|| format!(
+            "{} has no recoverable original movie compatible with this patch (installed movie SHA-256 {}). With Rocket League closed, verify the game files in your launcher, then use Update Workshop patch.",
+            self.package, current_hash
+        ))?;
+
         backup_guard::prepare(cooked, backups, &self.marker(), |name| self.is_backup(name))?;
-        if !backup.is_file() {
-            if let Some(vanilla) = retained {
-                self.with_movie(&mut upk, &vanilla, &backup)?;
-                let restored = UpkPackage::load(&backup)?;
-                if digest(&self.movie(&restored)?) != self.vanilla {
-                    return Err(format!("Recovered {} failed validation", self.package));
-                }
-            } else if self.movie(&upk).is_ok_and(|swf| digest(&swf) == self.vanilla) {
-                // only a clean movie is worth keeping: a backup of a patched one can never be restored
-                fs::copy(&live, &backup).map_err(|e| format!("Could not back up {}: {e}", self.package))?;
-            }
-        }
-        let temp = cooked.join(format!("{}.workshop.tmp", self.package));
-        let result = self.with_movie(&mut upk, self.patched, &temp).and_then(|()| {
-            let saved = UpkPackage::load(&temp)?;
-            if digest(&self.movie(&saved)?) == digest(self.patched) {
-                fs::copy(&temp, &live)
+        if self.clean_movie(&backup).is_none() {
+            let temp = backup.with_extension("recovery.tmp");
+            let saved = if current_hash == self.vanilla {
+                fs::copy(&live, &temp)
                     .map(|_| ())
+                    .map_err(|e| e.to_string())
+            } else {
+                self.with_movie(&mut upk, &vanilla, &temp)
+            };
+            let result = saved.and_then(|()| {
+                self.clean_movie(&temp)
+                    .ok_or_else(|| format!("Recovered {} failed validation", self.package))?;
+                fs::rename(&temp, &backup).map_err(|e| {
+                    format!("Could not save the restore copy of {}: {e}", self.package)
+                })
+            });
+            let _ = fs::remove_file(&temp);
+            result?;
+        }
+        if already_current {
+            Ok(())
+        } else {
+            self.install_movie(cooked, &mut upk, desired)
+        }
+    }
+
+    fn install_movie(
+        &self,
+        cooked: &Path,
+        upk: &mut UpkPackage,
+        desired: &[u8],
+    ) -> Result<(), String> {
+        let live = game_path::resolve(cooked, self.package);
+        let temp = cooked.join(format!("{}.workshop.tmp", self.package));
+        let result = self.with_movie(upk, desired, &temp).and_then(|()| {
+            let saved = UpkPackage::load(&temp)?;
+            if digest(&self.movie(&saved)?) == digest(desired) {
+                fs::rename(&temp, &live)
                     .map_err(|e| format!("Could not write {}: {e}", self.package))
             } else {
                 Err(format!("Patched {} failed validation", self.package))
@@ -203,38 +291,58 @@ impl Movie {
         result
     }
 
-    /// Put the original package back. Nothing to do when the movie is not ours.
+    /// Restore only the backed-up movie and keep other package exports.
     pub(super) fn restore(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
         let backup = self.backup_path(backups);
         if !self.status(cooked) {
-            let _ = fs::remove_file(backup);
             return Ok(());
         }
         backup_guard::check(cooked, backups, &self.marker(), |name| self.is_backup(name))?;
-        let original =
-            UpkPackage::load(&backup).map_err(|_| format!("No backup of {} to restore", self.package))?;
-        if digest(&self.movie(&original)?) != self.vanilla {
-            return Err(format!("The backup of {} is not the vanilla movie", self.package));
+        let original = UpkPackage::load(&backup)
+            .map_err(|_| format!("No backup of {} to restore", self.package))?;
+        let vanilla = self.movie(&original)?;
+        if digest(&vanilla) != self.vanilla {
+            return Err(format!(
+                "The backup of {} is not the vanilla movie",
+                self.package
+            ));
         }
-        fs::copy(&backup, game_path::resolve(cooked, self.package))
-            .map_err(|e| format!("Could not restore {}: {e}", self.package))?;
+        let mut live = UpkPackage::load(&game_path::resolve(cooked, self.package))?;
+        self.install_movie(cooked, &mut live, &vanilla)?;
         let _ = fs::remove_file(backup);
         let _ = fs::remove_file(backups.join(self.marker()));
         Ok(())
     }
 }
 
+pub(super) fn update_downloader(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let _guard = super::title_patcher::UI_PATCH_LOCK
+        .lock()
+        .map_err(|_| "UI patch lock unavailable")?;
+    MOVIES[0].apply(cooked, backups)
+}
+
 /// every menu is tried even when an earlier one fails; the errors come back together
 fn each(op: impl Fn(&Movie) -> Result<(), String>) -> Result<(), String> {
     let errors: Vec<String> = MOVIES.iter().filter_map(|movie| op(movie).err()).collect();
-    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 pub fn apply(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let _guard = super::title_patcher::UI_PATCH_LOCK
+        .lock()
+        .map_err(|_| "UI patch lock unavailable")?;
     each(|movie| movie.apply(cooked, backups))
 }
 
 pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let _guard = super::title_patcher::UI_PATCH_LOCK
+        .lock()
+        .map_err(|_| "UI patch lock unavailable")?;
     each(|movie| movie.restore(cooked, backups))
 }
 
@@ -248,14 +356,13 @@ mod tests {
     fn legacy_browser_upgrade_and_restore() {
         let source = std::env::var("HEBNIX_LEGACY_BROWSER").unwrap();
         let movie = &MOVIES[1];
-        let dir = std::env::temp_dir().join(format!("hebnix-browser-upgrade-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hebnix-browser-upgrade-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let live = dir.join(movie.package);
         fs::copy(source, &live).unwrap();
         let package = UpkPackage::load(&live).unwrap();
-        let current = digest(&movie.movie(&package).unwrap());
-        assert!(movie.retained_vanilla(&package, &current).is_some());
-        assert!(movie.retained_vanilla(&package, "unknown").is_none());
+        assert!(movie.retained_vanilla(&package).is_some());
         let backups = dir.join("Backups");
         movie.apply(&dir, &backups).unwrap();
         assert!(movie.status(&dir));
@@ -294,11 +401,20 @@ mod tests {
         let backups = dir.join("Backups");
         fs::create_dir_all(&backups).unwrap();
         for movie in &MOVIES {
-            fs::copy(Path::new(&vanilla).join(movie.package), dir.join(movie.package)).unwrap();
+            fs::copy(
+                Path::new(&vanilla).join(movie.package),
+                dir.join(movie.package),
+            )
+            .unwrap();
         }
         let originals: Vec<String> = MOVIES
             .iter()
-            .map(|m| digest(&m.movie(&UpkPackage::load(&dir.join(m.package)).unwrap()).unwrap()))
+            .map(|m| {
+                digest(
+                    &m.movie(&UpkPackage::load(&dir.join(m.package)).unwrap())
+                        .unwrap(),
+                )
+            })
             .collect();
         apply(&dir, &backups).unwrap();
         for movie in &MOVIES {
@@ -314,8 +430,26 @@ mod tests {
         restore(&dir, &backups).unwrap();
         for (movie, original) in MOVIES.iter().zip(originals) {
             assert!(!movie.status(&dir));
-            assert_eq!(digest(&movie.movie(&UpkPackage::load(&dir.join(movie.package)).unwrap()).unwrap()), original);
+            assert_eq!(
+                digest(
+                    &movie
+                        .movie(&UpkPackage::load(&dir.join(movie.package)).unwrap())
+                        .unwrap()
+                ),
+                original
+            );
         }
         let _ = fs::remove_dir_all(dir);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn workshop_movie_has_distinct_downloader_and_menu_only_variants() {
+    let movie = &MOVIES[0];
+    let menu_only = movie.menu_only().unwrap().unwrap();
+    assert_ne!(digest(menu_only), digest(movie.patched));
+    assert!(movie.is_patched(&digest(menu_only)));
+    assert!(movie.is_patched(&digest(movie.patched)));
+    assert!(MOVIES[1].menu_only().unwrap().is_none());
 }

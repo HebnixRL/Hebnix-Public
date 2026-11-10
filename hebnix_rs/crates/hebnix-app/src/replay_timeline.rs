@@ -1063,120 +1063,133 @@ impl ReplayTimeline {
             }
             _ => {}
         }
-        if let Some(scan) = &self.scan {
-            ui.add(
-                egui::ProgressBar::new(scan.frame as f32 / self.max_frame() as f32)
-                    .text("Scanning replay events · 16×"),
-            );
-            if ui.button("Cancel scan").clicked() {
-                self.finish_scan(ws, false, "Event scan cancelled; no cache saved.");
-            }
-        }
-        let ready = self.ready(ws);
-        if self.scan_failed
-            && ui
-                .add_enabled(ready, egui::Button::new("Retry event scan"))
-                .clicked()
-        {
-            self.start_analysis(ws, ui.ctx());
-        }
-        ui.horizontal_wrapped(|ui| {
-            let colour = if ws.connected() {
-                Color32::LIGHT_GREEN
-            } else {
-                Color32::GRAY
-            };
-            ui.colored_label(
-                colour,
-                if ws.connected() {
-                    "Stats API connected"
-                } else {
-                    "Stats API disconnected"
-                },
-            );
-            if ui.button("Detect current replay").clicked() {
-                self.last_attach_check = None;
-                self.refresh_files();
-            }
-            ui.label("Play/pause key:");
-            let mut display = if self.capture_rx.is_some() {
-                "Press a key...".into()
-            } else if self.keybind.is_empty() {
-                "Not set".into()
-            } else {
-                self.keybind.to_uppercase()
-            };
-            ui.add(
-                egui::TextEdit::singleline(&mut display)
-                    .interactive(false)
-                    .desired_width(100.0),
-            );
-            if ui
-                .add_enabled(self.capture_rx.is_none(), egui::Button::new("Set"))
-                .clicked()
-            {
-                self.capture_keybind(ui.ctx());
-            }
-            if ui
-                .add_enabled(
-                    !self.keybind.is_empty() || self.capture_rx.is_some(),
-                    egui::Button::new("Clear"),
-                )
-                .clicked()
-            {
-                self.capture_rx = None;
-                self.capture_guard = None;
-                self.keybind.clear();
-                if let Some(hotkey) = &mut self.hotkey {
-                    hotkey.clear();
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.heading(crate::i18n::t("nav-replay-library"));
+            ui.separator();
+            if let Some(scan) = &self.scan {
+                ui.add(
+                    egui::ProgressBar::new(scan.frame as f32 / self.max_frame() as f32)
+                        .text("Scanning replay events · 16×"),
+                );
+                if ui.button("Cancel scan").clicked() {
+                    self.finish_scan(ws, false, "Event scan cancelled; no cache saved.");
                 }
-                self.hotkey_rx.try_iter().for_each(drop);
-                self.save_keybind();
             }
+            if self.scan_failed
+                && ui
+                    .add_enabled(self.ready(ws), egui::Button::new("Retry event scan"))
+                    .clicked()
+            {
+                self.start_analysis(ws, ui.ctx());
+            }
+            ui.horizontal_wrapped(|ui| {
+                let colour = if ws.connected() {
+                    Color32::LIGHT_GREEN
+                } else {
+                    Color32::GRAY
+                };
+                ui.colored_label(
+                    colour,
+                    if ws.connected() {
+                        "Stats API connected"
+                    } else {
+                        "Stats API disconnected"
+                    },
+                );
+                if ui.button("Detect current replay").clicked() {
+                    self.last_attach_check = None;
+                    self.refresh_files();
+                }
+                ui.label("Play/pause key:");
+                let mut display = if self.capture_rx.is_some() {
+                    "Press a key...".into()
+                } else if self.keybind.is_empty() {
+                    "Not set".into()
+                } else {
+                    self.keybind.to_uppercase()
+                };
+                ui.add(
+                    egui::TextEdit::singleline(&mut display)
+                        .interactive(false)
+                        .desired_width(100.0),
+                );
+                if ui
+                    .add_enabled(self.capture_rx.is_none(), egui::Button::new("Set"))
+                    .clicked()
+                {
+                    self.capture_keybind(ui.ctx());
+                }
+                if ui
+                    .add_enabled(
+                        !self.keybind.is_empty() || self.capture_rx.is_some(),
+                        egui::Button::new("Clear"),
+                    )
+                    .clicked()
+                {
+                    self.capture_rx = None;
+                    self.capture_guard = None;
+                    self.keybind.clear();
+                    if let Some(hotkey) = &mut self.hotkey {
+                        hotkey.clear();
+                    }
+                    self.hotkey_rx.try_iter().for_each(drop);
+                    self.save_keybind();
+                }
+            });
+            if self.metadata.is_none()
+                && ws.connected()
+                && self
+                    .last_attach_check
+                    .is_none_or(|at| at.elapsed() > Duration::from_secs(2))
+            {
+                self.last_attach_check = Some(Instant::now());
+                self.attach_current(ws, ui.ctx());
+            }
+            ui.label(&self.status);
         });
-        if self.metadata.is_none()
-            && ws.connected()
-            && self
-                .last_attach_check
-                .is_none_or(|at| at.elapsed() > Duration::from_secs(2))
-        {
-            self.last_attach_check = Some(Instant::now());
-            self.attach_current(ws, ui.ctx());
-        }
-        ui.label(&self.status);
-        let editor_height =
-            (ui.available_height() - if self.metadata.is_some() { 205.0 } else { 0.0 }).max(60.0);
-        egui::ScrollArea::vertical().id_salt("replay_timeline_editor").max_height(editor_height).auto_shrink([false,false]).show(ui, |ui| crate::panel::followed(ui, |ui| {
-            if !self.full_replay || self.metadata.is_none() {
-                ui.heading("Waiting for a replay");
-                ui.label("Open a replay in Rocket League, then return here. Timeline controls become available while you are watching it.");
-                if self.full_replay { ui.label("Could not match this replay to a local file. Check your configured replay folder, then detect again."); }
-            } else {
-                if let Some(meta) = &self.metadata { ui.strong(format!("{} · {} frames · {} fps", meta.title,meta.frames,meta.fps)); }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.add_enabled(ready, egui::Button::new(if self.playing { "Pause" } else { "Play timeline" })).clicked() { self.toggle(ws); }
-                    if frame_step_button(ui, ready, false).clicked() { self.scrub(self.selected-1,ws); }
-                    if frame_step_button(ui, ready, true).clicked() { self.scrub(self.selected+1,ws); }
-                    if ui.add_enabled(ready, egui::Button::new("Frame 1")).clicked() { self.scrub(1,ws); }
-                    if ui.add_enabled(ready && !self.playing, egui::Button::new("+ Keyframe")).clicked() {
-                        if !self.keys.iter().any(|k| k.frame == self.selected) { self.keys.push(Keyframe { frame:self.selected,commands:vec![] }); self.keys.sort_by_key(|k| k.frame); }
-                        self.selected_key = Some(self.selected); self.save();
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Keyframes:");
-                    for key in &self.keys {
-                        if ui.selectable_label(self.selected_key == Some(key.frame),format!("Frame {}",key.frame)).clicked() { self.selected_key = Some(key.frame); }
-                    }
-                });
-                if let Some(frame) = self.selected_key {
-                    self.edit_keyframe(ui, frame, ready && !self.playing);
-                } else { ui.label("Select a frame and add a keyframe, or select a diamond to edit its commands."); }
-            }
-        }));
-        ui.separator();
+        ui.add_space(8.0);
+        let ready = self.ready(ws);
+        let canvas_height = if self.metadata.is_some() {
+            205.0 + egui::Frame::group(ui.style()).total_margin().sum().y
+        } else {
+            0.0
+        };
+        let editor_height = (ui.available_height() - canvas_height).max(60.0);
+        egui::ScrollArea::vertical().id_salt("replay_timeline_editor").max_height(editor_height).auto_shrink([false,false]).show(ui, |ui| {
+            crate::i18n::layout::bordered_panel(ui, |ui| {
+                ui.heading("Playback & Keyframes");
+                ui.separator();
+                if !self.full_replay || self.metadata.is_none() {
+                    ui.heading("Waiting for a replay");
+                    ui.label("Open a replay in Rocket League, then return here. Timeline controls become available while you are watching it.");
+                    if self.full_replay { ui.label("Could not match this replay to a local file. Check your configured replay folder, then detect again."); }
+                } else {
+                    if let Some(meta) = &self.metadata { ui.strong(format!("{} · {} frames · {} fps", meta.title,meta.frames,meta.fps)); }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(ready, egui::Button::new(if self.playing { "Pause" } else { "Play timeline" })).clicked() { self.toggle(ws); }
+                        if frame_step_button(ui, ready, false).clicked() { self.scrub(self.selected-1,ws); }
+                        if frame_step_button(ui, ready, true).clicked() { self.scrub(self.selected+1,ws); }
+                        if ui.add_enabled(ready, egui::Button::new("Frame 1")).clicked() { self.scrub(1,ws); }
+                        if ui.add_enabled(ready && !self.playing, egui::Button::new("+ Keyframe")).clicked() {
+                            if !self.keys.iter().any(|k| k.frame == self.selected) { self.keys.push(Keyframe { frame:self.selected,commands:vec![] }); self.keys.sort_by_key(|k| k.frame); }
+                            self.selected_key = Some(self.selected); self.save();
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Keyframes:");
+                        for key in &self.keys {
+                            if ui.selectable_label(self.selected_key == Some(key.frame),format!("Frame {}",key.frame)).clicked() { self.selected_key = Some(key.frame); }
+                        }
+                    });
+                    if let Some(frame) = self.selected_key {
+                        self.edit_keyframe(ui, frame, ready && !self.playing);
+                    } else { ui.label("Select a frame and add a keyframe, or select a diamond to edit its commands."); }
+                }
+            });
+        });
         if self.metadata.is_some() {
-            self.canvas(ui, ws, ready);
+            ui.add_space(4.0);
+            crate::i18n::layout::bordered_panel(ui, |ui| self.canvas(ui, ws, ready));
         }
     }
     fn edit_keyframe(&mut self, ui: &mut egui::Ui, frame: i64, enabled: bool) {

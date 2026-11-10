@@ -1,4 +1,4 @@
-use super::{HebnixApp, ItemsSubTab, PluginsSubTab, Tab};
+use super::HebnixApp;
 use crate::i18n::t;
 use eframe::egui;
 use hebnix_sdk::stats::{EventData, StatsEvent, TeamState, UpdateStateData};
@@ -11,9 +11,7 @@ use std::{
 enum HomeTab {
     #[default]
     LiveMatch,
-    Plugins,
-    Maps,
-    Swaps,
+    Tracker,
 }
 
 struct MatchEvent {
@@ -33,7 +31,7 @@ pub(super) struct HomeState {
 }
 
 impl HomeState {
-    fn clear_match(&mut self) {
+    pub(super) fn clear_match(&mut self) {
         *self = Self {
             tab: self.tab,
             ..Self::default()
@@ -163,7 +161,10 @@ fn team_scoreboard(ui: &mut egui::Ui, state: &UpdateStateData, team: &TeamState)
     };
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(
-            colour.r(), colour.g(), colour.b(), 210,
+            colour.r(),
+            colour.g(),
+            colour.b(),
+            210,
         ))
         .inner_margin(10)
         .show(ui, |ui| {
@@ -198,7 +199,10 @@ fn team_scoreboard(ui: &mut egui::Ui, state: &UpdateStateData, team: &TeamState)
     let text_colour = readable_text(body);
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_unmultiplied(
-            body.r(), body.g(), body.b(), 190,
+            body.r(),
+            body.g(),
+            body.b(),
+            190,
         ))
         .inner_margin(10)
         .show(ui, |ui| {
@@ -271,7 +275,7 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
                                 state.game.time_seconds,
                                 state.game.overtime,
                             ))));
-                            ui.label(&state.game.arena);
+                            ui.label(crate::discord_presence::display_map_name(&state.game.arena));
                             if home.ended || state.game.has_winner {
                                 ui.label(t("home-match-ended"));
                             }
@@ -356,154 +360,62 @@ impl HebnixApp {
     pub(super) fn render_home(&mut self, ui: &mut egui::Ui) {
         let connected = self.last_rl_open && self.stats.connected();
         ui.ctx().request_repaint_after(Duration::from_millis(250));
-        ui.heading(t("home-title"));
-        ui.add_space(8.0);
-        let green = if ui.visuals().dark_mode {
-            egui::Color32::LIGHT_GREEN
-        } else {
-            egui::Color32::from_rgb(0, 120, 50)
-        };
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.strong("Rocket League");
-                ui.colored_label(
-                    if self.last_rl_open {
-                        green
-                    } else {
-                        ui.visuals().weak_text_color()
-                    },
-                    t(if self.last_rl_open {
-                        "home-running"
-                    } else {
-                        "home-stopped"
-                    }),
-                );
-                ui.separator();
-                ui.strong("Stats API");
-                ui.colored_label(
-                    if connected {
-                        green
-                    } else {
-                        ui.visuals().weak_text_color()
-                    },
-                    t(if connected {
-                        "home-connected"
-                    } else {
-                        "home-disconnected"
-                    }),
-                );
-            });
-        });
-        ui.add_space(8.0);
+        if crate::theme::presentation(ui.ctx()).is_none_or(|theme| theme.layout.show_page_heading) {
+            ui.heading(t("home-title"));
+            ui.add_space(8.0);
+        }
         ui.horizontal_wrapped(|ui| {
             for (tab, key) in [
                 (HomeTab::LiveMatch, "home-live-match"),
-                (HomeTab::Plugins, "home-active-plugins"),
-                (HomeTab::Maps, "home-active-maps"),
-                (HomeTab::Swaps, "home-active-swaps"),
+                (HomeTab::Tracker, "home-tracker"),
             ] {
                 ui.selectable_value(&mut self.home.tab, tab, t(key));
             }
         });
         ui.separator();
         match self.home.tab {
-            HomeTab::LiveMatch => live_match(ui, &self.home, connected, self.last_rl_open),
-            HomeTab::Plugins => {
-                if ui.button(t("home-install-plugins")).clicked() {
-                    self.install_modal = super::InstallModal {
-                        open: true,
-                        ..Default::default()
-                    };
-                }
-                egui::ScrollArea::vertical()
-                    .id_salt("home_active_plugins")
-                    .max_height(ui.available_height().max(0.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        let plugins: Vec<_> = self
-                            .plugin_mgr
-                            .plugins
-                            .iter()
-                            .filter(|p| p.enabled && p.load_error.is_none())
-                            .map(|p| {
-                                (
-                                    p.slug.clone(),
-                                    p.display_name().to_string(),
-                                    p.has_settings(),
-                                )
-                            })
-                            .collect();
-                        if plugins.is_empty() {
-                            ui.label(t("home-no-plugins"));
-                        }
-                        for (slug, name, has_settings) in plugins {
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.strong(name);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if has_settings && ui.button(t("tab-settings")).clicked() {
-                                                self.selected_settings_plugin = Some(slug);
-                                                self.plugins_subtab = PluginsSubTab::Settings;
-                                                self.tab = Tab::Plugins;
-                                            }
-                                        },
-                                    );
-                                });
-                            });
-                        }
-                    }));
+            HomeTab::LiveMatch => {
+                let green = if ui.visuals().dark_mode {
+                    egui::Color32::LIGHT_GREEN
+                } else {
+                    egui::Color32::from_rgb(0, 120, 50)
+                };
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong("Rocket League");
+                        ui.colored_label(
+                            if self.last_rl_open {
+                                green
+                            } else {
+                                ui.visuals().weak_text_color()
+                            },
+                            t(if self.last_rl_open {
+                                "home-running"
+                            } else {
+                                "home-stopped"
+                            }),
+                        );
+                        ui.separator();
+                        ui.strong("Stats API");
+                        ui.colored_label(
+                            if connected {
+                                green
+                            } else {
+                                ui.visuals().weak_text_color()
+                            },
+                            t(if connected {
+                                "home-connected"
+                            } else {
+                                "home-disconnected"
+                            }),
+                        );
+                    });
+                });
+                ui.add_space(8.0);
+                live_match(ui, &self.home, connected, self.last_rl_open);
             }
-            HomeTab::Maps => {
-                if ui.button(t("home-install-map")).clicked() {
-                    self.workshop.open_import();
-                    self.tab = Tab::Workshop;
-                }
-                egui::ScrollArea::vertical()
-                    .id_salt("home_active_maps")
-                    .max_height(ui.available_height().max(0.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        let mut maps = self
-                            .workshop
-                            .manager
-                            .active_maps()
-                            .into_iter()
-                            .collect::<Vec<_>>();
-                        maps.sort_by(|a, b| a.0.cmp(&b.0));
-                        if maps.is_empty() {
-                            ui.label(t("home-no-maps"));
-                        }
-                        for (target, map) in maps {
-                            let name = map.get("name").and_then(|v| v.as_str()).unwrap_or(&target);
-                            ui.label(name);
-                        }
-                    }));
-            }
-            HomeTab::Swaps => {
-                if ui.button(t("home-swap-items")).clicked() {
-                    self.items_subtab = ItemsSubTab::Swapper;
-                    self.tab = Tab::Items;
-                }
-                let cooked_pc = std::path::PathBuf::from(&self.config.settings.rl_path)
-                    .join("TAGame")
-                    .join("CookedPCConsole");
-                let backups_dir = cooked_pc.join("Backups");
-                egui::ScrollArea::vertical()
-                    .id_salt("home_active_swaps")
-                    .max_height(ui.available_height().max(0.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        if self.swapper.active_count(&backups_dir) == 0 {
-                            ui.label(t("home-no-swaps"));
-                        }
-                        self.swapper
-                            .render_active_swaps(ui, &cooked_pc, &backups_dir, &self.tx);
-                    }));
-            }
+            HomeTab::Tracker => self.home_tracker.show(ui),
         }
     }
 }
@@ -516,7 +428,7 @@ mod tests {
     #[test]
     fn clears_previous_match_without_switching_tabs_and_bounds_history() {
         let mut home = HomeState {
-            tab: HomeTab::Plugins,
+            tab: HomeTab::Tracker,
             ..Default::default()
         };
         let mut update = StatsEvent::simple("UpdateState");
@@ -531,10 +443,10 @@ mod tests {
         home.event(&update);
         assert!(home.events.is_empty());
         assert!(home.snapshot.is_some());
-        assert!(home.tab == HomeTab::Plugins);
+        assert!(home.tab == HomeTab::Tracker);
         home.event(&StatsEvent::simple("MatchDestroyed"));
         assert!(home.snapshot.is_none());
-        assert!(home.tab == HomeTab::Plugins);
+        assert!(home.tab == HomeTab::Tracker);
     }
 
     #[test]

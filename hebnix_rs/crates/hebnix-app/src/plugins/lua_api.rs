@@ -3061,7 +3061,8 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                                 req = req.header(k, v);
                             }
                         }
-                        if url.starts_with("https://req.hebnix.com/") {
+                        let is_req = url.starts_with("https://req.hebnix.com/");
+                        if is_req {
                             match hebnix_sdk::req_auth::app_token() {
                                 Ok(token) => req = req.header("X-App-Token", token),
                                 Err(error) => {
@@ -3077,6 +3078,11 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                             }
                         }
                         let (status, body, hdrs) = send_req_full(req);
+                        if is_req && status == 498 {
+                            if let Ok(error) = serde_json::from_slice(&body) {
+                                hebnix_sdk::req_auth::observe_response(status, &error);
+                            }
+                        }
                         let _ = thread_tx.send(AppMsg::PluginHttpResult {
                             slug,
                             req_id,

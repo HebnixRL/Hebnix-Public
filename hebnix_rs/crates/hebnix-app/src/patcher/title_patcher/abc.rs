@@ -354,6 +354,54 @@ impl Abc {
         })
     }
 }
+/// Title edits append constants and change their own getters. Rank edits
+/// change different getters and use existing names and inline constants.
+pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<Vec<u8>>> {
+    if before == after || live == before {
+        return Ok(None);
+    }
+    if live == after {
+        return Ok(Some(before.to_vec()));
+    }
+    let (current, old, new) = (Abc::parse(live)?, Abc::parse(before)?, Abc::parse(after)?);
+    let header_end = |abc: &Abc, len| abc.bodies.first().map_or(len, |body| body.span.start);
+    let mut output = select_original(
+        &live[..header_end(&current, live.len())],
+        &before[..header_end(&old, before.len())],
+        &after[..header_end(&new, after.len())],
+    )?
+    .to_vec();
+
+    if current.bodies.len() != old.bodies.len() || current.bodies.len() != new.bodies.len() {
+        return Err("Method count changed in shared UI bytecode".into());
+    }
+    for ((current, old), new) in current.bodies.iter().zip(&old.bodies).zip(&new.bodies) {
+        if current.id != old.id || current.id != new.id {
+            return Err("Method order changed in shared UI bytecode".into());
+        }
+        output.extend_from_slice(select_original(
+            &live[current.span.clone()],
+            &before[old.span.clone()],
+            &after[new.span.clone()],
+        )?);
+    }
+    if output == live {
+        return Ok(None);
+    }
+    Abc::parse(&output)?;
+    Ok(Some(output))
+}
+
+fn select_original<'a>(live: &'a [u8], before: &'a [u8], after: &[u8]) -> Result<&'a [u8]> {
+    if before == after || live == before {
+        Ok(live)
+    } else if live == after {
+        Ok(before)
+    } else {
+        Err("Another edit changed the same UI bytecode".into())
+    }
+}
+
 struct Constants<'a> {
     strings: &'a mut Vec<String>,
     uints: &'a mut Vec<u32>,
@@ -603,6 +651,228 @@ fn local_selected_title(
         bind(code, at, end)?;
     }
     Ok(())
+}
+
+/// A call with no arguments and no result, run at the end of a method.
+#[derive(Clone, Copy)]
+pub(in crate::patcher) enum Call<'a> {
+    /// `this.name()`
+    This(&'a str),
+    /// `Class.name()` on a static method of another class, given as `package:Class`.
+    Static { class: &'a str, name: &'a str },
+}
+
+const RETURN_VOID: u8 = 0x47;
+const GET_LOCAL_0: u8 = 0xd0;
+const GET_LEX: u8 = 0x60;
+const CALL_PROP_VOID: u8 = 0x4f;
+
+/// Insert `calls` just before the final `returnvoid` of `class.method` (an
+/// instance method; `class` is `package:Class`). Every name used is already in
+/// the ABC, so no constant pool changes: a method's own trait name is a
+/// multiname that calls it. Branches stay valid because they are relative and
+/// the insert point is the last instruction. Returns None when the movie has
+/// no such class.
+pub(in crate::patcher) fn append_calls(
+    data: &[u8],
+    class: &str,
+    method: &str,
+    calls: &[Call<'_>],
+) -> Result<Option<(Vec<u8>, usize)>> {
+    let abc = Abc::parse(data)?;
+    let Some(owner) = abc
+        .classes
+        .iter()
+        .find(|c| abc.name(c.name).is_ok_and(|n| n.full == class))
+    else {
+        return Ok(None);
+    };
+    let trait_method = |traits: &[Trait], name: &str| {
+        traits
+            .iter()
+            .find(|t| (1..=3).contains(&t.kind) && abc.name(t.name).is_ok_and(|n| n.local == name))
+            .copied_name_and_method()
+    };
+    let (_, id) = trait_method(&owner.fields, method)
+        .ok_or_else(|| format!("{class} has no method {method}"))?;
+    let body = abc
+        .bodies
+        .iter()
+        .find(|b| b.id == id)
+        .ok_or("Method has no body")?;
+    if body.exceptions != 0 {
+        return Err(format!("{class}.{method} has exception handlers"));
+    }
+    let code = &data[body.code.clone()];
+    if code.last() != Some(&RETURN_VOID) {
+        return Err(format!("{class}.{method} does not end in returnvoid"));
+    }
+    let mut inserted = Vec::new();
+    for call in calls {
+        match *call {
+            Call::This(name) => {
+                let (multiname, _) = trait_method(&owner.fields, name)
+                    .ok_or_else(|| format!("{class} has no method {name}"))?;
+                inserted.push(GET_LOCAL_0);
+                op(&mut inserted, CALL_PROP_VOID, multiname);
+                put(&mut inserted, 0);
+            }
+            Call::Static {
+                class: target,
+                name,
+            } => {
+                let target = abc
+                    .classes
+                    .iter()
+                    .find(|c| abc.name(c.name).is_ok_and(|n| n.full == target))
+                    .ok_or_else(|| format!("Missing class {target}"))?;
+                let (multiname, _) = trait_method(&target.statics, name)
+                    .ok_or_else(|| format!("Missing static method {name}"))?;
+                op(&mut inserted, GET_LEX, target.name);
+                op(&mut inserted, CALL_PROP_VOID, multiname);
+                put(&mut inserted, 0);
+            }
+        }
+    }
+    if code.ends_with(&[&inserted[..], &[RETURN_VOID]].concat()) {
+        return Err(format!("{class}.{method} already has these calls"));
+    }
+    let mut new_code = code[..code.len() - 1].to_vec();
+    new_code.extend(&inserted);
+    new_code.push(RETURN_VOID);
+    Ok(Some((replace_body_code(data, body, &new_code), 1)))
+}
+
+/// The embedded Workshop movie supplies this method. Leaving it as a
+/// no-op keeps the Workshop and LAN controls available without a downloader.
+pub(in crate::patcher) fn disable_workshop_downloader(data: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+    let abc = Abc::parse(data)?;
+    let mut matches = abc.classes.iter().flat_map(|class| &class.fields).filter_map(|field| {
+        (abc.name(field.name).ok()?.local == "hbxToggleDl").then_some(field.method).flatten()
+    });
+    let Some(method) = matches.next() else { return Ok(None) };
+    if matches.next().is_some() {
+        return Err("Ambiguous Workshop downloader method".into());
+    }
+    let body = abc.bodies.iter().find(|body| body.id == method && body.exceptions == 0)
+        .ok_or("Missing Workshop downloader method body")?;
+    Ok(Some((replace_body_code(data, body, &[RETURN_VOID]), 1)))
+}
+
+fn replace_body_code(data: &[u8], body: &Body, new_code: &[u8]) -> Vec<u8> {
+    let mut rebuilt = Vec::new();
+    put(&mut rebuilt, body.id);
+    // Each call leaves at most a class and a receiver on the operand stack.
+    put(&mut rebuilt, body.stack.max(2));
+    put(&mut rebuilt, body.locals);
+    put(&mut rebuilt, body.init_scope);
+    put(&mut rebuilt, body.max_scope);
+    put(&mut rebuilt, new_code.len());
+    rebuilt.extend(new_code);
+    rebuilt.extend(&data[body.code.end..body.span.end]);
+    let mut out = data[..body.span.start].to_vec();
+    out.extend(rebuilt);
+    out.extend(&data[body.span.end..]);
+    out
+}
+
+/// Extend the team's existing colour transform to the visible boost fill.
+/// The fingerprint guards the two branch offsets we relocate and the
+/// multiname operands reused from the inspected HUD method.
+pub(in crate::patcher) fn patch_boost_ring(
+    data: &[u8],
+    enable: bool,
+) -> Result<Option<(Vec<u8>, usize)>> {
+    use sha2::{Digest, Sha256};
+
+    let abc = Abc::parse(data)?;
+    let Some(owner) = abc.classes.iter().find(|class| {
+        abc.name(class.name)
+            .is_ok_and(|name| name.full == "tagame.hud:BoostMeterView")
+    }) else {
+        return Ok(None);
+    };
+    let field = |name: &str| {
+        owner
+            .fields
+            .iter()
+            .find(|field| abc.name(field.name).is_ok_and(|entry| entry.local == name))
+            .ok_or_else(|| format!("Boost HUD is missing {name}"))
+    };
+    let method = field("onTeamColorChanged")?
+        .method
+        .ok_or("Missing boost colour handler")?;
+    let body = abc
+        .bodies
+        .iter()
+        .find(|body| body.id == method)
+        .ok_or("Missing boost colour handler body")?;
+    let code = &data[body.code.clone()];
+    const ORIGINAL: &str = "d646e74d8c2eb0ea3ffb40ddd7db79a99d7d133df2b65fe2ce7e7057df98c93f";
+    const TEAM_DISABLED_BRANCH: usize = 21;
+    const END_OF_TEAM_BLOCK: usize = 231;
+    const START_OF_NORMAL_BLOCK: usize = 235;
+    const FINAL_RETURN: usize = 378;
+
+    let mut receiver = vec![GET_LOCAL_0];
+    op(&mut receiver, 0x66, field("fillProgressBar")?.name);
+    // Copy the existing transform getter and setter on backgroundMovieClip.
+    const TRANSFORM: &[u8] = &[0x66, 0x96, 0x53];
+    const SET_COLOR_TRANSFORM: &[u8] = &[0x61, 0x99, 0x03];
+    receiver.extend(TRANSFORM);
+    let mut team = receiver.clone();
+    // this.m_teamStyle.colorTransform
+    team.extend([GET_LOCAL_0, 0x66, 0xac, 0x1d, 0x66, 0x99, 0x03]);
+    team.extend(SET_COLOR_TRANSFORM);
+    let mut normal = receiver;
+    // new ColorTransform() restores the original texture colours.
+    normal.extend([0x5d, 0x08, 0x4a, 0x08, 0x00]);
+    normal.extend(SET_COLOR_TRANSFORM);
+    if body.exceptions != 0 {
+        return Err("This Rocket League build has an unsupported boost HUD colour handler".into());
+    }
+    let patched = code.len() == FINAL_RETURN + 1 + team.len() + normal.len()
+        && code[END_OF_TEAM_BLOCK..].starts_with(&team)
+        && code.ends_with(&[normal.as_slice(), &[RETURN_VOID]].concat());
+    if patched {
+        let mut original = code[..END_OF_TEAM_BLOCK].to_vec();
+        let jump = branch(&mut original, 0x10);
+        original.extend(&code[START_OF_NORMAL_BLOCK + team.len()..FINAL_RETURN + team.len()]);
+        original.push(RETURN_VOID);
+        bind(&mut original, TEAM_DISABLED_BRANCH, START_OF_NORMAL_BLOCK)?;
+        bind(&mut original, jump, FINAL_RETURN)?;
+        if hex::encode(Sha256::digest(&original)) != ORIGINAL {
+            return Err("The team-coloured boost ring was modified by another patch".into());
+        }
+        return Ok((!enable).then(|| (replace_body_code(data, body, &original), 1)));
+    }
+    if !enable {
+        return Ok(None);
+    }
+    if hex::encode(Sha256::digest(code)) != ORIGINAL {
+        return Err("This Rocket League build has an unsupported boost HUD colour handler".into());
+    }
+
+    let mut replacement = code[..END_OF_TEAM_BLOCK].to_vec();
+    replacement.extend(team);
+    let jump = branch(&mut replacement, 0x10);
+    let normal_start = replacement.len();
+    replacement.extend(&code[START_OF_NORMAL_BLOCK..FINAL_RETURN]);
+    replacement.extend(normal);
+    let return_at = replacement.len();
+    replacement.push(RETURN_VOID);
+    bind(&mut replacement, TEAM_DISABLED_BRANCH, normal_start)?;
+    bind(&mut replacement, jump, return_at)?;
+    Ok(Some((replace_body_code(data, body, &replacement), 1)))
+}
+
+trait NameAndMethod {
+    fn copied_name_and_method(self) -> Option<(usize, usize)>;
+}
+impl NameAndMethod for Option<&Trait> {
+    fn copied_name_and_method(self) -> Option<(usize, usize)> {
+        self.and_then(|t| t.method.map(|m| (t.name, m)))
+    }
 }
 
 /// Returns None for ABCs without the game's title API. Existing indices remain
@@ -1617,3 +1887,8 @@ mod tests {
         }
     }
 }
+
+#[path = "rank_abc.rs"]
+mod rank_abc;
+use super::RankPick;
+pub(super) use rank_abc::patch as patch_ranks;

@@ -291,6 +291,7 @@ fn install(cooked: &Path, live: &Path, upk: &UpkPackage, patched: bool) -> Resul
 /// Turn the commands on.
 pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
+    backup_guard::check_install(cooked, backups)?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if is_patched(&upk)? {

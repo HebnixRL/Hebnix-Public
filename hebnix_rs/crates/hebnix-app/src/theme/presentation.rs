@@ -414,7 +414,7 @@ impl Presentation {
                 selected = Some(0);
             }
             if labels.len() > 1 {
-                let arrow = dropdown_button_styled(ui, egui::vec2(24.0, main.rect.height()), joined);
+                let arrow = dropdown_button_styled(ui, egui::vec2(24.0, main.rect.height()), joined, false);
                 if joined {
                     // One outline around two hit targets: primary action and menu.
                     let response = main.clone().union(arrow.clone());
@@ -425,7 +425,7 @@ impl Presentation {
                         egui::pos2(main.rect.right(), main.rect.bottom() - 1.0),
                     ], stroke);
                 }
-                action_menu(ui, &arrow, labels, &mut selected);
+                action_menu(ui, &arrow, labels, &mut selected, false);
             }
         });
         selected
@@ -464,8 +464,8 @@ impl Presentation {
                 selected = Some(0);
             }
             if labels.len() > 1 {
-                let arrow = dropdown_button(ui, egui::vec2(width, 24.0));
-                action_menu(ui, &arrow, labels, &mut selected);
+                let arrow = dropdown_button_styled(ui, egui::vec2(width, 24.0), false, true);
+                action_menu(ui, &arrow, labels, &mut selected, true);
             }
             return selected;
         }
@@ -488,8 +488,8 @@ impl Presentation {
             if main.clicked() {
                 selected = Some(0);
             }
-            let arrow = dropdown_button(ui, egui::vec2(menu_width, main.rect.height()));
-            action_menu(ui, &arrow, labels, &mut selected);
+            let arrow = dropdown_button_styled(ui, egui::vec2(menu_width, main.rect.height()), false, true);
+            action_menu(ui, &arrow, labels, &mut selected, true);
         });
         selected
     }
@@ -506,10 +506,10 @@ impl Presentation {
         // Let egui measure the complete button, including theme padding and
         // strokes. A guessed text width used as a maximum clips the labels.
         let text = egui::RichText::new(label).color(color(&n.text));
-        let button = if key == "Home" {
+        let button = if key == "Home" && width.is_none() {
             egui::Button::image(navigation_icon(key).fit_to_exact_size(egui::vec2(18.0,18.0))
                 .tint(color(&n.text)))
-        } else if n.icons {
+        } else if n.icons || key == "Home" {
             egui::Button::image_and_text(navigation_icon(key).fit_to_exact_size(egui::vec2(16.0,16.0))
                 .tint(color(&n.text)), text)
         } else { egui::Button::new(text) };
@@ -573,6 +573,13 @@ impl Presentation {
                 result.push(page);
             }
         }
+        if let Some(freeplay) = result.iter().position(|(id, _)| *id == "Freeplay") {
+            if result.iter().any(|(id, _)| *id == "Game Mods") {
+                let page = result.remove(freeplay);
+                let game_mods = result.iter().position(|(id, _)| *id == "Game Mods").unwrap();
+                result.insert(game_mods, page);
+            }
+        }
         if let Some(console) = result.iter().position(|(id, _)| *id == "Console") {
             if result.iter().any(|(id, _)| *id == "Settings") {
                 let page = result.remove(console);
@@ -597,6 +604,7 @@ fn navigation_icon(key: &str) -> egui::Image<'static> {
         "Colours" => egui::include_image!("../../assets/navigation/colours.svg"),
         "Items" | "UPK Studio" => egui::include_image!("../../assets/navigation/items.svg"),
         "Game Mods" => egui::include_image!("../../assets/navigation/game_mods.svg"),
+        "Freeplay" => egui::include_image!("../../assets/navigation/game_mods.svg"),
         "Plugins" => egui::include_image!("../../assets/navigation/plugins.svg"),
         "Replays" => egui::include_image!("../../assets/navigation/replays.svg"),
         "Settings" => egui::include_image!("../../assets/navigation/settings.svg"),
@@ -605,11 +613,7 @@ fn navigation_icon(key: &str) -> egui::Image<'static> {
     egui::Image::new(source)
 }
 
-fn dropdown_button(ui: &mut egui::Ui, size: egui::Vec2) -> egui::Response {
-    dropdown_button_styled(ui, size, false)
-}
-
-fn dropdown_button_styled(ui: &mut egui::Ui, size: egui::Vec2, joined: bool) -> egui::Response {
+fn dropdown_button_styled(ui: &mut egui::Ui, size: egui::Vec2, joined: bool, opens_up: bool) -> egui::Response {
     let arrow = ui
         .scope(|ui| {
             ui.spacing_mut().button_padding.x = 4.0;
@@ -629,20 +633,11 @@ fn dropdown_button_styled(ui: &mut egui::Ui, size: egui::Vec2, joined: bool) -> 
     // Draw the chevron as geometry so every theme font can display it.
     let center = arrow.rect.center();
     let stroke = ui.style().interact(&arrow).fg_stroke;
-    ui.painter().line_segment(
-        [
-            center + egui::vec2(-3.5, -1.5),
-            center + egui::vec2(0.0, 2.0),
-        ],
-        stroke,
-    );
-    ui.painter().line_segment(
-        [
-            center + egui::vec2(0.0, 2.0),
-            center + egui::vec2(3.5, -1.5),
-        ],
-        stroke,
-    );
+    let direction = if opens_up { -1.0 } else { 1.0 };
+    let tip = center + egui::vec2(0.0, 2.0 * direction);
+    let shoulder = -1.5 * direction;
+    ui.painter().line_segment([center + egui::vec2(-3.5, shoulder), tip], stroke);
+    ui.painter().line_segment([tip, center + egui::vec2(3.5, shoulder)], stroke);
     arrow
 }
 
@@ -651,8 +646,15 @@ fn action_menu(
     arrow: &egui::Response,
     labels: &[String],
     selected: &mut Option<usize>,
+    opens_up: bool,
 ) {
-    egui::Popup::menu(arrow)
+    let popup = egui::Popup::menu(arrow);
+    let popup = if opens_up {
+        popup.align(egui::RectAlign::TOP_END).align_alternatives(&[])
+    } else {
+        popup
+    };
+    popup
         .open_memory(arrow.clicked().then_some(egui::SetOpenCommand::Toggle))
         .width(ui.available_width().clamp(180.0, 360.0))
         .layout(egui::Layout::top_down(egui::Align::Min))

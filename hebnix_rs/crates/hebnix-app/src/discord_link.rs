@@ -213,7 +213,10 @@ fn link_account(code: &str) -> LinkResult {
         Err(ureq::Error::Status(status, response)) => {
             let detail = read_response(response)
                 .ok()
-                .and_then(|body| response_message(&body))
+                .and_then(|body| {
+                    hebnix_sdk::req_auth::observe_response(status, &body);
+                    response_message(&body)
+                })
                 .unwrap_or_else(|| format!("Discord link request returned HTTP {status}."));
             return LinkResult {
                 result: Err(detail),

@@ -8,7 +8,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use eframe::egui;
@@ -25,6 +25,7 @@ mod archive;
 mod banner_image;
 mod background_changer;
 mod hosted;
+pub(crate) mod freeplay;
 pub(crate) mod ingame_menu;
 mod lan_mutators;
 mod menu_map;
@@ -48,6 +49,7 @@ use local_import::{
 };
 
 const MULTIHOME_CHECK_MAX_ATTEMPTS: u8 = 30;
+const PEER_OFFLINE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MULTIPLAYER_SETTINGS_FILE: &str = "multiplayer_settings.json";
 const MULTIHOME_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -467,48 +469,72 @@ impl MapManager {
 
 /// the player list grows a search box past this many players
 const PLAYER_SEARCH_THRESHOLD: usize = 6;
+const MAX_TOOLTIP_NAMES: usize = 10;
 const OK_COLOUR: egui::Color32 = egui::Color32::LIGHT_GREEN;
 const WARN_COLOUR: egui::Color32 = egui::Color32::from_rgb(0xf3, 0x9c, 0x12);
-
-/// a player's maps in one line: "Map", "Map + 2 more" or "no map replaced"
-/// a player's hosted map in one line, or "no map hosted"
-fn offer_map_summary(maps: &[SlotMap]) -> String {
-    maps.iter()
-        .find(|map| map.slot == HOSTING_SLOT)
-        .map_or_else(|| "no map hosted".to_string(), |map| map.name.clone())
-}
 
 fn matches_filter(label: &str, filter: &str) -> bool {
     let filter = filter.trim();
     filter.is_empty() || label.to_lowercase().contains(&filter.to_lowercase())
 }
 
-/// "Name — Map", the map part coloured by whether they host one
-fn player_header(ui: &egui::Ui, offer: &PeerOffer) -> egui::text::LayoutJob {
-    let font = egui::TextStyle::Body.resolve(ui.style());
-    let visuals = ui.visuals();
-    let hosting = offer.maps.iter().any(|map| map.slot == HOSTING_SLOT);
-    let map_colour = if hosting { OK_COLOUR } else { visuals.weak_text_color() };
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        &offer.label(),
-        0.0,
-        egui::TextFormat::simple(font.clone(), visuals.strong_text_color()),
-    );
-    job.append(
-        " — ",
-        0.0,
-        egui::TextFormat::simple(font.clone(), visuals.weak_text_color()),
-    );
-    job.append(
-        &offer_map_summary(&offer.maps),
-        0.0,
-        egui::TextFormat::simple(font, map_colour),
-    );
-    job
+/// what's off about one of your slots for one player, None if they match
+fn slot_problem(offer: &PeerOffer, slot: &str, id: &str) -> Option<String> {
+    let who = offer.label();
+    match offer.maps.iter().find(|m| m.slot == slot) {
+        Some(theirs) if theirs.id == id => None,
+        Some(theirs) => Some(format!("{who} has {} here", theirs.name)),
+        None => Some(match offer.maps.iter().find(|m| m.id == id) {
+            Some(elsewhere) => format!("{who} put it in {} instead", elsewhere.slot),
+            None => format!("{who} hasn't replaced it"),
+        }),
+    }
 }
 
-/// a player's hosted map once their row is expanded, with the download
+/// one of your replaced slots, with a short "does everyone match" status
+fn render_my_slot(ui: &mut egui::Ui, slot: &str, data: &Value, offers: &[PeerOffer]) {
+    let id = id_of(data);
+    let name = str_of(data, "name", slot);
+    let problems: Vec<String> = offers
+        .iter()
+        .filter_map(|offer| slot_problem(offer, slot, &id))
+        .collect();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!("  {slot}: {name}"));
+        if offers.is_empty() {
+            return;
+        }
+        if problems.is_empty() {
+            ui.colored_label(OK_COLOUR, t("my-slot-everyone-has-it"));
+            return;
+        }
+        let mut tip = problems
+            .iter()
+            .take(MAX_TOOLTIP_NAMES)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if problems.len() > MAX_TOOLTIP_NAMES {
+            tip.push_str(&format!(
+                "\nand {} more",
+                problems.len() - MAX_TOOLTIP_NAMES
+            ));
+        }
+        ui.colored_label(
+            WARN_COLOUR,
+            t_args(
+                "my-slot-problems-of-offers-players-differ",
+                &[
+                    ("problems", (problems.len()).to_string().into()),
+                    ("offers", (offers.len()).to_string().into()),
+                ],
+            ),
+        )
+        .on_hover_text(tip);
+    });
+}
+
+/// A player's advertised maps and install options.
 fn render_player_maps(
     ui: &mut egui::Ui,
     offer: &PeerOffer,
@@ -516,54 +542,43 @@ fn render_player_maps(
     busy: bool,
     install: &mut Option<(SlotMap, IpAddr, bool)>,
 ) {
-    let Some(map) = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT) else {
-        ui.small(t("player-maps-hasn-t-replaced-any-map"));
-        return;
-    };
-    let have = peer_workshop_file(workshop, map).is_some();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
-        if have {
-            ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
-        } else if ui
-            .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
-            .clicked()
-        {
-            // the cdn first, the peer only if that fails: it may be a Steam or hand-made map the cdn lacks
-            let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map.clone() };
-            *install = Some((target, offer.ip, true));
-        }
-    });
-}
-
-/// everyone else who's on, with how they're connected
-fn render_players(ui: &mut egui::Ui, players: &[PeerLink]) {
-    if players.is_empty() {
-        ui.small(t("multiplayer-no-other-players-online"));
-        return;
-    }
-    egui::CollapsingHeader::new(t_n("multiplayer-players-online", players.len() as i64))
-        .id_salt("workshop_players_online")
-        .default_open(players.len() <= 6)
-        .show(ui, |ui| {
-            for player in players {
-                let link = if player.path == "unreachable" {
-                    t("multiplayer-link-unreachable")
-                } else {
-                    let route = if player.path == "direct" {
-                        t("multiplayer-route-direct")
-                    } else {
-                        t("multiplayer-route-relay")
-                    };
-                    let ping = player.latency_ms.map_or(0, |ms| ms.round() as i64);
-                    t_args(
-                        "multiplayer-link",
-                        &[("route", route.into()), ("ping", ping.into())],
-                    )
-                };
-                ui.small(format!("{}: {link}", player.name));
+    if let Some(map) = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT) {
+        let have = peer_workshop_file(workshop, map).is_some();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
+            if have {
+                ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
+            } else if ui
+                .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
+                .clicked()
+            {
+                // from the peer: it may be a Steam or hand-made map the cdn lacks
+                let target = SlotMap { slot: WORKSHOP_TARGET.to_string(), ..map.clone() };
+                *install = Some((target, offer.ip, true));
             }
         });
+    }
+}
+
+fn multiplayer_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(60.0, 46.0), egui::Sense::hover());
+    for (x, y, colour) in [
+        (42.0, 14.0, ui.visuals().weak_text_color()),
+        (24.0, 11.0, ui.visuals().text_color()),
+    ] {
+        let center = rect.min + egui::vec2(x, y);
+        let stroke = egui::Stroke::new(2.0, colour);
+        ui.painter().circle_stroke(center, 8.0, stroke);
+        let base = center + egui::vec2(0.0, 26.0);
+        let mut outline: Vec<_> = (0..=16)
+            .map(|step| {
+                let angle = std::f32::consts::PI * step as f32 / 16.0;
+                base + egui::vec2(14.0 * angle.cos(), -14.0 * angle.sin())
+            })
+            .collect();
+        outline.push(outline[0]);
+        ui.painter().add(egui::Shape::line(outline, stroke));
+    }
 }
 
 fn multiplayer_help_button(ui: &mut egui::Ui) {
@@ -683,6 +698,7 @@ pub enum ImageState {
 enum WorkshopView {
     Browse,
     Import,
+    ArenaBackgrounds,
     MenuMap,
     InGameMenu,
     Multiplayer,
@@ -696,6 +712,11 @@ pub enum StudioMapPage {
 
 struct MultiplayerState {
     wizard_started: bool,
+    reconnect_enabled: bool,
+    disconnect_on_close: bool,
+    player_online_toasts: bool,
+    peer_presence: HashMap<String, Option<Instant>>,
+    resume_pending: bool,
     host_name: String,
     identity_update_in_flight: bool,
     identity_updated: bool,
@@ -721,7 +742,7 @@ struct MultiplayerState {
     pending_peer_install: Option<(SlotMap, IpAddr, bool)>,
     /// the warning was accepted once this session, don't ask again
     peer_warning_accepted: bool,
-    /// Back was pressed while the tailnet was still starting; the finished
+    /// Disconnect was pressed while the tailnet was still starting; the finished
     /// connection gets dropped instead of kept
     abandon_tailnet: bool,
     /// search text for the player list
@@ -731,8 +752,6 @@ struct MultiplayerState {
     relay_only: bool,
     /// connect again on launch until the player disconnects by hand
     /// (saved in multiplayer_settings.json)
-    auto_connect: bool,
-    auto_connect_tried: bool,
     // multiplayer sidecar state
     sidecar: Option<Arc<TailcatSidecarHandle>>,
     tailnet_requested: bool,
@@ -747,11 +766,6 @@ struct MultiplayerState {
     launch_ready: bool,
     multihome_check_attempts: u8,
     multihome_check_in_flight: bool,
-    /// true while Hebnix itself is closing/relaunching Rocket League, so the
-    /// RL-monitor's "closed" transition doesn't arm the crash grace window
-    /// for a restart Hebnix initiated on purpose
-    launching_rocket_league: bool,
-
     /// set when Rocket League closes with a session still active; if it
     /// doesn't come back before this deadline, the session is torn down for
     /// real (see CRASH_GRACE_WINDOW)
@@ -768,6 +782,11 @@ impl Default for MultiplayerState {
     fn default() -> Self {
         Self {
             wizard_started: false,
+            reconnect_enabled: false,
+            disconnect_on_close: false,
+            player_online_toasts: true,
+            peer_presence: HashMap::new(),
+            resume_pending: false,
             host_name: "Hebnix Workshop".to_string(),
             identity_update_in_flight: false,
             identity_updated: false,
@@ -789,8 +808,6 @@ impl Default for MultiplayerState {
             player_filter: String::new(),
             abandon_tailnet: false,
             relay_only: false,
-            auto_connect: false,
-            auto_connect_tried: false,
             sidecar: None,
             tailnet_requested: false,
             tunnel_ready: false,
@@ -799,7 +816,6 @@ impl Default for MultiplayerState {
             launch_ready: false,
             multihome_check_attempts: 0,
             multihome_check_in_flight: false,
-            launching_rocket_league: false,
             shutdown_deadline: None,
         }
     }
@@ -845,7 +861,6 @@ pub struct WorkshopState {
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
     multiplayer: MultiplayerState,
-    rl_launch: crate::config::RlLaunchCfg,
     /// the "P2P File Sharing" system setting. read by the map sync server
     /// each time a player asks for a file, so it applies straight away.
     share_files: Arc<AtomicBool>,
@@ -862,8 +877,9 @@ impl WorkshopState {
         let views: Vec<WorkshopView> = [
             WorkshopView::Browse,
             WorkshopView::Import,
-            WorkshopView::MenuMap,
+            WorkshopView::ArenaBackgrounds,
             WorkshopView::InGameMenu,
+            WorkshopView::MenuMap,
             WorkshopView::Multiplayer,
         ]
         .into_iter()
@@ -875,7 +891,9 @@ impl WorkshopState {
 }
 
 impl WorkshopState {
-    pub(crate) fn maintenance_busy(&self) -> bool { self.background_changer.busy() }
+    pub(crate) fn maintenance_busy(&self) -> bool {
+        self.background_changer.busy() || self.ingame_menu.busy()
+    }
 
     pub fn new(base_dir: &Path) -> Self {
         let manager = MapManager::new(base_dir);
@@ -884,16 +902,17 @@ impl WorkshopState {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
         let mut multiplayer = MultiplayerState::default();
         multiplayer.saved_host = saved_host;
-        multiplayer.relay_only = std::fs::read(manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE))
+        if let Some(settings) = std::fs::read(manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|settings| settings.get("relay_only").and_then(Value::as_bool))
-            .unwrap_or(false);
-        multiplayer.auto_connect = std::fs::read(manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|settings| settings.get("auto_connect").and_then(Value::as_bool))
-            .unwrap_or(false);
+        {
+            multiplayer.relay_only = settings["relay_only"].as_bool().unwrap_or(false);
+            multiplayer.disconnect_on_close = settings["disconnect_on_close"].as_bool().unwrap_or(false);
+            multiplayer.player_online_toasts = settings["player_online_toasts"].as_bool().unwrap_or(true);
+            multiplayer.reconnect_enabled = !multiplayer.disconnect_on_close
+                && settings["reconnect"].as_bool().or_else(|| settings["auto_connect"].as_bool()).unwrap_or(false);
+            multiplayer.resume_pending = multiplayer.reconnect_enabled;
+        }
         Self {
             manager,
             catalog: Vec::new(),
@@ -927,7 +946,6 @@ impl WorkshopState {
             steam_downloader: SteamDownloader::default(),
             archive_browser: ArchiveBrowser::default(),
             multiplayer,
-            rl_launch: crate::config::RlLaunchCfg::default(),
             share_files: Arc::new(AtomicBool::new(true)),
             workshop_maps: PathBuf::new(),
             panel_mode: false,
@@ -980,10 +998,14 @@ impl WorkshopState {
             return;
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        if crate::patcher::workshop_menu::downloader_on(&cooked) || crate::patcher::instant_suite::wanted() {
+        let downloader = crate::patcher::workshop_menu::downloader_on(&cooked);
+        if downloader || crate::patcher::instant_suite::wanted() {
             crate::preview_server::start(&self.manager.cache_dir);
         }
-        if std::mem::take(&mut self.downloads_stale) && crate::patcher::workshop_menu::downloader_on(&cooked) {
+        if !downloader {
+            return;
+        }
+        if std::mem::take(&mut self.downloads_stale) {
             let cooked = cooked.clone();
             std::thread::spawn(move || drop(ingame_menu::refresh(&cooked)));
         }
@@ -1173,10 +1195,8 @@ impl WorkshopState {
         page: StudioMapPage,
         ui: &mut egui::Ui,
         rl_path: &str,
-        rl_launch: &crate::config::RlLaunchCfg,
         tx: &Sender<AppMsg>,
     ) {
-        self.rl_launch = rl_launch.clone();
         match page {
             StudioMapPage::ArenaBackgrounds => self.background_changer.render(ui, rl_path, tx),
         }
@@ -1211,21 +1231,8 @@ impl WorkshopState {
         });
     }
 
-    /// Once per run, from any tab: connect again if the player connected last time and has
-    /// not disconnected since, and keep the LAN host setting in step with the connection.
-    pub fn auto_connect(
-        &mut self,
-        rl_path: &str,
-        tx: &Sender<AppMsg>,
-        ctx: &eframe::egui::Context,
-    ) {
-        if !self.multiplayer.auto_connect_tried {
-            self.multiplayer.auto_connect_tried = true;
-            if self.multiplayer.auto_connect && !self.multiplayer.wizard_started {
-                self.multiplayer.wizard_started = true;
-                self.start_tailnet(tx, ctx);
-            }
-        }
+    /// Keeps the in-game LAN host setting in sync from any tab.
+    pub fn sync_lan_connection(&mut self, rl_path: &str) {
         let connected = self.multiplayer.tunnel_ready;
         if self.lan_synced != Some(connected) && !rl_path.is_empty() {
             self.lan_synced = Some(connected);
@@ -1233,15 +1240,13 @@ impl WorkshopState {
         }
     }
 
-    /// render the tab. rl_path and rl_launch come from the app config.
+    /// Render the Maps tab using the configured Rocket League path.
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
         rl_path: &str,
-        rl_launch: &crate::config::RlLaunchCfg,
         tx: &Sender<AppMsg>,
     ) {
-        self.rl_launch = rl_launch.clone();
         let connected = self.multiplayer.tunnel_ready;
         if self.lan_synced != Some(connected) {
             self.lan_synced = Some(connected);
@@ -1254,7 +1259,7 @@ impl WorkshopState {
         );
         let ctx = ui.ctx().clone();
 
-        if crate::theme::presentation(&ctx).is_some() {
+        if crate::theme::presentation(&ctx).is_some_and(|theme| theme.layout.show_page_heading) {
             ui.heading(t("tab-workshop"));
             ui.add_space(8.0);
         }
@@ -1265,14 +1270,15 @@ impl WorkshopState {
                 t("render-browse-maps"),
             );
             ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
-            if !self.panel_mode {
-                ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
-            }
+            ui.selectable_value(&mut self.view, WorkshopView::ArenaBackgrounds, t("nav-arena-backgrounds"));
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::InGameMenu,
                 if self.panel_mode { "LAN settings" } else { "In-game menu" },
             );
+            if !self.panel_mode {
+                ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+            }
             ui.selectable_value(
                 &mut self.view,
                 WorkshopView::Multiplayer,
@@ -1280,37 +1286,48 @@ impl WorkshopState {
             );
         });
         ui.separator();
+        if self.view == WorkshopView::ArenaBackgrounds {
+            egui::ScrollArea::vertical().id_salt("arena_backgrounds_page").show(ui, |ui| {
+                crate::i18n::layout::bordered_panel(ui, |ui| self.background_changer.render(ui, rl_path, tx));
+            });
+            return;
+        }
         if self.view == WorkshopView::Import {
-            let imported =
-                self.import_wizard
-                    .render(ui, &self.manager.cache_dir, &self.manager.runtime_dir);
-            if let Some(map) = imported {
-                self.add_local_map(map);
-            }
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(8.0);
-            let downloaded = self.steam_downloader.render(
-                ui,
-                &self.manager.cache_dir,
-                &self.manager.runtime_dir,
-            );
-            if let Some(map) = downloaded {
-                self.add_local_map(map);
-            }
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(8.0);
-            let from_archive =
-                self.archive_browser
-                    .render(ui, &self.manager.cache_dir, &self.manager.runtime_dir);
-            if let Some(map) = from_archive {
-                self.add_local_map(map);
-            }
+            egui::ScrollArea::vertical()
+                .id_salt("workshop_add_maps")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        if let Some(map) = self.import_wizard.render(
+                            ui, &self.manager.cache_dir, &self.manager.runtime_dir,
+                        ) {
+                            self.add_local_map(map);
+                        }
+                    });
+                    ui.add_space(8.0);
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        if let Some(map) = self.steam_downloader.render(
+                            ui, &self.manager.cache_dir, &self.manager.runtime_dir,
+                        ) {
+                            self.add_local_map(map);
+                        }
+                    });
+                    ui.add_space(8.0);
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        if let Some(map) = self.archive_browser.render(
+                            ui, &self.manager.cache_dir, &self.manager.runtime_dir,
+                        ) {
+                            self.add_local_map(map);
+                        }
+                    });
+                });
             return;
         }
         if self.view == WorkshopView::Multiplayer {
-            self.render_multiplayer(ui, rl_path, tx, &ctx);
+            egui::ScrollArea::vertical()
+                .id_salt("workshop_multiplayer_page")
+                .auto_shrink([false, false])
+                .show(ui, |ui| self.render_multiplayer(ui, rl_path, tx, &ctx));
             return;
         }
         if self.view == WorkshopView::InGameMenu {
@@ -1322,7 +1339,10 @@ impl WorkshopState {
         }
         if self.view == WorkshopView::MenuMap {
             let custom = self.cached_maps();
-            self.menu_map.render(ui, rl_path, &custom, tx);
+            egui::ScrollArea::vertical()
+                .id_salt("workshop_menu_maps")
+                .auto_shrink([false, false])
+                .show(ui, |ui| self.menu_map.render(ui, rl_path, &custom, tx));
             return;
         }
 
@@ -1503,117 +1523,159 @@ impl WorkshopState {
         }
     }
 
-    /// One flow, not two: Rocket League's own UI is where someone picks
-    /// Host or Join, not Hebnix's. Every peer runs the identical relay
-    /// (confirmed by packet capture that joining broadcasts too, not just
-    /// hosting - see hosting.rs), so there's nothing left for Hebnix to
-    /// ask about up front. Connect, start Rocket League, the relay starts
-    /// itself the moment the game's actually up - no separate button.
     fn render_multiplayer(
         &mut self,
         ui: &mut egui::Ui,
         rl_path: &str,
         tx: &Sender<AppMsg>,
-        ctx: &eframe::egui::Context,
+        ctx: &egui::Context,
     ) {
         if !self.multiplayer.wizard_started {
-            ui.add_space(56.0);
-            ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            crate::i18n::layout::bordered_panel(ui, |ui| {
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
+                    multiplayer_icon(ui);
+                    ui.heading(t("multiplayer-workshop-multiplayer"));
+                    ui.separator();
+                    let width = ui.available_width().min(560.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, 0.0),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            ui.set_width(width);
+                            ui.weak(t("multiplayer-connect-intro"));
+                        },
+                    );
+                    ui.add_space(10.0);
+                    if ui
+                        .checkbox(
+                            &mut self.multiplayer.relay_only,
+                            t("multiplayer-hide-my-ip-from-other-players"),
+                        )
+                        .on_hover_text(t("multiplayer-relay-only-hover"))
+                        .changed()
+                    {
+                        self.save_multiplayer_settings();
+                    }
+                    ui.add_space(8.0);
+                    let stopping = self.multiplayer.tailnet_requested
+                        || self.multiplayer.setup_progress.is_some();
+                    if ui
+                        .add_enabled(
+                            !stopping,
+                            egui::Button::new(t("multiplayer-connect"))
+                                .min_size(egui::vec2(180.0, 36.0)),
+                        )
+                        .clicked()
+                    {
+                        self.connect_multiplayer(tx, ctx);
+                    }
+                    ui.add_space(8.0);
+                    multiplayer_help_button(ui);
+                    self.render_multiplayer_preferences(ui);
+                    ui.weak(&self.multiplayer.status);
+                });
+                ui.add_space(12.0);
+            });
+            return;
+        }
+
+        if ui.available_width() >= 700.0 {
+            ui.horizontal(|ui| {
                 ui.heading(t("multiplayer-workshop-multiplayer"));
-                ui.label(t("multiplayer-connect-intro"));
-                ui.add_space(12.0);
-                if ui
-                    .checkbox(
-                        &mut self.multiplayer.relay_only,
-                        t("multiplayer-hide-my-ip-from-other-players"),
-                    )
-                    .on_hover_text(t("multiplayer-relay-only-hover"))
-                    .changed()
-                {
-                    self.save_multiplayer_settings();
-                }
-                ui.add_space(12.0);
-                if ui
-                    .add_sized([160.0, 38.0], egui::Button::new(t("multiplayer-connect")))
-                    .clicked()
-                {
-                    self.multiplayer.wizard_started = true;
-                    self.multiplayer.auto_connect = true;
-                    self.save_multiplayer_settings();
-                    self.start_tailnet(tx, ctx);
-                }
-                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), multiplayer_help_button);
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                ui.heading(t("multiplayer-workshop-multiplayer"));
                 multiplayer_help_button(ui);
             });
-            return;
         }
-        let mut start_relay = false;
+        ui.separator();
         let mut stop = false;
-        let mut launch = false;
         let mut close_game = false;
-        let mut install_peer_map: Option<(SlotMap, IpAddr, bool)> = None;
-        let mut block_peer: Option<(IpAddr, String)> = None;
-        let mut unblock_peer: Option<IpAddr> = None;
-        let setup_in_progress = self.multiplayer.setup_progress.is_some();
-        let tunnel_ready = self.multiplayer.tunnel_ready;
-        let mut back = false;
-        ui.horizontal(|ui| {
-            if self.multiplayer.relay.is_none() && ui.button(t("multiplayer-back")).clicked() {
-                back = true;
-            }
-            ui.strong(t("multiplayer-workshop-multiplayer"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                multiplayer_help_button(ui);
-            });
-        });
-        if back {
-            self.leave_multiplayer_setup();
-            return;
-        }
-        ui.group(|ui| {
-            ui.strong(t("multiplayer-setup"));
-            if !tunnel_ready {
-                ui.label(t("multiplayer-connecting-to-the-private-workshop-netwo"));
-                return;
-            }
-            render_players(ui, &self.multiplayer.players);
-            if !self.multiplayer.rl_open {
-                ui.label(t("multiplayer-start-rocket-league-normally"));
-                if ui
-                    .add_enabled(
-                        !setup_in_progress,
-                        egui::Button::new(t("action-start-rocket-league")),
-                    )
-                    .clicked()
-                {
-                    launch = true;
-                }
-            } else if !self.multiplayer.launch_ready {
-                if self.waiting_for_multihome_check() {
-                    ui.label(t("multiplayer-step-1-waiting-for-rocket-league"));
-                    ui.small(format!("{} ", t("multiplayer-checking-launch-command")));
+        let mut sync_slots = false;
+        let mut install_peer_map = None;
+        let mut block_peer = None;
+        let mut unblock_peer = None;
+        let mut setup = |ui: &mut egui::Ui, workshop: &mut Self| {
+            crate::i18n::layout::bordered_panel(ui, |ui| {
+                ui.heading(t("multiplayer-setup"));
+                ui.separator();
+                if !workshop.multiplayer.tunnel_ready {
+                    ui.label(t("multiplayer-connecting-to-the-private-workshop-netwo"));
+                } else if !workshop.multiplayer.rl_open {
+                    ui.label(t("multiplayer-start-rocket-league-normally"));
+                } else if !workshop.multiplayer.launch_ready {
+                    if workshop.waiting_for_multihome_check() {
+                        ui.label(t("multiplayer-step-1-waiting-for-rocket-league"));
+                        ui.weak(t("multiplayer-checking-launch-command"));
+                    } else {
+                        ui.label(t("multiplayer-rocket-league-still-uses-multihome"));
+                        close_game = ui.button(t("action-close-rocket-league")).clicked();
+                    }
+                } else if workshop.multiplayer.relay.is_none() {
+                    ui.label(t("multiplayer-starting-the-workshop-relay"));
                 } else {
-                    ui.label(t("multiplayer-rocket-league-still-uses-multihome"));
-                    if ui.button(t("action-close-rocket-league")).clicked() {
-                        close_game = true;
+                    ui.label(t("multiplayer-ready-host-or-join-from-rocket"));
+                    ui.small(t("multiplayer-set-a-match-password"));
+                    if let Some(name) = &workshop.multiplayer.detected_map {
+                        ui.small(t_args(
+                            "multiplayer-detected-lan-match-on-map-name",
+                            &[("name", name.to_string().into())],
+                        ));
                     }
                 }
-            } else if self.multiplayer.relay.is_none() {
-                ui.label(t("multiplayer-starting-the-workshop-relay"));
-                if !setup_in_progress {
-                    start_relay = true;
-                }
-            } else {
-                ui.label(t("multiplayer-ready-host-or-join-from-rocket"));
-                ui.small(t("multiplayer-set-a-match-password"));
-                if let Some(name) = &self.multiplayer.detected_map {
-                    ui.small(t_args(
-                        "multiplayer-detected-lan-match-on-map-name",
-                        &[("name", name.to_string().into())],
-                    ));
-                }
+                ui.add_space(8.0);
+                let button_size = egui::vec2(ui.available_width(), 32.0);
+                sync_slots = ui.add_enabled_ui(workshop.multiplayer.tunnel_ready, |ui| {
+                    ui.add_sized(button_size, egui::Button::new("Sync Map Slots"))
+                }).inner
+                    .on_disabled_hover_text("Connect to Workshop Multiplayer first.")
+                    .on_hover_text("Prepare your map slots now and load the maps other players are hosting.")
+                    .clicked();
+                stop = ui.add_sized(button_size, egui::Button::new(t("multiplayer-disconnect"))).clicked();
+                workshop.render_multiplayer_preferences(ui);
+            });
+        };
+        let mut players = |ui: &mut egui::Ui, workshop: &mut Self| {
+            workshop.render_multiplayer_players(ui, &mut install_peer_map, &mut block_peer, &mut unblock_peer);
+            if !workshop.multiplayer.status.is_empty() {
+                ui.add_space(6.0);
+                ui.label(&workshop.multiplayer.status);
             }
-        });
+            if let Some(progress) = &workshop.multiplayer.setup_progress {
+                ui.add(egui::ProgressBar::new(0.5).animate(true).text(progress));
+            }
+        };
+        let available = ui.available_width();
+        if available < 580.0 {
+            setup(ui, self);
+            ui.add_space(8.0);
+            players(ui, self);
+        } else {
+            let setup_width = (available * 0.27).clamp(220.0, 340.0);
+            let players_width = available - setup_width - ui.spacing().item_spacing.x;
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(setup_width);
+                    setup(ui, self);
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(players_width);
+                    players(ui, self);
+                });
+            });
+        }
+        if stop {
+            self.disconnect_multiplayer(tx, true);
+            return;
+        }
+        if sync_slots {
+            self.sync_multiplayer_slots(rl_path, ctx);
+        }
+
         let received: Vec<LocalMap> = self
             .multiplayer
             .received_maps
@@ -1623,72 +1685,6 @@ impl WorkshopState {
         for map in received {
             self.add_local_map(map);
         }
-        if self.multiplayer.relay.is_some() {
-            self.render_maps_in_use(ui, &mut install_peer_map, &mut block_peer);
-        }
-        if let Some(session) = &self.multiplayer.relay {
-            let blocked = session.blocked();
-            if !blocked.is_empty() {
-                ui.group(|ui| {
-                    egui::CollapsingHeader::new(t_args(
-                        "multiplayer-blocked-players-blocked",
-                        &[("blocked", (blocked.len()).to_string().into())],
-                    ))
-                    .id_salt("workshop_blocked_players")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.small(t("multiplayer-blocks-last-until-you-disconnect"));
-                        for (ip, label) in &blocked {
-                            ui.horizontal(|ui| {
-                                ui.label(label);
-                                if ui.small_button(t("multiplayer-unblock")).clicked() {
-                                    unblock_peer = Some(*ip);
-                                }
-                            });
-                        }
-                    });
-                });
-            }
-        }
-        if self.multiplayer.relay.is_some() {
-            ui.group(|ui| {
-                ui.strong(t("multiplayer-connected"));
-                if ui.button(t("multiplayer-disconnect")).clicked() {
-                    stop = true;
-                }
-                if ui
-                    .button("Sync map slots")
-                    .on_hover_text("Prepare your map slots now and load the maps other players are hosting, instead of waiting for the next automatic check.")
-                    .clicked()
-                {
-                    let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-                    if crate::patcher::workshop_lan_trial::enabled(&cooked) {
-                        crate::patcher::workshop_slots::ensure_pool(&cooked);
-                        self.slot_sync_asked = true;
-                        self.join_polled = None;
-                        // empty title = fetch every hosted map you are missing
-                        self.sync_title = Some(String::new());
-                        self.multiplayer.status = "Syncing map slots...".into();
-                        crate::toast::report("slot-sync", "Syncing map slots...", None, false);
-                    } else {
-                        self.multiplayer.status =
-                            "Enable the in-game Workshop menu first (Maps > In-game menu).".into();
-                        crate::toast::report_failed("slot-sync", &self.multiplayer.status);
-                    }
-                    ctx.request_repaint();
-                }
-            });
-        }
-        ui.add_space(10.0);
-        ui.label(&self.multiplayer.status);
-        if let Some(progress) = &self.multiplayer.setup_progress {
-            ui.add(egui::ProgressBar::new(0.5).animate(true).text(progress));
-        }
-
-        if launch {
-            self.launch_multiplayer(rl_path, tx, ctx);
-        }
-
         if let Some(session) = &self.multiplayer.relay {
             if let Some((ip, label)) = block_peer {
                 session.block(ip, label);
@@ -1715,53 +1711,44 @@ impl WorkshopState {
                 let _ = crate::winutil::kill_rocket_league();
             });
         }
-
-        if stop {
-            self.multiplayer.auto_connect = false;
-            self.save_multiplayer_settings();
-            self.disconnect_multiplayer(tx);
-        }
-        if start_relay {
-            self.start_relay(rl_path, tx, ctx);
-        }
     }
 
-    /// Back before the session is running: stop the sidecar and remove the
-    /// firewall rules instead of leaving them until Hebnix closes.
-    fn leave_multiplayer_setup(&mut self) {
-        self.multiplayer.auto_connect = false;
-        self.save_multiplayer_settings();
-        self.multiplayer.wizard_started = false;
-        self.multiplayer.pending_peer_install = None;
-        self.multiplayer.setup_progress = None;
-        self.multiplayer.tunnel_ready = false;
-        self.multiplayer.players.clear();
-        self.multiplayer.launch_ready = false;
-        self.multiplayer.launching_rocket_league = false;
-        self.multiplayer.multihome_check_attempts = 0;
-        self.multiplayer.multihome_check_in_flight = false;
-        self.multiplayer.status = t("default-connect-then-host-or-join-inside").to_string();
-        let sidecar = self.multiplayer.sidecar.take();
-        if sidecar.is_none() && self.multiplayer.tailnet_requested {
-            // still starting up in the background, so there's nothing to drop
-            // yet: throw it away the moment it reports in (Connect again
-            // before then just keeps it, see start_tailnet)
-            self.multiplayer.abandon_tailnet = true;
+    fn sync_multiplayer_slots(&mut self, rl_path: &str, ctx: &egui::Context) {
+        let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if crate::patcher::workshop_lan_trial::enabled(&cooked) {
+            crate::patcher::workshop_slots::ensure_pool(&cooked);
+            if let Some(session) = &self.multiplayer.relay {
+                session.poll_now();
+            }
+            self.slot_sync_asked = true;
+            self.join_polled = None;
+            self.sync_title = Some(String::new());
+            self.multiplayer.status = if self.multiplayer.relay.is_some() {
+                "Syncing map slots...".into()
+            } else {
+                "Map slots prepared. Hosted maps will sync once Rocket League is open.".into()
+            };
+            crate::toast::report("slot-sync", &self.multiplayer.status, None, false);
         } else {
-            self.multiplayer.tailnet_requested = false;
+            self.multiplayer.status =
+                "Enable the in-game Workshop menu first (Maps > In-game menu).".into();
+            crate::toast::report_failed("slot-sync", &self.multiplayer.status);
         }
-        // dropping the handle waits for the sidecar to exit, and the cleanup
-        // runs external commands, so none of it on the ui thread
-        std::thread::Builder::new()
-            .name("workshop-leave".into())
-            .spawn(move || {
-                drop(sidecar);
-                let _ = crate::multiplayer_lan::cleanup_system_state();
-            })
-            .ok();
+        ctx.request_repaint();
     }
 
-    fn disconnect_multiplayer(&mut self, tx: &Sender<AppMsg>) {
+    fn disconnect_multiplayer(&mut self, tx: &Sender<AppMsg>, forget: bool) {
+        if forget {
+            self.multiplayer.reconnect_enabled = false;
+            self.multiplayer.resume_pending = false;
+            self.save_multiplayer_settings();
+        }
+        let starting_tailnet = self.multiplayer.sidecar.is_none() && self.multiplayer.tailnet_requested;
+        let starting_relay = self.multiplayer.setup_progress.is_some();
+        self.multiplayer.abandon_tailnet = starting_tailnet;
+        self.multiplayer.pending_peer_install = None;
+        self.slot_sync_asked = false;
+        self.sync_title = None;
         let was_connected = self.multiplayer.tunnel_ready;
         let cleanup_error = self
             .multiplayer
@@ -1770,16 +1757,18 @@ impl WorkshopState {
             .and_then(|mut session| session.stop().err());
         // dropping the last handle stops the sidecar
         self.multiplayer.sidecar = None;
-        let _ = crate::multiplayer_lan::cleanup_system_state();
-        self.multiplayer.tailnet_requested = false;
+        if !starting_tailnet && !starting_relay {
+            let _ = crate::multiplayer_lan::cleanup_system_state();
+        }
+        self.multiplayer.tailnet_requested = starting_tailnet;
         self.multiplayer.wizard_started = false;
         self.multiplayer.tunnel_ready = false;
         self.multiplayer.players.clear();
+        self.multiplayer.peer_presence.clear();
         self.multiplayer.launch_ready = false;
         self.multiplayer.multihome_check_attempts = 0;
         self.multiplayer.multihome_check_in_flight = false;
         self.multiplayer.shutdown_deadline = None;
-        self.multiplayer.setup_progress = None;
         self.multiplayer.status = match cleanup_error {
             Some(error) => format!(
                 "Disconnected, but cleanup failed: {}",
@@ -1792,15 +1781,40 @@ impl WorkshopState {
         }
     }
 
-    /// Starts the multiplayer sidecar, which connects to everyone else who's
-    /// on. This happens before Rocket League is touched at all; RL can be
-    /// open already, since nothing about its launch changes.
-    fn start_tailnet(&mut self, tx: &Sender<AppMsg>, ctx: &eframe::egui::Context) {
-        if self.multiplayer.tailnet_requested {
-            // came back before an abandoned startup finished: keep it
-            self.multiplayer.abandon_tailnet = false;
+    fn connect_multiplayer(&mut self, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if self.multiplayer.wizard_started
+            || self.multiplayer.tailnet_requested
+            || self.multiplayer.setup_progress.is_some()
+        {
             return;
         }
+        self.multiplayer.wizard_started = true;
+        self.multiplayer.reconnect_enabled = true;
+        self.multiplayer.resume_pending = false;
+        self.save_multiplayer_settings();
+        self.start_tailnet(tx, ctx);
+    }
+
+    pub fn resume_multiplayer(&mut self, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if std::mem::take(&mut self.multiplayer.resume_pending) {
+            self.connect_multiplayer(tx, ctx);
+        }
+    }
+
+    pub fn tick_multiplayer(&mut self, rl_path: &str, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if self.multiplayer.wizard_started
+            && self.multiplayer.tunnel_ready
+            && self.multiplayer.launch_ready
+            && self.multiplayer.relay.is_none()
+            && self.multiplayer.setup_progress.is_none()
+            && !rl_path.is_empty()
+        {
+            self.start_relay(rl_path, tx, ctx);
+        }
+    }
+
+    /// Starts the private Workshop network before the in-game relay.
+    fn start_tailnet(&mut self, tx: &Sender<AppMsg>, ctx: &egui::Context) {
         self.multiplayer.tailnet_requested = true;
         self.multiplayer.status =
             t("start-tailnet-setting-up-the-private-workshop-network").to_string();
@@ -1826,8 +1840,11 @@ impl WorkshopState {
                         )));
                     }
                 }
-                TailcatSidecarHandle::spawn(&multiplayer_player_name(), relay_only, tx.clone())
-                    .map(Arc::new)
+                let digest = <sha2::Sha256 as sha2::Digest>::digest(multiplayer_client_token().as_bytes());
+                let node_id = hex::encode(&digest[..8]);
+                TailcatSidecarHandle::spawn(
+                    &multiplayer_player_name(), &node_id, relay_only, tx.clone(),
+                ).map(Arc::new)
             })();
             let _ = tx.send(AppMsg::WorkshopTailnetStarted { result });
             repaint.request_repaint();
@@ -1848,19 +1865,14 @@ impl WorkshopState {
         if !self.multiplayer.tailnet_requested {
             return;
         }
+        if self.multiplayer.abandon_tailnet {
+            drop(result);
+            let _ = crate::multiplayer_lan::cleanup_system_state();
+            self.multiplayer.abandon_tailnet = false;
+            self.multiplayer.tailnet_requested = false;
+            return;
+        }
         match result {
-            Ok(sidecar) if self.multiplayer.abandon_tailnet => {
-                // the player left the screen while this was starting
-                self.multiplayer.abandon_tailnet = false;
-                self.multiplayer.tailnet_requested = false;
-                std::thread::Builder::new()
-                    .name("workshop-leave".into())
-                    .spawn(move || {
-                        drop(sidecar);
-                        let _ = crate::multiplayer_lan::cleanup_system_state();
-                    })
-                    .ok();
-            }
             Ok(sidecar) => {
                 self.multiplayer.sidecar = Some(sidecar);
                 self.multiplayer.tunnel_ready = true;
@@ -1869,10 +1881,6 @@ impl WorkshopState {
                 let _ = tx.send(AppMsg::Log("[Multiplayer] Connected".to_string()));
                 self.refresh_launch_status(tx, ctx);
             }
-            Err(_) if self.multiplayer.abandon_tailnet => {
-                self.multiplayer.abandon_tailnet = false;
-                self.multiplayer.tailnet_requested = false;
-            }
             Err(error) => {
                 self.multiplayer.tailnet_requested = false;
                 self.multiplayer.wizard_started = false;
@@ -1880,6 +1888,35 @@ impl WorkshopState {
                     "multiplayer-could-not-start",
                     &[("error", redact(&error).into())],
                 );
+            }
+        }
+    }
+
+    pub fn multiplayer_peer_presence(&mut self, id: String, name: &str, online: bool) {
+        if !self.multiplayer.tunnel_ready || id.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let presence = &mut self.multiplayer.peer_presence;
+        if online {
+            let notify = match presence.insert(id.clone(), None) {
+                None => true,
+                Some(Some(left_at)) => now.duration_since(left_at) > PEER_OFFLINE_TIMEOUT,
+                Some(None) => false,
+            };
+            if notify && self.multiplayer.player_online_toasts {
+                crate::toast::report(
+                    &format!("workshop-player-online-{id}"),
+                    &t_args("multiplayer-player-is-online", &[("name", redact(name).into())]),
+                    None,
+                    true,
+                );
+            }
+        } else {
+            // Duplicate departures must not move the start of the offline period.
+            let state = presence.entry(id).or_default();
+            if state.is_none() {
+                *state = Some(now);
             }
         }
     }
@@ -1893,51 +1930,8 @@ impl WorkshopState {
     /// the sidecar exited on its own (crashed, or was killed)
     pub fn multiplayer_sidecar_exited(&mut self, tx: &Sender<AppMsg>) {
         if self.multiplayer.tunnel_ready {
-            self.disconnect_multiplayer(tx);
+            self.disconnect_multiplayer(tx, false);
             self.multiplayer.status = t("multiplayer-helper-stopped").to_string();
-        }
-    }
-
-    fn launch_multiplayer(
-        &mut self,
-        rl_path: &str,
-        tx: &Sender<AppMsg>,
-        ctx: &eframe::egui::Context,
-    ) {
-        if !self.multiplayer.tunnel_ready {
-            self.multiplayer.status =
-                t("launch-multiplayer-the-workshop-network-is-not-ready").to_string();
-            return;
-        }
-        self.multiplayer.launching_rocket_league = true;
-        self.multiplayer.setup_progress = Some(t("multiplayer-starting-rocket-league").to_string());
-        let rl_path = rl_path.to_string();
-        let rl_launch = self.rl_launch.clone();
-        let manager = self.manager.clone();
-        let tx = tx.clone();
-        let repaint = ctx.clone();
-        std::thread::spawn(move || {
-            let result = crate::winutil::start_rocket_league(&rl_launch, Path::new(&rl_path))
-                .map_err(|error| error.to_string());
-            let _ = tx.send(AppMsg::WorkshopMultiplayerLaunched { result });
-            repaint.request_repaint();
-        });
-    }
-
-    pub fn set_multiplayer_progress(&mut self, status: String) {
-        self.multiplayer.setup_progress = Some(status);
-    }
-
-    pub fn finish_multiplayer_launch(&mut self, result: Result<(), String>) {
-        self.multiplayer.setup_progress = None;
-        match result {
-            Ok(()) => {
-                self.multiplayer.status = t("multiplayer-rocket-league-is-starting").to_string();
-            }
-            Err(error) => {
-                self.multiplayer.launching_rocket_league = false;
-                self.multiplayer.status = format!("Could not start Rocket League: {error}");
-            }
         }
     }
 
@@ -2146,35 +2140,42 @@ impl WorkshopState {
         }
     }
 
-    fn render_maps_in_use(
+    fn render_multiplayer_players(
         &mut self,
         ui: &mut egui::Ui,
         install: &mut Option<(SlotMap, IpAddr, bool)>,
         block: &mut Option<(IpAddr, String)>,
+        unblock: &mut Option<IpAddr>,
     ) {
-        let Some(session) = &self.multiplayer.relay else {
-            return;
-        };
-        let workshop = self.workshop_maps.clone();
-        let mut offers = session.peer_offers();
-        offers.sort_by_key(|offer| offer.label().to_lowercase());
+        let offers = self.multiplayer.relay.as_ref().map(HostSession::peer_offers).unwrap_or_default();
+        let players = &self.multiplayer.players;
+        // A map offer can arrive before the sidecar sends its next status update.
+        let mut rows: Vec<_> = players.iter().map(|player| {
+            let offer = player.alias.and_then(|ip| offers.iter().find(|offer| offer.ip == ip));
+            (offer.map_or_else(|| player.name.clone(), PeerOffer::label), Some(player), offer)
+        }).collect();
+        rows.extend(offers.iter()
+            .filter(|offer| !players.iter().any(|player| player.alias == Some(offer.ip)))
+            .map(|offer| (offer.label(), None, Some(offer))));
+        rows.sort_by_key(|(name, _, _)| name.to_lowercase());
+        let mine = self.manager.active_maps();
         let busy = self.multiplayer.map_install_busy.load(Ordering::Relaxed);
-        ui.group(|ui| {
-            ui.strong(t("maps-in-use-maps-in-use"));
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(t_args(
-                    "maps-in-use-players-offers",
-                    &[("offers", (offers.len()).to_string().into())],
-                ))
-                .strong(),
-            );
-            if offers.is_empty() {
-                ui.small(t("maps-in-use-no-other-players-found-yet"));
-            } else {
-                ui.small(t("maps-in-use-maps-installed-from-another-player-come"));
-            }
-            if offers.len() > PLAYER_SEARCH_THRESHOLD {
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                multiplayer_icon(ui);
+                ui.add_space(8.0);
+                if !self.multiplayer.tunnel_ready {
+                    ui.spinner();
+                    ui.heading(t("multiplayer-connecting-to-the-private-workshop-netwo"));
+                } else if rows.is_empty() {
+                    ui.heading(t("multiplayer-no-other-players-online"));
+                    ui.weak("Invite another Hebnix player to connect to Workshop Multiplayer.");
+                } else {
+                    ui.heading(t_n("multiplayer-players-online", rows.len() as i64));
+                }
+            });
+            if rows.len() > PLAYER_SEARCH_THRESHOLD {
                 ui.horizontal(|ui| {
                     ui.label(t("spoofer-search"));
                     ui.text_edit_singleline(&mut self.multiplayer.player_filter);
@@ -2182,38 +2183,54 @@ impl WorkshopState {
             } else {
                 self.multiplayer.player_filter.clear();
             }
-            let filter = self.multiplayer.player_filter.clone();
-            egui::ScrollArea::vertical()
-                .id_salt("workshop_players")
-                .max_height(320.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                    let mut shown = 0;
-                    for offer in offers
-                        .iter()
-                        .filter(|o| matches_filter(&o.label(), &filter))
-                    {
-                        shown += 1;
-                        egui::CollapsingHeader::new(player_header(ui, offer))
-                            .id_salt(("workshop_player", offer.ip))
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                render_player_maps(ui, offer, &workshop, busy, install);
-                                ui.add_space(4.0);
-                                if ui
-                                    .button(t("maps-in-use-block-player"))
-                                    .on_hover_text(t("maps-in-use-hide-this-player-s-maps-and"))
-                                    .clicked()
-                                {
-                                    *block = Some((offer.ip, offer.label()));
+            if !rows.is_empty() || !mine.is_empty() {
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("workshop_players_online")
+                    .max_height(340.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let mut shown = false;
+                        for (index, (name, player, offer)) in rows.iter().enumerate() {
+                            if !matches_filter(name, &self.multiplayer.player_filter) {
+                                continue;
+                            }
+                            shown = true;
+                            let alias = player.and_then(|player| player.alias).or_else(|| offer.map(|offer| offer.ip));
+                            ui.push_id((alias, alias.is_none().then_some(index)), |ui| {
+                                crate::i18n::layout::bordered_panel(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.strong(name);
+                                        if let Some(ping) = player.filter(|player| player.path != "unreachable").and_then(|player| player.latency_ms) {
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.strong(format!("{ping:.0} ms"));
+                                            });
+                                        }
+                                    });
+                                    if let Some(offer) = offer {
+                                        render_player_maps(ui, offer, &self.workshop_maps, busy, install);
+                                        if ui.small_button(t("maps-in-use-block-player"))
+                                            .on_hover_text(t("maps-in-use-hide-this-player-s-maps-and"))
+                                            .clicked()
+                                        {
+                                            *block = Some((offer.ip, offer.label()));
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        if !shown && !rows.is_empty() {
+                            ui.small(t("maps-in-use-no-players-match-that-search"));
+                        }
+                        if !mine.is_empty() {
+                            ui.collapsing("Your map slots", |ui| {
+                                for (slot, data) in &mine {
+                                    render_my_slot(ui, slot, data, &offers);
                                 }
                             });
-                    }
-                    if shown == 0 && !offers.is_empty() {
-                        ui.small(t("maps-in-use-no-players-match-that-search"));
-                    }
-                }));
-
+                        }
+                    });
+            }
             let transfer = &self.multiplayer.map_transfer;
             let total = transfer.total.load(Ordering::Relaxed);
             if busy && total > 0 {
@@ -2232,7 +2249,32 @@ impl WorkshopState {
                     ui.small(result.as_str());
                 }
             }
+            ui.add_space(12.0);
         });
+        if let Some(session) = &self.multiplayer.relay {
+            let blocked = session.blocked();
+            if !blocked.is_empty() {
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    egui::CollapsingHeader::new(t_args(
+                        "multiplayer-blocked-players-blocked",
+                        &[("blocked", (blocked.len()).to_string().into())],
+                    ))
+                    .id_salt("workshop_blocked_players")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.small(t("multiplayer-blocks-last-until-you-disconnect"));
+                        for (ip, label) in &blocked {
+                            ui.horizontal(|ui| {
+                                ui.label(label);
+                                if ui.small_button(t("multiplayer-unblock")).clicked() {
+                                    *unblock = Some(*ip);
+                                }
+                            });
+                        }
+                    });
+                });
+            }
+        }
     }
 
     /// asks once per session before installing a map straight from another
@@ -2278,15 +2320,35 @@ impl WorkshopState {
         }
     }
 
+    fn render_multiplayer_preferences(&mut self, ui: &mut egui::Ui) {
+        let changed = ui
+            .checkbox(&mut self.multiplayer.disconnect_on_close, "Disconnect when Hebnix closes")
+            .on_hover_text("Stay disconnected when you next open Hebnix.")
+            .changed();
+        let toast_changed = ui
+            .checkbox(
+                &mut self.multiplayer.player_online_toasts,
+                t("multiplayer-show-player-online-toasts"),
+            )
+            .changed();
+        if changed || toast_changed {
+            self.save_multiplayer_settings();
+        }
+    }
+
     fn save_multiplayer_settings(&self) {
         let settings = serde_json::json!({
             "relay_only": self.multiplayer.relay_only,
-            "auto_connect": self.multiplayer.auto_connect,
+            "reconnect": self.multiplayer.reconnect_enabled,
+            "disconnect_on_close": self.multiplayer.disconnect_on_close,
+            "player_online_toasts": self.multiplayer.player_online_toasts,
         });
-        let _ = std::fs::write(
+        if let Err(error) = std::fs::write(
             self.manager.runtime_dir.join(MULTIPLAYER_SETTINGS_FILE),
             settings.to_string(),
-        );
+        ) {
+            tracing::warn!(%error, "Could not save Workshop multiplayer settings");
+        }
     }
 
     /// installs a map a peer has into the same slot. cdn maps are downloaded
@@ -2440,9 +2502,12 @@ impl WorkshopState {
     }
 
     pub fn finish_launch_check(&mut self, rl_open: bool, launch_ready: bool) {
+        self.multiplayer.multihome_check_in_flight = false;
+        if !self.multiplayer.tunnel_ready {
+            return;
+        }
         self.multiplayer.rl_open = rl_open;
         self.multiplayer.launch_ready = launch_ready;
-        self.multiplayer.multihome_check_in_flight = false;
         if !rl_open || launch_ready {
             self.multiplayer.multihome_check_attempts = 0;
         } else {
@@ -2482,12 +2547,16 @@ impl WorkshopState {
 
     pub fn finish_relay_started(&mut self, result: Result<HostSession, String>) {
         self.multiplayer.setup_progress = None;
+        if !self.multiplayer.wizard_started || !self.multiplayer.tunnel_ready {
+            drop(result);
+            let _ = crate::multiplayer_lan::cleanup_system_state();
+            return;
+        }
         match result {
             Ok(session) => {
                 self.multiplayer.identity_updated = false;
                 self.multiplayer.identity_update_in_flight = false;
-                self.multiplayer.status =
-                    t("finish-relay-started-relaying-host-or-join-from-rocket").to_string();
+                self.multiplayer.status.clear();
                 self.multiplayer.relay = Some(session);
             }
             Err(error) => {
@@ -2854,10 +2923,8 @@ impl WorkshopState {
     /// ordinary crash or restart), this arms a grace window; see
     /// tick_shutdown_grace for the part that actually tears things down.
     pub fn shutdown_multiplayer(&mut self) {
-        if self.multiplayer.launching_rocket_league {
-            // this is Hebnix's own close-then-relaunch, not a real exit
-            return;
-        }
+        self.multiplayer.rl_open = false;
+        self.multiplayer.launch_ready = false;
         if self.multiplayer.relay.is_none() || self.multiplayer.shutdown_deadline.is_some() {
             return;
         }
@@ -2903,7 +2970,6 @@ impl WorkshopState {
     }
 
     pub fn rocket_league_reopened(&mut self) {
-        self.multiplayer.launching_rocket_league = false;
         self.multiplayer.shutdown_deadline = None;
     }
 
@@ -2913,7 +2979,13 @@ impl WorkshopState {
         }
         self.multiplayer.relay = None;
         self.multiplayer.sidecar = None;
-        if !hebnix_sdk::process::is_rocket_league_running() {
+        let rl_open = hebnix_sdk::process::is_rocket_league_running();
+        if self.multiplayer.reconnect_enabled && self.multiplayer.disconnect_on_close {
+            self.multiplayer.reconnect_enabled = false;
+            self.multiplayer.resume_pending = false;
+            self.save_multiplayer_settings();
+        }
+        if !rl_open {
             let _ = crate::winutil::clear_rocket_league_multihome();
             let _ = crate::multiplayer_lan::cleanup_system_state();
         }
@@ -2969,14 +3041,6 @@ impl ThemedTileMetrics {
             action_height, delete_height, footer_height }
     }
 }
-fn centered_image_uv(source: egui::Vec2, viewport: egui::Vec2) -> egui::Rect {
-    let source_ratio = source.x / source.y.max(1.0);
-    let view_ratio = viewport.x / viewport.y.max(1.0);
-    let fraction = if source_ratio > view_ratio { egui::vec2(view_ratio/source_ratio,1.0) }
-        else { egui::vec2(1.0,source_ratio/view_ratio) };
-    egui::Rect::from_center_size(egui::pos2(0.5,0.5),fraction)
-}
-
 impl WorkshopState {
     fn browse_columns(
         &self,
@@ -3008,10 +3072,7 @@ impl WorkshopState {
         match self.images.get(banner) {
             Some(ImageState::Ready(bytes)) => {
                 let image = egui::Image::from_bytes(format!("bytes://workshop/{banner}"),bytes.clone()).corner_radius(4);
-                let uv = image.load_for_size(ui.ctx(),size).ok().and_then(|poll|poll.size())
-                    .map(|source|centered_image_uv(source,size))
-                    .unwrap_or(egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)));
-                image.uv(uv).paint_at(ui,rect);
+                crate::ui::browser::cover_image(ui, image, size).paint_at(ui, rect);
             }
             _ => { ui.painter().with_clip_rect(ui.clip_rect().intersect(rect)).text(rect.center(),egui::Align2::CENTER_CENTER,
                 t("card-no-image-available"),egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color()); }
@@ -3281,12 +3342,7 @@ mod theme_layout_tests {
                         },
                         |ui| {
                             egui::CentralPanel::default().show(ui, |ui| {
-                                workshop.render(
-                                    ui,
-                                    "",
-                                    &crate::config::RlLaunchCfg::default(),
-                                    &tx,
-                                );
+                                workshop.render(ui, "", &tx);
                                 assert!(
                                     ui.min_rect().right() <= width + 1.0,
                                     "Map content overflows at {theme}/{width}"

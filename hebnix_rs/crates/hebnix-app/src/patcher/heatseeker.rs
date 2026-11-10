@@ -24,7 +24,7 @@ fn rgb(colour: [u8; 3], intensity: f32) -> [u8; 12] {
 /// Replaces only local high-speed Heatseeker effects. It always rebuilds from
 /// a pristine backup, so it cannot alter the team-coloured normal glow.
 pub fn apply(cooked_pc: &Path, backups_dir: &Path, max_speed: [u8; 3]) -> Result<(), String> {
-    super::backup_guard::synchronize_install(cooked_pc, backups_dir)?;
+    super::backup_guard::check_install(cooked_pc, backups_dir)?;
     let live = cooked_pc.join(PACKAGE_NAME);
     if !live.is_file() {
         return Err(format!(
@@ -117,7 +117,7 @@ pub fn apply(cooked_pc: &Path, backups_dir: &Path, max_speed: [u8; 3]) -> Result
     package.save(&temp)?;
     UpkPackage::load(&temp)
         .map_err(|error| format!("Patched Heatseeker package failed validation: {error}"))?;
-    fs::copy(&temp, &live)
+    super::upk_history::install_copy(cooked_pc, &temp, &live, "Heatseeker ball glow")
         .map_err(|error| format!("Could not install Heatseeker glow patch: {error}"))?;
     let _ = fs::remove_file(temp);
     Ok(())
@@ -131,7 +131,7 @@ pub fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
     }
     UpkPackage::load(&backup)
         .map_err(|error| format!("Heatseeker glow backup is invalid: {error}"))?;
-    fs::copy(&backup, cooked_pc.join(PACKAGE_NAME))
+    super::upk_history::install_copy(cooked_pc, &backup, &cooked_pc.join(PACKAGE_NAME), "Restore Heatseeker ball glow")
         .map_err(|error| format!("Could not restore Heatseeker glow: {error}"))?;
     fs::remove_file(backup)
         .map_err(|error| format!("Could not remove Heatseeker glow backup: {error}"))

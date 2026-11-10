@@ -87,7 +87,7 @@ fn lookup(p: &UpkPackage, playlist: Code, scratch: Code) -> Result<Code, String>
     )
 }
 
-fn additions(p: &UpkPackage, path: &str, start: usize) -> Result<Code, String> {
+fn additions(p: &UpkPackage, path: &str, start: usize, version: u8) -> Result<Code, String> {
     if path == DATA {
         // Refresh after stats/ping changes so an asynchronous lookup can arrive
         // after the row was created. Bots use their own name handler.
@@ -117,7 +117,7 @@ fn additions(p: &UpkPackage, path: &str, start: usize) -> Result<Code, String> {
     let name = variable(p, 1, "GFxData_PRI_TA.PlayerName")?;
     let clear = Code::raw(&[0x0f]).then(scratch.clone()).then(text(""));
     let primary = lookup(p, Code::raw(&[0x38, 0x53]).then(number), scratch.clone())?;
-    let fallback = lookup(p, text("11"), scratch.clone())?;
+    let fallback = lookup(p, text(if version >= 3 { "selected" } else { "11" }), scratch.clone())?;
     let missing = Code::raw(&[0x81]).then(primary).then(Code::raw(&[0x16]));
     let retry = branch(missing, fallback, start + clear.memory())?;
     Ok(clear
@@ -192,7 +192,7 @@ fn early_name(p: &UpkPackage, version: u8) -> Result<Code, String> {
     if version < 2 {
         return Ok(rename);
     }
-    let mmr = additions(p, NAME, 346 + rename.memory())?;
+    let mmr = additions(p, NAME, 346 + rename.memory(), version)?;
     Ok(rename.then(mmr))
 }
 fn version_additions(
@@ -201,7 +201,7 @@ fn version_additions(
     start: usize,
     version: u8,
 ) -> Result<Code, String> {
-    let original = additions(p, path, start)?;
+    let original = additions(p, path, start, version)?;
     if path != DATA || version < 2 {
         return Ok(original);
     }
@@ -299,7 +299,7 @@ fn prepare(p: &mut UpkPackage, on: bool) -> Result<bool, String> {
         let (idx, actual) = bytes(p, path)?;
         let actual = actual.to_vec();
         let mut found = None;
-        for version in [2, 1, 0] {
+        for version in [3, 2, 1, 0] {
             if path == TITLE {
                 let mut original = actual.clone();
                 if enabled && hex::encode(Sha256::digest(&original)) != hash {
@@ -358,7 +358,7 @@ fn prepare(p: &mut UpkPackage, on: bool) -> Result<bool, String> {
         }
         let original = found.ok_or_else(|| format!("Unrecognized scoreboard hook in {path}"))?;
         let desired = if on {
-            payload(p, path, &original, memory, storage, 2)?
+            payload(p, path, &original, memory, storage, 3)?
         } else {
             original
         };
@@ -426,15 +426,19 @@ pub(crate) fn set_options(game: &Path, options: Options) -> Result<(), String> {
 }
 
 pub(crate) fn installed(game: &Path) -> Result<Options, String> {
+    installed_with_version(game).map(|(options, _)| options)
+}
+
+pub(crate) fn installed_with_version(game: &Path) -> Result<(Options, bool), String> {
     let mut p = UpkPackage::load(&super::super::game_path::resolve(
         &cooked(game),
         "TAGame.upk",
     ))?;
     let Some(slot) = p.names.iter().find(|s| PATCHED_SLOTS.contains(&s.as_str())) else {
-        return Ok(Options::default());
+        return Ok((Options::default(), false));
     };
     let slot = slot.clone();
-    prepare(&mut p, true)?;
+    let legacy = prepare(&mut p, true)?;
     let options = match slot.as_str() {
         MMR_SLOT => (true, false),
         NAMES_SLOT => (false, true),
@@ -447,10 +451,7 @@ pub(crate) fn installed(game: &Path) -> Result<Options, String> {
             .filter(|&(mmr, names)| mmr || names)
             .unwrap_or((true, false)),
     };
-    Ok(Options {
-        show_mmr: options.0,
-        unanonymize: options.1,
-    })
+    Ok((Options { show_mmr: options.0, unanonymize: options.1 }, legacy))
 }
 
 #[cfg(test)]
@@ -471,8 +472,23 @@ mod tests {
         }
         assert!(prepare(&mut p, false).unwrap());
         assert_eq!(original_names, p.names);
-        for ((n, _, _, _), saved) in SPECS.iter().zip(original) {
-            assert_eq!(bytes(&p, n).unwrap().1, saved);
+        for ((n, _, _, _), saved) in SPECS.iter().zip(&original) {
+            assert_eq!(bytes(&p, n).unwrap().1, saved.as_slice());
+        }
+        // Existing installations must upgrade the previous fallback in place.
+        let (slot, _) = checked_slot(&p).unwrap();
+        p.rename_names_same_size(&[(slot, LOAD.into())]).unwrap();
+        for ((path, memory, storage, _), saved) in SPECS.iter().zip(&original) {
+            let (index, _) = bytes(&p, path).unwrap();
+            let legacy = payload(&p, path, saved, *memory, *storage, 2).unwrap();
+            p.replace_export_payload(index, &legacy).unwrap();
+        }
+        assert!(prepare(&mut p, true).unwrap());
+        assert!(!prepare(&mut p, true).unwrap());
+        assert!(prepare(&mut p, false).unwrap());
+        assert_eq!(original_names, p.names);
+        for ((path, _, _, _), saved) in SPECS.iter().zip(&original) {
+            assert_eq!(bytes(&p, path).unwrap().1, saved.as_slice());
         }
     }
 }

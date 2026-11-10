@@ -17,6 +17,31 @@ pub struct Settings {
     lateral: f32,
 }
 impl Settings {
+    pub(super) fn description(self) -> String {
+        format!(
+            "{}° · {:+.2} ↕ · {:+.2} ↔",
+            self.camber, self.vertical, self.lateral
+        )
+    }
+
+    pub(super) fn history_controls(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::Slider::new(&mut self.camber, -30.0..=30.0)
+                .step_by(0.25)
+                .text(t("render-camber-degrees")),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.vertical, -15.0..=15.0)
+                .step_by(0.25)
+                .text(t("render-up-down")),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.lateral, -15.0..=15.0)
+                .step_by(0.25)
+                .text(t("render-left-right-track-width")),
+        );
+    }
+
     fn validate(self) -> Result<(), String> {
         if !self.camber.is_finite()
             || !self.vertical.is_finite()
@@ -75,7 +100,7 @@ fn adjusted(q: [f32; 4], position: [f32; 3], left: bool, s: Settings) -> ([f32; 
         ],
     )
 }
-fn build(baseline: &Path, output: &Path, s: Settings) -> Result<(), String> {
+pub(super) fn build(baseline: &Path, output: &Path, s: Settings) -> Result<(), String> {
     s.validate()?;
     let mut p = UpkPackage::load(baseline)?;
     // Resolve the usable local body mesh, including an already-swapped mesh. Some legacy
@@ -216,6 +241,23 @@ fn record_dir(cooked: &Path, file: &str) -> PathBuf {
     cooked.join("Backups").join("WheelAlignment").join(file)
 }
 
+pub(super) fn live_settings(
+    cooked: &Path,
+    file: &str,
+    current: &[u8],
+) -> Option<(Vec<u8>, Settings)> {
+    let dir = record_dir(cooked, file);
+    let record: Record =
+        serde_json::from_slice(&fs::read(dir.join("alignment.json")).ok()?).ok()?;
+    if record.version != 1 || record.installed_hash != hash(current) {
+        return None;
+    }
+    let baseline = fs::read(dir.join("baseline.upk.bak"))
+        .or_else(|_| fs::read(dir.join("baseline.upk")))
+        .ok()?;
+    (hash(&baseline) == record.baseline_hash).then_some((baseline, record.settings))
+}
+
 fn package_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     let current = dir.join(format!("{name}.upk.bak"));
     let legacy = dir.join(format!("{name}.upk"));
@@ -256,10 +298,31 @@ fn migrate_legacy_package_files(cooked: &Path) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TransactionAction {
+pub(super) enum TransactionAction {
     Apply,
     Revert,
     RevertAndForget,
+}
+
+pub(super) fn recovery_settings(cooked: &Path) -> Result<Vec<(String, Settings)>, String> {
+    let dir = cooked.join("Backups/WheelAlignment");
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut settings = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path().join("alignment.json");
+        if path.is_file() {
+            let record: Record = serde_json::from_slice(&read(&path)?).map_err(|error| error.to_string())?;
+            if record.settings != Settings::default() {
+                settings.push((entry.file_name().to_string_lossy().into_owned(), record.settings));
+            }
+        }
+    }
+    Ok(settings)
 }
 
 pub(crate) fn restore_for_uninstall(cooked: &Path) -> Result<(), String> {
@@ -269,13 +332,23 @@ pub(crate) fn restore_for_uninstall(cooked: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| e.to_string())?;
         if entry.path().join("alignment.json").is_file() {
             let file = entry.file_name().to_string_lossy().into_owned();
-            transaction(cooked, &file, Settings::default(), TransactionAction::RevertAndForget)?;
+            let live = cooked.join(&file);
+            if let Some(mut recipe) = super::upk_history::current_recipe(cooked, &live)?
+                && recipe.owned_paint
+                && recipe.donor.eq_ignore_ascii_case(&file)
+            {
+                recipe.paint = super::painted_swap::SwapPaint::Default;
+                recipe.alignment = Some(Settings::default());
+                super::upk_history::edit_current(cooked, &file, recipe)?;
+            } else {
+                transaction(cooked, &file, Settings::default(), TransactionAction::RevertAndForget)?;
+            }
         }
     }
     Ok(())
 }
 
-fn transaction(
+pub(super) fn transaction(
     cooked: &Path,
     file: &str,
     settings: Settings,
@@ -284,14 +357,7 @@ fn transaction(
     ensure_closed()?;
     settings.validate()?;
     let backups = cooked.join("Backups");
-    match action {
-        TransactionAction::Apply => {
-            super::backup_guard::synchronize_install(cooked, &backups)?;
-        }
-        TransactionAction::Revert | TransactionAction::RevertAndForget => {
-            super::backup_guard::check_install(cooked, &backups)?;
-        }
-    }
+    super::backup_guard::check_install(cooked, &backups)?;
     if Path::new(file).components().count() != 1
         || !file.to_ascii_lowercase().ends_with(".upk")
         || file.contains(['/', '\\', ':'])
@@ -305,6 +371,19 @@ fn transaction(
     let current = read(&live)?;
     let current_hash = hash(&current);
     let dir = record_dir(cooked, file);
+    if action != TransactionAction::RevertAndForget
+        && let Some(mut recipe) = super::upk_history::current_recipe(cooked, &live)?
+        && recipe.alignment.is_some()
+        && live_settings(cooked, file, &current).is_none()
+    {
+        recipe.alignment = Some(if action == TransactionAction::Apply {
+            settings
+        } else {
+            Settings::default()
+        });
+        super::upk_history::edit_current(cooked, file, recipe)?;
+        return Ok(t("upk-history-saved"));
+    }
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     // A directory lock protects against another Hebnix instance applying concurrently.
     let lock = dir.join("operation.lock");
@@ -378,7 +457,20 @@ fn transaction(
     if action == TransactionAction::Apply && settings != Settings::default() {
         record.adjustments = record.adjustments.saturating_add(1);
     }
+    let prior_metadata = read(&metadata)?;
     let next = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    let mut recipe = match super::upk_history::current_recipe(cooked, &live)? {
+        Some(recipe) => recipe,
+        None => super::upk_history::Recipe {
+            baseline: super::upk_history::baseline(cooked, &read(&baseline)?)?,
+            caption: String::new(),
+            donor: file.to_owned(),
+            paint: super::painted_swap::SwapPaint::Default,
+            alignment: None,
+            owned_paint: true,
+        },
+    };
+    recipe.alignment = Some(record.settings);
     // Save the exact immediately preceding state as an additional recovery copy.
     write(&previous, &current)?;
     if let Err(error) = (|| {
@@ -386,9 +478,17 @@ fn transaction(
         if hash(&read(&live)?) != record.installed_hash {
             return Err("Installed hash mismatch".into());
         }
-        write_record(&metadata, &next)
+        write_record(&metadata, &next)?;
+        super::upk_history::record(
+            cooked,
+            &live,
+            &current,
+            &t("app-wheel-alignment"),
+            Some(recipe),
+        )
     })() {
-        let rollback = write(&live, &current);
+        let rollback =
+            write(&live, &current).and_then(|()| write_record(&metadata, &prior_metadata));
         return Err(format!(
             "{error}; rollback {}",
             if rollback.is_ok() {
@@ -543,10 +643,12 @@ impl WheelAlignmentState {
                 };
                 let dir = record_dir(cooked, file);
                 if self.loaded.as_ref() != Some(&dir) {
-                    self.settings = read(&dir.join("alignment.json"))
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-                        .map(|r| r.settings)
+                    self.settings = super::upk_history::current_recipe(cooked, &cooked.join(file))
+                        .ok().flatten().and_then(|recipe| recipe.alignment)
+                        .or_else(|| read(&dir.join("alignment.json"))
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+                            .map(|r| r.settings))
                         .unwrap_or_default();
                     self.loaded = Some(dir.clone());
                 }

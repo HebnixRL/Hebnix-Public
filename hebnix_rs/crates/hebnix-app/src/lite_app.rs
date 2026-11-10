@@ -19,7 +19,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.3.0";
+pub const APP_VERSION: &str = "2.2.9";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -148,6 +148,7 @@ pub struct LiteApp {
     maintenance_running: bool,
     changelog_popup: Option<crate::update::ChangelogEntry>,
     notification_popup: Option<crate::notifications::Notification>,
+    req_clock_warning_open: bool,
     epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     quitting: bool,
@@ -358,6 +359,7 @@ impl LiteApp {
             maintenance_running: false,
             changelog_popup: None,
             notification_popup: None,
+            req_clock_warning_open: false,
             epic_repair: Default::default(),
             launch_path_notice: false,
             quitting: false,
@@ -1240,7 +1242,7 @@ impl LiteApp {
             .id_salt("lite_plugins_list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for plugin in &self.plugin_mgr.plugins {
+                for plugin in self.plugin_mgr.plugins_by_name() {
                     let row_width = ui.available_width();
                     let mut enabled = plugin.enabled;
                     egui::Frame::group(ui.style())
@@ -2188,34 +2190,18 @@ impl LiteApp {
     }
 
     fn render_hebnix_settings(&mut self, ui: &mut egui::Ui) {
-        theme::secondary_navigation(ui, "lite_hebnix_settings_list")
-            .show(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.hebnix_settings_tab,
-                    HebnixSettingsTab::Interface,
-                    t("nav-settings-appearance"),
-                );
-                ui.selectable_value(
-                    &mut self.hebnix_settings_tab,
-                    HebnixSettingsTab::Directories,
-                    t("nav-files-folders"),
-                );
-                ui.selectable_value(
-                    &mut self.hebnix_settings_tab,
-                    HebnixSettingsTab::System,
-                    t("settings-nav-system"),
-                );
-                ui.selectable_value(
-                    &mut self.hebnix_settings_tab,
-                    HebnixSettingsTab::Discord,
-                    t("settings-nav-discord"),
-                );
-                ui.selectable_value(
-                    &mut self.hebnix_settings_tab,
-                    HebnixSettingsTab::ActionButton,
-                    t("settings-nav-action-button"),
-                );
-            });
+        theme::secondary_navigation(ui, "lite_hebnix_settings_list").show(ui, |ui| {
+            let tabs = [
+                (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
+                (HebnixSettingsTab::Directories, t("nav-files-folders")),
+                (HebnixSettingsTab::System, t("settings-nav-system")),
+                (HebnixSettingsTab::Discord, t("settings-nav-discord")),
+                (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
+            ];
+            for (tab, label) in tabs {
+                ui.selectable_value(&mut self.hebnix_settings_tab, tab, label);
+            }
+        });
         crate::i18n::layout::subtab_content_frame().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("lite_hebnix_settings_content")
@@ -2640,8 +2626,7 @@ impl LiteApp {
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
         let with_settings: Vec<(String, String)> = self
             .plugin_mgr
-            .plugins
-            .iter()
+            .plugins_by_name()
             .filter(|plugin| plugin.enabled && plugin.has_settings())
             .map(|plugin| (plugin.slug.clone(), plugin.display_name().to_string()))
             .collect();
@@ -2667,25 +2652,25 @@ impl LiteApp {
         if !selected_valid {
             self.selected_settings_plugin = Some(with_settings[0].0.clone());
         }
+        theme::secondary_navigation(ui, "lite_plugin_settings_list").show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("lite_plugin_settings_names")
+                .show(ui, |ui| {
+                    for (slug, name) in &with_settings {
+                        let selected = self.selected_settings_plugin.as_ref() == Some(slug);
+                        if ui.selectable_label(selected, name).clicked() {
+                            self.selected_settings_plugin = Some(slug.clone());
+                        }
+                    }
+                });
+        });
+
         let selected = self.selected_settings_plugin.clone().unwrap_or_default();
         let display_name = with_settings
             .iter()
             .find(|(slug, _)| *slug == selected)
             .map(|(_, name)| name.clone())
             .unwrap_or_default();
-
-        theme::secondary_navigation(ui, "lite_plugin_settings_list")
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("lite_plugin_settings_names")
-                    .show(ui, |ui| {
-                        for (slug, name) in &with_settings {
-                            if ui.selectable_label(*slug == selected, name).clicked() {
-                                self.selected_settings_plugin = Some(slug.clone());
-                            }
-                        }
-                    });
-            });
 
         crate::i18n::layout::subtab_content_frame().show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -3257,7 +3242,9 @@ impl eframe::App for LiteApp {
         self.render_launch_path_notice(&ctx);
         self.render_changelog_popup(&ctx);
         self.epic_repair.show(&ctx);
-        if !self.hidden {
+        if !self.hidden
+            && !crate::notifications::render_clock_warning(&ctx, &mut self.req_clock_warning_open)
+        {
             self.render_notification_popup(&ctx);
         }
         ctx.request_repaint_after(

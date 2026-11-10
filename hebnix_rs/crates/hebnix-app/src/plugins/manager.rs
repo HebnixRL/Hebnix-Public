@@ -82,6 +82,18 @@ pub struct PluginManager {
 }
 
 impl PluginManager {
+    pub fn plugins_by_name(&self) -> impl Iterator<Item = &LoadedPlugin> {
+        let mut plugins: Vec<_> = self.plugins.iter().collect();
+        plugins.sort_by_cached_key(|plugin| {
+            (
+                plugin.display_name().to_lowercase(),
+                plugin.slug.to_lowercase(),
+                plugin.slug.as_str(),
+            )
+        });
+        plugins.into_iter()
+    }
+
     /// All overlay publishers execute on this thread. Drain their complete
     /// output every logic cycle, independently of the incoming event backlog.
     pub fn take_overlay_messages(&self) -> Vec<(String, serde_json::Value)> {
@@ -1080,5 +1092,39 @@ impl PluginManager {
             }
             rt.host.window.borrow_mut().pos_dirty = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_lists_sort_by_display_name_then_folder() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut manager = PluginManager::new(std::env::temp_dir(), tx, "test");
+        manager.plugins = [
+            ("early-folder", "Zebra"),
+            ("z-folder", "Alpha"),
+            ("m-folder", "Beta"),
+            ("a-folder", "alpha"),
+        ]
+        .into_iter()
+        .map(|(slug, name)| LoadedPlugin {
+            slug: slug.into(),
+            manifest: PluginManifest {
+                name: name.into(),
+                ..Default::default()
+            },
+            filename: String::new(),
+            enabled: false,
+            load_error: None,
+            runtime: None,
+        })
+        .collect();
+
+        let order: Vec<_> = manager.plugins_by_name().map(|p| p.slug.as_str()).collect();
+        assert_eq!(order, ["a-folder", "z-folder", "m-folder", "early-folder"]);
+        assert_eq!(manager.plugins[0].slug, "early-folder");
     }
 }

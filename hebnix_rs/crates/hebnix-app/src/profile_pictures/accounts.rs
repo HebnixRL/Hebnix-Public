@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Account {
+pub(crate) struct Account {
     pub key: String,
     pub platform: String,
     pub id: String,
@@ -63,6 +63,18 @@ fn save_identity(path: &Path) -> Option<Account> {
     };
     Account::from_key(&format!("{platform}:{stem}"))
 }
+pub(crate) fn latest_saved() -> Option<Account> {
+    save_file::find_save_accounts(None)
+        .into_iter()
+        .find_map(|entry| {
+            let mut account = save_identity(&entry.path)?;
+            if !entry.display_name.starts_with("Account (") {
+                account.name = entry.display_name;
+            }
+            Some(account)
+        })
+}
+
 fn profile_name(name: &str) -> Option<String> {
     let name = name.trim();
     if name.is_empty()
@@ -138,7 +150,7 @@ fn discover_in(directories: &[PathBuf], previous: &[Account]) -> Vec<Account> {
     }
     result
 }
-pub(super) fn current() -> Option<Account> {
+pub(crate) fn current() -> Option<Account> {
     if !hebnix_sdk::process::is_rocket_league_running() {
         return None;
     }

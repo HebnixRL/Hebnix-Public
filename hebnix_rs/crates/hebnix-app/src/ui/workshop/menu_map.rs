@@ -317,38 +317,72 @@ impl MenuMapState {
         self.ensure_loaded(rl_path, ui.ctx());
         self.poll_scan();
         let loading = self.scan.is_some();
-        ui.heading(t("nav-menu-background"));
-        ui.label(t("menu-map-description"));
-        ui.small(t("menu-map-close-game"));
-        ui.add_space(12.0);
-        if loading {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(t("menu-map-loading"));
-            });
-        }
         let ready = !self.busy
             && !loading
             && !self.refresh_needed
             && !self.state_error
             && self.last_path.as_deref() == Some(rl_path);
-        let editable = ready && self.active.is_none();
-        ui.add_enabled_ui(editable, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.workshop, false, t("menu-map-source-arenas"));
-                ui.selectable_value(&mut self.workshop, true, t("menu-map-source-workshop"));
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.heading(t("nav-menu-background"));
+            ui.separator();
+            ui.label(t("menu-map-description"));
+            ui.small(t("menu-map-close-game"));
+            ui.add_space(12.0);
+            if loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(t("menu-map-loading"));
+                });
+            }
+            let editable = ready && self.active.is_none();
+            ui.add_enabled_ui(editable, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.workshop, false, t("menu-map-source-arenas"));
+                    ui.selectable_value(&mut self.workshop, true, t("menu-map-source-workshop"));
+                });
             });
-        });
-        if self.workshop && !custom.iter().any(|map| map.id == self.selected_custom) {
-            self.selected_custom = custom.first().map(|map| map.id.clone()).unwrap_or_default();
-        }
-        let chosen_custom = custom.iter().find(|map| map.id == self.selected_custom);
-        ui.add_enabled_ui(editable, |ui| {
-            if self.workshop {
-                egui::ComboBox::from_id_salt("menu_map_workshop")
-                    .selected_text(match chosen_custom {
-                        Some(map) => map.name.clone(),
-                        None => t("menu-map-choose"),
+            if self.workshop && !custom.iter().any(|map| map.id == self.selected_custom) {
+                self.selected_custom = custom.first().map(|map| map.id.clone()).unwrap_or_default();
+            }
+            let chosen_custom = custom.iter().find(|map| map.id == self.selected_custom);
+            ui.add_enabled_ui(editable, |ui| {
+                if self.workshop {
+                    egui::ComboBox::from_id_salt("menu_map_workshop")
+                        .selected_text(match chosen_custom {
+                            Some(map) => map.name.clone(),
+                            None => t("menu-map-choose"),
+                        })
+                        .width(360.0)
+                        .height(320.0)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show_ui(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.filter)
+                                    .hint_text(t("render-search-maps")),
+                            );
+                            ui.separator();
+                            let filter = self.filter.trim().to_lowercase();
+                            for map in custom {
+                                if map.name.to_lowercase().contains(&filter)
+                                    && ui
+                                        .selectable_value(
+                                            &mut self.selected_custom,
+                                            map.id.clone(),
+                                            &map.name,
+                                        )
+                                        .clicked()
+                                {
+                                    ui.close();
+                                }
+                            }
+                        });
+                    return;
+                }
+                egui::ComboBox::from_id_salt("menu_map_arena")
+                    .selected_text(if self.selected.is_empty() {
+                        t("menu-map-choose")
+                    } else {
+                        crate::discord_presence::display_map_name(&self.selected)
                     })
                     .width(360.0)
                     .height(320.0)
@@ -360,105 +394,75 @@ impl MenuMapState {
                         );
                         ui.separator();
                         let filter = self.filter.trim().to_lowercase();
-                        for map in custom {
-                            if map.name.to_lowercase().contains(&filter)
-                                && ui
+                        for arena in &self.arenas {
+                            if arena.label.to_lowercase().contains(&filter)
+                                || arena.package.to_lowercase().contains(&filter)
+                            {
+                                if ui
                                     .selectable_value(
-                                        &mut self.selected_custom,
-                                        map.id.clone(),
-                                        &map.name,
+                                        &mut self.selected,
+                                        arena.package.clone(),
+                                        &arena.label,
                                     )
                                     .clicked()
-                            {
-                                ui.close();
+                                {
+                                    ui.close();
+                                }
                             }
                         }
                     });
-                return;
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        editable
+                            && if self.workshop {
+                                chosen_custom.is_some()
+                            } else {
+                                !self.selected.is_empty()
+                            },
+                        egui::Button::new(t("menu-map-apply")),
+                    )
+                    .clicked()
+                {
+                    let custom = if self.workshop { chosen_custom } else { None };
+                    self.launch(Action::Apply, custom, rl_path, tx, ui.ctx());
+                }
+                if ui
+                    .add_enabled(
+                        ready && self.active.is_some(),
+                        egui::Button::new(t("menu-map-restore")),
+                    )
+                    .clicked()
+                {
+                    self.launch(Action::Restore, None, rl_path, tx, ui.ctx());
+                }
+                if self.busy {
+                    ui.spinner();
+                }
+            });
+            if let Some(active) = &self.active {
+                ui.label(t_args(
+                    "menu-map-active",
+                    &[("map", active.display_name().into())],
+                ));
+                ui.small(t("menu-map-restore-first"));
             }
-            egui::ComboBox::from_id_salt("menu_map_arena")
-                .selected_text(if self.selected.is_empty() {
-                    t("menu-map-choose")
+            if self.workshop {
+                if custom.is_empty() {
+                    ui.label(t("menu-map-workshop-empty"));
                 } else {
-                    crate::discord_presence::display_map_name(&self.selected)
-                })
-                .width(360.0)
-                .height(320.0)
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .show_ui(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
-                            .hint_text(t("render-search-maps")),
-                    );
-                    ui.separator();
-                    let filter = self.filter.trim().to_lowercase();
-                    for arena in &self.arenas {
-                        if arena.label.to_lowercase().contains(&filter)
-                            || arena.package.to_lowercase().contains(&filter)
-                        {
-                            if ui
-                                .selectable_value(
-                                    &mut self.selected,
-                                    arena.package.clone(),
-                                    &arena.label,
-                                )
-                                .clicked()
-                            {
-                                ui.close();
-                            }
-                        }
-                    }
-                });
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    editable
-                        && if self.workshop {
-                            chosen_custom.is_some()
-                        } else {
-                            !self.selected.is_empty()
-                        },
-                    egui::Button::new(t("menu-map-apply")),
-                )
-                .clicked()
-            {
-                let custom = if self.workshop { chosen_custom } else { None };
-                self.launch(Action::Apply, custom, rl_path, tx, ui.ctx());
-            }
-            if ui
-                .add_enabled(
-                    ready && self.active.is_some(),
-                    egui::Button::new(t("menu-map-restore")),
-                )
-                .clicked()
-            {
-                self.launch(Action::Restore, None, rl_path, tx, ui.ctx());
-            }
-            if self.busy {
-                ui.spinner();
+                    ui.small(t("menu-map-workshop-note"));
+                }
+            } else if !loading && self.arenas.is_empty() {
+                ui.label(t("menu-map-empty"));
             }
         });
-        if let Some(active) = &self.active {
-            ui.label(t_args(
-                "menu-map-active",
-                &[("map", active.display_name().into())],
-            ));
-            ui.small(t("menu-map-restore-first"));
-        }
-        if self.workshop {
-            if custom.is_empty() {
-                ui.label(t("menu-map-workshop-empty"));
-            } else {
-                ui.small(t("menu-map-workshop-note"));
-            }
-        } else if !loading && self.arenas.is_empty() {
-            ui.label(t("menu-map-empty"));
-        }
         ui.add_space(12.0);
-        self.render_car(ui, ready);
-        self.render_camera(ui, ready);
+        crate::i18n::layout::bordered_panel(ui, |ui| self.render_car(ui, ready));
+        ui.add_space(8.0);
+        crate::i18n::layout::bordered_panel(ui, |ui| self.render_camera(ui, ready));
         self.render_reapply(ui, ready, custom, rl_path, tx);
         if !self.status.is_empty() {
             ui.add_space(8.0);
@@ -688,8 +692,8 @@ impl MenuMapState {
     fn render_plugin_card(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.strong(t("menu-map-plugin-title"));
-            ui.add_space(4.0);
+            ui.heading(t("menu-map-plugin-title"));
+            ui.separator();
             ui.label(t("menu-map-plugin-description"));
             ui.add_space(8.0);
             if ui

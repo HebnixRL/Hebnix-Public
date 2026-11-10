@@ -300,7 +300,8 @@ pub fn link_product(
         if peer_payloads(&checked, checked_index) != peers {
             return Err("Decal override changed a sibling product".into());
         }
-        fs::copy(&staged, target_live).map_err(|e| e.to_string())?;
+        let game = target_live.parent().ok_or("Missing decal package directory")?;
+        super::upk_history::install_linked(game, target_live, &fs::read(&staged).map_err(|e| e.to_string())?, "Decal variant")?;
         if let (Some(game), Some(backups)) = (target_live.parent(), target_backup.parent()) {
             retire_carriers(&previous, &checked, game, backups);
         }
@@ -330,8 +331,8 @@ fn peer_payloads(package: &UpkPackage, except: usize) -> Vec<(usize, Vec<u8>)> {
 
 pub fn restore_product(live: &Path, backup: &Path, asset: &str) -> Result<(), String> {
     if legacy_shared_package(live, backup)? {
-        fs::copy(backup, live).map_err(|e| e.to_string())?;
-        return Ok(());
+        let game = live.parent().ok_or("Missing decal package directory")?;
+        return super::upk_history::install_copy(game, backup, live, "Restore decal variant");
     }
     let original = UpkPackage::load(backup)?;
     let original_index = skin_index(&original, asset)?;
@@ -355,7 +356,8 @@ pub fn restore_product(live: &Path, backup: &Path, asset: &str) -> Result<(), St
         if peer_payloads(&checked, index) != peers {
             return Err("Restoring one decal changed a sibling product".into());
         }
-        fs::copy(&staged, live).map_err(|e| e.to_string())?;
+        let game = live.parent().ok_or("Missing decal package directory")?;
+        super::upk_history::install_linked(game, live, &fs::read(&staged).map_err(|e| e.to_string())?, "Restore decal variant")?;
         if let (Some(game), Some(backups)) = (live.parent(), backup.parent()) {
             retire_carriers(&previous, &checked, game, backups);
         }

@@ -14,6 +14,15 @@ mod messages;
 mod monitor;
 mod notifications;
 mod overlay;
+mod panel {
+    // Lite has no controller panel. Shared scroll areas render their contents directly.
+    pub(crate) fn followed<R>(
+        ui: &mut eframe::egui::Ui,
+        add: impl FnOnce(&mut eframe::egui::Ui) -> R,
+    ) -> R {
+        add(ui)
+    }
+}
 mod plugins;
 mod runtime_assets;
 mod recovery_tasks;

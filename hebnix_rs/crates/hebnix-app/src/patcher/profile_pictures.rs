@@ -327,10 +327,13 @@ fn edit_workshop_checked(
         }
     }
     let changes = values(&package, on)?;
-    if changes
+    let workshop_changed = changes
         .iter()
-        .all(|(at, value)| package.image.get(*at..*at + value.len()) == Some(value.as_slice()))
-    {
+        .any(|(at, value)| package.image.get(*at..*at + value.len()) != Some(value.as_slice()));
+    let freeplay_changed = super::workshop_menu::edit_solo_freeplay(&mut package, on)?;
+    let restart_changed = super::workshop_host::edit_freeplay_restart(&mut package, on)?;
+    let credentials_changed = super::workshop_host::edit_lan_credentials(&mut package, on)?;
+    if !workshop_changed && !freeplay_changed && !restart_changed && !credentials_changed {
         return Ok(());
     }
     // Keep the parsed name table in sync before native bytecode is generated.
@@ -383,7 +386,10 @@ fn edit_workshop_checked(
             restore_snapshot(&mut check, saved)?;
         }
     }
-    if !values(&check, on)?
+    if super::workshop_menu::edit_solo_freeplay(&mut check, on)?
+        || super::workshop_host::edit_freeplay_restart(&mut check, on)?
+        || super::workshop_host::edit_lan_credentials(&mut check, on)?
+        || !values(&check, on)?
         .iter()
         .all(|(at, value)| check.image.get(*at..*at + value.len()) == Some(value.as_slice()))
     {

@@ -6,6 +6,7 @@ pub mod background_merger;
 pub mod map_swap;
 pub mod anthem_patcher;
 pub mod backup_guard;
+pub mod game_update;
 pub mod delete_backups;
 pub mod game_path;
 pub mod ball;
@@ -76,3 +77,4 @@ pub(crate) fn patch_source_selector(ui: &mut eframe::egui::Ui, source: &mut Patc
     })
     .inner
 }
+pub mod upk_history;

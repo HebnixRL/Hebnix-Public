@@ -56,14 +56,9 @@ pub enum AppMsg {
     BackgroundChangerDone(Result<String, String>),
     MenuMapDone(Result<String, String>),
     BackgroundChangerProgress(String),
-    WorkshopMultiplayerProgress(String),
     // result of starting the multiplayer sidecar and its first announce
     WorkshopTailnetStarted {
         result: Result<std::sync::Arc<crate::multiplayer_lan::TailcatSidecarHandle>, String>,
-    },
-    // result of starting Rocket League for Workshop multiplayer
-    WorkshopMultiplayerLaunched {
-        result: Result<(), String>,
     },
     // fires whether this peer ended up hosting or joining inside Rocket
     // League - the relay itself doesn't care which, see hosting.rs
@@ -192,6 +187,7 @@ pub enum AppMsg {
     SendWsCommand(hebnix_sdk::stats::websocket::WsCommand),
     // another player turned Workshop multiplayer on or off
     TailcatPeer {
+        id: String,
         name: String,
         online: bool,
     },

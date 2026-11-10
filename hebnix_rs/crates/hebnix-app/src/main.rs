@@ -78,7 +78,6 @@ mod patch_core {
 mod plugins;
 mod profile_pictures;
 mod scoreboard;
-mod name_bridge;
 mod presets;
 #[cfg(target_os = "windows")]
 mod rl_launch;

@@ -365,15 +365,6 @@ impl HebnixApp {
             ui.heading("Titles");
             ui.separator();
             self.owned_inventory.show(ui);
-            ui.horizontal_wrapped(|ui| {
-                ui.weak(format!(
-                    "{} owned titles in the selected save",
-                    self.owned_inventory.title_ids.len()
-                ));
-                changed |= ui
-                    .checkbox(&mut self.title_only_owned, "Show only owned replacements")
-                    .changed();
-            });
             if self.title_patcher.busy() {
                 ui.label("Title patch operation in progress. Editing will resume when it finishes.");
             }

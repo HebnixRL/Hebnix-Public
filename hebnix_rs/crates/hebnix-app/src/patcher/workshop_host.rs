@@ -29,6 +29,11 @@ pub const RUN_FILE: &str = "HbxRun.txt";
 const RUN_PATH: &str = r"..\..\TAGame\HbxRun.txt";
 /// Return, Nothing, EndOfScript: how the function ends.
 const END: usize = 3;
+const FREEPLAY_REQUEST: &str = "{\"Command\":\"HebnixRestartFreeplayV2\"}";
+const OLD_FREEPLAY_REQUEST: &str = "{\"Command\":\"HebnixRestartFreeplay\"}";
+const FREEPLAY_FILE: &str = "HbxFreeplayRun.txt";
+const LAN_NAME: &str = "HbxLanName.txt";
+const LAN_PASSWORD: &str = "HbxLanPassword.txt";
 
 fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
     upk.find_object(path).ok_or_else(|| format!("{path} was not found in {PACKAGE}"))
@@ -126,7 +131,7 @@ fn block(upk: &UpkPackage, base: usize) -> Result<Script, String> {
     let load_file = upk
         .names
         .iter()
-        .position(|n| n == "LoadFileToString")
+        .position(|n| matches!(n.as_str(), "LoadFileToString" | "TransformedLeftX"))
         .map(|i| [(i as i32).to_le_bytes(), [0; 4]].concat())
         .ok_or("The Workshop menu is not enabled: LoadFileToString is missing")?;
     let file_system = object(upk, "Core.FileSystem")?;
@@ -168,6 +173,179 @@ fn payload(upk: &UpkPackage) -> Result<(usize, Script), String> {
     let export = &upk.exports[index];
     let bytes = &upk.image[export.serial_offset..export.serial_offset + export.serial_size];
     Ok((index, Script::of_function(bytes)?))
+}
+
+fn load_text(upk: &UpkPackage, filename: &str, destination: &Script) -> Result<Script, String> {
+    let loader = upk.names.iter().position(|n| matches!(n.as_str(), "LoadFileToString" | "TransformedLeftX"))
+        .ok_or("The Workshop file loader is missing")? as i32;
+    let path = format!(r"..\..\TAGame\{filename}");
+    let mut read = Script::new();
+    read.raw(&[0x1b]).name(loader).append(&string(&path)).append(destination).raw(&[0x16]);
+    let mut load = Script::new();
+    load.raw(&[0x5e, 0x12, 0, 0x20]).object(object(upk, "Core.FileSystem")?)
+        .raw(&(read.mem_size() as u16).to_le_bytes()).object(0).raw(&[0]).append(&read);
+    Ok(load)
+}
+
+fn freeplay_block(upk: &UpkPackage, base: usize, legacy: bool) -> Result<Script, String> {
+    let command = field(upk, 0x2b, &format!("{COMMAND}.CommandJson"))?;
+    let load = load_text(upk, FREEPLAY_FILE, &command)?;
+    let open = native(
+        if legacy { 0xf8 } else { 0xa8 },
+        &[string(if legacy { "open " } else { "Open" }), command.clone()],
+    );
+    let execute = if legacy {
+        // Retained to recognize and remove the first restart hook.
+        let console = upk.names.iter().position(|n| n == "ConsoleCommand")
+            .ok_or("ConsoleCommand is missing")? as i32;
+        let mut execute = Script::new();
+        execute.raw(&[0x0e]).object(object(upk, "Engine.Actor.ConsoleCommand.ReturnValue")?)
+            .raw(&[0x1b]).name(console).append(&open).raw(&[0x28, 0x16]);
+        context(upk, field(upk, 0x01, "MatchStatsExporter_TA.PrimaryPC")?, execute, None)?
+    } else {
+        // Match TravelManager.Open: call Travel with the Open command and
+        // let the game choose its own command user.
+        let travel = call(upk, "TravelManager_TA.Travel", &[open, native_nothing()])?;
+        let mut execute = Script::new();
+        execute.raw(&[0x5e, 0x12, 0, 0x20]).object(object(upk, "TravelManager_TA")?)
+            .raw(&(travel.mem_size() as u16).to_le_bytes()).object(0).raw(&[0]).append(&travel);
+        execute
+    };
+    let request = native(204, &[command, string(if legacy { OLD_FREEPLAY_REQUEST } else { FREEPLAY_REQUEST })]);
+    let end = base + 3 + request.mem_size() + load.mem_size() + execute.mem_size();
+    let mut block = jump(end, &request)?;
+    block.append(&load).append(&execute);
+    Ok(block)
+}
+
+pub(super) fn edit_freeplay_restart(upk: &mut UpkPackage, on: bool) -> Result<bool, String> {
+    let (_, mut script) = payload(upk)?;
+    let installed = script.bytes().windows(FREEPLAY_REQUEST.len()).any(|w| w == FREEPLAY_REQUEST.as_bytes());
+    let legacy = script.bytes().windows(OLD_FREEPLAY_REQUEST.len()).any(|w| w == OLD_FREEPLAY_REQUEST.as_bytes());
+    if !legacy && installed == on {
+        return Ok(false);
+    }
+    if !script.bytes().ends_with(&[0x04, 0x0b, 0x4c]) {
+        return Err(format!("{COMMAND} changed layout in this Rocket League version"));
+    }
+    if installed || legacy {
+        let probe = freeplay_block(upk, 0, legacy)?;
+        let start = script.len().checked_sub(END + probe.len()).ok_or("Freeplay restart hook is missing")?;
+        let block = freeplay_block(upk, script.mem_size() - END - probe.mem_size(), legacy)?;
+        if script.bytes().get(start..start + block.len()) != Some(block.bytes()) {
+            return Err("The Freeplay restart hook changed layout".into());
+        }
+        script.cut(start, block.len(), block.refs());
+    }
+    if on {
+        let block = freeplay_block(upk, script.mem_size() - END, false)?;
+        script.insert_before_tail(END, &block);
+    }
+    replace_script(upk, COMMAND, &script)?;
+    Ok(true)
+}
+
+pub const FREEPLAY_MESSAGE: &str = "HebnixRestartFreeplayV2";
+
+pub fn request_freeplay_travel(
+    cooked: &Path,
+    stats: &hebnix_sdk::stats::WsStatsClient,
+    url: &str,
+) -> Result<(), String> {
+    if !stats.connected() {
+        return Err("Connect Rocket League's Stats API to restart Freeplay.".into());
+    }
+    let path = cooked.parent().unwrap_or(cooked).join(FREEPLAY_FILE);
+    std::fs::write(path, url).map_err(|error| format!("Could not prepare Freeplay travel: {error}"))?;
+    stats.send_command(hebnix_sdk::stats::WsCommand::new(FREEPLAY_MESSAGE))
+        .map_err(|_| "Could not queue Freeplay travel.".into())
+}
+
+pub fn freeplay_ready(cooked: &Path) -> bool {
+    UpkPackage::load(&game_path::resolve(cooked, PACKAGE)).is_ok_and(|upk| {
+        payload(&upk).is_ok_and(|(_, script)| script.bytes().windows(FREEPLAY_REQUEST.len())
+            .any(|window| window == FREEPLAY_REQUEST.as_bytes()))
+    })
+}
+
+/// Override the LAN settings returned to both the server browser and the
+/// login validator. The profile's private-match settings stay on disk as-is.
+pub(super) fn edit_lan_credentials(upk: &mut UpkPackage, on: bool) -> Result<bool, String> {
+    const FUNCTION: &str = "ListenServer_TA.GetCustomMatchSettings";
+    const SETTINGS: &str = "ProjectX._Types_X.CustomMatchSettings";
+    const EXPRESSION_LEN: usize = 76;
+    const EXPRESSION_REFS: usize = 10;
+    let index = object(upk, FUNCTION)? as usize - 1;
+    let export = &upk.exports[index];
+    let current = Script::of_function(&upk.image[export.serial_offset..export.serial_offset + export.serial_size])?;
+    let result = field(upk, 0x2b, &format!("{FUNCTION}.ReturnValue"))?;
+    let mut trailer = Script::new();
+    trailer.raw(&[0x04, 0x3a]).object(object(upk, &format!("{FUNCTION}.ReturnValue"))?).raw(&[0x4c]);
+    let mut assign = Script::new();
+    assign.raw(&[0x0f]).append(&result);
+    let mut suffix = Script::new();
+    for (member, filename) in [("ServerName", LAN_NAME), ("Password", LAN_PASSWORD)] {
+        let mut destination = Script::new();
+        destination.raw(&[0x35]).object(object(upk, &format!("{SETTINGS}.{member}"))?)
+            .object(object(upk, SETTINGS)?).raw(&[0, 1]).append(&result);
+        suffix.append(&load_text(upk, filename, &destination)?);
+    }
+    suffix.raw(&[0x04]).append(&result).append(&trailer);
+
+    let bytes = current.bytes();
+    let vanilla = bytes.len() == 1 + EXPRESSION_LEN + trailer.len()
+        && current.refs() == EXPRESSION_REFS + trailer.refs()
+        && bytes.starts_with(&[0x04, 0x5e, 0x19, 0x00])
+        && bytes.ends_with(trailer.bytes());
+    let patched = bytes.len() == assign.len() + EXPRESSION_LEN + suffix.len()
+        && bytes.starts_with(assign.bytes()) && bytes.ends_with(suffix.bytes());
+    if !vanilla && !patched {
+        return Err(format!("{FUNCTION} changed layout in this Rocket League version"));
+    }
+    if on == patched {
+        return Ok(false);
+    }
+    let start = if vanilla { 1 } else { assign.len() };
+    let expression = Script::from_parts(bytes[start..start + EXPRESSION_LEN].to_vec(), EXPRESSION_REFS);
+    let mut replacement = Script::new();
+    if on {
+        replacement.append(&assign).append(&expression).append(&suffix);
+    } else {
+        replacement.raw(&[0x04]).append(&expression).append(&trailer);
+    }
+    replace_script(upk, FUNCTION, &replacement)?;
+    Ok(true)
+}
+
+pub fn read_lan_credentials(cooked: &Path) -> Option<(String, String)> {
+    let directory = cooked.parent().unwrap_or(cooked);
+    let password = std::fs::read_to_string(directory.join(LAN_PASSWORD)).ok()?;
+    let name = std::fs::read_to_string(directory.join(LAN_NAME)).unwrap_or_default();
+    Some((name, password))
+}
+
+pub fn store_lan_credentials(cooked: &Path, credentials: Option<(&str, &str)>) -> Result<(), String> {
+    let directory = cooked.parent().unwrap_or(cooked);
+    let name = credentials.map(|(name, _)| name).filter(|name| !name.is_empty());
+    let password = credentials.map(|(_, password)| password);
+    if name.is_some_and(|name| name.chars().any(char::is_control))
+        || password.is_some_and(|password| password.chars().any(|ch| {
+            ch.is_whitespace() || ch.is_control() || matches!(ch, '?' | '#' | '"' | '|' | ';' | '&')
+        }))
+    {
+        return Err("Use a password without spaces or URL separators.".into());
+    }
+    for (file, value) in [(LAN_NAME, name), (LAN_PASSWORD, password)] {
+        let path = directory.join(file);
+        let result = match value {
+            Some(value) => std::fs::write(path, value),
+            None => std::fs::remove_file(path).or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }
+            }),
+        };
+        result.map_err(|error| format!("Could not save LAN match settings: {error}"))?;
+    }
+    Ok(())
 }
 
 /// Whether the block is in the function.
@@ -274,13 +452,32 @@ mod tests {
         let source = std::env::var("HEBNIX_UPK_TEST_SOURCE").unwrap();
         let mut upk = UpkPackage::load(Path::new(&source)).unwrap();
         super::super::workshop_menu::rename_names(&mut upk, true).unwrap();
+        edit_freeplay_restart(&mut upk, false).unwrap();
+        remove(&mut upk).unwrap();
+        edit_lan_credentials(&mut upk, false).unwrap();
         let before = payload(&upk).unwrap().1.bytes().to_vec();
+        let credentials = |upk: &UpkPackage| {
+            let e = &upk.exports[upk.find_object("ListenServer_TA.GetCustomMatchSettings").unwrap() as usize - 1];
+            upk.image[e.serial_offset..e.serial_offset + e.serial_size].to_vec()
+        };
+        let credentials_before = credentials(&upk);
         add(&mut upk).unwrap();
+        let (_, mut old_restart) = payload(&upk).unwrap();
+        let legacy = freeplay_block(&upk, old_restart.mem_size() - END, true).unwrap();
+        old_restart.insert_before_tail(END, &legacy);
+        replace_script(&mut upk, COMMAND, &old_restart).unwrap();
+        assert!(edit_freeplay_restart(&mut upk, true).unwrap());
+        assert!(edit_lan_credentials(&mut upk, true).unwrap());
         let out = std::env::temp_dir().join("hebnix_host_test.upk");
         upk.save_fast(&out).unwrap();
         let mut reloaded = UpkPackage::load(&out).unwrap();
         let _ = std::fs::remove_file(out);
         assert!(has(&reloaded));
+        assert!(!edit_freeplay_restart(&mut reloaded, true).unwrap());
+        assert!(!edit_lan_credentials(&mut reloaded, true).unwrap());
+        assert!(edit_freeplay_restart(&mut reloaded, false).unwrap());
+        assert!(edit_lan_credentials(&mut reloaded, false).unwrap());
+        assert_eq!(credentials(&reloaded), credentials_before);
         remove(&mut reloaded).unwrap();
         assert!(!has(&reloaded));
         assert_eq!(payload(&reloaded).unwrap().1.bytes(), &before[..]);

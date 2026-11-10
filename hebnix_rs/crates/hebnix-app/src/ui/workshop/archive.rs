@@ -297,6 +297,7 @@ impl ArchiveBrowser {
         let downloading = self.downloading.load(Ordering::Relaxed);
 
         ui.heading(t("render-no-api-key-use-the-rl"));
+        ui.separator();
         ui.label(t("render-if-you-can-t-get-a"));
         ui.hyperlink_to(
             t("render-open-the-rl-workshop-archive-request"),

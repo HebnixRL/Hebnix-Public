@@ -9,6 +9,7 @@ pub struct Setting {
 }
 
 pub const SETTINGS: &[Setting] = &[
+    Setting { label: "Game Mode", options: &[("Soccar", ""), ("Heatseeker", "Ball_God")] },
     Setting { label: "Free Play", options: &[("Disable Free Play", ""), ("Enable Free Play", "FreePlay")] },
     Setting {
         label: "Match Length",
@@ -117,7 +118,7 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting {
         label: "Boost Strength",
-        options: &[("1X", ""), ("1.5X", "BoostMultiplier1_5x"), ("2X", "BoostMultiplier2x"), ("10X", "BoostMultiplier10x")],
+        options: &[("1X", ""), ("1.5X", "BoostMultiplier1_5x"), ("2X", "BoostMultiplier2x"), ("5X", "BoostMultiplier5x"), ("10X", "BoostMultiplier10x")],
     },
     Setting {
         label: "Gravity",
@@ -150,11 +151,28 @@ pub const SETTINGS: &[Setting] = &[
     },
     Setting { label: "Bot Loadouts", options: &[("Default", ""), ("Random", "RandomizedBotLoadouts")] },
     Setting { label: "Audio", options: &[("Default", ""), ("Haunted", "HauntedAudio")] },
+    Setting { label: "Car Jumps", options: &[("Default", ""), ("No Jumps", "NoJumps"), ("Unlimited Jumps", "UnlimitedJumps")] },
+    Setting { label: "Dodge Timer", options: &[("Default", ""), ("Unlimited", "DodgeUnlimitedSeconds")] },
+    Setting { label: "Boost Restriction", options: &[("Default", ""), ("Aerial Only", "AerialBoostOnly")] },
+    Setting { label: "Driving Direction", options: &[("Default", ""), ("Backwards", "BackwardsMode")] },
+    Setting { label: "Goal Scoring", options: &[("Default", ""), ("Disabled", "DisableGoalScoring")] },
     Setting {
         label: "Game Event",
         options: &[("Default", ""), ("Haunted", "HauntedGameEventRules"), ("Rugby", "RugbyGameEventRules")],
     },
 ];
+
+pub fn heatseeker(picks: &[usize]) -> bool {
+    picks.first() == Some(&1)
+}
+
+pub fn travel_tags(picks: &[usize]) -> impl Iterator<Item = &'static str> + '_ {
+    let heatseeker = heatseeker(picks);
+    tags(picks)
+        .filter(move |tag| {
+            !heatseeker || (*tag != "FreePlay" && (!tag.starts_with("Ball_") || *tag == "Ball_God"))
+        })
+}
 
 /// Split game tags into the chosen option of each setting, and the tags no
 /// setting claims (kept so nothing typed or written by hand is lost).
@@ -182,6 +200,30 @@ pub fn tags(picks: &[usize]) -> impl Iterator<Item = &'static str> + '_ {
         .filter(|t| !t.is_empty())
 }
 
+pub fn render_picks(
+    ui: &mut eframe::egui::Ui,
+    id: &str,
+    picks: &mut [usize],
+    show: impl Fn(&Setting) -> bool,
+) -> bool {
+    use eframe::egui;
+    let mut changed = false;
+    egui::Grid::new(id).num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+        for (index, setting) in SETTINGS.iter().enumerate().filter(|(_, setting)| show(setting)) {
+            ui.label(setting.label);
+            egui::ComboBox::from_id_salt((id, index))
+                .selected_text(setting.options[picks[index]].0)
+                .show_ui(ui, |ui| {
+                    for (option, (label, _)) in setting.options.iter().enumerate() {
+                        changed |= ui.selectable_value(&mut picks[index], option, *label).changed();
+                    }
+                });
+            ui.end_row();
+        }
+    });
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +233,12 @@ mod tests {
         let (picks, extra) = parse("10Minutes,Ball_Puck,Lan,FreePlay".split(','));
         assert_eq!(extra, ["Lan"]);
         assert_eq!(tags(&picks).collect::<Vec<_>>(), ["FreePlay", "10Minutes", "Ball_Puck"]);
+    }
+
+    #[test]
+    fn heatseeker_keeps_its_homing_ball_and_other_mutators() {
+        let (picks, _) = parse("FreePlay,Ball_God,Ball_Puck,LowGravity,AerialBoostOnly".split(','));
+        assert!(heatseeker(&picks));
+        assert_eq!(travel_tags(&picks).collect::<Vec<_>>(), ["Ball_God", "LowGravity", "AerialBoostOnly"]);
     }
 }

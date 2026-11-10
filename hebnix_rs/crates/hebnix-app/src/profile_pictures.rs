@@ -1,7 +1,8 @@
 //! Native profile pictures and the user's saved avatar gallery.
-mod accounts;
+pub(crate) mod accounts;
 mod gallery;
 mod service;
+pub(crate) use service::download_profile_avatar;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::{

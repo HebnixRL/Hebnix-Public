@@ -1,7 +1,7 @@
 //! Presentation helpers scoped to the Item Swapper working area.
 use super::*;
 
-pub(super) use crate::ui::browser::{ROWS, frame, pagination, search, tile_height};
+pub(super) use crate::ui::browser::{ROWS, TILE_HEIGHT, frame, pagination, search};
 
 pub(super) fn columns(ui: &egui::Ui, manual: bool) -> usize {
     crate::ui::browser::columns(ui, if manual { 224.0 } else { 150.0 })
@@ -86,24 +86,29 @@ impl SwapperState {
     }
 }
 
-pub(super) fn preview(ui: &mut egui::Ui, id: &str, preview: Preview, height: f32) {
+pub(super) fn preview(
+    ui: &mut egui::Ui,
+    id: &str,
+    preview: Preview,
+    height: f32,
+    fill_tile: bool,
+) {
     let size = egui::vec2(ui.available_width(), height);
     ui.allocate_ui_with_layout(
         size,
         egui::Layout::centered_and_justified(egui::Direction::TopDown),
         |ui| match preview {
             Preview::Ready(bytes) => {
-                ui.add(
-                    egui::Image::from_bytes(
-                        format!(
-                            "bytes://swapper-browser/{id}/{:08x}",
-                            crc32fast::hash(&bytes)
-                        ),
-                        bytes,
-                    )
-                    .fit_to_exact_size(size)
-                    .maintain_aspect_ratio(true),
+                let image = egui::Image::from_bytes(
+                    format!("bytes://swapper-browser/{id}/{:08x}", crc32fast::hash(&bytes)),
+                    bytes,
                 );
+                let image = if fill_tile {
+                    crate::ui::browser::cover_image(ui, image, size)
+                } else {
+                    image.fit_to_exact_size(size)
+                };
+                ui.add(image);
             }
             Preview::Loading => {
                 ui.spinner()
@@ -158,6 +163,7 @@ pub(super) fn tile(
         &item_identity(item),
         image,
         image_rect.height(),
+        true,
     );
     let mut banner_ui = ui.new_child(
         egui::UiBuilder::new()

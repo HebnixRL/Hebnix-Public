@@ -65,6 +65,7 @@ fn install(cooked: &Path, upk: &mut UpkPackage, swf: &[u8]) -> Result<(), String
 
 /// Put the patched movie in over the vanilla one.
 fn patch(cooked: &Path, backups: &Path) -> Result<(), String> {
+    super::backup_guard::check_install(cooked, backups)?;
     let mut upk = UpkPackage::load(&super::game_path::resolve(cooked, PACKAGE))?;
     let current = MOVIE.movie(&upk)?;
     if digest(&current) == digest(MOVIE.patched) {
@@ -97,6 +98,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
         return Ok(());
     }
     ensure_closed()?;
+    super::backup_guard::check_install(cooked, backups)?;
     unpatch(cooked, backups)
 }
 
@@ -206,8 +208,12 @@ mod tests {
     fn enable_reapply_restore_on_a_copy() {
         let source = std::env::var("HEBNIX_HUD_UPK").unwrap();
         let dir = std::env::temp_dir().join(format!("hebnix-chat-paste-{}", std::process::id()));
+        let dir = dir.join("TAGame/CookedPCConsole");
         let backups = dir.join("Backups");
+        let binaries = dir.join("../../Binaries/Win64");
         std::fs::create_dir_all(&backups).unwrap();
+        std::fs::create_dir_all(&binaries).unwrap();
+        std::fs::write(binaries.join("RocketLeague.exe"), b"fixture").unwrap();
         std::fs::copy(&source, dir.join(PACKAGE)).unwrap();
         let original = digest(&MOVIE.movie(&UpkPackage::load(&dir.join(PACKAGE)).unwrap()).unwrap());
         patch(&dir, &backups).unwrap();
@@ -219,6 +225,6 @@ mod tests {
         unpatch(&dir, &backups).unwrap();
         assert!(!enabled(&backups) && !MOVIE.status(&dir));
         assert_eq!(digest(&MOVIE.movie(&UpkPackage::load(&dir.join(PACKAGE)).unwrap()).unwrap()), original);
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
     }
 }

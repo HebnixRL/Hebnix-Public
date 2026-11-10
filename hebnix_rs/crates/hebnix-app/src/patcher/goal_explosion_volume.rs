@@ -134,6 +134,7 @@ pub fn apply(cooked: &Path, backups: &Path, gain: f32) -> Result<(), String> {
         return Err(format!("Goal explosion volume must be between {MIN_DB} and {MAX_DB} dB"));
     }
     ensure_closed()?;
+    super::backup_guard::check_install(cooked, backups)?;
     let manifest = manifest()?;
     let dir = backups.join(DIR);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -164,6 +165,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
         return Ok(());
     }
     ensure_closed()?;
+    super::backup_guard::check_install(cooked, backups)?;
     let manifest = manifest()?;
     for bank in &manifest.banks {
         let original = dir.join(&bank.bank);

@@ -209,7 +209,7 @@ fn commit(
         }
         return Err(error);
     }
-    Ok(())
+    super::upk_history::record(cooked, &cooked.join(file), before, "Texture replacement", None)
 }
 
 pub(crate) fn apply(

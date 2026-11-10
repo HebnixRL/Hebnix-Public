@@ -135,7 +135,13 @@ impl TrackerClient {
             Err(ureq::Error::Status(404, _)) => {
                 return Err("NOT_FOUND_404: profile service returned 404".to_string());
             }
-            Err(ureq::Error::Status(status, _)) => {
+            Err(ureq::Error::Status(status, response)) => {
+                if status == 498 {
+                    let reader = response.into_reader().take(RESPONSE_MAX_BYTES);
+                    if let Ok(body) = serde_json::from_reader(reader) {
+                        crate::req_auth::observe_response(status, &body);
+                    }
+                }
                 return Err(format!("profile service returned HTTP {status}"));
             }
             Err(ureq::Error::Transport(error)) => {

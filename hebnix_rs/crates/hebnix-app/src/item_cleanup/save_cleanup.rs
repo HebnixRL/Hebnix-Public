@@ -265,56 +265,42 @@ pub fn clear_saved_instances(
     ))
 }
 
-/// The account save that loadout presets are read from and written to. Uses the same
-/// account discovery as the owned-items view. Rotating copies (`<account>_N.save`)
-/// are only used when the base save is missing; their preset positions can differ.
-fn main_save() -> Result<PathBuf, String> {
-    let accounts = hebnix_sdk::save_file::find_save_accounts(None);
-    let account = accounts
-        .first()
-        .ok_or("No Rocket League account save found")?;
-    let stem = account
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.split('_').next())
-        .unwrap_or_default();
-    let base = account.path.with_file_name(format!("{stem}.save"));
-    Ok(if base.is_file() { base } else { account.path.clone() })
-}
-
-pub fn loadout_export(position: usize) -> Result<String, String> {
-    let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
+pub fn loadout_export(path: &Path, position: usize) -> Result<String, String> {
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
     loadout_edit::export(&raw, position)
 }
 
-pub fn loadout_preset(position: usize) -> Result<loadout_code::Preset, String> {
-    let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
+pub fn loadout_preset(path: &Path, position: usize) -> Result<loadout_code::Preset, String> {
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
     loadout_edit::export_preset(&raw, position)
 }
 
-pub fn loadout_export_bakkes(position: usize) -> Result<String, String> {
-    let raw = std::fs::read(main_save()?).map_err(|e| e.to_string())?;
-    let preset = loadout_edit::export_preset(&raw, position)?;
+pub fn loadout_owned_instances(path: &Path) -> Result<Vec<(i32, u64, u64, i64)>, String> {
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    loadout_edit::owned_instances(&raw)
+}
+
+pub fn loadout_order(path: &Path) -> Result<Vec<u32>, String> {
+    let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+    loadout_edit::preset_order(&raw)
+}
+
+pub fn loadout_export_bakkes(path: &Path, position: usize) -> Result<String, String> {
+    let preset = loadout_preset(path, position)?;
     bakkes_code::encode(&bakkes_code::from_preset(&preset)?)
 }
 
-pub fn apply_loadout_edit(edit: &loadout_edit::Edit) -> Result<String, String> {
+pub fn apply_loadout_edit(path: &Path, edit: &loadout_edit::Edit) -> Result<(), String> {
     if hebnix_sdk::process::detector::rocket_league_running_checked()? {
         return Err(crate::i18n::t("loadouts-close-game"));
     }
-    let path = main_save()?;
-    let changed = execute(&[path.clone()], "loadout", require_closed, |raw| {
+    execute(&[path.to_owned()], "loadout", require_closed, |raw| {
         loadout_edit::plan(raw, edit)
     })?;
-    Ok(if changed == 1 {
-        format!("Saved preset change to {}. Original save backed up beside it.", path.display())
-    } else {
-        "No change needed.".into()
-    })
+    Ok(())
 }
 
-pub fn loadout_names() -> Result<Vec<String>, String> {
-    let save = hebnix_sdk::save_file::load(&main_save()?, false).map_err(|e| e.to_string())?;
-    Ok(save.loadout_sets().into_iter().map(|set| set.name).collect())
+pub fn loadout_summaries(path: &Path) -> Result<Vec<(String, i64)>, String> {
+    let save = hebnix_sdk::save_file::load(path, false).map_err(|e| e.to_string())?;
+    Ok(save.loadout_sets().into_iter().map(|set| (set.name, set.blue.body())).collect())
 }

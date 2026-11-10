@@ -121,6 +121,7 @@ fn install(cooked: &Path, live: &Path, upk: &UpkPackage, patched: bool) -> Resul
 
 pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
+    backup_guard::check_install(cooked, backups)?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if is_patched(&upk) {
@@ -208,6 +209,7 @@ impl State {
         let mut key_changed = false;
         ui.add_enabled_ui(!self.busy(), |ui| {
             ui.checkbox(&mut want, t("game-mod-bots-freeplay")).on_hover_text(t("game-mod-bots-freeplay-description"));
+            ui.separator();
             ui.label(t("game-mod-bots-freeplay-description"));
             ui.horizontal(|ui| {
                 ui.label(t("game-mod-bots-freeplay-key"));

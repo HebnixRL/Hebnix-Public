@@ -418,6 +418,8 @@ pub const BALLS: &[(&str, &str)] = &[
 pub struct SavedSwap {
     pub source: usize,
     pub donor: usize,
+    #[serde(default)]
+    pub colours: bool,
     files: Vec<SavedMesh>,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -591,6 +593,7 @@ pub fn apply_with_colours(
         swaps.push(SavedSwap {
             source,
             donor,
+            colours,
             files: files.clone(),
         });
         save_state(backups, &swaps)?;
@@ -610,7 +613,10 @@ pub fn apply_with_colours(
                 ));
             }
             drop(current);
-            std::fs::rename(work.join(&f.file), &live)
+            super::upk_history::install_copy(
+                cooked, &work.join(&f.file), &live,
+                &format!("{} → {} · Ball appearance", BALLS[donor].1, BALLS[source].1),
+            )
                 .map_err(|e| format!("Install failed: {e}. Use Restore to recover."))?;
         }
         Ok(())
@@ -687,7 +693,9 @@ pub fn restore(cooked: &Path, backups: &Path, source: usize) -> Result<(), Strin
         if hash(&payload(&check, BALLS[source].1)?) != f.before {
             return Err("Restored mesh failed validation".into());
         }
-        std::fs::rename(&temp, &live).map_err(|e| e.to_string())?;
+        let result = super::upk_history::install_copy(cooked, &temp, &live, "Restore ball appearance");
+        let _ = std::fs::remove_file(temp);
+        result?;
     }
     swaps.retain(|s| s.source != source);
     save_state(backups, &swaps)

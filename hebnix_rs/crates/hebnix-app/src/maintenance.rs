@@ -27,52 +27,61 @@ impl UninstallUi {
             ui.label(t("maintenance-windows"));
             return false;
         }
-        ui.checkbox(&mut self.application, t("maintenance-app"));
-        ui.checkbox(&mut self.settings, t("maintenance-settings"));
-        ui.checkbox(&mut self.extensions, t("maintenance-extensions"));
-        ui.checkbox(&mut self.assets, t("maintenance-assets"));
-        if can_restore_game {
-            ui.checkbox(&mut self.restore_game, t("maintenance-restore"));
-        }
-        ui.checkbox(&mut self.certificate, t("maintenance-certificate"));
-        ui.label(t("maintenance-note"));
-        ui.label(base.display().to_string());
-        eframe::egui::CollapsingHeader::new(t("maintenance-files")).show(ui, |ui| {
-            for path in removal_paths(base, self) {
-                ui.monospace(path.display().to_string());
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.heading(t("maintenance-tab"));
+            ui.checkbox(&mut self.application, t("maintenance-app"));
+            ui.checkbox(&mut self.settings, t("maintenance-settings"));
+            ui.checkbox(&mut self.extensions, t("maintenance-extensions"));
+            ui.checkbox(&mut self.assets, t("maintenance-assets"));
+            if can_restore_game {
+                ui.checkbox(&mut self.restore_game, t("maintenance-restore"));
             }
-            if self.application {
-                if let Ok(exe) = std::env::current_exe() {
-                    ui.monospace(exe.display().to_string());
-                }
-            }
+            ui.checkbox(&mut self.certificate, t("maintenance-certificate"));
         });
-        if let Some(error) = &self.error {
-            ui.colored_label(eframe::egui::Color32::RED, error);
-        }
-        let selected = self.application
-            || self.settings
-            || self.extensions
-            || self.assets
-            || self.restore_game
-            || self.certificate;
-        if ui
-            .add_enabled(selected, eframe::egui::Button::new(t("maintenance-remove")))
-            .clicked()
-        {
-            self.confirm = true;
-        }
-        let mut confirmed = false;
-        if self.confirm {
-            ui.separator();
-            ui.label(t("maintenance-confirm"));
-            ui.horizontal(|ui| {
-                confirmed = ui.button(t("maintenance-confirm-button")).clicked();
-                if ui.button(t("maintenance-cancel")).clicked() {
-                    self.confirm = false;
+        ui.add_space(8.0);
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.label(t("maintenance-note"));
+            ui.label(base.display().to_string());
+            eframe::egui::CollapsingHeader::new(t("maintenance-files")).show(ui, |ui| {
+                for path in removal_paths(base, self) {
+                    ui.monospace(path.display().to_string());
+                }
+                if self.application {
+                    if let Ok(exe) = std::env::current_exe() {
+                        ui.monospace(exe.display().to_string());
+                    }
                 }
             });
-        }
+        });
+        ui.add_space(8.0);
+        let mut confirmed = false;
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            if let Some(error) = &self.error {
+                ui.colored_label(eframe::egui::Color32::RED, error);
+            }
+            let selected = self.application
+                || self.settings
+                || self.extensions
+                || self.assets
+                || self.restore_game
+                || self.certificate;
+            if ui
+                .add_enabled(selected, eframe::egui::Button::new(t("maintenance-remove")))
+                .clicked()
+            {
+                self.confirm = true;
+            }
+            if self.confirm {
+                ui.separator();
+                ui.label(t("maintenance-confirm"));
+                ui.horizontal(|ui| {
+                    confirmed = ui.button(t("maintenance-confirm-button")).clicked();
+                    if ui.button(t("maintenance-cancel")).clicked() {
+                        self.confirm = false;
+                    }
+                });
+            }
+        });
         confirmed
     }
 }
@@ -229,7 +238,7 @@ pub fn removal_paths(base: &Path, options: &UninstallUi) -> Vec<PathBuf> {
         ]);
     }
     if options.restore_game && options.settings {
-        names.extend(["state", "title_upk"]);
+        names.extend(["state", "title_upk", "rank_upk"]);
     }
     if options.certificate && options.settings {
         names.push("spoofer");

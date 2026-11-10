@@ -316,7 +316,7 @@ impl ColoursState {
                         for (index, colour) in self.settings.custom_colours.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
                                 colour_row(ui, &label, colour);
-                                if ui.small_button("✕").clicked() {
+                                if ui.small_button("×").clicked() {
                                     remove = Some(index);
                                 }
                             });
@@ -324,10 +324,7 @@ impl ColoursState {
                         if let Some(index) = remove {
                             self.settings.custom_colours.remove(index);
                         }
-                        // each colour takes one palette cell, the row is only so wide
-                        if self.settings.custom_colours.len() < MAX_CUSTOM_COLOURS
-                            && ui.button("+").clicked()
-                        {
+                        if ui.button("+").clicked() {
                             self.settings.custom_colours.push([255, 0, 0]);
                         }
                     });
@@ -648,8 +645,6 @@ impl ColoursState {
     }
 }
 
-const MAX_CUSTOM_COLOURS: usize = 12;
-
 fn colour_row(ui: &mut egui::Ui, label: &str, colour: &mut [u8; 3]) {
     ui.horizontal(|ui| {
         let label_w = crate::i18n::layout::label_column_width(ui, &[label.to_string()], 110.0);
@@ -806,7 +801,7 @@ fn restore_arena_boost_colours(cooked_pc: &Path, backups_dir: &Path) -> Result<(
             format!("Could not validate {} during restore: {error}", saved.file)
         })?)
         .map_err(|error| format!("Restored {} failed validation: {error}", saved.file))?;
-        if let Err(error) = fs::copy(&temp, &live) {
+        if let Err(error) = super::upk_history::install_copy(cooked_pc, &temp, &live, "Restore boost-pad colours") {
             let _ = fs::remove_file(&temp);
             return Err(format!(
                 "Could not restore active boost pads in {}: {error}",
@@ -876,10 +871,11 @@ fn apply(
     if settings.extended_palette {
         package.extend_palette()?;
     }
+    let mut output = package.save()?;
+    drop(package);
     if let Some(cars) = cars {
-        package.apply_car_colours(&cars)?;
+        output = append_custom_car_colours(output, &cars)?;
     }
-    let output = package.save()?;
     let temp = cooked_pc.join("TAGame.upk.colours.tmp");
     fs::write(&temp, &output)
         .map_err(|error| format!("Could not write the patched temporary file: {error}"))?;
@@ -1917,78 +1913,6 @@ impl Package {
         Ok(())
     }
 
-    /// Adds custom car colours to the bottom row of the team and accent sets. Each distinct
-    /// colour takes one cell, counted left from pure black, in every set so the picker
-    /// offers it for primary and accent alike.
-    fn apply_car_colours(&mut self, cars: &CarColours) -> Result<(), String> {
-        let mut picked: Vec<[u8; 3]> = Vec::new();
-        for colour in [cars.blue_primary, cars.orange_primary, cars.blue_accent, cars.orange_accent]
-            .into_iter()
-            .flatten()
-            .chain(cars.extra.iter().copied())
-        {
-            if !picked.contains(&colour) {
-                picked.push(colour);
-            }
-        }
-        let required = ["BlueTeamV3", "OrangeTeamV3", "Accent"];
-        let optional = ["CustomTeam"];
-        let expected = picked.len() * required.len();
-        let mut written = 0;
-        for export in self.exports.clone() {
-            if self.class_of(export).map(strip_suffix) != Some("CarColorSet_TA") {
-                continue;
-            }
-            let Some(object_name) = self.name_of(export.object_name) else {
-                continue;
-            };
-            let set = strip_suffix(object_name).to_string();
-            let counted = required.contains(&set.as_str());
-            if !counted && !optional.contains(&set.as_str()) {
-                continue;
-            }
-            let props = self.parse_props(export);
-            let hue = props.iter().find(|prop| prop.name == "HueCount");
-            let colours = props.iter().find(|prop| prop.name == "Colors");
-            let (Some(hue), Some(colours)) = (hue, colours) else {
-                continue;
-            };
-            let hue_count = usize_from_i32(
-                read_i32(&self.image, export.serial_offset + hue.value_offset)?,
-                "hue count",
-            )?;
-            let colour_count = usize_from_i32(
-                read_i32(&self.image, export.serial_offset + colours.value_offset)?,
-                "colour count",
-            )?;
-            let row =
-                export.serial_offset + colours.value_offset + 4 + (colour_count - hue_count) * 16;
-            for (index, colour) in picked.iter().enumerate() {
-                let from_black = index + 1;
-                if from_black >= hue_count {
-                    continue;
-                }
-                let base = row + (hue_count - from_black - 1) * 16;
-                write_rgb(&mut self.image, base, *colour)?;
-                self.image[base + 12..base + 16].copy_from_slice(&1.0f32.to_le_bytes());
-                if let Some(chunk) = self
-                    .chunks
-                    .iter()
-                    .position(|chunk| base >= chunk.u_off && base < chunk.u_off + chunk.u_size)
-                {
-                    self.modified_chunks.insert(chunk);
-                }
-                if counted {
-                    written += 1;
-                }
-            }
-        }
-        if written != expected {
-            return Err("The car colour sets were not found for custom car colours.".into());
-        }
-        Ok(())
-    }
-
     fn extend_palette(&mut self) -> Result<(), String> {
         let targets = ["BlueTeamV3", "OrangeTeamV3", "CustomTeam"];
         let mut sets = 0;
@@ -2104,6 +2028,125 @@ impl Package {
         }
         Ok(output)
     }
+}
+
+pub(crate) fn loadout_palettes(cooked: &Path) -> Result<[Vec<[u8; 3]>; 3], String> {
+    use super::upk_package::{UpkPackage, strip};
+
+    let package = UpkPackage::load(&super::game_path::resolve(cooked, "TAGame.upk"))?;
+    let mut palettes = [Vec::new(), Vec::new(), Vec::new()];
+    for export in &package.exports {
+        if strip(&package.class_of(export)) != "CarColorSet_TA" {
+            continue;
+        }
+        let index = match strip(&package.name_of(export.object_name)) {
+            "BlueTeamV3" => 0,
+            "OrangeTeamV3" => 1,
+            "Accent" => 2,
+            _ => continue,
+        };
+        let (props, _) = package.serialized_props(export)?;
+        let colours = props.iter().find(|p| p.name == "Colors" && p.tag_type == "ArrayProperty")
+            .ok_or("Missing car palette colours")?;
+        let at = export.serial_offset + colours.value_offset;
+        let count = usize_from_i32(read_i32(&package.image, at)?, "colour count")?;
+        if count == 0 || count.checked_mul(16).and_then(|size| size.checked_add(4)) != Some(colours.size) {
+            return Err("Invalid car palette layout".into());
+        }
+        let data = package.image.get(at + 4..at + colours.size).ok_or("Truncated car palette")?;
+        palettes[index] = data.chunks_exact(16).take(256).map(|cell| {
+            std::array::from_fn(|channel| {
+                let offset = channel * 4;
+                let value = f32::from_le_bytes(cell[offset..offset + 4].try_into().unwrap());
+                (value.clamp(0.0, 1.0) * 255.0).round() as u8
+            })
+        }).collect();
+    }
+    if palettes.iter().any(Vec::is_empty) {
+        return Err("The car colour palettes could not be found.".into());
+    }
+    Ok(palettes)
+}
+
+fn append_custom_car_colours(raw: Vec<u8>, cars: &CarColours) -> Result<Vec<u8>, String> {
+    let mut seen = HashSet::new();
+    let picked: Vec<_> = [
+        cars.blue_primary,
+        cars.orange_primary,
+        cars.blue_accent,
+        cars.orange_accent,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(cars.extra.iter().copied())
+    .filter(|colour| seen.insert(*colour))
+    .collect();
+    if picked.is_empty() {
+        return Ok(raw);
+    }
+    let mut swatches = vec![0; picked.len() * 16];
+    for (cell, colour) in swatches.chunks_exact_mut(16).zip(picked.iter().copied()) {
+        write_rgb(cell, 0, colour)?;
+        cell[12..16].copy_from_slice(&1.0f32.to_le_bytes());
+    }
+
+    let mut package = super::upk_package::UpkPackage::from_bytes(raw)?;
+    let mut required = HashSet::from(["BlueTeamV3", "OrangeTeamV3", "Accent"]);
+    for index in 0..package.exports.len() {
+        let export = &package.exports[index];
+        if strip_suffix(&package.class_of(export)) != "CarColorSet_TA" {
+            continue;
+        }
+        let name = package.name_of(export.object_name);
+        let set = strip_suffix(&name);
+        if !required.contains(set) && set != "CustomTeam" {
+            continue;
+        }
+
+        let (props, _) = package.serialized_props(export)?;
+        let property = |name, kind| {
+            props
+                .iter()
+                .find(|prop| prop.name == name && prop.tag_type == kind)
+                .ok_or_else(|| format!("{set}.{name} was not found in the car palette."))
+        };
+        let hue = property("HueCount", "IntProperty")?;
+        let values = property("ValueCount", "IntProperty")?;
+        let colours = property("Colors", "ArrayProperty")?;
+        let mut payload =
+            package.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec();
+        let width = usize_from_i32(read_i32(&payload, hue.value_offset)?, "hue count")?;
+        let rows = usize_from_i32(read_i32(&payload, values.value_offset)?, "value count")?;
+        let count = usize_from_i32(read_i32(&payload, colours.value_offset)?, "colour count")?;
+        if hue.size != 4
+            || values.size != 4
+            || width == 0
+            || rows == 0
+            || width.checked_mul(rows) != Some(count)
+            || colours.size != 4 + count * 16
+        {
+            return Err(format!("The {set} car palette layout has changed."));
+        }
+
+        let new_count = i32::try_from(count + picked.len()).map_err(|_| "Too many car colours")?;
+        let new_rows = i32::try_from(rows + picked.len().div_ceil(width))
+            .map_err(|_| "Too many car colour rows")?;
+        let new_size = i32::try_from(colours.size + swatches.len())
+            .map_err(|_| "The car palette is too large")?;
+        write_i32(&mut payload, values.value_offset, new_rows)?;
+        write_i32(&mut payload, colours.value_offset, new_count)?;
+        // An array tag stores its size and array index immediately before the value.
+        write_i32(&mut payload, colours.value_offset - 8, new_size)?;
+
+        let end = colours.value_offset + colours.size;
+        payload.splice(end..end, swatches.iter().copied());
+        package.replace_export_payload(index, &payload)?;
+        required.remove(set);
+    }
+    if !required.is_empty() {
+        return Err("The car colour sets were not found for custom car colours.".into());
+    }
+    package.repacked()
 }
 
 fn valid_property(kind: &str) -> bool {
@@ -2229,7 +2272,7 @@ fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
         .collect()
 }
 
-fn package_guid(data: &[u8]) -> Result<[u8; 16], String> {
+pub(super) fn package_guid(data: &[u8]) -> Result<[u8; 16], String> {
     let offset = fstring_end(data, 12)? + 48;
     data.get(offset..offset + 16)
         .ok_or("Package GUID is truncated")?

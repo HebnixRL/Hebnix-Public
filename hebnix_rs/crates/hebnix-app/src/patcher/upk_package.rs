@@ -553,6 +553,10 @@ impl UpkPackage {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw =
             std::fs::read(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+        Self::from_bytes(raw)
+    }
+
+    pub(crate) fn from_bytes(raw: Vec<u8>) -> Result<Self, String> {
         let header = read_header(&raw)?;
         let encrypted_header_size = encrypted_header_size(&header)?;
         let encrypted = raw
@@ -1391,7 +1395,7 @@ impl UpkPackage {
     /// Same package framing/encryption with faster zlib compression. Intended
     /// for verified title staging, where latency matters more than file size.
     pub(crate) fn save_fast(&self, path: &Path) -> Result<(), String> {
-        std::fs::write(path, self.repacked_with_compression(1)?)
+        std::fs::write(path, self.repacked_fast()?)
             .map_err(|e| format!("Could not write {}: {e}", path.display()))
     }
     /// Duplicate a validated local template into a stripped export slot.
@@ -1441,6 +1445,10 @@ impl UpkPackage {
     pub(crate) fn repacked(&self) -> Result<Vec<u8>, String> {
         self.repacked_with_compression(9)
     }
+    pub(crate) fn repacked_fast(&self) -> Result<Vec<u8>, String> {
+        self.repacked_with_compression(1)
+    }
+
     fn repacked_with_compression(&self, compression: u32) -> Result<Vec<u8>, String> {
         if self.chunks.is_empty() && (self.raw_dirty || self.header_dirty) {
             let mut output = self.image.clone();

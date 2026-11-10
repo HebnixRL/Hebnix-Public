@@ -717,6 +717,7 @@ impl ImportWizard {
     ) -> Option<LocalMap> {
         let mut imported = None;
         ui.heading(t("render-import-a-map"));
+        ui.separator();
         ui.label(t("render-add-a-map-that-isn-t"));
         ui.add_space(8.0);
         match self.step {

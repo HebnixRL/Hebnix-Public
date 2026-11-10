@@ -12,14 +12,8 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
         return Err("The configured Rocket League folder could not be found. Correct it in Settings before restoring game changes.".into());
     }
     let backups = cooked.join("Backups");
-    // Check without synchronize_install: uninstall must never discard recovery
-    // files just because a newer game build has been installed.
-    if backups.exists() {
-        let saved = fs::read_to_string(backups.join("hebnix-install-build.sha256"))
-            .map_err(|_| "Game backups have no build marker. Verify Rocket League files before uninstalling.")?;
-        if saved.trim() != super::backup_guard::build_id(&cooked)? {
-            return Err("Rocket League changed since the backups were made. Verify game files before uninstalling; backups have been kept.".into());
-        }
+    if super::backup_guard::update_required(&cooked)? {
+        return Err("Rocket League changed since the backups were made. Resolve the update prompt before uninstalling.".into());
     }
     if crate::replay_history_patch::installed(game).unwrap_or(false) {
         crate::replay_history_patch::set_enabled(game, false)?;
@@ -184,4 +178,28 @@ mod tests {
         assert!(restore_packages(&backups, &fixture.0).is_err());
         assert!(backups.join("Missing.upk.bak").is_file());
     }
+}
+
+/// Remove only item changes already applied during this recovery. The old
+/// backup tree has been quarantined before this function can run.
+pub(crate) fn restore_repatched_items(base: &Path, cooked: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    super::backup_guard::check_install(cooked, &backups)?;
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    super::swapper::SwapperState::new(base).restore_all_active(cooked, &backups, &tx)?;
+    super::thumbnail_patcher::restore_all(cooked, &backups)?;
+    super::wheel_alignment::restore_for_uninstall(cooked)?;
+    for swap in super::ball_visual::active(&backups)?.into_iter().rev() {
+        super::ball_visual::restore(cooked, &backups, swap.source)?;
+    }
+    for file in super::item_name::languages(cooked) {
+        if !super::item_name::load(&backups, &file)?.patches.is_empty() {
+            super::item_name::rename(cooked, &backups, &file, "", None)?;
+        }
+    }
+    super::decal_patcher::restore_for_uninstall(cooked, &backups)?;
+    restore_ball_regions(&backups, cooked)?;
+    restore_packages(&backups, cooked)?;
+    restore_packages(&backups.join("Anthems"), cooked)?;
+    restore_packages(&backups.join("CarPatcher"), cooked)
 }

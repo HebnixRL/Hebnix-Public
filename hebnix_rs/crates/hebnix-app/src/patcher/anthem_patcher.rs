@@ -612,6 +612,12 @@ impl AnthemPatcherState {
             apply(&cooked, active, saved)
         });
     }
+    pub(crate) fn repatch(&mut self, active: HashMap<String, String>, cooked: &Path, ctx: &egui::Context) {
+        let saved = self.saved.clone();
+        let cooked = cooked.to_path_buf();
+        self.job(ctx, "Repatching anthems...", move || apply(&cooked, active, saved));
+    }
+
     pub fn restore_all(&mut self, cooked: &Path, ctx: &egui::Context) {
         let saved = self.saved.clone();
         let cooked = cooked.to_path_buf();

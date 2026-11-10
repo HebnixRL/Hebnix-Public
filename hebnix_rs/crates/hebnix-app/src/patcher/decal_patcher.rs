@@ -1739,7 +1739,7 @@ fn restore_package_texture_regions(
     }
     // Keep appended TFC chunks until Restore All: other active packages may
     // still point to data appended after this package was patched.
-    fs::copy(&package_backup, game_dir.join(package_name))
+    super::upk_history::install_linked(game_dir, &game_dir.join(package_name), &fs::read(&package_backup).map_err(|e| e.to_string())?, "Restore decal")
         .map_err(|error| format!("Failed to restore {package_name}: {error}"))?;
     Ok(())
 }
@@ -2310,7 +2310,7 @@ fn patch_decal_on_skin(
         repack_package(&package)?
     };
     progress(0.9, &t("patch-decal-on-skin-encrypting-patched-upk"));
-    fs::write(&upk_path, &final_out).map_err(|e| format!("Failed to write patched UPK: {}", e))?;
+    super::upk_history::install_linked(game_dir, &upk_path, &final_out, "Custom decal")?;
     progress(1.0, &t("patch-decal-on-skin-decal-patch-complete"));
     Ok((target_upk, patched_fields))
 }
@@ -2328,7 +2328,7 @@ fn restore_decal_candidates(
     for target_upk in target_candidates {
         let backup_upk = backups_dir.join(format!("{target_upk}.bak"));
         if backup_upk.is_file() {
-            fs::copy(&backup_upk, cooked_pc.join(target_upk))
+            super::upk_history::install_linked(cooked_pc, &cooked_pc.join(target_upk), &fs::read(&backup_upk).map_err(|e| e.to_string())?, "Restore decal")
                 .map_err(|error| format!("Failed to restore {target_upk}: {error}"))?;
             restored_package = true;
         }
@@ -2946,9 +2946,7 @@ impl DecalPatcherState {
         if crate::messages::block_item_action_if_game_running(tx) {
             return Ok(());
         }
-        if crate::patcher::backup_guard::synchronize_install(cooked_pc, backups_dir)? {
-            self.active_decals.clear();
-        }
+        crate::patcher::backup_guard::check_install(cooked_pc, backups_dir)?;
         self.validate_key_file()?;
 
         let decal_name_owned = decal_name.to_string();
@@ -3915,18 +3913,13 @@ impl DecalPatcherState {
                                         |ui| {
                                             ui.set_min_height(245.0);
                                             ui.vertical_centered(|ui| {
-                                                let size = egui::vec2(
-                                                    ui.available_width().min(120.0),
-                                                    90.0,
-                                                );
+                                                let size = egui::vec2(ui.available_width(), 120.0);
                                                 if let Some(bytes) = decal.preview_image.as_ref() {
-                                                    ui.add(
-                                                        egui::Image::from_bytes(
-                                                            format!("bytes://decal/{}", decal.name),
-                                                            bytes.clone(),
-                                                        )
-                                                        .fit_to_exact_size(size),
+                                                    let image = egui::Image::from_bytes(
+                                                        format!("bytes://decal/{}", decal.name),
+                                                        bytes.clone(),
                                                     );
+                                                    ui.add(crate::ui::browser::cover_image(ui, image, size));
                                                 } else {
                                                     ui.add_sized(
                                                         size,
@@ -4487,18 +4480,16 @@ impl DecalPatcherState {
                                             |ui| {
                                                 ui.set_min_height(172.0);
                                                 ui.vertical_centered(|ui| {
-                                                    let size = egui::vec2(140.0, 96.0);
+                                                    let size = egui::vec2(ui.available_width(), 120.0);
                                                     if let Some(bytes) = &decal.preview_image {
-                                                        ui.add(
-                                                            egui::Image::from_bytes(
-                                                                format!(
-                                                                    "bytes://decal/preview/{}",
-                                                                    decal.name
-                                                                ),
-                                                                bytes.clone(),
-                                                            )
-                                                            .fit_to_exact_size(size),
+                                                        let image = egui::Image::from_bytes(
+                                                            format!(
+                                                                "bytes://decal/preview/{}",
+                                                                decal.name
+                                                            ),
+                                                            bytes.clone(),
                                                         );
+                                                        ui.add(crate::ui::browser::cover_image(ui, image, size));
                                                     } else {
                                                         ui.add_sized(
                                                             size,

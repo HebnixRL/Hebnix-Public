@@ -68,8 +68,9 @@ fn chevron_pos(output: &egui::FullOutput) -> egui::Pos2 {
     fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
         match shape {
             egui::Shape::LineSegment {points, ..}
-                if (points[1]-points[0]-egui::vec2(3.5,3.5)).length()<0.01 =>
-                    Some(points[1]-egui::vec2(0.0,2.0)),
+                if ((points[1]-points[0]).abs()-egui::vec2(3.5,3.5)).length()<0.01
+                    && points[1].x > points[0].x =>
+                    Some(points[1]-egui::vec2(0.0, 2.0 * (points[1].y - points[0].y).signum())),
             egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
             _ => None,
         }
@@ -134,6 +135,7 @@ fn sidebar_primary_and_menu_actions_dispatch_once() {
     assert_eq!(frame(&ctx,&p,&labels,&mut view,&mut center,click(menu,false)).selected,None);
     let output=frame(&ctx,&p,&labels,&mut view,&mut center,vec![]);
     let secondary=text_pos(&output.output,&labels[1]);
+    assert!(secondary.x < menu.x && secondary.y < menu.y, "Sidebar menu should open above and to the left of the chevron");
     frame(&ctx,&p,&labels,&mut view,&mut center,click(secondary,true));
     assert_eq!(frame(&ctx,&p,&labels,&mut view,&mut center,click(secondary,false)).selected,Some(1));
     assert_eq!(frame(&ctx,&p,&labels,&mut view,&mut center,vec![]).selected,None);
@@ -257,5 +259,6 @@ fn sidebar_header_is_text_and_page_icons_render_as_images() {
     let image_count:usize=output.output.shapes.iter().map(|s|images(&s.shape)).sum();
     assert_eq!(image_count,super::Tab::ALL.len()+1,"Expected one icon per navigation page and the bell, with no header image");
     let _=text_pos(&output.output,"Hebnix");
+    let _=text_pos(&output.output,&super::Tab::Home.label());
 }
 

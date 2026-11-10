@@ -130,6 +130,7 @@ fn install(cooked: &Path, live: &Path, upk: &UpkPackage, patched: bool) -> Resul
 /// Turn the patch on, or change its scale.
 pub fn enable(cooked: &Path, backups: &Path, scale: f32) -> Result<(), String> {
     ensure_closed()?;
+    backup_guard::check_install(cooked, backups)?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     let index = function_index(&upk)?;

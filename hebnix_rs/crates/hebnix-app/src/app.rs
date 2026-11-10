@@ -1,6 +1,10 @@
 // crates/hebnix-app/src/app.rs
+mod game_update;
+
 #[path = "ui/home.rs"]
 mod home;
+#[path = "ui/home_tracker.rs"]
+mod home_tracker;
 #[cfg(test)]
 #[path = "ui/navigation_tests.rs"]
 mod navigation_tests;
@@ -46,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.3.0";
+pub const APP_VERSION: &str = "2.2.9";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -80,16 +84,17 @@ fn get_retry(url: &str, timeout: Duration) -> Result<ureq::Response, String> {
     Err(last)
 }
 
-const RANK_SPOOF_PLAYLISTS: &[(i32, &str)] = &[
-    (10, "Ranked 1v1"),
-    (11, "Ranked 2v2"),
-    (13, "Ranked 3v3"),
-    (27, "Hoops"),
-    (28, "Rumble"),
-    (29, "Dropshot"),
-    (30, "Snow Day"),
-    (61, "Quads"),
-    (63, "Heatseeker"),
+const RANK_SPOOF_PLAYLISTS: &[(i32, &str, u8)] = &[
+    (10, "Ranked 1v1", 2),
+    (11, "Ranked 2v2", 4),
+    (13, "Ranked 3v3", 6),
+    (27, "Hoops", 4),
+    (28, "Rumble", 6),
+    (29, "Dropshot", 6),
+    (30, "Snow Day", 6),
+    (34, "Tournaments", 6),
+    (61, "Quads", 8),
+    (63, "Heatseeker", 4),
 ];
 
 #[allow(dead_code)]
@@ -155,10 +160,11 @@ fn default_mu_for_tier(tier: i32) -> f64 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct RankSpoofState {
     enabled: bool,
     rank: i32,
+    division: u8,
     mmr: String,
 }
 
@@ -251,13 +257,15 @@ impl RankSpoofState {
         serde_json::json!({
             "enabled": self.enabled,
             "rank": self.rank,
+            "division": self.division,
             "mmr": self.mmr
         })
     }
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
             enabled: v.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
-            rank: v.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            rank: v.get("rank").and_then(|v| v.as_i64()).unwrap_or(0).clamp(0, 22) as i32,
+            division: v.get("division").and_then(|v| v.as_u64()).unwrap_or(0).min(3) as u8,
             mmr: v
                 .get("mmr")
                 .and_then(|v| v.as_str())
@@ -316,6 +324,7 @@ enum Tab {
     Spoofer,
     Items,
     Patcher,
+    Freeplay,
     GameMods,
     Settings,
     Plugins,
@@ -324,11 +333,12 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Home,
         Self::Workshop,
         Self::Items,
         Self::Patcher,
+        Self::Freeplay,
         Self::GameMods,
         Self::Spoofer,
         Self::Replays,
@@ -347,6 +357,7 @@ impl Tab {
             Self::Spoofer => t("nav-player"),
             Self::Items => t("tab-patcher"),
             Self::Patcher => t("nav-upk-studio"),
+            Self::Freeplay => t("tab-freeplay"),
             Self::GameMods => t("tab-game-mods"),
             Self::Settings => t("tab-settings"),
             Self::Plugins => t("tab-plugins"),
@@ -365,6 +376,7 @@ impl Tab {
             Self::Spoofer => "Spoofer",
             Self::Items => "Items",
             Self::Patcher => "UPK Studio",
+            Self::Freeplay => "Freeplay",
             Self::GameMods => "Game Mods",
             Self::Settings => "Settings",
             Self::Plugins => "Plugins",
@@ -403,28 +415,31 @@ enum ItemsMode {
     GameColours,
     ArenaBackgrounds,
     GoalExplosion,
+    MenuTextures,
     ItemNames,
     Manage,
     ItemsActive,
+    History,
     Presets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StudioSection {
-    Tools,
     CustomAssets,
     Appearance,
     Active,
+    History,
 }
 
 impl ItemsMode {
     fn section(self) -> Option<StudioSection> {
         Some(match self {
             Self::Swapper | Self::Recolour | Self::ItemsActive | Self::Presets => return None,
-            Self::SpeedPatch => StudioSection::Tools,
+            Self::SpeedPatch => StudioSection::Appearance,
             Self::Patching | Self::ItemNames => StudioSection::CustomAssets,
-            Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds | Self::GoalExplosion => StudioSection::Appearance,
+            Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds | Self::GoalExplosion | Self::MenuTextures => StudioSection::Appearance,
             Self::Manage => StudioSection::Active,
+            Self::History => StudioSection::History,
         })
     }
 }
@@ -482,13 +497,11 @@ enum HebnixSettingsTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpooferSubTab {
     Username,
-    NameBridgeTest,
     Titles,
     ProfilePictures,
     Scoreboard,
     TitleRank,
     Friends,
-    MenuTextures,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -555,6 +568,7 @@ pub struct HebnixApp {
 
     stats: Arc<StatsClient>,
     home: home::HomeState,
+    home_tracker: home_tracker::Tracker,
     ws_stats: Arc<hebnix_sdk::stats::websocket::WsStatsClient>,
     stats_tx: crossbeam_channel::Sender<hebnix_sdk::stats::StatsEvent>,
     monitor: Monitor,
@@ -579,6 +593,7 @@ pub struct HebnixApp {
     speed_patch: crate::speed_patch::State,
     console: ConsoleState,
     workshop: WorkshopState,
+    freeplay: crate::ui::workshop::freeplay::State,
     rlapi_panel: crate::ui::rlapi::RlApiPanel,
     auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays,
     replay_history_patch: crate::replay_history_patch::State,
@@ -640,6 +655,7 @@ pub struct HebnixApp {
     maintenance_running: bool,
     changelog_popup: Option<crate::update::ChangelogEntry>,
     notification_popup: Option<crate::notifications::Notification>,
+    req_clock_warning_open: bool,
     epic_repair: crate::epic_connection::RepairState,
     launch_path_notice: bool,
     rl_launch_setup_open: bool,
@@ -662,7 +678,6 @@ pub struct HebnixApp {
     title_editor: titles::TitleEditorState,
     profile_pictures: crate::profile_pictures::State,
     scoreboard: crate::scoreboard::State,
-    name_bridge: crate::name_bridge::State,
     menu_textures: menu_textures::MenuTextureState,
     spoofer_title_target: Option<String>,
     spoofer_titles: Vec<TitleSpoofSettings>,
@@ -673,7 +688,7 @@ pub struct HebnixApp {
     catalogs_loading: bool,
     catalogs_loaded: bool,
     catalogs_error: Option<String>,
-    spoofer_rank_enabled: bool,
+    rank_patch: crate::patcher::title_patcher::RankPatchState,
     spoofer_ranks: HashMap<i32, RankSpoofState>,
     spoofer_cert_installed: bool,
     spoofer_certificate_prompt_open: bool,
@@ -689,6 +704,7 @@ pub struct HebnixApp {
     patcher_car: crate::car_patcher::CarPatcherState,
     patcher_anthem: crate::patcher::anthem_patcher::AnthemPatcherState,
     wheel_alignment: crate::patcher::wheel_alignment::WheelAlignmentState,
+    upk_history: crate::patcher::upk_history::History,
     goal_explosion: crate::patcher::goal_explosion::State,
     goal_explosion_volume: crate::patcher::goal_explosion_volume::State,
     forfeit_command: crate::patcher::forfeit_command::State,
@@ -700,6 +716,7 @@ pub struct HebnixApp {
     chat_paste: crate::patcher::chat_paste::State,
     instant_suite: crate::patcher::instant_suite::State,
     swapper: crate::swapper::SwapperState,
+    game_update: game_update::State,
     colours: crate::patcher::colours::ColoursState,
     colour_admin_prompt_open: bool,
     admin_prompt_open: bool,
@@ -920,7 +937,6 @@ impl HebnixApp {
         let mut spoofer_titles = Vec::new();
         let mut spoofer_title_copy = None;
         let mut title_only_owned = true;
-        let spoofer_rank_enabled = false;
         let mut spoofer_ranks = HashMap::new();
 
         if let Ok(text) = std::fs::read_to_string(base_dir.join("spoofer_settings.json")) {
@@ -988,20 +1004,22 @@ impl HebnixApp {
                         }
                     }
                 }
-                // Live match data identifies Heatseeker as playlist 63.
-                // Retain an existing spoof when migrating the earlier IDs.
-                if !spoofer_ranks.contains_key(&63) {
-                    if let Some(state) = spoofer_ranks
-                        .remove(&34)
-                        .or_else(|| spoofer_ranks.remove(&43))
-                        .or_else(|| spoofer_ranks.remove(&38))
-                    {
-                        spoofer_ranks.insert(63, state);
+                if json.get("rank_display_version").is_none() {
+                    // Live match data identifies Heatseeker as playlist 63.
+                    // Retain an existing spoof when migrating the earlier IDs.
+                    if !spoofer_ranks.contains_key(&63) {
+                        if let Some(state) = spoofer_ranks
+                            .remove(&34)
+                            .or_else(|| spoofer_ranks.remove(&43))
+                            .or_else(|| spoofer_ranks.remove(&38))
+                        {
+                            spoofer_ranks.insert(63, state);
+                        }
                     }
+                    spoofer_ranks.remove(&34);
+                    spoofer_ranks.remove(&38);
+                    spoofer_ranks.remove(&43);
                 }
-                spoofer_ranks.remove(&34);
-                spoofer_ranks.remove(&38);
-                spoofer_ranks.remove(&43);
             }
         }
 
@@ -1096,6 +1114,7 @@ impl HebnixApp {
             control_rx,
             stats,
             home: home::HomeState::default(),
+            home_tracker: home_tracker::Tracker::new(&base_dir),
             ws_stats: Arc::clone(&ws_stats),
             stats_tx,
             monitor,
@@ -1114,11 +1133,12 @@ impl HebnixApp {
             patcher_subtab: PatcherSubTab::Car,
             swapper_subtab: PatcherSubTab::Swapper(crate::swapper::SwapCategory::Bodies),
             items_subtab: ItemsSubTab::Swapper,
-            replays_subtab: ReplaysSubTab::ReplayTimeline,
+            replays_subtab: ReplaysSubTab::AutoUploadReplays,
             replay_timeline: crate::replay_timeline::ReplayTimeline::new(&base_dir, &cc.egui_ctx),
             speed_patch: crate::speed_patch::State::default(),
             console: ConsoleState::default(),
             workshop,
+            freeplay: Default::default(),
             rlapi_panel: crate::ui::rlapi::RlApiPanel::default(),
             auto_upload_replays: crate::auto_upload_replays::AutoUploadReplays::new(&base_dir).with_refresh_client(Arc::clone(&ws_stats)),
             replay_history_patch: Default::default(),
@@ -1173,6 +1193,7 @@ impl HebnixApp {
             maintenance_running: false,
             changelog_popup: None,
             notification_popup: None,
+            req_clock_warning_open: false,
             epic_repair: Default::default(),
             launch_path_notice: false,
             rl_launch_setup_open: false,
@@ -1194,7 +1215,6 @@ impl HebnixApp {
             title_editor,
             profile_pictures: crate::profile_pictures::State::new(&base_dir),
             scoreboard: Default::default(),
-            name_bridge: Default::default(),
             menu_textures: Default::default(),
             spoofer_title_target,
             spoofer_titles,
@@ -1205,7 +1225,7 @@ impl HebnixApp {
             catalogs_loading: true,
             catalogs_loaded: false,
             catalogs_error: None,
-            spoofer_rank_enabled,
+            rank_patch: Default::default(),
             spoofer_ranks,
             spoofer_cert_installed: cert_installed,
             spoofer_certificate_prompt_open: false,
@@ -1220,6 +1240,7 @@ impl HebnixApp {
             patcher_car,
             patcher_anthem,
             wheel_alignment: Default::default(),
+            upk_history: Default::default(),
             goal_explosion: Default::default(),
             goal_explosion_volume: Default::default(),
             forfeit_command: Default::default(),
@@ -1231,6 +1252,7 @@ impl HebnixApp {
             chat_paste: Default::default(),
             instant_suite: Default::default(),
             swapper,
+            game_update: game_update::State::default(),
             colours: crate::patcher::colours::ColoursState::new(),
             colour_admin_prompt_open: false,
             admin_prompt_open: false,
@@ -1260,7 +1282,6 @@ impl HebnixApp {
         }
 
         app.save_friends_internal();
-        app.save_ranks_internal();
         app.save_config();
         if let Err(error) = app.spoofer_mgr.start_lifecycle_monitor() {
             app.disable_certificate_features();
@@ -1305,7 +1326,7 @@ impl HebnixApp {
             "spoofer_titles": self.spoofer_titles,
             "spoofer_title_copy": self.spoofer_title_copy,
             "title_only_owned": self.title_only_owned,
-            "spoofer_rank_enabled": self.spoofer_rank_enabled,
+            "rank_display_version": 1,
             "ranks": map,
         });
 
@@ -1411,31 +1432,48 @@ impl HebnixApp {
     }
 
     fn render_game_mods_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(t("game-mods-intro"));
-        ui.add_space(8.0);
-        let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
-        let backups_dir = cooked_pc.join("Backups");
-        if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
-            self.save_config();
-        }
-        ui.add_space(8.0);
-        self.chat_export.render(ui, &cooked_pc, &backups_dir);
-        ui.add_space(8.0);
-        self.lan_commands.render(ui, &cooked_pc, &backups_dir);
-        ui.add_space(8.0);
-        self.chat_paste.render(ui, &cooked_pc, &backups_dir);
-        ui.add_space(8.0);
-        if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.instant_suite_mode, &mut self.config.game_mods.instant_suite_map) {
-            self.save_config();
-        }
-        ui.add_space(8.0);
-        if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
-            self.save_config();
-        }
-        ui.add_space(8.0);
-        if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
-            self.save_config();
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("game_mods_options")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
+                let backups_dir = cooked_pc.join("Backups");
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
+                        self.save_config();
+                    }
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    self.chat_export.render(ui, &cooked_pc, &backups_dir);
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    self.lan_commands.render(ui, &cooked_pc, &backups_dir);
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    self.chat_paste.render(ui, &cooked_pc, &backups_dir);
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
+                        self.save_config();
+                    }
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
+                        self.save_config();
+                    }
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
+                        self.save_config();
+                    }
+                });
+            });
     }
 
     fn render_replay_auto_upload_tab(&mut self, ui: &mut egui::Ui) {
@@ -1842,89 +1880,92 @@ impl HebnixApp {
         ctx: &egui::Context,
     ) {
         self.process_preset_operations(cooked_pc, backups_dir, ctx);
-        ui.heading(t("studio-swap-presets"));
-        ui.label(t("presets-save-and-restore-named-collections-of"));
-        ui.horizontal(|ui| {
-            ui.label(t("presets-name"));
-            ui.text_edit_singleline(&mut self.presets.name_edit);
-            ui.checkbox(
-                &mut self.presets.include_patches,
-                t("presets-include-patches"),
-            );
-            if ui.button(t("presets-save-preset")).clicked() {
-                let swaps = std::fs::read(backups_dir.join("swapper_swaps.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<Vec<serde_json::Value>>(&b).ok())
-                    .unwrap_or_default();
-                let patches = if self.presets.include_patches {
-                    serde_json::json!({
-                        "ball": self.patcher_ball.active_ball,
-                        "boost": self.patcher_boost.active_boost,
-                        "decals": self.patcher_decal.active_decals,
-                        "cars": self.patcher_car.active_cars,
-                        "car_colours": self.colours.settings.car_colours_patch(),
-                    })
-                } else {
-                    serde_json::Value::Null
-                };
-                let preset = crate::presets::Preset {
-                    name: self.presets.name_edit.trim().to_string(),
-                    include_patches: self.presets.include_patches,
-                    patches,
-                    swaps,
-                };
-                if let Err(error) = self.presets.save(preset) {
-                    self.console.write(format!("[Presets] {error}"));
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.heading(t("studio-swap-presets"));
+            ui.separator();
+            ui.label(t("presets-save-and-restore-named-collections-of"));
+            ui.horizontal(|ui| {
+                ui.label(t("presets-name"));
+                ui.text_edit_singleline(&mut self.presets.name_edit);
+                ui.checkbox(
+                    &mut self.presets.include_patches,
+                    t("presets-include-patches"),
+                );
+                if ui.button(t("presets-save-preset")).clicked() {
+                    let swaps = std::fs::read(backups_dir.join("swapper_swaps.json"))
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<Vec<serde_json::Value>>(&b).ok())
+                        .unwrap_or_default();
+                    let patches = if self.presets.include_patches {
+                        serde_json::json!({
+                            "ball": self.patcher_ball.active_ball,
+                            "boost": self.patcher_boost.active_boost,
+                            "decals": self.patcher_decal.active_decals,
+                            "cars": self.patcher_car.active_cars,
+                            "car_colours": self.colours.settings.car_colours_patch(),
+                        })
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    let preset = crate::presets::Preset {
+                        name: self.presets.name_edit.trim().to_string(),
+                        include_patches: self.presets.include_patches,
+                        patches,
+                        swaps,
+                    };
+                    if let Err(error) = self.presets.save(preset) {
+                        self.console.write(format!("[Presets] {error}"));
+                    }
                 }
-            }
-        });
-        ui.horizontal(|ui| {
-            if ui.button(t("btn-refresh")).clicked() {
-                self.presets.refresh();
-            }
-            if ui.button(t("presets-import-json")).clicked() {
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter(t("presets-json"), &["json"])
-                    .pick_file()
-                {
-                    if let Ok(bytes) = std::fs::read(file) {
-                        if let Ok(preset) = serde_json::from_slice::<crate::presets::Preset>(&bytes)
-                        {
-                            let _ = self.presets.save(preset);
+            });
+            ui.horizontal(|ui| {
+                if ui.button(t("btn-refresh")).clicked() {
+                    self.presets.refresh();
+                }
+                if ui.button(t("presets-import-json")).clicked() {
+                    if let Some(file) = rfd::FileDialog::new()
+                        .add_filter(t("presets-json"), &["json"])
+                        .pick_file()
+                    {
+                        if let Ok(bytes) = std::fs::read(file) {
+                            if let Ok(preset) = serde_json::from_slice::<crate::presets::Preset>(&bytes)
+                            {
+                                let _ = self.presets.save(preset);
+                            }
                         }
                     }
                 }
-            }
-        });
-        ui.separator();
-        if self.presets.presets.is_empty() {
-            ui.weak(t("presets-no-presets-saved"));
-        } else {
-            let names: Vec<String> = self
-                .presets
-                .presets
-                .iter()
-                .map(|p| p.name.clone())
-                .collect();
-            egui::ComboBox::from_id_salt("preset_select")
-                .selected_text(&names[self.presets.selected])
-                .show_ui(ui, |ui| {
-                    for (index, name) in names.iter().enumerate() {
-                        ui.selectable_value(&mut self.presets.selected, index, name);
+            });
+            ui.separator();
+            if self.presets.presets.is_empty() {
+                ui.weak(t("presets-no-presets-saved"));
+            } else {
+                let names: Vec<String> = self
+                    .presets
+                    .presets
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                egui::ComboBox::from_id_salt("preset_select")
+                    .selected_text(&names[self.presets.selected])
+                    .show_ui(ui, |ui| {
+                        for (index, name) in names.iter().enumerate() {
+                            ui.selectable_value(&mut self.presets.selected, index, name);
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("Apply Preset").clicked() {
+                        self.apply_selected_preset(cooked_pc, backups_dir, ctx);
+                    }
+                    if ui.button("Edit Preset").clicked() {
+                        self.presets.begin_edit_selected();
+                    }
+                    if ui.button(t("presets-delete")).clicked() {
+                        self.presets.delete_selected();
                     }
                 });
-            ui.horizontal(|ui| {
-                if ui.button("Apply Preset").clicked() {
-                    self.apply_selected_preset(cooked_pc, backups_dir, ctx);
-                }
-                if ui.button("Edit Preset").clicked() {
-                    self.presets.begin_edit_selected();
-                }
-                if ui.button(t("presets-delete")).clicked() {
-                    self.presets.delete_selected();
-                }
-            });
-        }
+            }
+        });
         let editing = self.presets.editing.is_some();
         let mut save_edit = false;
         let mut cancel_edit = false;
@@ -2159,32 +2200,6 @@ impl HebnixApp {
         self.save_friends_internal();
     }
 
-    fn save_ranks_internal(&self) {
-        let mut active = HashMap::new();
-        if self.spoofer_rank_enabled {
-            for (id, state) in &self.spoofer_ranks {
-                if state.enabled
-                    && RANK_SPOOF_PLAYLISTS
-                        .iter()
-                        .any(|(supported, _)| id == supported)
-                {
-                    let mu = if let Ok(mmr) = state.mmr.parse::<f64>() {
-                        f64::max(0.0, (mmr - 100.0) / 20.0)
-                    } else {
-                        default_mu_for_tier(state.rank)
-                    };
-                    active.insert(*id, (state.rank, mu));
-                }
-            }
-        }
-        self.spoofer_mgr.update_ranks(active);
-    }
-
-    fn save_ranks(&mut self) {
-        self.save_ranks_internal();
-        self.save_config();
-    }
-
     fn replay_options_enabled(&self) -> bool {
         self.config.replay_upload.enabled()
             && self.replay_history_patch.enabled()
@@ -2220,7 +2235,6 @@ impl HebnixApp {
         self.spoofer_mgr
             .set_title_enabled(self.spoofer_title_enabled);
         self.save_friends_internal();
-        self.save_ranks_internal();
         self.sync_proxy_consumers();
     }
 
@@ -2233,7 +2247,6 @@ impl HebnixApp {
         self.spoofer_certificate_prompt_open = false;
         self.spoofer_mgr.set_username("");
         self.save_friends_internal();
-        self.save_ranks_internal();
         self.save_config();
         if hebnix_sdk::process::is_rocket_league_running() {
             self.console.write("[Spoofer] Proxy disabled. Restart Rocket League to discard its current cached local connection.");
@@ -2305,6 +2318,9 @@ impl HebnixApp {
             self.set_hidden(ctx, true);
             return;
         }
+        if !self.config.settings.panel_enabled {
+            return;
+        }
         if self
             .config
             .settings
@@ -2364,7 +2380,8 @@ impl HebnixApp {
                     SpooferSubTab::Username,
                     SpooferSubTab::Titles,
                     SpooferSubTab::ProfilePictures,
-                    SpooferSubTab::MenuTextures,
+                    SpooferSubTab::Scoreboard,
+                    SpooferSubTab::TitleRank,
                     SpooferSubTab::Friends,
                 ],
                 &mut self.spoofer_subtab,
@@ -2450,6 +2467,9 @@ impl HebnixApp {
                 }
             }
             Some(index) => {
+                if pages[index] == Tab::Replays && self.tab != Tab::Replays {
+                    self.replays_subtab = ReplaysSubTab::AutoUploadReplays;
+                }
                 self.tab = pages[index];
                 ui.horizontal(|ui| {
                     if ui.button("< Back").clicked() {
@@ -2612,8 +2632,12 @@ impl HebnixApp {
                         self.check_statsapi_rate();
                         self.check_web_port();
                     }
+                    self.workshop.resume_multiplayer(&self.tx, ctx);
                     if rl_state_changed || platform_changed {
                         self.workshop.refresh_launch_status(&self.tx, ctx);
+                    }
+                    if rl_state_changed && !rl_open {
+                        self.workshop.shutdown_multiplayer();
                     }
                     self.workshop.tick_shutdown_grace();
                 }
@@ -2939,9 +2963,6 @@ impl HebnixApp {
                     let message = self.workshop.update_background_changer_progress(message);
                     self.console.write(message);
                 }
-                AppMsg::WorkshopMultiplayerProgress(status) => {
-                    self.workshop.set_multiplayer_progress(status);
-                }
                 AppMsg::WorkshopTailnetStarted { result } => {
                     if let Err(error) = &result {
                         self.console.write(format!(
@@ -2950,9 +2971,6 @@ impl HebnixApp {
                         ));
                     }
                     self.workshop.finish_tailnet_started(result, &self.tx, ctx);
-                }
-                AppMsg::WorkshopMultiplayerLaunched { result } => {
-                    self.workshop.finish_multiplayer_launch(result);
                 }
                 AppMsg::WorkshopRelayStarted { result } => {
                     self.workshop.finish_relay_started(result);
@@ -3117,10 +3135,8 @@ impl HebnixApp {
                     self.plugin_mgr.on_ws_close(&slug, &id, &reason);
                     ctx.request_repaint();
                 }
-                AppMsg::TailcatPeer { name, online } => {
-                    let word = if online { "is on" } else { "left" };
-                    self.console
-                        .write(format!("[Multiplayer] {} {word}", crate::multiplayer_lan::redact(&name)));
+                AppMsg::TailcatPeer { id, name, online } => {
+                    self.workshop.multiplayer_peer_presence(id, &name, online);
                 }
                 AppMsg::TailcatStatus { peers } => {
                     self.workshop.multiplayer_players(peers);
@@ -3147,10 +3163,19 @@ impl HebnixApp {
         let replay_event = self.replay_timeline.is_replay_event(&event);
         self.replay_timeline.event(&event, &self.ws_stats);
         self.sync_proxy_consumers();
-        if !replay_event && matches!(event.event_type.as_str(), "MatchCreated" | "MatchStarted" | "UpdateState") {
+        if !replay_event
+            && (event.event_type == "MatchStarted"
+                || (event.event_type == "UpdateState" && !self.match_ended))
+        {
             self.auto_upload_replays.track_match(event.match_guid.as_deref());
         }
         match event.event_type.as_str() {
+            "MatchCreated" | "MatchStarted" => {
+                if !replay_event {
+                    crate::patcher::instant_suite::clear_match_end();
+                }
+                self.plugin_mgr.dispatch_game_event(&event);
+            }
             "UpdateState" => {
                 let entered_match = !self.in_match && !self.match_ended;
                 if !self.match_ended {
@@ -3159,7 +3184,7 @@ impl HebnixApp {
                 }
                 if let Some(state) = event.update_state() {
                     if !replay_event {
-                        self.scoreboard.update(event.match_guid.as_deref(), state);
+                        self.scoreboard.update(event.match_guid.as_deref(), state, &self.config.scoreboard);
                     }
                     self.workshop
                         .update_workshop_map_from_stats(&state.game.arena, &self.tx);
@@ -3180,9 +3205,11 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
-                if !replay_event {
-                    self.auto_upload_replays.submit_finished(event.match_guid.as_deref());
-                    crate::patcher::instant_suite::match_ended();
+                if !replay_event && !self.match_ended {
+                    crate::patcher::instant_suite::match_ended(
+                        self.config.game_mods.instant_suite_private,
+                        self.config.game_mods.instant_suite_tournaments,
+                    );
                 }
                 self.in_match = false;
                 self.match_ended = true;
@@ -3193,7 +3220,6 @@ impl HebnixApp {
             "MatchDestroyed" => {
                 if !replay_event {
                 self.scoreboard.end_match();
-                self.auto_upload_replays.submit_finished(event.match_guid.as_deref());
                 }
                 self.in_match = false;
                 self.match_ended = false;
@@ -3213,9 +3239,10 @@ impl HebnixApp {
 
     fn handle_rl_status(&mut self, rl_open: bool, api_open: bool) {
         if !rl_open || !api_open {
-            self.home = home::HomeState::default();
+            self.home.clear_match();
             self.scoreboard.end_match();
         }
+        self.home_tracker.set_running(rl_open);
         self.last_rl_open = rl_open;
         self.last_api_open = api_open;
         let is_ready = rl_open && api_open;
@@ -3258,9 +3285,6 @@ impl HebnixApp {
                 self.console
                     .write("[Monitor] Connection lost. Halting listener...");
                 self.stats.stop();
-                if !rl_open {
-                    self.workshop.shutdown_multiplayer();
-                }
                 self.match_ended = false;
                 if self.in_match {
                     self.in_match = false;
@@ -3822,55 +3846,24 @@ impl HebnixApp {
     }
 
     fn render_spoofer_tab(&mut self, ui: &mut egui::Ui) {
-        if self.spoofer_subtab == SpooferSubTab::TitleRank {
-            self.spoofer_subtab = SpooferSubTab::Username;
-        }
         theme::secondary_navigation(ui, "spoofer_settings_list").show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("spoofer_settings_names")
-                .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.spoofer_subtab,
-                        SpooferSubTab::Username,
-                        t("nav-player-name"),
-                    );
-                    ui.selectable_value(
-                        &mut self.spoofer_subtab,
-                        SpooferSubTab::NameBridgeTest,
-                        "Name bridge test",
-                    );
-                    ui.selectable_value(
-                        &mut self.spoofer_subtab,
-                        SpooferSubTab::Titles,
-                        t("nav-titles"),
-                    );
-                    ui.selectable_value(
-                        &mut self.spoofer_subtab,
-                        SpooferSubTab::ProfilePictures,
-                        t("nav-profile-pictures"),
-                    );
-                    ui.selectable_value(&mut self.spoofer_subtab, SpooferSubTab::Scoreboard, t("nav-scoreboard"));
-                    ui.scope(|ui| {
-                        ui.add_enabled_ui(false, |ui| {
-                            ui.selectable_value(
-                                &mut self.spoofer_subtab,
-                                SpooferSubTab::TitleRank,
-                                t("spoofer-rank"),
-                            )
-                            .on_disabled_hover_text("Rank spoofing is currently unavailable.");
-                        });
-                        ui.selectable_value(
-                            &mut self.spoofer_subtab,
-                            SpooferSubTab::MenuTextures,
-                            "Menus (experimental)",
-                        );
-                        ui.selectable_value(
-                            &mut self.spoofer_subtab,
-                            SpooferSubTab::Friends,
-                            t("spoofer-friends"),
-                        );
+                .show(ui, |ui| {
+                    crate::panel::followed(ui, |ui| {
+                        let tabs = [
+                            (SpooferSubTab::Username, t("nav-player-name")),
+                            (SpooferSubTab::Titles, t("nav-titles")),
+                            (SpooferSubTab::ProfilePictures, t("nav-profile-pictures")),
+                            (SpooferSubTab::Scoreboard, t("nav-scoreboard")),
+                            (SpooferSubTab::TitleRank, t("spoofer-rank")),
+                            (SpooferSubTab::Friends, t("spoofer-friends")),
+                        ];
+                        for (value, label) in tabs {
+                            ui.selectable_value(&mut self.spoofer_subtab, value, label);
+                        }
                     });
-                }));
+                });
         });
 
         egui::CentralPanel::default()
@@ -3883,10 +3876,6 @@ impl HebnixApp {
                 self.title_editor.leave_page();
                 if self.spoofer_subtab == SpooferSubTab::ProfilePictures {
                     self.profile_pictures.show(ui, std::path::Path::new(&self.config.settings.rl_path));
-                    return;
-                }
-                if self.spoofer_subtab == SpooferSubTab::MenuTextures {
-                    self.render_menu_textures_page(ui);
                     return;
                 }
                 if self.spoofer_subtab == SpooferSubTab::Username {
@@ -3903,247 +3892,277 @@ impl HebnixApp {
                         SpooferSubTab::Titles => {
                             unreachable!("Titles uses its own scrolling columns")
                         }
-                        SpooferSubTab::Scoreboard => self.scoreboard.show(ui),
-                        SpooferSubTab::NameBridgeTest => self.name_bridge.show(ui, std::path::Path::new(&self.config.settings.rl_path)),
+                        SpooferSubTab::Scoreboard => {
+                            if self.scoreboard.show(ui, &mut self.config.scoreboard) {
+                                self.save_config();
+                            }
+                        }
                         SpooferSubTab::ProfilePictures => unreachable!("Profile pictures uses its own page"),
-                        SpooferSubTab::MenuTextures => {
-                            unreachable!("Menu textures use their own scroll area")
-                        }
+
                         SpooferSubTab::Friends => {
-                            ui.heading(t("spoofer-friends"));
-                            ui.add_space(8.0);
-
-                            ui.scope(|ui| {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .checkbox(
-                                            &mut self.spoofer_friends_enabled,
-                                            t("spoofer-enable-friend-name-spoof"),
-                                        )
-                                        .changed()
-                                    {
-                                        self.save_friends();
-                                        self.evaluate_proxies();
-                                    }
-                                });
-                                ui.add_space(8.0);
-
-                                ui.horizontal(|ui| {
-                                    ui.label(t("spoofer-search"));
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.friends_search)
-                                            .desired_width(150.0),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.button(t("spoofer-revert-all")).clicked() {
-                                                for state in self.spoofer_friends.values_mut() {
-                                                    state.enabled = false;
-                                                    state.spoofed_name.clear();
-                                                }
-                                                self.save_friends();
-                                            }
-                                        },
-                                    );
-                                });
-                                ui.add_space(8.0);
-
-                                let discovered =
-                                    self.spoofer_mgr.discovered_friends.lock().unwrap().clone();
-
-                                let mut changed = false;
-                                for (acc_id, orig_name) in &discovered {
-                                    let entry = self
-                                        .spoofer_friends
-                                        .entry(acc_id.clone())
-                                        .or_insert_with(|| {
-                                            changed = true;
-                                            FriendSpoofState {
-                                                enabled: false,
-                                                original_name: orig_name.clone(),
-                                                spoofed_name: String::new(),
-                                            }
-                                        });
-                                    if entry.original_name != *orig_name {
-                                        entry.original_name = orig_name.clone();
-                                        changed = true;
-                                    }
-                                }
-                                if changed {
-                                    self.save_friends();
-                                }
-
-                                let mut friends_vec: Vec<_> =
-                                    self.spoofer_friends.iter_mut().collect();
-                                friends_vec.sort_by(|a, b| {
-                                    a.1.original_name
-                                        .to_lowercase()
-                                        .cmp(&b.1.original_name.to_lowercase())
-                                });
-
-                                let query = self.friends_search.to_lowercase();
-                                friends_vec.retain(|(_, state)| {
-                                    query.is_empty()
-                                        || state.original_name.to_lowercase().contains(&query)
-                                        || state.spoofed_name.to_lowercase().contains(&query)
-                                });
-
-                                if discovered.is_empty() && friends_vec.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(t(
-                                            "spoofer-start-rocket-league-to-populate-friends",
-                                        ))
-                                        .color(egui::Color32::GRAY),
-                                    );
-                                } else {
-                                    let mut any_interaction = false;
-
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("friends_scroll")
-                                        .auto_shrink([false, false])
-                                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                                            for (_id, state) in friends_vec {
-                                                ui.horizontal(|ui| {
-                                                    if ui.checkbox(&mut state.enabled, "").changed()
-                                                    {
-                                                        any_interaction = true;
-                                                    }
-
-                                                    let mut orig_name_display =
-                                                        state.original_name.clone();
-                                                    ui.add_sized(
-                                                        [150.0, 20.0],
-                                                        egui::TextEdit::singleline(
-                                                            &mut orig_name_display,
-                                                        )
-                                                        .interactive(false),
-                                                    );
-
-                                                    let text_resp = ui.add(
-                                                        egui::TextEdit::singleline(
-                                                            &mut state.spoofed_name,
-                                                        )
-                                                        .hint_text(t("spoofer-spoofed-name")),
-                                                    );
-                                                    if text_resp.changed() {
-                                                        any_interaction = true;
-                                                    }
-                                                });
-                                            }
-                                        }));
-
-                                    if any_interaction {
-                                        self.save_friends();
-                                    }
-                                }
-                            });
-                        }
-                        SpooferSubTab::TitleRank => {
-                            ui.heading(t("spoofer-rank-spoofing"));
-                            ui.add_space(8.0);
-
-                            ui.weak(spoofer::WEBSOCKET_UNAVAILABLE);
-                            ui.scope(|ui| {
-                                if ui
-                                    .checkbox(
-                                        &mut self.spoofer_rank_enabled,
-                                        t("spoofer-enable-rank-spoofing"),
-                                    )
-                                    .changed()
-                                {
-                                    self.save_ranks();
-                                    self.evaluate_proxies();
-                                }
-
-                                ui.add_space(8.0);
+                            crate::i18n::layout::bordered_panel(ui, |ui| {
+                                ui.heading(t("spoofer-friends"));
+                                ui.separator();
 
                                 ui.scope(|ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .checkbox(
+                                                &mut self.spoofer_friends_enabled,
+                                                t("spoofer-enable-friend-name-spoof"),
+                                            )
+                                            .changed()
+                                        {
+                                            self.save_friends();
+                                            self.evaluate_proxies();
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(t("spoofer-search"));
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.friends_search)
+                                                .desired_width(150.0),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.button(t("spoofer-revert-all")).clicked() {
+                                                    for state in self.spoofer_friends.values_mut() {
+                                                        state.enabled = false;
+                                                        state.spoofed_name.clear();
+                                                    }
+                                                    self.save_friends();
+                                                }
+                                            },
+                                        );
+                                    });
+                                    ui.add_space(8.0);
+
+                                    let discovered =
+                                        self.spoofer_mgr.discovered_friends.lock().unwrap().clone();
+
                                     let mut changed = false;
+                                    for (acc_id, orig_name) in &discovered {
+                                        let entry = self
+                                            .spoofer_friends
+                                            .entry(acc_id.clone())
+                                            .or_insert_with(|| {
+                                                changed = true;
+                                                FriendSpoofState {
+                                                    enabled: false,
+                                                    original_name: orig_name.clone(),
+                                                    spoofed_name: String::new(),
+                                                }
+                                            });
+                                        if entry.original_name != *orig_name {
+                                            entry.original_name = orig_name.clone();
+                                            changed = true;
+                                        }
+                                    }
+                                    if changed {
+                                        self.save_friends();
+                                    }
 
-                                    egui::ScrollArea::vertical().id_salt("ranks_scroll").show(
-                                        ui,
-                                        |ui| crate::panel::followed(ui, |ui| {
-                                            for &(id, fallback_name) in RANK_SPOOF_PLAYLISTS {
-                                                let name =
-                                                    hebnix_sdk::utils::playlists::known_name(
-                                                        i64::from(id),
-                                                    )
-                                                    .unwrap_or(fallback_name);
-                                                let state = self.spoofer_ranks.entry(id).or_insert(
-                                                    RankSpoofState {
-                                                        enabled: false,
-                                                        rank: 0,
-                                                        mmr: String::new(),
-                                                    },
-                                                );
+                                    let mut friends_vec: Vec<_> =
+                                        self.spoofer_friends.iter_mut().collect();
+                                    friends_vec.sort_by(|a, b| {
+                                        a.1.original_name
+                                            .to_lowercase()
+                                            .cmp(&b.1.original_name.to_lowercase())
+                                    });
 
-                                                ui.horizontal(|ui| {
-                                                    ui.add_sized(
-                                                        [110.0, 20.0],
-                                                        |ui: &mut egui::Ui| {
-                                                            let r = ui
-                                                                .checkbox(&mut state.enabled, name);
-                                                            if r.changed() {
-                                                                changed = true;
-                                                            }
-                                                            r
-                                                        },
-                                                    );
+                                    let query = self.friends_search.to_lowercase();
+                                    friends_vec.retain(|(_, state)| {
+                                        query.is_empty()
+                                            || state.original_name.to_lowercase().contains(&query)
+                                            || state.spoofed_name.to_lowercase().contains(&query)
+                                    });
 
-                                                    ui.scope(|ui| {
-                                                        let combo = egui::ComboBox::from_id_salt(
-                                                            format!("rank_combo_{id}"),
-                                                        )
-                                                        .selected_text(rank_name(state.rank))
-                                                        .width(160.0)
-                                                        .show_ui(ui, |ui| {
-                                                            let mut local_changed = false;
-                                                            for r in 0..=22 {
-                                                                if ui
-                                                                    .selectable_value(
-                                                                        &mut state.rank,
-                                                                        r,
-                                                                        rank_name(r),
-                                                                    )
-                                                                    .changed()
-                                                                {
-                                                                    local_changed = true;
-                                                                }
-                                                            }
-                                                            local_changed
-                                                        });
+                                    if discovered.is_empty() && friends_vec.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(t(
+                                                "spoofer-start-rocket-league-to-populate-friends",
+                                            ))
+                                            .color(egui::Color32::GRAY),
+                                        );
+                                    } else {
+                                        let mut any_interaction = false;
 
-                                                        if combo.inner.unwrap_or(false) {
-                                                            changed = true;
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("friends_scroll")
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                for (_id, state) in friends_vec {
+                                                    ui.horizontal(|ui| {
+                                                        if ui.checkbox(&mut state.enabled, "").changed()
+                                                        {
+                                                            any_interaction = true;
                                                         }
 
-                                                        let mmr_resp = ui.add(
+                                                        let mut orig_name_display =
+                                                            state.original_name.clone();
+                                                        ui.add_sized(
+                                                            [150.0, 20.0],
                                                             egui::TextEdit::singleline(
-                                                                &mut state.mmr,
+                                                                &mut orig_name_display,
                                                             )
-                                                            .desired_width(60.0)
-                                                            .hint_text(t("spoofer-mmr")),
+                                                            .interactive(false),
                                                         );
-                                                        if mmr_resp.changed() {
-                                                            changed = true;
+
+                                                        let text_resp = ui.add(
+                                                            egui::TextEdit::singleline(
+                                                                &mut state.spoofed_name,
+                                                            )
+                                                            .hint_text(t("spoofer-spoofed-name")),
+                                                        );
+                                                        if text_resp.changed() {
+                                                            any_interaction = true;
                                                         }
                                                     });
-                                                });
-                                                ui.add_space(4.0);
-                                            }
-                                        }),
-                                    );
+                                                }
+                                            });
 
-                                    if changed {
-                                        self.save_ranks();
-                                        self.evaluate_proxies();
+                                        if any_interaction {
+                                            self.save_friends();
+                                        }
                                     }
                                 });
                             });
                         }
+                        SpooferSubTab::TitleRank => self.render_rank_display(ui),
                     }));
             });
+    }
+
+    fn render_rank_display(&mut self, ui: &mut egui::Ui) {
+        use crate::patcher::title_patcher::RankPick;
+
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.heading(t("spoofer-rank-spoofing"));
+            ui.label("Choose the rank, division and MMR shown locally in Rocket League.");
+            ui.weak("Close Rocket League before applying. Untick a playlist and apply to restore its display.");
+            ui.add_space(8.0);
+
+            ui.add_enabled_ui(!self.rank_patch.busy(), |ui| {
+                egui::Grid::new("rank_display_grid")
+                    .spacing([12.0, 5.0])
+                    .show(ui, |ui| {
+                        for &(id, name, _) in RANK_SPOOF_PLAYLISTS {
+                            let state = self.spoofer_ranks.entry(id).or_default();
+                            ui.checkbox(&mut state.enabled, name);
+                            egui::ComboBox::from_id_salt(("rank", id))
+                                .selected_text(rank_name(state.rank))
+                                .width(150.0)
+                                .show_ui(ui, |ui| {
+                                    for rank in 0..=22 {
+                                        if ui
+                                            .selectable_value(&mut state.rank, rank, rank_name(rank))
+                                            .changed()
+                                        {
+                                            state.mmr = ((default_mu_for_tier(rank) * 20.0 + 100.0)
+                                                as u32)
+                                                .to_string();
+                                        }
+                                    }
+                                });
+                            let divisions =
+                                ["Division I", "Division II", "Division III", "Division IV"];
+                            ui.add_enabled_ui((1..22).contains(&state.rank), |ui| {
+                                egui::ComboBox::from_id_salt(("rank_division", id))
+                                    .selected_text(divisions[usize::from(state.division)])
+                                    .show_ui(ui, |ui| {
+                                        for (division, name) in divisions.into_iter().enumerate() {
+                                            ui.selectable_value(
+                                                &mut state.division,
+                                                division as u8,
+                                                name,
+                                            );
+                                        }
+                                    });
+                            });
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.mmr)
+                                    .desired_width(65.0)
+                                    .hint_text(t("spoofer-mmr")),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                let cooked = std::path::Path::new(&self.config.settings.rl_path)
+                    .join("TAGame")
+                    .join("CookedPCConsole");
+                let ready = cooked.is_dir()
+                    && !self.last_rl_open
+                    && !self.first_status
+                    && !self.title_patcher.busy();
+                let (apply, restore) = ui.horizontal(|ui| {
+                    let blocked = "Set the Rocket League folder and close the game first.";
+                    let apply = ui
+                        .add_enabled(ready, egui::Button::new(t("spoofer-apply-ranks")))
+                        .on_disabled_hover_text(blocked)
+                        .clicked();
+                    let restore = ui
+                        .add_enabled(ready, egui::Button::new(t("spoofer-restore-ranks")))
+                        .on_hover_text(t("spoofer-restore-ranks-help"))
+                        .on_disabled_hover_text(blocked)
+                        .clicked();
+                    (apply, restore)
+                }).inner;
+                if restore {
+                    self.rank_patch.start(
+                        self.base_dir.clone(),
+                        cooked,
+                        Vec::new(),
+                        ui.ctx().clone(),
+                    );
+                } else if apply {
+                    let picks = RANK_SPOOF_PLAYLISTS
+                        .iter()
+                        .filter_map(|&(id, name, players)| {
+                            let state = self.spoofer_ranks.get(&id).filter(|state| state.enabled)?;
+                            let mmr = if state.mmr.trim().is_empty() {
+                                Ok((default_mu_for_tier(state.rank) * 20.0 + 100.0) as usize)
+                            } else {
+                                state
+                                    .mmr
+                                    .trim()
+                                    .parse::<usize>()
+                                    .ok()
+                                    .filter(|mmr| (100..=9999).contains(mmr))
+                                    .ok_or_else(|| {
+                                        format!("Enter an MMR between 100 and 9999 for {name}.")
+                                    })
+                            };
+                            Some(mmr.map(|mmr| RankPick {
+                                playlist: id as u8,
+                                tier: state.rank as u8,
+                                division: state.division,
+                                mmr,
+                                players,
+                            }))
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    match picks {
+                        Ok(picks) => {
+                            self.rank_patch.start(
+                                self.base_dir.clone(),
+                                cooked,
+                                picks,
+                                ui.ctx().clone(),
+                            );
+                        }
+                        Err(error) => self.rank_patch.status = error,
+                    }
+                }
+            });
+            if self.rank_patch.busy() {
+                ui.spinner();
+            }
+            ui.label(&self.rank_patch.status);
+        });
     }
 
     /// topmost first. hidden with fewer than two layers.
@@ -4292,10 +4311,10 @@ impl HebnixApp {
             .id_salt("plugins_list")
             .auto_shrink([false, false])
             .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                for plugin in &self.plugin_mgr.plugins {
+                for plugin in self.plugin_mgr.plugins_by_name() {
                     if let Some(err) = &plugin.load_error {
                         ui.horizontal(|ui| {
-                            ui.add_enabled(false, egui::Checkbox::new(&mut false, &plugin.slug));
+                            ui.add_enabled(false, egui::Checkbox::new(&mut false, plugin.display_name()));
                             ui.colored_label(
                                 egui::Color32::from_rgb(0xe7, 0x4c, 0x3c),
                                 err.clone(),
@@ -4644,38 +4663,24 @@ impl HebnixApp {
     fn render_hebnix_settings(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
-        theme::secondary_navigation(ui, "hebnix_settings_list")
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("hebnix_settings_names")
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.hebnix_settings_tab,
-                            HebnixSettingsTab::Interface,
-                            t("nav-settings-appearance"),
-                        );
-                        ui.selectable_value(
-                            &mut self.hebnix_settings_tab,
-                            HebnixSettingsTab::Directories,
-                            t("nav-files-folders"),
-                        );
-                        ui.selectable_value(
-                            &mut self.hebnix_settings_tab,
-                            HebnixSettingsTab::System,
-                            t("settings-nav-system"),
-                        );
-                        ui.selectable_value(
-                            &mut self.hebnix_settings_tab,
-                            HebnixSettingsTab::Discord,
-                            t("settings-nav-discord"),
-                        );
-                        ui.selectable_value(
-                            &mut self.hebnix_settings_tab,
-                            HebnixSettingsTab::ActionButton,
-                            t("settings-nav-action-button"),
-                        );
-                    }));
-            });
+        theme::secondary_navigation(ui, "hebnix_settings_list").show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("hebnix_settings_names")
+                .show(ui, |ui| {
+                    crate::panel::followed(ui, |ui| {
+                        let tabs = [
+                            (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
+                            (HebnixSettingsTab::Directories, t("nav-files-folders")),
+                            (HebnixSettingsTab::System, t("settings-nav-system")),
+                            (HebnixSettingsTab::Discord, t("settings-nav-discord")),
+                            (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
+                        ];
+                        for (value, label) in tabs {
+                            ui.selectable_value(&mut self.hebnix_settings_tab, value, label);
+                        }
+                    });
+                });
+        });
 
         egui::CentralPanel::default()
             .frame(crate::i18n::layout::subtab_content_frame())
@@ -4683,823 +4688,867 @@ impl HebnixApp {
                 egui::ScrollArea::vertical()
                     .id_salt("hebnix_settings_view")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        ui.heading(match self.hebnix_settings_tab {
-                            HebnixSettingsTab::Interface => t("nav-settings-appearance"),
-                            HebnixSettingsTab::Directories => t("nav-files-folders"),
-                            HebnixSettingsTab::Discord => t("settings-heading-discord"),
-                            HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
-                            HebnixSettingsTab::System => t("settings-heading-system"),
-                        });
-                        ui.add_space(8.0);
+                    .show(ui, |ui| {
+                        crate::i18n::layout::bordered_panel(ui, |ui| {
+                            ui.heading(match self.hebnix_settings_tab {
+                                HebnixSettingsTab::Interface => t("nav-settings-appearance"),
+                                HebnixSettingsTab::Directories => t("nav-files-folders"),
+                                HebnixSettingsTab::Discord => t("settings-heading-discord"),
+                                HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
+                                HebnixSettingsTab::System => t("settings-heading-system"),
+                            });
+                            ui.separator();
 
-                        match self.hebnix_settings_tab {
-                            HebnixSettingsTab::Interface => {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.selectable_value(
-                                        &mut self.appearance_subtab,
-                                        AppearanceSubTab::General,
-                                        t("settings-appearance-general"),
-                                    );
-                                    ui.selectable_value(
-                                        &mut self.appearance_subtab,
-                                        AppearanceSubTab::Theme,
-                                        t("settings-appearance-theme"),
-                                    );
-                                });
-                                ui.separator();
-                                if self.appearance_subtab == AppearanceSubTab::Theme {
-                                    let label_w = label_column_width(ui, &[t("settings-theme-label")]);
-                                    ui.horizontal(|ui| {
-                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
-                                        let mut selected = self.config.settings.theme.clone();
-                                        let mut changed = false;
-                                        egui::ComboBox::from_id_salt("theme_select")
-                                            .selected_text(selected.clone())
-                                            .width(120.0)
-                                            .show_ui(ui, |ui| {
-                                                for option in self.theme_options.clone() {
-                                                    if ui
-                                                        .selectable_value(
-                                                            &mut selected,
-                                                            option.clone(),
-                                                            option,
-                                                        )
-                                                        .changed()
-                                                    {
-                                                        changed = true;
+                            match self.hebnix_settings_tab {
+                                HebnixSettingsTab::Interface => {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.selectable_value(
+                                            &mut self.appearance_subtab,
+                                            AppearanceSubTab::General,
+                                            t("settings-appearance-general"),
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.appearance_subtab,
+                                            AppearanceSubTab::Theme,
+                                            t("settings-appearance-theme"),
+                                        );
+                                    });
+                                    ui.separator();
+                                    if self.appearance_subtab == AppearanceSubTab::Theme {
+                                        let label_w = label_column_width(ui, &[t("settings-theme-label")]);
+                                        ui.horizontal_wrapped(|ui| {
+                                            crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
+                                            let mut selected = self.config.settings.theme.clone();
+                                            let mut changed = false;
+                                            egui::ComboBox::from_id_salt("theme_select")
+                                                .selected_text(selected.clone())
+                                                .width(120.0)
+                                                .show_ui(ui, |ui| {
+                                                    for option in self.theme_options.clone() {
+                                                        if ui
+                                                            .selectable_value(
+                                                                &mut selected,
+                                                                option.clone(),
+                                                                option,
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            changed = true;
+                                                        }
+                                                    }
+                                                });
+                                            if changed {
+                                                self.change_theme(&ctx, &selected);
+                                            }
+                                            if ui.button(t("btn-refresh")).clicked() {
+                                                self.theme_options = theme::list_themes(&self.themes_dir);
+                                                let selected = self.config.settings.theme.clone();
+                                                self.change_theme(&ctx, &selected);
+                                                self.console.write(format!(
+                                                    "[Console] {}",
+                                                    t("console-themes-rescanned")
+                                                ));
+                                            }
+                                            if ui.button(t("settings-import-themes")).clicked() {
+                                                let dialog = rfd::FileDialog::new()
+                                                    .set_title(t("settings-import-themes"))
+                                                    .add_filter("ZIP", &["zip"]);
+                                                if let Some(path) = winutil::parent_file_dialog(dialog).pick_file() {
+                                                    match crate::deep_link::import_theme_zip(&path, &self.themes_dir, &self.fonts_dir) {
+                                                        Ok(()) => {
+                                                            self.theme_options = theme::list_themes(&self.themes_dir);
+                                                            let selected = self.config.settings.theme.clone();
+                                                            self.change_theme(&ctx, &selected);
+                                                        }
+                                                        Err(error) => {
+                                                            let dialog = rfd::MessageDialog::new()
+                                                                .set_title(t("settings-import-themes"))
+                                                                .set_level(rfd::MessageLevel::Error)
+                                                                .set_description(error);
+                                                            #[cfg(target_os = "windows")]
+                                                            let dialog = winutil::parent_message_dialog(dialog);
+                                                            dialog.show();
+                                                        }
                                                     }
                                                 }
-                                            });
-                                        if changed {
-                                            self.change_theme(&ctx, &selected);
-                                        }
-                                        if ui.button(t("btn-refresh")).clicked() {
-                                            self.theme_options = theme::list_themes(&self.themes_dir);
-                                            let selected = self.config.settings.theme.clone();
-                                            self.change_theme(&ctx, &selected);
-                                            self.console.write(format!(
-                                                "[Console] {}",
-                                                t("console-themes-rescanned")
-                                            ));
-                                        }
-                                        if ui.button(t("btn-open-folder")).clicked() {
-                                            let _ = open::that(&self.themes_dir);
-                                        }
-                                        if ui.button(t("settings-open-fonts-folder")).clicked() {
-                                            let _ = open::that(&self.fonts_dir);
+                                            }
+                                            if ui.button(t("btn-open-folder")).clicked() {
+                                                let _ = open::that(&self.themes_dir);
+                                            }
+                                            if ui.button(t("settings-open-fonts-folder")).clicked() {
+                                                let _ = open::that(&self.fonts_dir);
+                                            }
+                                        });
+
+                                        return;
+                                    }
+                                    let label_w = label_column_width(
+                                        ui,
+                                        &[
+                                            t("settings-keybind-label"),
+                                            t("settings-language-label"),
+                                            t("settings-opacity-label"),
+                                            t("settings-toast-position-label"),
+                                            t("system-default-tab"),
+                                        ],
+                                    );
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-keybind-label"));
+                                        let display = if self.capturing_hotkey {
+                                            "...".to_string()
+                                        } else {
+                                            self.config.settings.hotkey.to_uppercase()
+                                        };
+                                        ui.add_enabled(
+                                            false,
+                                            egui::TextEdit::singleline(&mut display.clone())
+                                                .desired_width(120.0),
+                                        );
+                                        let btn_text = if self.capturing_hotkey {
+                                            t("settings-keybind-listening")
+                                        } else {
+                                            t("settings-keybind-set")
+                                        };
+                                        if ui
+                                            .add_enabled(
+                                                !self.capturing_hotkey,
+                                                egui::Button::new(btn_text),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.start_hotkey_capture(&ctx);
                                         }
                                     });
 
-                                    return;
-                                }
-                                let label_w = label_column_width(
-                                    ui,
-                                    &[
-                                        t("settings-keybind-label"),
-                                        t("settings-language-label"),
-                                        t("settings-opacity-label"),
-                                        t("settings-toast-position-label"),
-                                        t("system-default-tab"),
-                                    ],
-                                );
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-keybind-label"));
-                                    let display = if self.capturing_hotkey {
-                                        "...".to_string()
-                                    } else {
-                                        self.config.settings.hotkey.to_uppercase()
-                                    };
-                                    ui.add_enabled(
-                                        false,
-                                        egui::TextEdit::singleline(&mut display.clone())
-                                            .desired_width(120.0),
-                                    );
-                                    let btn_text = if self.capturing_hotkey {
-                                        t("settings-keybind-listening")
-                                    } else {
-                                        t("settings-keybind-set")
-                                    };
-                                    if ui
-                                        .add_enabled(
-                                            !self.capturing_hotkey,
-                                            egui::Button::new(btn_text),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.start_hotkey_capture(&ctx);
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-language-label"));
-                                    let mut chosen = self.config.settings.language.clone();
-                                    let mut language_changed = false;
-                                    let known = crate::i18n::available();
-                                    let shown = if chosen.eq_ignore_ascii_case(crate::i18n::AUTO) {
-                                        t("settings-language-auto")
-                                    } else {
-                                        known
-                                            .iter()
-                                            .find(|l| l.code.eq_ignore_ascii_case(&chosen))
-                                            .map(crate::i18n::display_name)
-                                            .unwrap_or_else(|| chosen.clone())
-                                    };
-                                    egui::ComboBox::from_id_salt("language_select")
-                                        .selected_text(shown)
-                                        .show_ui(ui, |ui| {
-                                            language_changed |= ui
-                                                .selectable_value(
-                                                    &mut chosen,
-                                                    crate::i18n::AUTO.to_string(),
-                                                    t("settings-language-auto"),
-                                                )
-                                                .changed();
-                                            for locale in &known {
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-language-label"));
+                                        let mut chosen = self.config.settings.language.clone();
+                                        let mut language_changed = false;
+                                        let known = crate::i18n::available();
+                                        let shown = if chosen.eq_ignore_ascii_case(crate::i18n::AUTO) {
+                                            t("settings-language-auto")
+                                        } else {
+                                            known
+                                                .iter()
+                                                .find(|l| l.code.eq_ignore_ascii_case(&chosen))
+                                                .map(crate::i18n::display_name)
+                                                .unwrap_or_else(|| chosen.clone())
+                                        };
+                                        egui::ComboBox::from_id_salt("language_select")
+                                            .selected_text(shown)
+                                            .show_ui(ui, |ui| {
                                                 language_changed |= ui
                                                     .selectable_value(
                                                         &mut chosen,
-                                                        locale.code.clone(),
-                                                        crate::i18n::display_name(locale),
+                                                        crate::i18n::AUTO.to_string(),
+                                                        t("settings-language-auto"),
                                                     )
                                                     .changed();
-                                            }
-                                        });
-                                    if language_changed {
-                                        self.change_language(&ctx, &chosen);
-                                    }
-                                });
+                                                for locale in &known {
+                                                    language_changed |= ui
+                                                        .selectable_value(
+                                                            &mut chosen,
+                                                            locale.code.clone(),
+                                                            crate::i18n::display_name(locale),
+                                                        )
+                                                        .changed();
+                                                }
+                                            });
+                                        if language_changed {
+                                            self.change_language(&ctx, &chosen);
+                                        }
+                                    });
 
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-opacity-label"));
-                                    let slider = ui.add(
-                                        egui::Slider::new(
-                                            &mut self.config.settings.window_opacity,
-                                            0.5..=1.0,
-                                        )
-                                        .fixed_decimals(2),
-                                    );
-                                    if slider.changed() {
-                                        let theme_name = self.config.settings.theme.clone();
-                                        let _ = theme::apply_theme(
-                                            &ctx,
-                                            &self.themes_dir,
-                                            &self.fonts_dir,
-                                            &theme_name,
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-opacity-label"));
+                                        let slider = ui.add(
+                                            egui::Slider::new(
+                                                &mut self.config.settings.window_opacity,
+                                                0.5..=1.0,
+                                            )
+                                            .fixed_decimals(2),
                                         );
-                                        theme::apply_window_opacity(
-                                            &ctx,
-                                            self.config.settings.window_opacity,
-                                        );
-                                    }
-                                    if slider.drag_stopped() || slider.lost_focus() {
-                                        self.save_config();
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-toast-position-label"));
-                                    let mut changed = false;
-                                    egui::ComboBox::from_id_salt("toast_position_select")
-                                        .selected_text(self.config.settings.toast_position.label())
-                                        .show_ui(ui, |ui| {
-                                            for pos in crate::toast::ToastPos::ALL {
-                                                changed |= ui
-                                                    .selectable_value(
-                                                        &mut self.config.settings.toast_position,
-                                                        pos,
-                                                        pos.label(),
-                                                    )
-                                                    .changed();
-                                            }
-                                        });
-                                    if changed {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-default-tab"));
-                                    let mut selected =
-                                        Tab::from_config_key(&self.config.settings.default_tab);
-                                    egui::ComboBox::from_id_salt("default_tab")
-                                        .selected_text(selected.label())
-                                        .show_ui(ui, |ui| {
-                                            for tab in Tab::ALL {
-                                                ui.selectable_value(
-                                                    &mut selected,
-                                                    tab,
-                                                    tab.label(),
-                                                );
-                                            }
-                                        });
-                                    if self.config.settings.default_tab != selected.config_key() {
-                                        self.config.settings.default_tab =
-                                            selected.config_key().to_string();
-                                        self.save_config();
-                                    }
-                                });
-                                ui.add_space(12.0);
-                                ui.strong("Controller panel");
-                                ui.weak("Opened with L3 + R3 beside the game.");
-                                let mut panel_changed = false;
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, "Opens from".to_string());
-                                    panel_changed |= ui.selectable_value(&mut self.config.settings.panel_left, true, "Left").changed();
-                                    panel_changed |= ui.selectable_value(&mut self.config.settings.panel_left, false, "Right").changed();
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, "Width".to_string());
-                                    panel_changed |= ui
-                                        .add(egui::Slider::new(&mut self.config.settings.panel_width, 0.2..=0.5).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
-                                        .on_hover_text("Share of the game window the panel covers")
-                                        .changed();
-                                });
-                                panel_changed |= ui.checkbox(&mut self.config.settings.panel_animate, "Slide in like a drawer").changed();
-                                panel_changed |= ui.checkbox(&mut self.config.settings.panel_advanced, "Show every page (Advanced mode)").changed();
-                                if panel_changed {
-                                    self.save_config();
-                                }
-                            }
-
-                            HebnixSettingsTab::Directories => {
-                                ui.label(
-                                    egui::RichText::new(t("settings-dirs-autodetected"))
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                                ui.add_space(8.0);
-
-                                // ini key names are technical, they stay untranslated
-                                let label_w = label_column_width(
-                                    ui,
-                                    &[
-                                        t("settings-rl-folder-label"),
-                                        t("settings-statsapi-ini-label"),
-                                        "PacketSendRate:".to_string(),
-                                        "Port:".to_string(),
-                                        "WebPort:".to_string(),
-                                        t("settings-replay-save-folder"),
-                                    ],
-                                );
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-rl-folder-label"));
-                                    ui.add_enabled(
-                                        false,
-                                        egui::TextEdit::singleline(
-                                            &mut self.config.settings.rl_path,
-                                        )
-                                        .desired_width(480.0),
-                                    );
-                                    if ui.button(t("btn-browse")).clicked() {
-                                        if let Some(dir) = rfd::FileDialog::new()
-                                            .set_directory(&self.config.settings.rl_path)
-                                            .pick_folder()
-                                        {
-                                            self.config.settings.rl_path =
-                                                dir.to_string_lossy().to_string();
-                                            self.remember_patcher_state(
-                                                &self.config.settings.rl_path,
+                                        if slider.changed() {
+                                            let theme_name = self.config.settings.theme.clone();
+                                            let _ = theme::apply_theme(
+                                                &ctx,
+                                                &self.themes_dir,
+                                                &self.fonts_dir,
+                                                &theme_name,
                                             );
-                                            self.save_config();
-                                            self.refresh_stats_api_viewer();
+                                            theme::apply_window_opacity(
+                                                &ctx,
+                                                self.config.settings.window_opacity,
+                                            );
                                         }
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-statsapi-ini-label"));
-                                    ui.add_enabled(
-                                        false,
-                                        egui::TextEdit::singleline(
-                                            &mut self.config.settings.statsapi_path,
-                                        )
-                                        .desired_width(480.0),
-                                    );
-                                    if ui.button(t("btn-browse")).clicked() {
-                                        let start_dir = std::path::Path::new(
-                                            &self.config.settings.statsapi_path,
-                                        )
-                                        .parent()
-                                        .map(|p| p.to_path_buf())
-                                        .unwrap_or_default();
-                                        if let Some(file) = rfd::FileDialog::new()
-                                            .set_directory(start_dir)
-                                            .add_filter(t("filter-ini-files"), &["ini"])
-                                            .pick_file()
-                                        {
-                                            self.config.settings.statsapi_path =
-                                                file.to_string_lossy().to_string();
-                                            self.save_config();
-                                            self.refresh_stats_api_viewer();
-                                        }
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-packetsendrate"));
-                                    let resp = ui.add(
-                                        egui::TextEdit::singleline(&mut self.packet_rate_edit)
-                                            .hint_text(t("settings-not-found"))
-                                            .desired_width(100.0),
-                                    );
-                                    if resp.changed() {
-                                        self.packet_rate_edit.retain(|c| c.is_ascii_digit());
-                                    }
-                                    if resp.lost_focus() {
-                                        let current = self.packet_rate.clone().unwrap_or_default();
-                                        if !self.packet_rate_edit.is_empty()
-                                            && self.packet_rate_edit != current
-                                        {
-                                            let value = self.packet_rate_edit.clone();
-                                            self.update_ini_setting("PacketSendRate", &value);
-                                        } else {
-                                            self.packet_rate_edit = current;
-                                        }
-                                    }
-                                    if self.packet_rate.as_deref() != Some("20")
-                                        && ui
-                                            .add(
-                                                egui::Button::new(t_args(
-                                                    "settings-set-value",
-                                                    &[("value", "20".into())],
-                                                ))
-                                                .fill(egui::Color32::from_rgb(0xd3, 0x54, 0x00)),
-                                            )
-                                            .clicked()
-                                    {
-                                        self.update_ini_setting("PacketSendRate", "20");
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-port"));
-                                    let resp = ui.add(
-                                        egui::TextEdit::singleline(&mut self.port_edit)
-                                            .hint_text(t("settings-not-found"))
-                                            .desired_width(100.0),
-                                    );
-                                    if resp.changed() {
-                                        self.port_edit.retain(|c| c.is_ascii_digit());
-                                    }
-                                    if resp.lost_focus() {
-                                        let current = self.port_value.clone().unwrap_or_default();
-                                        let valid = self
-                                            .port_edit
-                                            .parse::<u16>()
-                                            .map(|p| p > 0)
-                                            .unwrap_or(false);
-                                        if valid && self.port_edit != current {
-                                            let value = self.port_edit.clone();
-                                            self.update_ini_setting("Port", &value);
-                                        } else {
-                                            self.port_edit = current;
-                                        }
-                                    }
-                                    if self.port_value.as_deref() != Some("49123")
-                                        && ui
-                                            .add(
-                                                egui::Button::new(t("btn-reset")).fill(
-                                                    egui::Color32::from_rgb(0xc0, 0x39, 0x2b),
-                                                ),
-                                            )
-                                            .clicked()
-                                    {
-                                        self.update_ini_setting("Port", "49123");
-                                    }
-                                    if ui.button(t("btn-refresh")).clicked() {
-                                        self.refresh_stats_api_viewer();
-                                    }
-                                });
-
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-webport"));
-                                    let resp = ui.add(
-                                        egui::TextEdit::singleline(&mut self.web_port_edit)
-                                            .hint_text(t("settings-not-found"))
-                                            .desired_width(100.0),
-                                    );
-                                    if resp.changed() {
-                                        self.web_port_edit.retain(|c| c.is_ascii_digit());
-                                    }
-                                    if resp.lost_focus() {
-                                        let current =
-                                            self.web_port_value.clone().unwrap_or_default();
-                                        let valid = self
-                                            .web_port_edit
-                                            .parse::<u16>()
-                                            .map(|p| p > 0)
-                                            .unwrap_or(false);
-                                        if valid && self.web_port_edit != current {
-                                            let value = self.web_port_edit.clone();
-                                            self.update_ini_setting("WebPort", &value);
-                                        } else {
-                                            self.web_port_edit = current;
-                                        }
-                                    }
-                                    if self.web_port_value.as_deref() != Some("49124")
-                                        && ui
-                                            .add(
-                                                egui::Button::new(t_args(
-                                                    "settings-set-value",
-                                                    &[("value", "49124".into())],
-                                                ))
-                                                .fill(egui::Color32::from_rgb(0xd3, 0x54, 0x00)),
-                                            )
-                                            .clicked()
-                                    {
-                                        self.update_ini_setting("WebPort", "49124");
-                                    }
-                                });
-
-                                ui.label(
-                                    egui::RichText::new(t("settings-ini-restart-note"))
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-
-                                ui.add_space(8.0);
-                                let replay_folder = crate::auto_upload_replays::configured_replay_directory(
-                                    &self.config.replay_upload,
-                                    std::path::Path::new(&self.config.settings.rl_path),
-                                    &self.config.rl_launch,
-                                );
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("settings-replay-save-folder"));
-                                    let mut display = replay_folder.as_ref()
-                                        .map(|path| path.display().to_string())
-                                        .unwrap_or_else(|error| error.clone());
-                                    ui.add_enabled(false, egui::TextEdit::singleline(&mut display).desired_width(480.0));
-                                    if ui.button(t("btn-browse")).clicked() {
-                                        let mut dialog = rfd::FileDialog::new();
-                                        if let Ok(path) = &replay_folder {
-                                            dialog = dialog.set_directory(path);
-                                        }
-                                        if let Some(folder) = dialog.pick_folder() {
-                                            self.config.replay_upload.save_directory = folder.to_string_lossy().into_owned();
+                                        if slider.drag_stopped() || slider.lost_focus() {
                                             self.save_config();
                                         }
-                                    }
-                                    if !self.config.replay_upload.save_directory.is_empty()
-                                        && ui.button(t("btn-reset")).clicked()
-                                    {
-                                        self.config.replay_upload.save_directory.clear();
-                                        self.save_config();
-                                    }
-                                });
+                                    });
 
-                                ui.add_space(12.0);
-                                ui.separator();
-                                ui.add_space(4.0);
-                                ui.strong(t("settings-rl-launch-heading"));
-                                ui.label(
-                                    egui::RichText::new(t("settings-rl-launch-desc"))
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                                let mode_label = match self.config.rl_launch.mode {
-                                    crate::config::RlLaunchMode::Unconfigured => {
-                                        t("settings-rl-mode-unconfigured")
-                                    }
-                                    crate::config::RlLaunchMode::SteamNative => {
-                                        t("settings-rl-mode-steam-native")
-                                    }
-                                    crate::config::RlLaunchMode::EpicDirect => {
-                                        t("settings-rl-mode-epic-direct")
-                                    }
-                                    crate::config::RlLaunchMode::SteamShortcutToHeroic => {
-                                        t("settings-rl-mode-steam-shortcut")
-                                    }
-                                    crate::config::RlLaunchMode::HeroicDirect => {
-                                        t("settings-rl-mode-heroic-direct")
-                                    }
-                                };
-                                ui.label(t_args(
-                                    "settings-rl-current-setup",
-                                    &[("mode", mode_label.as_str().into())],
-                                ));
-                                if ui.button(t("settings-rl-launch-setup-button")).clicked() {
-                                    self.rl_launch_draft = self.config.rl_launch.clone();
-                                    self.rl_launch_shortcut_candidates.clear();
-                                    self.rl_launch_setup_open = true;
-                                }
-                            }
-
-                            HebnixSettingsTab::Discord => {
-                                let mut changed = false;
-                                if ui
-                                    .checkbox(
-                                        &mut self.config.settings.discord_rich_presence,
-                                        t("discord-enable"),
-                                    )
-                                    .changed()
-                                {
-                                    self.discord_presence
-                                        .configure(self.config.settings.discord_rich_presence);
-                                    changed = true;
-                                }
-                                if ui
-                                    .checkbox(
-                                        &mut self.config.settings.discord_rocket_league_only,
-                                        t("discord-rl-only"),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.add_space(8.0);
-                                ui.label(t("discord-message-label"));
-                                let mut game_state = self.config.settings.discord_game_state;
-                                if ui
-                                    .checkbox(&mut game_state, t("discord-game-state"))
-                                    .changed()
-                                {
-                                    self.config.settings.discord_game_state = game_state;
-                                    changed = true;
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-toast-position-label"));
+                                        let mut changed = false;
+                                        egui::ComboBox::from_id_salt("toast_position_select")
+                                            .selected_text(self.config.settings.toast_position.label())
+                                            .show_ui(ui, |ui| {
+                                                for pos in crate::toast::ToastPos::ALL {
+                                                    changed |= ui
+                                                        .selectable_value(
+                                                            &mut self.config.settings.toast_position,
+                                                            pos,
+                                                            pos.label(),
+                                                        )
+                                                        .changed();
+                                                }
+                                            });
+                                        if changed {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-default-tab"));
+                                        let mut selected =
+                                            Tab::from_config_key(&self.config.settings.default_tab);
+                                        egui::ComboBox::from_id_salt("default_tab")
+                                            .selected_text(selected.label())
+                                            .show_ui(ui, |ui| {
+                                                for tab in Tab::ALL {
+                                                    ui.selectable_value(
+                                                        &mut selected,
+                                                        tab,
+                                                        tab.label(),
+                                                    );
+                                                }
+                                            });
+                                        if self.config.settings.default_tab != selected.config_key() {
+                                            self.config.settings.default_tab =
+                                                selected.config_key().to_string();
+                                            self.save_config();
+                                        }
+                                    });
                                 }
 
-                                ui.indent("discord_game_state_fields", |ui| {
-                                    ui.add_enabled_ui(
-                                        self.config.settings.discord_game_state,
-                                        |ui| {
-                                            let selected = self.config.settings.discord_show_score
-                                                as u8
-                                                + self.config.settings.discord_show_map as u8
-                                                + self.config.settings.discord_show_gamemode as u8;
-                                            if ui
-                                                .add_enabled(
-                                                    !self.config.settings.discord_show_score
-                                                        || selected > 1,
-                                                    egui::Checkbox::new(
-                                                        &mut self
-                                                            .config
-                                                            .settings
-                                                            .discord_show_score,
-                                                        t("discord-show-score"),
-                                                    ),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
-                                            }
-                                            let selected = self.config.settings.discord_show_score
-                                                as u8
-                                                + self.config.settings.discord_show_map as u8
-                                                + self.config.settings.discord_show_gamemode as u8;
-                                            if ui
-                                                .add_enabled(
-                                                    !self.config.settings.discord_show_map
-                                                        || selected > 1,
-                                                    egui::Checkbox::new(
-                                                        &mut self.config.settings.discord_show_map,
-                                                        t("discord-show-map"),
-                                                    ),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
-                                            }
-                                            let selected = self.config.settings.discord_show_score
-                                                as u8
-                                                + self.config.settings.discord_show_map as u8
-                                                + self.config.settings.discord_show_gamemode as u8;
-                                            if ui
-                                                .add_enabled(
-                                                    !self.config.settings.discord_show_gamemode
-                                                        || selected > 1,
-                                                    egui::Checkbox::new(
-                                                        &mut self
-                                                            .config
-                                                            .settings
-                                                            .discord_show_gamemode,
-                                                        t("discord-show-gamemode"),
-                                                    ),
-                                                )
-                                                .changed()
-                                            {
-                                                changed = true;
-                                            }
-                                        },
-                                    );
-                                });
-
-                                ui.horizontal(|ui| {
-                                    let mut custom = !self.config.settings.discord_game_state;
-                                    if ui.checkbox(&mut custom, t("discord-custom")).changed() {
-                                        self.config.settings.discord_game_state = !custom;
-                                        changed = true;
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            custom,
-                                            egui::TextEdit::singleline(
-                                                &mut self.config.settings.discord_custom_message,
-                                            )
-                                            .hint_text(t("discord-custom-hint"))
-                                            .desired_width(280.0),
-                                        )
-                                        .changed()
-                                    {
-                                        changed = true;
-                                    }
-                                });
-                                if self.config.settings.discord_game_state {
+                                HebnixSettingsTab::Directories => {
                                     ui.label(
-                                        egui::RichText::new(t("discord-custom-disabled-note"))
+                                        egui::RichText::new(t("settings-dirs-autodetected"))
                                             .size(11.0)
                                             .color(egui::Color32::GRAY),
                                     );
-                                }
-                                if changed {
-                                    self.save_config();
-                                    self.refresh_discord_presence();
-                                }
-                                let ctx = ui.ctx().clone();
-                                self.discord_link.show(ui, &ctx);
-                            }
+                                    ui.add_space(8.0);
 
-                            HebnixSettingsTab::ActionButton => {
-                                self.render_action_button_settings(ui);
-                            }
+                                    // ini key names are technical, they stay untranslated
+                                    let label_w = label_column_width(
+                                        ui,
+                                        &[
+                                            t("settings-rl-folder-label"),
+                                            t("settings-statsapi-ini-label"),
+                                            "PacketSendRate:".to_string(),
+                                            "Port:".to_string(),
+                                            "WebPort:".to_string(),
+                                            t("settings-replay-save-folder"),
+                                        ],
+                                    );
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-rl-folder-label"));
+                                        ui.add_enabled(
+                                            false,
+                                            egui::TextEdit::singleline(
+                                                &mut self.config.settings.rl_path,
+                                            )
+                                            .desired_width(480.0),
+                                        );
+                                        if ui.button(t("btn-browse")).clicked() {
+                                            if let Some(dir) = rfd::FileDialog::new()
+                                                .set_directory(&self.config.settings.rl_path)
+                                                .pick_folder()
+                                            {
+                                                self.config.settings.rl_path =
+                                                    dir.to_string_lossy().to_string();
+                                                self.remember_patcher_state(
+                                                    &self.config.settings.rl_path,
+                                                );
+                                                self.save_config();
+                                                self.refresh_stats_api_viewer();
+                                            }
+                                        }
+                                    });
 
-                            HebnixSettingsTab::System => {
-                                let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
-                                self.delete_backups.render(ui, &cooked_pc);
-                                ui.add_space(16.0);
-                                let label_w = label_column_width(
-                                    ui,
-                                    &[
-                                        t("system-start-with-windows"),
-                                        t("system-start-in-tray"),
-                                        t("system-close-to-tray"),
-                                        t("system-p2p"),
-                                        t("system-suppress-left"),
-                                        t("system-fullscreen-warning"),
-                                        t("system-allow-draw-focus"),
-                                        t("system-limit-hotkey"),
-                                        t("system-statsapi-rate"),
-                                        t("system-default-tab"),
-                                        "Overlay refresh rate:".to_string(),
-                                    ],
-                                );
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-start-with-windows"));
-                                    if ui.checkbox(&mut self.startup_enabled, "").changed() {
-                                        if let Err(e) =
-                                            winutil::set_startup_enabled(self.startup_enabled)
-                                        {
-                                            self.console.write(format!(
-                                                "[Console] {}",
-                                                t_args(
-                                                    "console-startup-failed",
-                                                    &[("error", e.to_string().into())]
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-statsapi-ini-label"));
+                                        ui.add_enabled(
+                                            false,
+                                            egui::TextEdit::singleline(
+                                                &mut self.config.settings.statsapi_path,
+                                            )
+                                            .desired_width(480.0),
+                                        );
+                                        if ui.button(t("btn-browse")).clicked() {
+                                            let start_dir = std::path::Path::new(
+                                                &self.config.settings.statsapi_path,
+                                            )
+                                            .parent()
+                                            .map(|p| p.to_path_buf())
+                                            .unwrap_or_default();
+                                            if let Some(file) = rfd::FileDialog::new()
+                                                .set_directory(start_dir)
+                                                .add_filter(t("filter-ini-files"), &["ini"])
+                                                .pick_file()
+                                            {
+                                                self.config.settings.statsapi_path =
+                                                    file.to_string_lossy().to_string();
+                                                self.save_config();
+                                                self.refresh_stats_api_viewer();
+                                            }
+                                        }
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-packetsendrate"));
+                                        let resp = ui.add(
+                                            egui::TextEdit::singleline(&mut self.packet_rate_edit)
+                                                .hint_text(t("settings-not-found"))
+                                                .desired_width(100.0),
+                                        );
+                                        if resp.changed() {
+                                            self.packet_rate_edit.retain(|c| c.is_ascii_digit());
+                                        }
+                                        if resp.lost_focus() {
+                                            let current = self.packet_rate.clone().unwrap_or_default();
+                                            if !self.packet_rate_edit.is_empty()
+                                                && self.packet_rate_edit != current
+                                            {
+                                                let value = self.packet_rate_edit.clone();
+                                                self.update_ini_setting("PacketSendRate", &value);
+                                            } else {
+                                                self.packet_rate_edit = current;
+                                            }
+                                        }
+                                        if self.packet_rate.as_deref() != Some("20")
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(t_args(
+                                                        "settings-set-value",
+                                                        &[("value", "20".into())],
+                                                    ))
+                                                    .fill(egui::Color32::from_rgb(0xd3, 0x54, 0x00)),
                                                 )
-                                            ));
-                                            self.startup_enabled = winutil::is_startup_enabled();
+                                                .clicked()
+                                        {
+                                            self.update_ini_setting("PacketSendRate", "20");
+                                        }
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-port"));
+                                        let resp = ui.add(
+                                            egui::TextEdit::singleline(&mut self.port_edit)
+                                                .hint_text(t("settings-not-found"))
+                                                .desired_width(100.0),
+                                        );
+                                        if resp.changed() {
+                                            self.port_edit.retain(|c| c.is_ascii_digit());
+                                        }
+                                        if resp.lost_focus() {
+                                            let current = self.port_value.clone().unwrap_or_default();
+                                            let valid = self
+                                                .port_edit
+                                                .parse::<u16>()
+                                                .map(|p| p > 0)
+                                                .unwrap_or(false);
+                                            if valid && self.port_edit != current {
+                                                let value = self.port_edit.clone();
+                                                self.update_ini_setting("Port", &value);
+                                            } else {
+                                                self.port_edit = current;
+                                            }
+                                        }
+                                        if self.port_value.as_deref() != Some("49123")
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(t("btn-reset")).fill(
+                                                        egui::Color32::from_rgb(0xc0, 0x39, 0x2b),
+                                                    ),
+                                                )
+                                                .clicked()
+                                        {
+                                            self.update_ini_setting("Port", "49123");
+                                        }
+                                        if ui.button(t("btn-refresh")).clicked() {
+                                            self.refresh_stats_api_viewer();
+                                        }
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("hebnix-settings-webport"));
+                                        let resp = ui.add(
+                                            egui::TextEdit::singleline(&mut self.web_port_edit)
+                                                .hint_text(t("settings-not-found"))
+                                                .desired_width(100.0),
+                                        );
+                                        if resp.changed() {
+                                            self.web_port_edit.retain(|c| c.is_ascii_digit());
+                                        }
+                                        if resp.lost_focus() {
+                                            let current =
+                                                self.web_port_value.clone().unwrap_or_default();
+                                            let valid = self
+                                                .web_port_edit
+                                                .parse::<u16>()
+                                                .map(|p| p > 0)
+                                                .unwrap_or(false);
+                                            if valid && self.web_port_edit != current {
+                                                let value = self.web_port_edit.clone();
+                                                self.update_ini_setting("WebPort", &value);
+                                            } else {
+                                                self.web_port_edit = current;
+                                            }
+                                        }
+                                        if self.web_port_value.as_deref() != Some("49124")
+                                            && ui
+                                                .add(
+                                                    egui::Button::new(t_args(
+                                                        "settings-set-value",
+                                                        &[("value", "49124".into())],
+                                                    ))
+                                                    .fill(egui::Color32::from_rgb(0xd3, 0x54, 0x00)),
+                                                )
+                                                .clicked()
+                                        {
+                                            self.update_ini_setting("WebPort", "49124");
+                                        }
+                                    });
+
+                                    ui.label(
+                                        egui::RichText::new(t("settings-ini-restart-note"))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+
+                                    ui.add_space(8.0);
+                                    let replay_folder = crate::auto_upload_replays::configured_replay_directory(
+                                        &self.config.replay_upload,
+                                        std::path::Path::new(&self.config.settings.rl_path),
+                                        &self.config.rl_launch,
+                                    );
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("settings-replay-save-folder"));
+                                        let mut display = replay_folder.as_ref()
+                                            .map(|path| path.display().to_string())
+                                            .unwrap_or_else(|error| error.clone());
+                                        ui.add_enabled(false, egui::TextEdit::singleline(&mut display).desired_width(480.0));
+                                        if ui.button(t("btn-browse")).clicked() {
+                                            let mut dialog = rfd::FileDialog::new();
+                                            if let Ok(path) = &replay_folder {
+                                                dialog = dialog.set_directory(path);
+                                            }
+                                            if let Some(folder) = dialog.pick_folder() {
+                                                self.config.replay_upload.save_directory = folder.to_string_lossy().into_owned();
+                                                self.save_config();
+                                            }
+                                        }
+                                        if !self.config.replay_upload.save_directory.is_empty()
+                                            && ui.button(t("btn-reset")).clicked()
+                                        {
+                                            self.config.replay_upload.save_directory.clear();
+                                            self.save_config();
+                                        }
+                                    });
+
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(4.0);
+                                    ui.strong(t("settings-rl-launch-heading"));
+                                    ui.label(
+                                        egui::RichText::new(t("settings-rl-launch-desc"))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    let mode_label = match self.config.rl_launch.mode {
+                                        crate::config::RlLaunchMode::Unconfigured => {
+                                            t("settings-rl-mode-unconfigured")
+                                        }
+                                        crate::config::RlLaunchMode::SteamNative => {
+                                            t("settings-rl-mode-steam-native")
+                                        }
+                                        crate::config::RlLaunchMode::EpicDirect => {
+                                            t("settings-rl-mode-epic-direct")
+                                        }
+                                        crate::config::RlLaunchMode::SteamShortcutToHeroic => {
+                                            t("settings-rl-mode-steam-shortcut")
+                                        }
+                                        crate::config::RlLaunchMode::HeroicDirect => {
+                                            t("settings-rl-mode-heroic-direct")
+                                        }
+                                    };
+                                    ui.label(t_args(
+                                        "settings-rl-current-setup",
+                                        &[("mode", mode_label.as_str().into())],
+                                    ));
+                                    if ui.button(t("settings-rl-launch-setup-button")).clicked() {
+                                        self.rl_launch_draft = self.config.rl_launch.clone();
+                                        self.rl_launch_shortcut_candidates.clear();
+                                        self.rl_launch_setup_open = true;
+                                    }
+                                }
+
+                                HebnixSettingsTab::Discord => {
+                                    let mut changed = false;
+                                    if ui
+                                        .checkbox(
+                                            &mut self.config.settings.discord_rich_presence,
+                                            t("discord-enable"),
+                                        )
+                                        .changed()
+                                    {
+                                        self.discord_presence
+                                            .configure(self.config.settings.discord_rich_presence);
+                                        changed = true;
+                                    }
+                                    if ui
+                                        .checkbox(
+                                            &mut self.config.settings.discord_rocket_league_only,
+                                            t("discord-rl-only"),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.add_space(8.0);
+                                    ui.label(t("discord-message-label"));
+                                    let mut game_state = self.config.settings.discord_game_state;
+                                    if ui
+                                        .checkbox(&mut game_state, t("discord-game-state"))
+                                        .changed()
+                                    {
+                                        self.config.settings.discord_game_state = game_state;
+                                        changed = true;
+                                    }
+
+                                    ui.indent("discord_game_state_fields", |ui| {
+                                        ui.add_enabled_ui(
+                                            self.config.settings.discord_game_state,
+                                            |ui| {
+                                                let selected = self.config.settings.discord_show_score
+                                                    as u8
+                                                    + self.config.settings.discord_show_map as u8
+                                                    + self.config.settings.discord_show_gamemode as u8;
+                                                if ui
+                                                    .add_enabled(
+                                                        !self.config.settings.discord_show_score
+                                                            || selected > 1,
+                                                        egui::Checkbox::new(
+                                                            &mut self
+                                                                .config
+                                                                .settings
+                                                                .discord_show_score,
+                                                            t("discord-show-score"),
+                                                        ),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                                let selected = self.config.settings.discord_show_score
+                                                    as u8
+                                                    + self.config.settings.discord_show_map as u8
+                                                    + self.config.settings.discord_show_gamemode as u8;
+                                                if ui
+                                                    .add_enabled(
+                                                        !self.config.settings.discord_show_map
+                                                            || selected > 1,
+                                                        egui::Checkbox::new(
+                                                            &mut self.config.settings.discord_show_map,
+                                                            t("discord-show-map"),
+                                                        ),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                                let selected = self.config.settings.discord_show_score
+                                                    as u8
+                                                    + self.config.settings.discord_show_map as u8
+                                                    + self.config.settings.discord_show_gamemode as u8;
+                                                if ui
+                                                    .add_enabled(
+                                                        !self.config.settings.discord_show_gamemode
+                                                            || selected > 1,
+                                                        egui::Checkbox::new(
+                                                            &mut self
+                                                                .config
+                                                                .settings
+                                                                .discord_show_gamemode,
+                                                            t("discord-show-gamemode"),
+                                                        ),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    changed = true;
+                                                }
+                                            },
+                                        );
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        let mut custom = !self.config.settings.discord_game_state;
+                                        if ui.checkbox(&mut custom, t("discord-custom")).changed() {
+                                            self.config.settings.discord_game_state = !custom;
+                                            changed = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                custom,
+                                                egui::TextEdit::singleline(
+                                                    &mut self.config.settings.discord_custom_message,
+                                                )
+                                                .hint_text(t("discord-custom-hint"))
+                                                .desired_width(280.0),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                    });
+                                    if self.config.settings.discord_game_state {
+                                        ui.label(
+                                            egui::RichText::new(t("discord-custom-disabled-note"))
+                                                .size(11.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                    if changed {
+                                        self.save_config();
+                                        self.refresh_discord_presence();
+                                    }
+                                    let ctx = ui.ctx().clone();
+                                    self.discord_link.show(ui, &ctx);
+                                }
+
+                                HebnixSettingsTab::ActionButton => {
+                                    self.render_action_button_settings(ui);
+                                }
+
+                                HebnixSettingsTab::System => {
+                                    let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
+                                    self.delete_backups.render(ui, &cooked_pc);
+                                    ui.add_space(16.0);
+                                    let label_w = label_column_width(
+                                        ui,
+                                        &[
+                                            t("system-start-with-windows"),
+                                            t("system-start-in-tray"),
+                                            t("system-close-to-tray"),
+                                            t("system-p2p"),
+                                            t("system-suppress-left"),
+                                            t("system-fullscreen-warning"),
+                                            t("system-allow-draw-focus"),
+                                            t("system-limit-hotkey"),
+                                            t("system-statsapi-rate"),
+                                            t("system-default-tab"),
+                                            "Overlay refresh rate:".to_string(),
+                                        ],
+                                    );
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-start-with-windows"));
+                                        if ui.checkbox(&mut self.startup_enabled, "").changed() {
+                                            if let Err(e) =
+                                                winutil::set_startup_enabled(self.startup_enabled)
+                                            {
+                                                self.console.write(format!(
+                                                    "[Console] {}",
+                                                    t_args(
+                                                        "console-startup-failed",
+                                                        &[("error", e.to_string().into())]
+                                                    )
+                                                ));
+                                                self.startup_enabled = winutil::is_startup_enabled();
+                                            }
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-start-in-tray"));
+                                        if ui
+                                            .checkbox(&mut self.config.settings.start_in_tray, "")
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-close-to-tray"));
+                                        if ui
+                                            .checkbox(&mut self.config.settings.close_to_tray, "")
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-p2p"));
+                                        if ui
+                                            .checkbox(&mut self.config.settings.p2p_file_sharing, "")
+                                            .changed()
+                                        {
+                                            self.workshop
+                                                .set_share_files(self.config.settings.p2p_file_sharing);
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(t("system-p2p-note"))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-suppress-left"));
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.settings.suppress_left_alerts,
+                                                "",
+                                            )
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-fullscreen-warning"));
+                                        let mut show =
+                                            !self.config.settings.suppress_fullscreen_warning;
+                                        if ui.checkbox(&mut show, "").changed() {
+                                            self.config.settings.suppress_fullscreen_warning = !show;
+                                            self.fullscreen_notice_dismissed = false;
+                                            self.fullscreen_notice = show
+                                                && self.window_mode == Some(WindowMode::Fullscreen);
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(t("system-fullscreen-note"))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-allow-draw-focus"));
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.settings.allow_draw_on_hebnix_focus,
+                                                "",
+                                            )
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-limit-hotkey"));
+                                        if ui
+                                            .checkbox(
+                                                &mut self
+                                                    .config
+                                                    .settings
+                                                    .restrict_hotkey_to_hebnix_or_rocket_league,
+                                                "",
+                                            )
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-statsapi-rate"));
+                                        let mut show =
+                                            !self.config.settings.suppress_statsapi_rate_warning;
+                                        if ui.checkbox(&mut show, "").changed() {
+                                            self.config.settings.suppress_statsapi_rate_warning = !show;
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.label(
+                                        egui::RichText::new(t("system-statsapi-note"))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    ui.add_space(8.0);
+                                    if ui
+                                        .add_enabled(
+                                            !self.epic_repair.running,
+                                            egui::Button::new(t("action-fix-epic-connection")),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.epic_repair.begin(ui.ctx());
+                                        if self.epic_repair.running {
+                                            self.spoofer_mgr.shutdown();
                                         }
                                     }
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-start-in-tray"));
-                                    if ui
-                                        .checkbox(&mut self.config.settings.start_in_tray, "")
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-close-to-tray"));
-                                    if ui
-                                        .checkbox(&mut self.config.settings.close_to_tray, "")
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-p2p"));
-                                    if ui
-                                        .checkbox(&mut self.config.settings.p2p_file_sharing, "")
-                                        .changed()
-                                    {
-                                        self.workshop
-                                            .set_share_files(self.config.settings.p2p_file_sharing);
-                                        self.save_config();
-                                    }
-                                });
-                                ui.label(
-                                    egui::RichText::new(t("system-p2p-note"))
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-suppress-left"));
-                                    if ui
-                                        .checkbox(
-                                            &mut self.config.settings.suppress_left_alerts,
-                                            "",
-                                        )
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-fullscreen-warning"));
-                                    let mut show =
-                                        !self.config.settings.suppress_fullscreen_warning;
-                                    if ui.checkbox(&mut show, "").changed() {
-                                        self.config.settings.suppress_fullscreen_warning = !show;
-                                        self.fullscreen_notice_dismissed = false;
-                                        self.fullscreen_notice = show
-                                            && self.window_mode == Some(WindowMode::Fullscreen);
-                                        self.save_config();
-                                    }
-                                });
-                                ui.label(
-                                    egui::RichText::new(t("system-fullscreen-note"))
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-allow-draw-focus"));
-                                    if ui
-                                        .checkbox(
-                                            &mut self.config.settings.allow_draw_on_hebnix_focus,
-                                            "",
-                                        )
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-limit-hotkey"));
-                                    if ui
-                                        .checkbox(
-                                            &mut self
-                                                .config
-                                                .settings
-                                                .restrict_hotkey_to_hebnix_or_rocket_league,
-                                            "",
-                                        )
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, t("system-statsapi-rate"));
-                                    let mut show =
-                                        !self.config.settings.suppress_statsapi_rate_warning;
-                                    if ui.checkbox(&mut show, "").changed() {
-                                        self.config.settings.suppress_statsapi_rate_warning = !show;
-                                        self.save_config();
-                                    }
-                                });
-                                ui.label(
-                                    egui::RichText::new(t("system-statsapi-note"))
-                                        .size(11.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                                ui.add_space(8.0);
-                                if ui
-                                    .add_enabled(
-                                        !self.epic_repair.running,
-                                        egui::Button::new(t("action-fix-epic-connection")),
-                                    )
-                                    .clicked()
-                                {
-                                    self.epic_repair.begin(ui.ctx());
-                                    if self.epic_repair.running {
-                                        self.spoofer_mgr.shutdown();
-                                    }
-                                }
-                                ui.horizontal(|ui| {
-                                    crate::i18n::layout::settings_label(ui, label_w, "Overlay refresh rate:");
-                                    let slider = ui
-                                        .add(
-                                            egui::Slider::new(
-                                                &mut self.config.settings.overlay_refresh_fps,
-                                                20..=60,
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, "Overlay refresh rate:");
+                                        let slider = ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut self.config.settings.overlay_refresh_fps,
+                                                    20..=60,
+                                                )
+                                                .suffix(" fps"),
                                             )
-                                            .suffix(" fps"),
-                                        )
-                                        .on_hover_text(
-                                            "How often the overlay and plugins update while Rocket League is open. Lower it to use less CPU on slower PCs, higher is smoother.",
-                                        );
-                                    if slider.drag_stopped() || slider.lost_focus() {
-                                        self.save_config();
-                                    }
-                                });
-                                ui.add_space(8.0);
-                                ui.separator();
-                                self.render_spoofer_certificate_settings(ui);
+                                            .on_hover_text(
+                                                "How often the overlay and plugins update while Rocket League is open. Lower it to use less CPU on slower PCs, higher is smoother.",
+                                            );
+                                        if slider.drag_stopped() || slider.lost_focus() {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    self.render_spoofer_certificate_settings(ui);
+                                }
                             }
+                        });
+                        if self.hebnix_settings_tab == HebnixSettingsTab::Interface
+                            && self.appearance_subtab == AppearanceSubTab::General
+                        {
+                            ui.add_space(8.0);
+                            self.render_controller_panel_settings(ui);
                         }
-                    }));
+                    });
             });
+    }
+
+    fn render_controller_panel_settings(&mut self, ui: &mut egui::Ui) {
+        let settings = &mut self.config.settings;
+        let mut changed = false;
+        crate::i18n::layout::bordered_panel(ui, |ui| {
+            ui.heading("Controller panel");
+            ui.separator();
+            changed |= ui.checkbox(&mut settings.panel_enabled, "Enable controller panel").changed();
+            ui.weak("Open the panel beside the game with L3 + R3.");
+            ui.add_enabled_ui(settings.panel_enabled, |ui| {
+                let label_w = label_column_width(ui, &["Opens from".into(), "Width".into()]);
+                ui.horizontal(|ui| {
+                    crate::i18n::layout::settings_label(ui, label_w, "Opens from");
+                    changed |= ui.selectable_value(&mut settings.panel_left, true, "Left").changed();
+                    changed |= ui.selectable_value(&mut settings.panel_left, false, "Right").changed();
+                });
+                ui.horizontal(|ui| {
+                    crate::i18n::layout::settings_label(ui, label_w, "Width");
+                    changed |= ui.add(egui::Slider::new(&mut settings.panel_width, 0.2..=0.5)
+                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)))
+                        .on_hover_text("Share of the game window the panel covers")
+                        .changed();
+                });
+                changed |= ui.checkbox(&mut settings.panel_animate, "Slide in like a drawer").changed();
+                changed |= ui.checkbox(&mut settings.panel_advanced, "Show every page (Advanced mode)").changed();
+            });
+        });
+        if changed {
+            self.save_config();
+            if !self.config.settings.panel_enabled && self.panel.active {
+                self.set_hidden(ui.ctx(), true);
+            }
+        }
     }
 
     fn change_theme(&mut self, ctx: &egui::Context, choice: &str) {
@@ -5551,8 +5600,7 @@ impl HebnixApp {
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
         let with_settings: Vec<(String, String)> = self
             .plugin_mgr
-            .plugins
-            .iter()
+            .plugins_by_name()
             .filter(|p| p.enabled && p.has_settings())
             .map(|p| (p.slug.clone(), p.display_name().to_string()))
             .collect();
@@ -5578,21 +5626,23 @@ impl HebnixApp {
         if !selected_valid {
             self.selected_settings_plugin = Some(with_settings[0].0.clone());
         }
-        let selected = self.selected_settings_plugin.clone().unwrap();
 
-        theme::secondary_navigation(ui, "plugin_settings_list")
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("plugin_settings_names")
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
+        theme::secondary_navigation(ui, "plugin_settings_list").show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("plugin_settings_names")
+                .show(ui, |ui| {
+                    crate::panel::followed(ui, |ui| {
                         for (slug, name) in &with_settings {
-                            if ui.selectable_label(*slug == selected, name).clicked() {
+                            let selected = self.selected_settings_plugin.as_ref() == Some(slug);
+                            if ui.selectable_label(selected, name).clicked() {
                                 self.selected_settings_plugin = Some(slug.clone());
                             }
                         }
-                    }));
-            });
+                    });
+                });
+        });
 
+        let selected = self.selected_settings_plugin.clone().unwrap();
         let display_name = with_settings
             .iter()
             .find(|(slug, _)| *slug == selected)
@@ -5626,13 +5676,18 @@ impl HebnixApp {
             ui.selectable_value(&mut self.maintenance.tab, true, t("maintenance-tab"));
         });
         if self.maintenance.tab {
-            if self.maintenance.render(ui, true, &self.base_dir) {
+            let confirmed = egui::ScrollArea::vertical()
+                .id_salt("about_uninstall")
+                .show(ui, |ui| self.maintenance.render(ui, true, &self.base_dir))
+                .inner;
+            if confirmed {
                 if self.patcher_ball.processing_target.is_some()
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
                     || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
-                    || self.title_patcher.busy() || self.swapper.busy()
+                    || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
+                    || self.scoreboard.busy()
                     || self.workshop.maintenance_busy()
                     || self.replay_history_patch.busy()
                 {
@@ -7143,11 +7198,7 @@ impl eframe::App for HebnixApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
-        self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
-        self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
-        self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
-        crate::maintenance::acknowledge_update();
+        self.freeplay.poll_restart(ctx, &self.ws_stats, &self.config.settings.rl_path);
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
                 crate::watchdog::finish_live_handoff();
@@ -7157,9 +7208,24 @@ impl eframe::App for HebnixApp {
             ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
+        if self.check_game_update() {
+            if self.hidden {
+                self.set_hidden(ctx, false);
+            }
+            self.handle_messages(ctx);
+            ctx.request_repaint_after(Duration::from_millis(250));
+            return;
+        }
+        self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
+        self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
+        self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
+        self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
+        crate::maintenance::acknowledge_update();
         // eframe skips ui() while occluded, but controls must still run.
         crate::visibility::poll(ctx);
         self.handle_messages(ctx);
+        self.home_tracker.tick(ctx);
+        self.workshop.tick_multiplayer(&self.config.settings.rl_path, &self.tx, ctx);
         self.deliver_overlay_messages();
         self.replay_timeline.tick(ctx, &self.ws_stats,
             self.tab == Tab::Replays && self.replays_subtab == ReplaysSubTab::ReplayTimeline);
@@ -7180,6 +7246,17 @@ impl eframe::App for HebnixApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         crate::visibility::note_ui_frame(ctx);
+        if self.check_game_update() {
+            if self.hidden {
+                self.set_hidden(ctx, false);
+            }
+            self.render_game_update(ctx);
+            return;
+        }
+
+        if self.rank_patch.poll() {
+            self.save_config();
+        }
         if let Some((plugins, themes)) = self.pending_installs.take() {
             for plugin_id in plugins {
                 self.download_hebnix_plugin(&plugin_id);
@@ -7259,7 +7336,9 @@ impl eframe::App for HebnixApp {
                                 self.tab = tab;
                             }
                         } else {
-                            ui.selectable_value(&mut self.tab, tab, tab.label());
+                            if ui.selectable_value(&mut self.tab, tab, tab.label()).clicked() && tab == Tab::Replays {
+                                self.replays_subtab = ReplaysSubTab::AutoUploadReplays;
+                            }
                         }
                     }
 
@@ -7342,7 +7421,7 @@ impl eframe::App for HebnixApp {
         };
         // peers' map names and the game's sync button need this on every tab, hidden or not
         let join_rl_path = self.config.settings.rl_path.clone();
-        self.workshop.auto_connect(&join_rl_path, &self.tx.clone(), ctx);
+        self.workshop.sync_lan_connection(&join_rl_path);
         // Instant Suite's action can change mid-game: the winner movie asks Hebnix each match
         let cooked_pc = PathBuf::from(&join_rl_path).join("TAGame").join("CookedPCConsole");
         self.instant_suite.tick(&cooked_pc, &cooked_pc.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
@@ -7351,7 +7430,9 @@ impl eframe::App for HebnixApp {
         self.workshop.render_join_prompt(ctx, &join_rl_path);
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
         self.render_plugin_windows(ctx);
-        if !self.hidden {
+        if !self.hidden
+            && !crate::notifications::render_clock_warning(ctx, &mut self.req_clock_warning_open)
+        {
             self.render_notification_popup(ctx);
         }
         self.plugin_mgr.flush_window_positions();
@@ -7393,33 +7474,50 @@ impl HebnixApp {
             theme::secondary_navigation(ui, "items_categories").show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("items_category_pages")
-                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        if self.items_subtab == ItemsSubTab::Colours {
-                            self.swapper.render_recolour_categories(ui);
-                        } else {
-                            for category in crate::swapper::SwapCategory::ALL {
-                                ui.selectable_value(
-                                    &mut self.swapper_subtab,
-                                    PatcherSubTab::Swapper(category),
-                                    category.label(),
-                                );
+                    .show(ui, |ui| {
+                        crate::panel::followed(ui, |ui| {
+                            if self.items_subtab == ItemsSubTab::Colours {
+                                self.swapper.render_recolour_categories(ui);
+                            } else {
+                                let mut categories = crate::swapper::SwapCategory::ALL;
+                                categories.sort_by_key(|category| category.label().to_lowercase());
+                                for category in categories {
+                                    ui.selectable_value(
+                                        &mut self.swapper_subtab,
+                                        PatcherSubTab::Swapper(category),
+                                        category.label(),
+                                    );
+                                }
                             }
-                        }
-                    }));
+                        });
+                    });
             });
         }
         if self.items_subtab == ItemsSubTab::Loadouts {
+            if self.catalogs_loading {
+                ui.horizontal(|ui| { ui.spinner(); ui.label(t("app-loading-item-catalogs")); });
+            }
+            if let Some(error) = self.catalogs_error.clone() {
+                ui.colored_label(ui.visuals().error_fg_color, t_args("app-catalog-download-failed-error", &[("error", error.into())]));
+                if ui.button(t("app-reload-catalogs")).clicked() {
+                    self.reload_catalogs(ui.ctx());
+                }
+            }
+            let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
+                .join("TAGame")
+                .join("CookedPCConsole");
             let apply = egui::ScrollArea::vertical()
                 .id_salt("loadouts_scroll")
                 .auto_shrink([false; 2])
-                .show(ui, |ui| crate::panel::followed(ui, |ui| self.loadouts.show(ui, &self.swapper, &mut self.presets)))
+                .show(ui, |ui| {
+                    crate::panel::followed(ui, |ui| {
+                        self.loadouts.show(ui, &mut self.swapper, &cooked_pc, &mut self.presets, self.catalogs_loading)
+                    })
+                })
                 .inner;
             if let Some(name) = apply {
                 if let Some(index) = self.presets.presets.iter().position(|p| p.name == name) {
                     self.presets.selected = index;
-                    let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
-                        .join("TAGame")
-                        .join("CookedPCConsole");
                     let backups_dir = cooked_pc.join("Backups");
                     let ctx = ui.ctx().clone();
                     self.apply_selected_preset(&cooked_pc, &backups_dir, &ctx);
@@ -7444,8 +7542,8 @@ impl HebnixApp {
             for (value, key) in [
                 (StudioSection::CustomAssets, "studio-custom-assets"),
                 (StudioSection::Appearance, "studio-appearance"),
-                (StudioSection::Tools, "studio-tools"),
                 (StudioSection::Active, "nav-active"),
+                (StudioSection::History, "upk-history"),
             ] {
                 ui.selectable_value(&mut section, value, t(key));
             }
@@ -7454,25 +7552,35 @@ impl HebnixApp {
             self.items_mode = match section {
                 StudioSection::CustomAssets => ItemsMode::Patching,
                 StudioSection::Appearance => ItemsMode::GameColours,
-                StudioSection::Tools => ItemsMode::SpeedPatch,
                 StudioSection::Active => ItemsMode::Manage,
+                StudioSection::History => ItemsMode::History,
             };
         }
         ui.separator();
-        if section != StudioSection::Active {
+        if section == StudioSection::History && section != previous {
+            self.upk_history.enter();
+        }
+        if !matches!(section, StudioSection::Active | StudioSection::History) {
             theme::secondary_navigation(ui, "studio_navigation").show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("studio_pages")
                     .show(ui, |ui| crate::panel::followed(ui, |ui| match section {
                         StudioSection::CustomAssets => {
-                            for (value, key) in [
-                                (PatcherSubTab::Car, "nav-car-models"),
-                                (PatcherSubTab::Decal, "nav-decals"),
-                                (PatcherSubTab::Anthem, "studio-player-anthems"),
-                                (PatcherSubTab::Ball, "nav-ball-textures"),
-                                (PatcherSubTab::BoostMeter, "nav-boost-meter"),
-                                (PatcherSubTab::Thumbnail, "nav-item-thumbnails"),
-                            ] {
+                            let mut pages = [
+                                (Some(PatcherSubTab::Car), "nav-car-models"),
+                                (Some(PatcherSubTab::Decal), "nav-decals"),
+                                (Some(PatcherSubTab::Anthem), "studio-player-anthems"),
+                                (Some(PatcherSubTab::Ball), "nav-ball-textures"),
+                                (Some(PatcherSubTab::BoostMeter), "nav-boost-meter"),
+                                (Some(PatcherSubTab::Thumbnail), "nav-item-thumbnails"),
+                                (None, "nav-item-names"),
+                            ];
+                            pages.sort_by_key(|(_, key)| t(key).to_lowercase());
+                            for (value, key) in pages {
+                                let Some(value) = value else {
+                                    ui.selectable_value(&mut self.items_mode, ItemsMode::ItemNames, t(key));
+                                    continue;
+                                };
                                 let selected = self.items_mode == ItemsMode::Patching
                                     && self.patcher_subtab == value;
                                 if ui.selectable_label(selected, t(key)).clicked() {
@@ -7480,31 +7588,22 @@ impl HebnixApp {
                                     self.patcher_subtab = value;
                                 }
                             }
-                            ui.selectable_value(
-                                &mut self.items_mode,
-                                ItemsMode::ItemNames,
-                                t("nav-item-names"),
-                            );
                         }
                         StudioSection::Appearance => {
-                            for (value, key) in [
+                            let mut pages = [
                                 (ItemsMode::GameColours, "nav-game-colours"),
                                 (ItemsMode::BallAppearance, "nav-ball-shape"),
                                 (ItemsMode::WheelAlignment, "app-wheel-alignment"),
-                                (ItemsMode::ArenaBackgrounds, "nav-arena-backgrounds"),
+                                (ItemsMode::SpeedPatch, "app-speed-patch"),
                                 (ItemsMode::GoalExplosion, "nav-goal-explosion-scale"),
-                            ] {
+                                (ItemsMode::MenuTextures, "nav-menu-textures-experimental"),
+                            ];
+                            pages.sort_by_key(|(_, key)| t(key).to_lowercase());
+                            for (value, key) in pages {
                                 ui.selectable_value(&mut self.items_mode, value, t(key));
                             }
                         }
-                        StudioSection::Tools => {
-                            ui.selectable_value(
-                                &mut self.items_mode,
-                                ItemsMode::SpeedPatch,
-                                t("app-speed-patch"),
-                            );
-                        }
-                        StudioSection::Active => unreachable!(),
+                        StudioSection::Active | StudioSection::History => unreachable!(),
                     }));
             });
         }
@@ -7519,35 +7618,230 @@ impl HebnixApp {
     ) {
         egui::ScrollArea::vertical()
             .id_salt("active_item_swaps")
-            .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                ui.heading(t("nav-active"));
-                let count = self.swapper.active_count(backups_dir);
-                ui.horizontal(|ui| {
-                    ui.label(t_n("items-active-changes", count as i64));
-                    if ui
-                        .add_enabled(count > 0, egui::Button::new(t("app-restore-all")))
-                        .clicked()
-                    {
-                        match self
-                            .swapper
-                            .restore_all_active(cooked_pc, backups_dir, &self.tx)
+            .show(ui, |ui| {
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.heading(t("nav-active"));
+                    ui.separator();
+                    let count = self.swapper.active_count(backups_dir);
+                    ui.horizontal(|ui| {
+                        ui.label(t_n("items-active-changes", count as i64));
+                        if ui
+                            .add_enabled(count > 0, egui::Button::new(t("app-restore-all")))
+                            .clicked()
                         {
-                            Ok(count) => self
-                                .console
-                                .write(format!("[Items] Restored {count} item changes.")),
-                            Err(error) => self
-                                .console
-                                .write(format!("[Items] Restore failed: {error}")),
+                            match self
+                                .swapper
+                                .restore_all_active(cooked_pc, backups_dir, &self.tx)
+                            {
+                                Ok(count) => self
+                                    .console
+                                    .write(format!("[Items] Restored {count} item changes.")),
+                                Err(error) => self
+                                    .console
+                                    .write(format!("[Items] Restore failed: {error}")),
+                            }
                         }
+                    });
+                    ui.separator();
+                    if count == 0 {
+                        ui.weak(t("app-no-patches-or-swaps-are-active"));
                     }
+                    self.swapper
+                        .render_active_swaps(ui, cooked_pc, backups_dir, &self.tx);
                 });
-                ui.separator();
-                if count == 0 {
-                    ui.weak(t("app-no-patches-or-swaps-are-active"));
+            });
+    }
+
+    fn render_active_patch_tiles(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &std::path::Path,
+        backups: &std::path::Path,
+        ctx: &egui::Context,
+    ) {
+        enum Patch {
+            Ball,
+            Boost,
+            Decal(String),
+            Car(String),
+            Anthem(String),
+        }
+
+        let image = |id: String, bytes: std::sync::Arc<[u8]>| {
+            egui::Image::from_bytes(
+                format!("bytes://active/{id}/{:08x}", crc32fast::hash(&bytes)),
+                bytes,
+            )
+        };
+        let mut tiles = Vec::new();
+        if let Some(name) = &self.patcher_ball.active_ball {
+            let images = self
+                .patcher_ball
+                .balls
+                .iter()
+                .find(|item| &item.name == name)
+                .and_then(|item| item.image_bytes.clone())
+                .map(|bytes| image(format!("ball/{name}"), bytes))
+                .into_iter()
+                .collect::<Vec<_>>();
+            tiles.push((
+                Patch::Ball,
+                name.clone(),
+                t("app-replaced-the-default-ball"),
+                images,
+            ));
+        }
+        if let Some(name) = &self.patcher_boost.active_boost {
+            let images = self
+                .patcher_boost
+                .boosts
+                .iter()
+                .find(|item| &item.name == name)
+                .into_iter()
+                .flat_map(|item| {
+                    [
+                        ("background", &item.background_image),
+                        ("fill", &item.fill_image),
+                        ("glow", &item.glow_image),
+                        ("tint", &item.tint_image),
+                    ]
+                })
+                .filter_map(|(layer, bytes)| {
+                    Some(image(format!("boost/{name}/{layer}"), bytes.clone()?))
+                })
+                .collect();
+            tiles.push((
+                Patch::Boost,
+                name.clone(),
+                t("app-replaced-the-default-boost-meter"),
+                images,
+            ));
+        }
+        for (target, name) in &self.patcher_decal.active_decals {
+            let images = self
+                .patcher_decal
+                .decals
+                .iter()
+                .find(|item| &item.name == name)
+                .and_then(|item| item.preview_image.clone())
+                .map(|bytes| image(format!("decal/{target}"), bytes))
+                .into_iter()
+                .collect();
+            let description = t_args(
+                "app-replaced-target-label",
+                &[(
+                    "target_label",
+                    self.patcher_decal.target_display_name(target).into(),
+                )],
+            );
+            tiles.push((
+                Patch::Decal(target.clone()),
+                name.clone(),
+                description,
+                images,
+            ));
+        }
+        for (target, name) in &self.patcher_car.active_cars {
+            let images = self
+                .patcher_car
+                .active_preview(target, name)
+                .into_iter()
+                .collect();
+            let description = t_args(
+                "app-replaced-target-for-its-bodyid-car",
+                &[("target", target.clone().into())],
+            );
+            tiles.push((
+                Patch::Car(target.clone()),
+                name.clone(),
+                description,
+                images,
+            ));
+        }
+        for (key, name) in &self.patcher_anthem.active_anthems {
+            tiles.push((
+                Patch::Anthem(key.clone()),
+                name.clone(),
+                "Patched anthem audio".into(),
+                Vec::new(),
+            ));
+        }
+        tiles.sort_by(|(_, a, a_description, _), (_, b, b_description, _)| {
+            a.cmp(b).then_with(|| a_description.cmp(b_description))
+        });
+
+        let columns = crate::ui::browser::columns(ui, 224.0);
+        let mut restore = None;
+        for row in tiles.chunks(columns) {
+            ui.columns(columns, |uis| {
+                for (ui, (patch, name, description, images)) in uis.iter_mut().zip(row) {
+                    crate::ui::browser::frame(ui, false).show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            let width = ui.available_width();
+                            let size = egui::vec2(width, width * 2.0 / 3.0);
+                            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                            if images.is_empty() {
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    t("items-browser-preview-missing"),
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                    ui.visuals().weak_text_color(),
+                                );
+                            }
+                            for image in images {
+                                let image = if matches!(patch, Patch::Car(_) | Patch::Decal(_)) {
+                                    crate::ui::browser::cover_image(ui, image.clone(), size)
+                                } else {
+                                    image.clone().fit_to_exact_size(size)
+                                };
+                                ui.place(rect, image);
+                            }
+                            ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate())
+                                .on_hover_text(name);
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(description).weak())
+                                    .truncate(),
+                            )
+                            .on_hover_text(description);
+                            if ui.button(t("app-restore")).clicked() {
+                                restore = Some(patch);
+                            }
+                        });
+                    });
                 }
-                self.swapper
-                    .render_active_swaps(ui, cooked_pc, backups_dir, &self.tx);
-            }));
+            });
+        }
+        match restore {
+            Some(Patch::Ball) => self
+                .patcher_ball
+                .begin_restore(cooked, backups, &self.tx, ctx),
+            Some(Patch::Boost) => self
+                .patcher_boost
+                .begin_restore(cooked, backups, &self.tx, ctx),
+            Some(Patch::Decal(target)) => {
+                if let Some((car, skin)) = target.split_once('|') {
+                    let _ = self
+                        .patcher_decal
+                        .restore_decal_from_skin(car, skin, cooked, backups, &self.tx, ctx);
+                }
+            }
+            Some(Patch::Car(target)) => {
+                if let Err(error) =
+                    self.patcher_car
+                        .restore(target, cooked, backups, &self.tx, &mut self.config)
+                {
+                    let _ = self
+                        .tx
+                        .send(AppMsg::Log(format!("[Cars] Restore failed: {error}")));
+                }
+            }
+            Some(Patch::Anthem(key)) => {
+                self.patcher_anthem
+                    .update_enabled(key.clone(), false, cooked, ctx);
+            }
+            None => {}
+        }
     }
 
     fn render_editor_content(&mut self, ui: &mut egui::Ui, mode: ItemsMode) {
@@ -7684,284 +7978,103 @@ impl HebnixApp {
                             self.patcher_boost.poll_ops(&self.tx, &mut self.config);
                             self.patcher_decal
                                 .handle_op_result(&self.tx, &mut self.config);
+                            crate::i18n::layout::bordered_panel(ui, |ui| {
+                                ui.heading(t("nav-active"));
+                                ui.separator();
+                                let active_count =
+                                    usize::from(self.patcher_ball.active_ball.is_some())
+                                        + usize::from(
+                                            self.patcher_boost.active_boost.is_some(),
+                                        )
+                                        + self.patcher_decal.active_decals.len()
+                                        + self.patcher_car.active_cars.len()
+                                        + self.patcher_anthem.active_anthems.len();
+                                ui.horizontal(|ui| {
+                                    ui.label(t_n("items-active-changes", active_count as i64));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    active_count > 0,
+                                                    egui::Button::new(t("app-restore-all")),
+                                                )
+                                                .clicked()
+                                            {
+                                                if !self
+                                                    .patcher_anthem
+                                                    .active_anthems
+                                                    .is_empty()
+                                                {
+                                                    self.patcher_anthem
+                                                        .restore_all(&cooked_pc, ctx);
+                                                }
+                                                if self.patcher_ball.active_ball.is_some() {
+                                                    self.patcher_ball.begin_restore(
+                                                        &cooked_pc,
+                                                        &backups_dir,
+                                                        &self.tx,
+                                                        ctx,
+                                                    );
+                                                }
+                                                if self.patcher_boost.active_boost.is_some() {
+                                                    self.patcher_boost.begin_restore(
+                                                        &cooked_pc,
+                                                        &backups_dir,
+                                                        &self.tx,
+                                                        ctx,
+                                                    );
+                                                }
+                                                if !self.patcher_decal.active_decals.is_empty()
+                                                {
+                                                    let _ =
+                                                        self.patcher_decal.restore_all_decals(
+                                                            &cooked_pc,
+                                                            &backups_dir,
+                                                            &self.tx,
+                                                            ctx,
+                                                        );
+                                                }
+                                                if !self.patcher_car.active_cars.is_empty() {
+                                                    if let Err(error) =
+                                                        self.patcher_car.restore_all(
+                                                            &cooked_pc,
+                                                            &backups_dir,
+                                                            &self.tx,
+                                                            &mut self.config,
+                                                        )
+                                                    {
+                                                        let _ =
+                                                            self.tx.send(AppMsg::Log(format!(
+                                                                "[Cars] Restore failed: {error}"
+                                                            )));
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.separator();
+                                if active_count == 0 {
+                                    ui.vertical_centered(|ui| {
+                                        ui.weak(t("app-no-patches-or-swaps-are-active"))
+                                    });
+                                }
+                            });
+                            ui.add_space(8.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("active_upk_studio")
                                 .auto_shrink([false, false])
-                                .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                                    ui.heading(t("nav-active"));
-                                    let active_count =
-                                        usize::from(self.patcher_ball.active_ball.is_some())
-                                            + usize::from(
-                                                self.patcher_boost.active_boost.is_some(),
-                                            )
-                                            + self.patcher_decal.active_decals.len()
-                                            + self.patcher_car.active_cars.len()
-                                            + self.patcher_anthem.active_anthems.len();
-                                    ui.horizontal(|ui| {
-                                        ui.label(t_n("items-active-changes", active_count as i64));
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .add_enabled(
-                                                        active_count > 0,
-                                                        egui::Button::new(t("app-restore-all")),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    if !self
-                                                        .patcher_anthem
-                                                        .active_anthems
-                                                        .is_empty()
-                                                    {
-                                                        self.patcher_anthem
-                                                            .restore_all(&cooked_pc, ctx);
-                                                    }
-                                                    if self.patcher_ball.active_ball.is_some() {
-                                                        self.patcher_ball.begin_restore(
-                                                            &cooked_pc,
-                                                            &backups_dir,
-                                                            &self.tx,
-                                                            ctx,
-                                                        );
-                                                    }
-                                                    if self.patcher_boost.active_boost.is_some() {
-                                                        self.patcher_boost.begin_restore(
-                                                            &cooked_pc,
-                                                            &backups_dir,
-                                                            &self.tx,
-                                                            ctx,
-                                                        );
-                                                    }
-                                                    if !self.patcher_decal.active_decals.is_empty()
-                                                    {
-                                                        let _ =
-                                                            self.patcher_decal.restore_all_decals(
-                                                                &cooked_pc,
-                                                                &backups_dir,
-                                                                &self.tx,
-                                                                ctx,
-                                                            );
-                                                    }
-                                                    if !self.patcher_car.active_cars.is_empty() {
-                                                        if let Err(error) =
-                                                            self.patcher_car.restore_all(
-                                                                &cooked_pc,
-                                                                &backups_dir,
-                                                                &self.tx,
-                                                                &mut self.config,
-                                                            )
-                                                        {
-                                                            let _ =
-                                                                self.tx.send(AppMsg::Log(format!(
-                                                                    "[Cars] Restore failed: {error}"
-                                                                )));
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                        );
-                                    });
-                                    ui.separator();
-                                    if active_count == 0 {
-                                        ui.vertical_centered(|ui| {
-                                            ui.weak(t("app-no-patches-or-swaps-are-active"))
-                                        });
-                                    }
-
-                                    let active_ball = self.patcher_ball.active_ball.clone();
-                                    if let Some(name) = active_ball {
-                                        let image = self
-                                            .patcher_ball
-                                            .balls
-                                            .iter()
-                                            .find(|item| item.name == name)
-                                            .and_then(|item| item.image_bytes.clone());
-                                        ui.horizontal(|ui| {
-                                            if let Some(image) = image {
-                                                ui.add(
-                                                    egui::Image::from_bytes(
-                                                        format!("bytes://active/ball/{name}"),
-                                                        image,
-                                                    )
-                                                    .fit_to_exact_size(egui::vec2(90.0, 58.0)),
-                                                );
-                                            }
-                                            ui.vertical(|ui| {
-                                                ui.strong(&name);
-                                                ui.weak(t("app-replaced-the-default-ball"));
-                                            });
-                                            if ui.button(t("app-restore")).clicked() {
-                                                self.patcher_ball.begin_restore(
-                                                    &cooked_pc,
-                                                    &backups_dir,
-                                                    &self.tx,
-                                                    ctx,
-                                                );
-                                            }
-                                        });
-                                    }
-                                    let active_boost = self.patcher_boost.active_boost.clone();
-                                    if let Some(name) = active_boost {
-                                        let images = self
-                                            .patcher_boost
-                                            .boosts
-                                            .iter()
-                                            .find(|item| item.name == name)
-                                            .map(|item| {
-                                                (
-                                                    item.background_image.clone(),
-                                                    item.fill_image.clone(),
-                                                    item.glow_image.clone(),
-                                                    item.tint_image.clone(),
-                                                )
-                                            });
-                                        ui.horizontal(|ui| {
-                                            if let Some((background, fill, glow, tint)) = images {
-                                                let size = egui::vec2(90.0, 58.0);
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    size,
-                                                    egui::Sense::hover(),
-                                                );
-                                                for (layer, image) in [
-                                                    ("background", background),
-                                                    ("fill", fill),
-                                                    ("glow", glow),
-                                                    ("tint", tint),
-                                                ] {
-                                                    if let Some(image) = image {
-                                                        ui.put(
-                                                    rect,
-                                                    egui::Image::from_bytes(
-                                                        format!(
-                                                            "bytes://active/boost/{name}/{layer}"
-                                                        ),
-                                                        image,
-                                                    )
-                                                    .fit_to_exact_size(size),
-                                                );
-                                                    }
-                                                }
-                                            }
-                                            ui.vertical(|ui| {
-                                                ui.strong(&name);
-                                                ui.weak(t("app-replaced-the-default-boost-meter"));
-                                            });
-                                            if ui.button(t("app-restore")).clicked() {
-                                                self.patcher_boost.begin_restore(
-                                                    &cooked_pc,
-                                                    &backups_dir,
-                                                    &self.tx,
-                                                    ctx,
-                                                );
-                                            }
-                                        });
-                                    }
-                                    let active_decals = self
-                                        .patcher_decal
-                                        .active_decals
-                                        .iter()
-                                        .map(|(target, name)| (target.clone(), name.clone()))
-                                        .collect::<Vec<_>>();
-                                    let mut restore_decal = None;
-                                    for (target, name) in active_decals {
-                                        let target_label =
-                                            self.patcher_decal.target_display_name(&target);
-                                        let image = self
-                                            .patcher_decal
-                                            .decals
-                                            .iter()
-                                            .find(|item| item.name == name)
-                                            .and_then(|item| item.preview_image.clone());
-                                        ui.horizontal(|ui| {
-                                            if let Some(image) = image {
-                                                ui.add(
-                                                    egui::Image::from_bytes(
-                                                        format!("bytes://active/decal/{target}"),
-                                                        image,
-                                                    )
-                                                    .fit_to_exact_size(egui::vec2(90.0, 58.0)),
-                                                );
-                                            }
-                                            ui.vertical(|ui| {
-                                                ui.strong(&name);
-                                                ui.weak(t_args(
-                                                    "app-replaced-target-label",
-                                                    &[(
-                                                        "target_label",
-                                                        target_label.to_string().into(),
-                                                    )],
-                                                ));
-                                            });
-                                            if ui.button(t("app-restore")).clicked() {
-                                                restore_decal =
-                                                    target.split_once('|').map(|(car, skin)| {
-                                                        (car.to_string(), skin.to_string())
-                                                    });
-                                            }
-                                        });
-                                    }
-                                    if let Some((car, skin)) = restore_decal {
-                                        let _ = self.patcher_decal.restore_decal_from_skin(
-                                            &car,
-                                            &skin,
-                                            &cooked_pc,
-                                            &backups_dir,
-                                            &self.tx,
-                                            ctx,
-                                        );
-                                    }
-                                    let active_cars = self
-                                        .patcher_car
-                                        .active_cars
-                                        .iter()
-                                        .map(|(target, name)| (target.clone(), name.clone()))
-                                        .collect::<Vec<_>>();
-                                    let mut restore_car = None;
-                                    for (target, name) in active_cars {
-                                        ui.horizontal(|ui| {
-                                            ui.vertical(|ui| {
-                                                ui.strong(&name);
-                                                ui.weak(t_args(
-                                                    "app-replaced-target-for-its-bodyid-car",
-                                                    &[("target", target.to_string().into())],
-                                                ));
-                                            });
-                                            if ui.button(t("app-restore")).clicked() {
-                                                restore_car = Some(target.clone());
-                                            }
-                                        });
-                                    }
-                                    if let Some(target) = restore_car {
-                                        if let Err(error) = self.patcher_car.restore(
-                                            &target,
-                                            &cooked_pc,
-                                            &backups_dir,
-                                            &self.tx,
-                                            &mut self.config,
-                                        ) {
-                                            let _ = self.tx.send(AppMsg::Log(format!(
-                                                "[Cars] Restore failed: {error}"
-                                            )));
-                                        }
-                                    }
-                                    let active_anthems = self.patcher_anthem.active_anthems.clone();
-                                    for (key, name) in active_anthems {
-                                        ui.horizontal(|ui| {
-                                            ui.strong(name);
-                                            ui.weak("Patched anthem audio");
-                                            if ui.button(t("app-restore")).clicked() {
-                                                self.patcher_anthem
-                                                    .update_enabled(key, false, &cooked_pc, ctx);
-                                            }
-                                        });
-                                    }
-                                }));
+                                .show(ui, |ui| {
+                                    self.render_active_patch_tiles(ui, &cooked_pc, &backups_dir, ctx);
+                                });
                         }
                         PatcherSubTab::Presets => {
                             self.render_presets_tab(ui, &cooked_pc, &backups_dir, ctx);
                         }
                     }
+                } else if mode == ItemsMode::History {
+                    self.upk_history.render(ui, &cooked_pc, &self.swapper);
                 } else if mode == ItemsMode::ItemsActive {
                     self.render_active_items(ui, &cooked_pc, &backups_dir);
                 } else if mode == ItemsMode::ItemNames {
@@ -7988,25 +8101,34 @@ impl HebnixApp {
                         &backups_dir,
                         &self.tx,
                         &self.owned_inventory.ids,
+                        &self.owned_inventory.paints,
                     );
                 } else if mode == ItemsMode::SpeedPatch {
                     egui::ScrollArea::vertical()
                         .id_salt("items_speed_patch")
-                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                            if self.speed_patch.render(
-                                ui,
-                                &mut self.config.speed_patch,
-                                &cooked_pc,
-                                &backups_dir,
-                                &self.tx,
-                            ) {
-                                self.save_config();
-                            }
-                        }));
+                        .show(ui, |ui| {
+                            crate::i18n::layout::bordered_panel(ui, |ui| {
+                                if self.speed_patch.render(
+                                    ui,
+                                    &mut self.config.speed_patch,
+                                    &cooked_pc,
+                                    &backups_dir,
+                                    &self.tx,
+                                ) {
+                                    self.save_config();
+                                }
+                            });
+                        });
+                } else if mode == ItemsMode::MenuTextures {
+                    self.render_menu_textures_page(ui);
                 } else if mode == ItemsMode::GoalExplosion {
-                    self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
-                    ui.add_space(16.0);
-                    self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
+                    });
+                    ui.add_space(8.0);
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
+                    });
                 } else if mode == ItemsMode::WheelAlignment {
                     if self.catalogs_loading {
                         ui.spinner();
@@ -8057,7 +8179,6 @@ impl HebnixApp {
                         page,
                         ui,
                         &self.config.settings.rl_path,
-                        &self.config.rl_launch,
                         &self.tx,
                     );
                 }
@@ -8080,13 +8201,13 @@ impl HebnixApp {
             Tab::Console => self.render_console_tab(ui),
             Tab::Workshop => {
                 let rl_path = self.config.settings.rl_path.clone();
-                let rl_launch = self.config.rl_launch.clone();
                 let tx = self.tx.clone();
-                self.workshop.render(ui, &rl_path, &rl_launch, &tx);
+                self.workshop.render(ui, &rl_path, &tx);
             }
             Tab::Spoofer => self.render_spoofer_tab(ui),
             Tab::Items => self.render_items_tab(ui),
             Tab::Patcher => self.render_upk_studio(ui),
+            Tab::Freeplay => self.freeplay.render(ui, &self.config.settings.rl_path, &self.ws_stats),
             Tab::GameMods => self.render_game_mods_tab(ui),
             Tab::Settings => self.render_settings_tab(ui),
             Tab::Plugins => self.render_plugins_tab(ui),
@@ -8094,13 +8215,13 @@ impl HebnixApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(
                         &mut self.replays_subtab,
-                        ReplaysSubTab::ReplayTimeline,
-                        t("nav-replay-library"),
+                        ReplaysSubTab::AutoUploadReplays,
+                        t("nav-auto-upload"),
                     );
                     ui.selectable_value(
                         &mut self.replays_subtab,
-                        ReplaysSubTab::AutoUploadReplays,
-                        t("nav-auto-upload"),
+                        ReplaysSubTab::ReplayTimeline,
+                        t("nav-replay-library"),
                     );
                 });
                 ui.separator();
@@ -8140,7 +8261,10 @@ impl HebnixApp {
         for (key, label) in p.ordered_pages(&pages) {
             let tab = Tab::from_config_key(key);
             let width = vertical.then(|| ui.available_width());
-            if p.nav_item(ui, self.tab == tab, key, label, width).clicked() { self.tab = tab; }
+            if p.nav_item(ui, self.tab == tab, key, label, width).clicked() {
+                self.tab = tab;
+                if tab == Tab::Replays { self.replays_subtab = ReplaysSubTab::AutoUploadReplays; }
+            }
         }
     }
 

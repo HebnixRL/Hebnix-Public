@@ -156,6 +156,7 @@ fn install(cooked: &Path, live: &Path, upk: &UpkPackage, patched: bool) -> Resul
 /// Turn the command on.
 pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     ensure_closed()?;
+    backup_guard::check_install(cooked, backups)?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if let Some(old) = read_saved(backups) {
@@ -396,6 +397,7 @@ impl State {
         let mut key_changed = false;
         ui.add_enabled_ui(!self.busy(), |ui| {
             ui.checkbox(&mut want, t("game-mod-forfeit")).on_hover_text(t("game-mod-forfeit-description"));
+            ui.separator();
             ui.label(t("game-mod-forfeit-description"));
             ui.horizontal(|ui| {
                 ui.label(t("game-mod-forfeit-key"));

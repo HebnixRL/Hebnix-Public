@@ -57,6 +57,7 @@ pub struct SettingsCfg {
     pub allow_draw_on_hebnix_focus: bool,
     pub toast_position: crate::toast::ToastPos,
     pub restrict_hotkey_to_hebnix_or_rocket_league: bool,
+    pub panel_enabled: bool,
     /// Controller side panel: show every page, not just the in-game ones (maps, plugins).
     pub panel_advanced: bool,
     /// Controller side panel: dock on the left edge instead of the right.
@@ -106,6 +107,7 @@ impl Default for SettingsCfg {
             toast_position: Default::default(),
             restrict_hotkey_to_hebnix_or_rocket_league: true,
             panel_advanced: false,
+            panel_enabled: true,
             panel_left: false,
             panel_width: 0.30,
             panel_animate: true,
@@ -175,7 +177,7 @@ pub struct SpeedPatchCfg {
 }
 
 /// Game Mods page settings
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GameModsCfg {
     /// Rocket League key name the forfeit command is bound to.
@@ -192,6 +194,19 @@ pub struct GameModsCfg {
     pub instant_suite_mode: String,
     /// The map Instant Suite's workshop action loads, by path.
     pub instant_suite_map: String,
+    pub instant_suite_private: bool,
+    pub instant_suite_tournaments: bool,
+}
+
+impl Default for GameModsCfg {
+    fn default() -> Self {
+        Self {
+            forfeit_key: String::new(), celebration_key: String::new(), bots_freeplay_key: String::new(),
+            forfeit_pad: String::new(), celebration_pad: String::new(), bots_freeplay_pad: String::new(),
+            instant_suite_mode: "nothing".into(), instant_suite_map: String::new(),
+            instant_suite_private: false, instant_suite_tournaments: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,6 +399,33 @@ fn normalize_action_entries(
     *entries = normalized;
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreboardMmrSource {
+    #[default]
+    Playlist,
+    Gamemode,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScoreboardCfg {
+    pub ignore_self: bool,
+    pub mmr_source: ScoreboardMmrSource,
+    pub fixed_playlist: Option<i64>,
+}
+
+impl Default for ScoreboardCfg {
+    fn default() -> Self {
+        Self {
+            ignore_self: true,
+            mmr_source: ScoreboardMmrSource::Playlist,
+            fixed_playlist: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -396,6 +438,7 @@ pub struct Config {
     pub speed_patch: SpeedPatchCfg,
     pub game_mods: GameModsCfg,
     pub replay_upload: ReplayUploadCfg,
+    pub scoreboard: ScoreboardCfg,
     pub action_button: ActionButtonCfg,
     /// enabled state keyed by plugin slug
     pub plugins: BTreeMap<String, bool>,
