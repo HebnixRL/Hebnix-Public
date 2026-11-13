@@ -184,6 +184,25 @@ pub fn current(backups: &Path) -> Option<f32> {
     serde_json::from_slice::<Saved>(&bytes).ok().map(|saved| saved.gain)
 }
 
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path, gain: f32) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let dir = backups.join(DIR);
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    for bank in manifest()?.banks {
+        let live = std::fs::read(cooked.join(&bank.bank)).map_err(|error| error.to_string())?;
+        if sha256_hex(&live) == bank.sha256 {
+            continue;
+        }
+        let source = archive.join(DIR).join(&bank.bank);
+        let original = std::fs::read(source).map_err(|error| error.to_string())?;
+        if patch(&original, &bank, gain)? != live {
+            return Err(mismatch(&bank));
+        }
+        super::upk_history::replace(&dir.join(&bank.bank), &original)?;
+    }
+    apply(cooked, &backups, gain)
+}
+
 /// Page state: the slider and the job writing the banks.
 pub struct State {
     gain: f32,

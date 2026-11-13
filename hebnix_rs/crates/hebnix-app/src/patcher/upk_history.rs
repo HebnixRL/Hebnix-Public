@@ -332,6 +332,17 @@ pub(super) fn record_linked(
     commit(cooked, live, before, &after, label, None, None, false, true)
 }
 
+/// Commit a feature's staged package against the exact input it edited.
+pub(super) fn install_linked_from(
+    cooked: &Path,
+    live: &Path,
+    before: &[u8],
+    after: &[u8],
+    label: &str,
+) -> Result<(), String> {
+    commit(cooked, live, before, after, label, None, None, true, true)
+}
+
 fn commit(
     cooked: &Path,
     live: &Path,
@@ -1272,7 +1283,7 @@ pub(super) fn check_live_package(cooked: &Path, live: &Path) -> Result<(), Strin
         None => backup_guard::different_version(&backups.join(format!("{file}.bak")), live)?,
     };
     if replaced {
-        return Err(format!("{file} changed outside Hebnix. Resolve the Rocket League update prompt before patching it."));
+        return Err(format!("{file} changed outside Hebnix. Close Rocket League and run repatch in the Hebnix Console."));
     }
     Ok(())
 }
@@ -1287,7 +1298,7 @@ fn package_expectations(store: &Path) -> Result<Vec<(String, String, bool)>, Str
         }
         if let Some(swap) = row.swap {
             for (name, hash) in swap.after.sidecars {
-                if valid_file(&name) && seen.insert(name.to_ascii_lowercase()) {
+                if valid_sidecar(&name) && seen.insert(name.to_ascii_lowercase()) {
                     let patched = swap.before.sidecars.iter().any(|(file, before)| file == &name && before != &hash);
                     expected.push((name, hash, patched));
                 }
@@ -1295,6 +1306,14 @@ fn package_expectations(store: &Path) -> Result<Vec<(String, String, bool)>, Str
         }
     }
     Ok(expected)
+}
+
+pub(super) fn tracked_items(cooked: &Path) -> Result<std::collections::HashSet<String>, String> {
+    Ok(entries(&root(cooked)?)?.into_iter()
+        .filter(|row| row.swap.is_some() || matches!(row.label.as_str(),
+            "Ball textures" | "Custom decal" | "Decal variant"))
+        .map(|row| row.file.to_ascii_lowercase())
+        .collect())
 }
 
 /// Compare against the last bytes Hebnix wrote, since a vanilla backup
@@ -1315,10 +1334,41 @@ pub(super) fn replaced_packages(
     Ok((tracked, changed))
 }
 
+/// Packages from the active item history that still contain our bytes but
+/// could not be reset to a verified input. Never promote these to new stock.
+pub(super) fn remaining_repatch_item(
+    cooked: &Path,
+    backups: &Path,
+    build: &str,
+) -> Result<Option<String>, String> {
+    let store = backups.join(DIR).join(build);
+    let rows = entries(&store)?;
+    for row in &rows {
+        let direct_item = matches!(row.label.as_str(), "Ball textures" | "Custom decal" | "Decal variant");
+        if direct_item && row.before != row.after && live_hash(cooked, &row.file)?.as_deref() == Some(&row.after) {
+            return Ok(Some(row.file.clone()));
+        }
+        if let Some(swap) = &row.swap {
+            if row.before != row.after && live_hash(cooked, &row.file)?.as_deref() == Some(&row.after) {
+                return Ok(Some(row.file.clone()));
+            }
+            for (name, expected) in &swap.after.sidecars {
+                if valid_sidecar(name)
+                    && swap.before.sidecars.iter().any(|(file, before)| file == name && before != expected)
+                    && live_hash(cooked, name)?.as_deref() == Some(expected)
+                {
+                    return Ok(Some(name.clone()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn live_hash(cooked: &Path, file: &str) -> Result<Option<String>, String> {
     let live = super::game_path::resolve(cooked, file);
     if Path::new(file).components().any(|part| !matches!(part, std::path::Component::Normal(_)))
-        || location(cooked, &live).is_none()
+        || (location(cooked, &live).is_none() && !valid_sidecar(file))
     {
         return Err("Invalid UPK history path".into());
     }
@@ -1349,17 +1399,38 @@ fn live_hash(cooked: &Path, file: &str) -> Result<Option<String>, String> {
     Ok(Some(hash))
 }
 
-pub(super) fn unchanged_hud(cooked: &Path, backups: &Path, build: &str) -> Result<bool, String> {
-    for (file, expected, _) in package_expectations(&backups.join(DIR).join(build))? {
-        if file.eq_ignore_ascii_case(super::title_patcher::BOOST_HUD) {
-            return Ok(live_hash(cooked, &file)?.as_deref() == Some(&expected));
+pub(super) fn unchanged_ui_packages(
+    cooked: &Path,
+    backups: &Path,
+    build: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    let store = backups.join(DIR).join(build);
+    let rows = entries(&store)?;
+    let mut retained = std::collections::HashSet::new();
+    for (file, expected, _) in package_expectations(&store)? {
+        let hud = file.eq_ignore_ascii_case(super::title_patcher::BOOST_HUD);
+        let title = rows.iter().find(|row| row.file.eq_ignore_ascii_case(&file))
+            .is_some_and(|row| row.linked && matches!(row.label.as_str(),
+                "Title overrides" | "Restore Title overrides" | "Rank display" | "Restore Rank display"));
+        let workshop = matches!(file.to_ascii_lowercase().as_str(),
+            "gfx_workshopmenu_sf.upk" | "gfx_serverbrowsermenu_sf.upk" | "gfx_winnermenu_sf.upk");
+        if (hud || title || workshop)
+            && !rows.iter().any(|row| row.file.eq_ignore_ascii_case(&file) && row.swap.is_some())
+            && live_hash(cooked, &file)?.as_deref() == Some(&expected)
+        {
+            retained.insert(file.to_ascii_lowercase());
         }
     }
-    Ok(false)
+    Ok(retained)
 }
 
-/// Carry forward the HUD's restore points during a content-only recovery.
-pub(super) fn carry_hud_history(source: &Path, destination: &Path, build: &str) -> Result<(), String> {
+/// Keep restore points for UI packages that item recovery will leave in place.
+pub(super) fn carry_ui_history(
+    source: &Path,
+    destination: &Path,
+    build: &str,
+    retained: &std::collections::HashSet<String>,
+) -> Result<(), String> {
     let source = source.join(DIR).join(build);
     let destination = destination.join(DIR).join(build);
     let events = match fs::read_dir(source.join("events")) {
@@ -1374,7 +1445,7 @@ pub(super) fn carry_hud_history(source: &Path, destination: &Path, build: &str) 
         }
         let bytes = read(&path)?;
         let entry: Entry = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        if !entry.file.eq_ignore_ascii_case(super::title_patcher::BOOST_HUD) {
+        if !retained.contains(&entry.file.to_ascii_lowercase()) {
             continue;
         }
         for id in [&entry.before, &entry.after].into_iter()
@@ -1386,12 +1457,120 @@ pub(super) fn carry_hud_history(source: &Path, destination: &Path, build: &str) 
         }
         let events = destination.join("events");
         fs::create_dir_all(&events).map_err(|error| error.to_string())?;
-        replace(&events.join(path.file_name().ok_or("Missing HUD history filename")?), &bytes)?;
+        replace(&events.join(path.file_name().ok_or("Missing UI history filename")?), &bytes)?;
     }
     Ok(())
 }
 
-pub(super) fn remaining_patch(cooked: &Path, backups: &Path, keep_hud: bool) -> Result<Option<String>, String> {
+/// Roll back known item changes before archiving their restore points. The
+/// package's bytes identify its history even after the executable changes.
+/// A package replaced by Rocket League is already the new input.
+pub(super) fn restore_repatch_baselines(
+    cooked: &Path,
+    backups: &Path,
+    build: &str,
+    retained: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let _guard = INSTALL.lock().map_err(|error| error.to_string())?;
+    let store = backups.join(DIR).join(build);
+    let rows = entries(&store)?;
+    let mut changes = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for latest in &rows {
+        if !seen.insert(latest.file.to_ascii_lowercase())
+            || retained.contains(&latest.file.to_ascii_lowercase())
+            || !valid_file(&latest.file)
+            || latest.file.contains(['/', '\\'])
+        {
+            continue;
+        }
+        let history: Vec<_> = rows.iter().filter(|row| row.file.eq_ignore_ascii_case(&latest.file)).collect();
+        let first = history.last().unwrap();
+        if history.windows(2).any(|pair| pair[0].before != pair[1].after)
+            || history.iter().any(|row| row.linked && !matches!(
+                row.label.as_str(), "Ball textures" | "Custom decal" | "Decal variant"
+            ))
+            || first.swap.as_ref().is_some_and(|swap| swap.before.active.is_some())
+        {
+            continue;
+        }
+        let installed = live_hash(cooked, &latest.file)?;
+        let installed_patch = history.iter()
+            .find(|row| installed.as_deref() == Some(row.after.as_str()))
+            .map_or_else(|| latest.after.clone(), |row| row.after.clone());
+        let mut files = HashMap::from([(latest.file.clone(), (first.before.clone(), installed_patch))]);
+        for transition in history.iter().rev().filter_map(|row| row.swap.as_ref()) {
+            for (name, before) in &transition.before.sidecars {
+                if valid_sidecar(name) {
+                    files.entry(name.clone()).or_insert_with(|| (before.clone(), before.clone()));
+                }
+            }
+            for (name, after) in &transition.after.sidecars {
+                if let Some((_, current)) = files.get_mut(name) {
+                    current.clone_from(after);
+                }
+            }
+        }
+        // The backup must agree with the history's starting point. This
+        // excludes histories that started on top of a pre-existing patch.
+        let backup_name = format!("{}.bak", latest.file);
+        let car_backups = backups.join("CarPatcher");
+        let backup_dirs = [car_backups.as_path(), backups];
+        let baseline = backup_dirs.into_iter().find_map(|dir| {
+            let bytes = fs::read(super::game_path::resolve(dir, &backup_name)).ok()?;
+            (hash(&bytes) == first.before).then_some(bytes)
+        }).or_else(|| {
+            let recorded_backup = history.iter().filter_map(|row| row.swap.as_ref())
+                .flat_map(|swap| &swap.after.backups)
+                .any(|(name, id)| name.eq_ignore_ascii_case(&latest.file) && id == &first.before);
+            // The first swap records its input before it installs anything.
+            // It is also a restore point when the standalone backup is gone.
+            if recorded_backup || first.swap.as_ref().is_some_and(|swap| swap.before.active.is_none()) {
+                load_blob(&store, &first.before).ok()
+            } else {
+                None
+            }
+        });
+        let Some(baseline) = baseline else {
+            continue;
+        };
+        for (name, (before, after)) in files {
+            let live = super::game_path::resolve(cooked, &name);
+            if before == after || !fs::read(&live).is_ok_and(|bytes| hash(&bytes) == after) {
+                continue;
+            }
+            let bytes = if name == latest.file {
+                baseline.clone()
+            } else {
+                load_blob(&store, &before).or_else(|_| {
+                let saved = read(&backups.join(format!("{name}.bak")))?;
+                if hash(&saved) == before { Ok(saved) } else { Err(format!("No verified backup for {name}")) }
+                })?
+            };
+            let key = name.to_ascii_lowercase();
+            if let Some((_, expected, original)) = changes.get(&key) {
+                if expected != &after || original != &bytes {
+                    return Err(format!("Conflicting UPK history for {name}"));
+                }
+            } else {
+                changes.insert(key, (name, after, bytes));
+            }
+        }
+    }
+    if !changes.is_empty() && hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before restoring item package baselines.".into());
+    }
+    for (_, (name, expected, bytes)) in changes {
+        let path = super::game_path::resolve(cooked, &name);
+        if hash(&read(&path)?) != expected {
+            return Err(format!("{name} changed while preparing its recovery"));
+        }
+        replace(&path, &bytes)?;
+    }
+    Ok(())
+}
+
+pub(super) fn remaining_patch(cooked: &Path, backups: &Path, retained: &std::collections::HashSet<String>) -> Result<Option<String>, String> {
     let history = backups.join(DIR);
     let stores = match backup_guard::recorded_build(backups)? {
         Some(build) => vec![history.join(build)],
@@ -1409,7 +1588,7 @@ pub(super) fn remaining_patch(cooked: &Path, backups: &Path, keep_hud: bool) -> 
     for store in stores {
         for (file, expected, patched) in package_expectations(&store)? {
             if patched && live_hash(cooked, &file)?.as_deref() == Some(&expected)
-                && !(keep_hud && file.eq_ignore_ascii_case(super::title_patcher::BOOST_HUD))
+                && !retained.contains(&file.to_ascii_lowercase())
             {
                 return Ok(Some(file));
             }

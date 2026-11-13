@@ -348,6 +348,23 @@ pub(crate) fn restore_for_uninstall(cooked: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove a car's record. Returns the error when only the old files could not be deleted.
+fn retire(dir: &Path, file: &str) -> Result<Option<std::io::Error>, String> {
+    // Rename first so the car disappears from the active record set atomically. A uniquely
+    // named remnant is ignored by refresh_edited if Windows cannot remove it immediately.
+    let retired = dir.with_file_name(format!(
+        ".removed-{file}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::rename(dir, &retired)
+        .map_err(|e| format!("The alignment record could not be removed: {e}"))?;
+    Ok(fs::remove_dir_all(&retired).err())
+}
+
 pub(super) fn transaction(
     cooked: &Path,
     file: &str,
@@ -402,13 +419,40 @@ pub(super) fn transaction(
     let stage = package_file(&dir, "candidate")?;
     let previous = package_file(&dir, "previous")?;
     let mut record = if metadata.exists() {
-        let r: Record = serde_json::from_slice(&read(&metadata)?)
+        let mut r: Record = serde_json::from_slice(&read(&metadata)?)
             .map_err(|e| format!("Invalid alignment backup: {e}"))?;
         if r.version != 1 || hash(&read(&baseline)?) != r.baseline_hash {
             return Err("Alignment backup failed validation".into());
         }
-        if current_hash != r.installed_hash {
-            return Err("This UPK changed outside Wheel Alignment. Refusing to overwrite a swap/custom body or game update. Restore that later patch first; alignment backup retained.".into());
+        if current_hash == r.baseline_hash {
+            // Verify Game Files or a history restore put the baseline back.
+            r.installed_hash = current_hash.clone();
+            r.settings = Settings::default();
+        } else if current_hash != r.installed_hash {
+            // The record is stale: something else wrote this package since. Keeping it
+            // would block every later action, so drop it instead of refusing forever.
+            if action == TransactionAction::Revert {
+                return Err("This UPK changed outside Wheel Alignment. Refusing to overwrite a swap/custom body or game update. Restore that later patch first; alignment backup retained.".into());
+            }
+            if action == TransactionAction::RevertAndForget
+                && let Some(mut recipe) = super::upk_history::current_recipe(cooked, &live)?
+                && recipe.alignment.is_some()
+            {
+                recipe.alignment = Some(Settings::default());
+                super::upk_history::edit_current(cooked, file, recipe)?;
+            }
+            drop(_lock);
+            let leftover = retire(&dir, file)?;
+            if action == TransactionAction::Apply {
+                // Capture the package as it is now as the new baseline.
+                return transaction(cooked, file, settings, action);
+            }
+            return Ok(match leftover {
+                Some(error) => format!(
+                    "Old alignment record removed from the modified list. Old recovery files could not be deleted: {error}"
+                ),
+                None => "Old alignment record removed. The package was left as it is.".into(),
+            });
         }
         r
     } else {
@@ -499,20 +543,8 @@ pub(super) fn transaction(
         ));
     }
     if action == TransactionAction::RevertAndForget {
-        // Rename first so the car disappears from the active record set atomically. A uniquely
-        // named remnant is ignored by refresh_edited if Windows cannot remove it immediately.
         drop(_lock);
-        let retired = dir.with_file_name(format!(
-            ".removed-{file}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        fs::rename(&dir, &retired)
-            .map_err(|e| format!("Alignment reverted, but its record could not be removed: {e}"))?;
-        if let Err(error) = fs::remove_dir_all(&retired) {
+        if let Some(error) = retire(&dir, file)? {
             return Ok(format!(
                 "Alignment reverted and removed from the modified list. Old recovery files could not be deleted: {error}"
             ));
@@ -758,5 +790,42 @@ impl WheelAlignmentState {
             }
             ui.label(&self.status);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_records_can_be_forgotten_without_touching_the_package() {
+        let root = std::env::temp_dir().join(format!("hebnix-alignment-{}", rand::random::<u64>()));
+        let cooked = root.join("TAGame/CookedPCConsole");
+        fs::create_dir_all(&cooked).unwrap();
+        fs::create_dir_all(root.join("Binaries/Win64")).unwrap();
+        fs::write(root.join("Binaries/Win64/RocketLeague.exe"), b"test build").unwrap();
+        super::super::backup_guard::check_install(&cooked, &cooked.join("Backups")).unwrap();
+        let file = "Body_Octane_SF.upk";
+        let live = cooked.join(file);
+        let dir = record_dir(&cooked, file);
+        // Once replaced by other bytes, once put back to the baseline by a file verify.
+        for current in [&b"replaced elsewhere"[..], b"stock"] {
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("baseline.upk.bak"), b"stock").unwrap();
+            let record = Record {
+                version: 1,
+                baseline_hash: hash(b"stock"),
+                installed_hash: hash(b"aligned"),
+                settings: Settings { camber: -15., vertical: 0., lateral: 0. },
+                adjustments: 1,
+            };
+            fs::write(dir.join("alignment.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+            fs::write(&live, current).unwrap();
+            transaction(&cooked, file, Settings::default(), TransactionAction::RevertAndForget)
+                .unwrap();
+            assert!(!dir.exists());
+            assert_eq!(fs::read(&live).unwrap(), current);
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }

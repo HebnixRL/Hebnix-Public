@@ -17,12 +17,20 @@ try {
     if ($plan.mode -eq 'update') {
         $movedOld = $false
         $installed = $false
+        $createdMarker = $false
         try {
             Retry { Move-Item -LiteralPath $plan.exe -Destination $plan.backup }
             $movedOld = $true
             Retry { Move-Item -LiteralPath $plan.staged -Destination $plan.exe }
             $installed = $true
-            if ($plan.base) { [IO.File]::WriteAllText((Join-Path $plan.base '.first'), 'updated') }
+            if ($plan.base) {
+                [IO.Directory]::CreateDirectory($plan.base) | Out-Null
+                $marker = Join-Path $plan.base '.first'
+                if (!(Test-Path -LiteralPath $marker)) {
+                    Retry { [IO.File]::WriteAllText($marker, 'updated') }
+                    $createdMarker = $true
+                }
+            }
             $env:HEBNIX_UPDATE_ACK = Join-Path $helperDir 'started'
             $updated = Start-Process -FilePath $plan.exe -WorkingDirectory ([IO.Path]::GetDirectoryName($plan.exe)) -WindowStyle Hidden -PassThru -ErrorAction Stop
             $deadline = [DateTime]::UtcNow.AddMinutes(3)
@@ -35,6 +43,7 @@ try {
             Remove-Item Env:\HEBNIX_UPDATE_ACK
         } catch {
             Remove-Item Env:\HEBNIX_UPDATE_ACK -ErrorAction SilentlyContinue
+            if ($createdMarker) { Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue }
             if ($null -ne $updated -and !$updated.HasExited) { $updated.Kill(); $updated.WaitForExit() }
             if ($installed) { Retry { Remove-Item -LiteralPath $plan.exe -Force } }
             if ($movedOld) { Retry { Move-Item -LiteralPath $plan.backup -Destination $plan.exe } }

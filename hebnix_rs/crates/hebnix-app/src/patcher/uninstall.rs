@@ -13,7 +13,7 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     }
     let backups = cooked.join("Backups");
     if super::backup_guard::update_required(&cooked)? {
-        return Err("Rocket League changed since the backups were made. Resolve the update prompt before uninstalling.".into());
+        return Err("Rocket League changed since the backups were made. Run repatch in the Hebnix Console before uninstalling.".into());
     }
     if crate::replay_history_patch::installed(game).unwrap_or(false) {
         crate::replay_history_patch::set_enabled(game, false)?;
@@ -31,6 +31,9 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     }
     if super::profile_pictures::name_bridge::recorded(game) {
         super::profile_pictures::name_bridge::set_enabled(game, false)?;
+    }
+    if super::profile_pictures::status(game).is_ok_and(|(enabled, _)| enabled) {
+        super::profile_pictures::set_enabled(game, false)?;
     }
     super::title_patcher::restore_for_uninstall(base, &cooked)?;
     if !backups.exists() {
@@ -51,6 +54,7 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
         }
     }
     super::goal_explosion::restore(&cooked, &backups)?;
+    super::goal_explosion_volume::restore(&cooked, &backups)?;
     super::forfeit_command::restore(&cooked, &backups)?;
     super::celebration::restore(&cooked, &backups)?;
     let _ = super::celebration::unbind();
@@ -60,7 +64,13 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     super::chat_export::restore(&cooked, &backups)?;
     super::lan_commands::restore(&cooked, &backups)?;
     super::instant_suite::restore(&cooked, &backups)?;
+    if super::workshop_host::freeplay_ready(&cooked) {
+        super::workshop_host::set_freeplay_patch(&cooked, false)?;
+    }
     super::colours::restore_for_uninstall(&cooked, &backups)?;
+    if super::workshop_menu::status(&cooked).unwrap_or(false) {
+        super::workshop_menu::restore(&cooked, &backups)?;
+    }
     // Nested feature snapshots may include older changes to the same package.
     // Restore them before the shared pristine package snapshots at the root.
     super::thumbnail_patcher::restore_all(&cooked, &backups)?;
@@ -70,7 +80,7 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     super::decal_patcher::restore_for_uninstall(&cooked, &backups)?;
     super::heatseeker::restore(&cooked, &backups)?;
     restore_ball_regions(&backups, &cooked)?;
-    restore_packages(&backups, &cooked)?;
+    restore_packages_matching(&backups, &cooked, |file| !file.eq_ignore_ascii_case("TAGame.upk"))?;
     // the boost backup may have been taken with the patched HUD movie in it
     super::chat_paste::restore(&cooked, &backups)?;
     Ok(())
@@ -110,6 +120,14 @@ fn restore_ball_regions(backups: &Path, cooked: &Path) -> Result<(), String> {
 }
 
 fn restore_packages(backups: &Path, cooked: &Path) -> Result<(), String> {
+    restore_packages_matching(backups, cooked, |_| true)
+}
+
+fn restore_packages_matching(
+    backups: &Path,
+    cooked: &Path,
+    include: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     if !backups.exists() {
         return Ok(());
     }
@@ -122,6 +140,9 @@ fn restore_packages(backups: &Path, cooked: &Path) -> Result<(), String> {
         let Some(live) = name.strip_suffix(".bak") else {
             continue;
         };
+        if !include(live) {
+            continue;
+        }
         if ![".upk", ".tfc", ".bnk"]
             .iter()
             .any(|ext| live.ends_with(ext))
@@ -199,7 +220,11 @@ pub(crate) fn restore_repatched_items(base: &Path, cooked: &Path) -> Result<(), 
     }
     super::decal_patcher::restore_for_uninstall(cooked, &backups)?;
     restore_ball_regions(&backups, cooked)?;
-    restore_packages(&backups, cooked)?;
+    let item_packages = super::upk_history::tracked_items(cooked)?;
+    restore_packages_matching(&backups, cooked, |file| {
+        item_packages.contains(&file.to_ascii_lowercase())
+            || super::patch_core::gameinfo::is_ball_upk(file)
+    })?;
     restore_packages(&backups.join("Anthems"), cooked)?;
     restore_packages(&backups.join("CarPatcher"), cooked)
 }

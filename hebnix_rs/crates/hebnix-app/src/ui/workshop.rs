@@ -1225,7 +1225,7 @@ impl WorkshopState {
         }
         std::thread::spawn(move || {
             if let Err(e) = crate::patcher::workshop_menu::upgrade_movie(&cooked) {
-                crate::toast::report("workshop-ui", &format!("[Workshop] {e}"), None, true);
+                tracing::warn!("[Workshop] {e}");
             }
             let _ = ingame_menu::refresh(&cooked);
         });

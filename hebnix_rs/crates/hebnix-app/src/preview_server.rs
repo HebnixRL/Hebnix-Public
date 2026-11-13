@@ -69,15 +69,13 @@ fn serve(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
     let mut head = [0u8; 2048];
     let n = stream.read(&mut head)?;
     let request = String::from_utf8_lossy(&head[..n]);
-    let bytes = {
-        request
+    let bytes = request
             .lines()
             .next()
             .and_then(|line| line.strip_prefix("GET /p/"))
             .and_then(|rest| rest.split(".png").next())
             .filter(|id| !id.is_empty() && id.len() < 32 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-            .and_then(|id| thumbnail(dir, id))
-    };
+            .and_then(|id| thumbnail(dir, id));
     match bytes {
         Some(bytes) => {
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len())?;

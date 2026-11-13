@@ -300,7 +300,7 @@ impl HebnixApp {
         self.spoofer_titles.remove(index);
     }
 
-    fn title_rules(&self) -> Vec<crate::patcher::title_patcher::TitleOverride> {
+    pub(super) fn title_rules(&self) -> Vec<crate::patcher::title_patcher::TitleOverride> {
         self.spoofer_titles
             .iter()
             .map(|title| {

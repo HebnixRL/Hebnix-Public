@@ -22,10 +22,14 @@ pub(crate) struct Recovery {
     pub(crate) prepared: bool,
     #[serde(default)]
     pub(crate) clearing: bool,
+    #[serde(default)]
+    instant_suite: bool,
+    #[serde(default)]
+    pub(crate) reset_pending: bool,
 }
 
 impl Recovery {
-    fn archive(&self, cooked: &Path) -> std::path::PathBuf {
+    pub(super) fn archive(&self, cooked: &Path) -> std::path::PathBuf {
         cooked.with_file_name(format!(".hebnix-stale-backups-{:016x}", self.archive_id))
     }
 
@@ -80,6 +84,9 @@ impl Recovery {
             build: backup_guard::build_id(cooked)?,
             prepared: false,
             clearing: false,
+            instant_suite: super::instant_suite::recorded_enabled(&backups)
+                || super::instant_suite::status(cooked, &backups),
+            reset_pending: false,
         })
     }
 
@@ -88,10 +95,18 @@ impl Recovery {
         if build == self.build && (!self.prepared || !backup_guard::update_required(cooked)?) {
             return Ok(());
         }
-        for backups in [cooked.join("Backups"), self.archive(cooked)] {
-            ensure_no_old_patch(cooked, &backups, repatch)?;
+        let backups = cooked.join("Backups");
+        let archive = self.archive(cooked);
+        ensure_no_old_patch(cooked, &backups, repatch)?;
+        if archive.is_dir() {
+            ensure_no_old_patch(cooked, &archive, repatch)?;
+            // Preserve feature receipts across a second update. The current
+            // tree may include partial item work from the interrupted run.
+            if backups.is_dir() {
+                let interrupted = archive.with_extension(format!("interrupted-{:016x}", rand::random::<u64>()));
+                fs::rename(&backups, interrupted).map_err(|error| error.to_string())?;
+            }
         }
-        self.remove_archive(cooked)?;
         self.build = build;
         self.prepared = false;
         self.save(cooked)
@@ -103,10 +118,10 @@ impl Recovery {
         }
         let backups = cooked.join("Backups");
         let archive = self.archive(cooked);
-        if !repatch && archive.exists() {
-            ensure_no_old_patch(cooked, &archive, false)?;
-        }
         if self.prepared {
+            if !repatch && archive.is_dir() {
+                ensure_no_old_patch(cooked, &archive, false)?;
+            }
             return Ok(());
         }
         if !archive.exists() {
@@ -115,7 +130,9 @@ impl Recovery {
                 fs::rename(&backups, &archive).map_err(|e| e.to_string())?;
             }
         }
-        if repatch && keep_hud(cooked, &archive)? {
+        backup_guard::initialize_install(cooked, &backups, &self.build)?;
+        let retained = retained_ui(cooked, &archive, true)?;
+        if retained.contains(&super::title_patcher::BOOST_HUD.to_ascii_lowercase()) {
             for name in ["GFX_Hud_SF.upk.bak", "boost-build.sha256", "ChatPaste/vanilla.swf"] {
                 let source = archive.join(name);
                 if source.is_file() {
@@ -127,23 +144,89 @@ impl Recovery {
                     upk_history::replace(&destination, &bytes)?;
                 }
             }
-            upk_history::carry_hud_history(&archive, &backups, &self.build)?;
         }
-        backup_guard::initialize_install(cooked, &backups, &self.build)?;
+        if !retained.is_empty() {
+            upk_history::carry_ui_history(&archive, &backups, &self.build, &retained)?;
+        }
         self.prepared = true;
+        self.reset_pending = true;
         if let Err(error) = self.save(cooked) {
             self.prepared = false;
+            self.reset_pending = false;
             return Err(error);
         }
         Ok(())
     }
 
     pub(crate) fn finish(cooked: &Path) -> Result<(), String> {
+        if hebnix_sdk::process::is_rocket_league_running() {
+            return Err("Close Rocket League before finishing recovery.".into());
+        }
         if let Some(recovery) = Self::load(cooked)? {
+            if recovery.build != backup_guard::build_id(cooked)? {
+                return Err("Rocket League changed again before recovery finished.".into());
+            }
+            let archive = recovery.archive(cooked);
+            if archive.is_dir() {
+                let mut errors = Vec::new();
+                for (feature, apply) in [
+                    ("Profile pictures", super::profile_pictures::recover_after_update as fn(&Path, &Path) -> Result<(), String>),
+                    ("Player name bridge", super::profile_pictures::name_bridge::retain_recovery_state),
+                    ("Workshop", super::workshop_menu::recover_after_update),
+                    ("Freeplay", super::workshop_host::recover_freeplay),
+                    ("UPK Studio colours", super::colours::recover_after_update),
+                    ("LAN chat commands", super::lan_commands::recover_after_update),
+                    ("Chat Paste", super::chat_paste::recover_after_update),
+                    ("Game Mods", recover_game_mods),
+                ] {
+                    if hebnix_sdk::process::is_rocket_league_running() {
+                        return Err("Close Rocket League before finishing recovery.".into());
+                    }
+                    if let Err(error) = apply(cooked, &archive) {
+                        errors.push(format!("{feature}: {error}"));
+                    }
+                }
+                if let Err(error) = super::instant_suite::recover_after_update(cooked, &archive, recovery.instant_suite) {
+                    errors.push(format!("Instant Suite: {error}"));
+                }
+                if !errors.is_empty() {
+                    return Err(errors.join("\n"));
+                }
+            }
             recovery.remove_archive(cooked)?;
         }
         fs::remove_file(cooked.join(JOURNAL)).map_err(|e| e.to_string())
     }
+}
+
+fn recover_game_mods(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    if archive.join("Dispatcher/state.json").is_file() {
+        let package = super::upk_package::UpkPackage::load(&super::game_path::resolve(cooked, "TAGame.upk"))?;
+        super::dispatcher::retain_recovery_state(cooked, archive, &package)?;
+    }
+    for (name, enabled, apply) in [
+        ("Forfeit command", super::forfeit_command::enabled as fn(&Path) -> bool,
+            super::forfeit_command::enable as fn(&Path, &Path) -> Result<(), String>),
+        ("Celebration", super::celebration::enabled, super::celebration::enable),
+        ("Bots in Freeplay", super::bots_freeplay::enabled, super::bots_freeplay::enable),
+    ] {
+        if enabled(archive) && !enabled(&backups) {
+            apply(cooked, &backups).map_err(|error| format!("{name}: {error}"))?;
+        }
+    }
+    super::chat_export::recover_after_update(cooked, archive)?;
+    if let Some(scale) = super::goal_explosion::current(archive)
+        && super::goal_explosion::current(&backups).is_none()
+    {
+        super::goal_explosion::recover_after_update(cooked, archive, scale)?;
+    }
+    if let Some(gain) = super::goal_explosion_volume::current(archive)
+        && super::goal_explosion_volume::current(&backups).is_none()
+    {
+        super::goal_explosion_volume::recover_after_update(cooked, archive, gain)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_item_state(root: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -154,8 +237,9 @@ pub(crate) fn apply_alignment(
     cooked: &Path,
     file: &str,
     settings: super::wheel_alignment::Settings,
+    force: bool,
 ) -> Result<(), String> {
-    if super::wheel_alignment::recovery_settings(cooked)?
+    if !force && super::wheel_alignment::recovery_settings(cooked)?
         .iter()
         .any(|(name, saved)| name == file && *saved == settings)
     {
@@ -231,7 +315,7 @@ mod tests {
         for name in ["A.upk", "B.upk"] {
             let live = cooked.join(name);
             fs::write(&live, b"vanilla").unwrap();
-            upk_history::install(&cooked, &live, b"patched", "Fixture", None).unwrap();
+            upk_history::install_linked(&cooked, &live, b"patched", "Fixture").unwrap();
             fs::write(backups.join(format!("{name}.bak")), b"vanilla").unwrap();
         }
         assert!(!backup_guard::update_required(&cooked).unwrap());
@@ -250,7 +334,7 @@ mod tests {
         );
         let mut recovery = Recovery::capture(&cooked, PatcherCfg::default()).unwrap();
         recovery.save(&cooked).unwrap();
-        assert!(recovery.prepare(&cooked, true).unwrap_err().contains("A.upk"));
+        assert!(recovery.prepare(&cooked, false).unwrap_err().contains("A.upk"));
         assert!(backups.join("A.upk.bak").is_file());
 
         fs::write(cooked.join("A.upk"), b"new game bytes").unwrap();
@@ -285,6 +369,29 @@ mod tests {
     }
 
     #[test]
+    fn recovery_keeps_updated_stock_and_resets_a_surviving_item_patch() {
+        let install = Install::new();
+        let cooked = install.cooked();
+        let backups = cooked.join("Backups");
+        for file in ["Updated.upk", "Survivor.upk"] {
+            let live = cooked.join(file);
+            fs::write(&live, b"old stock").unwrap();
+            upk_history::install_linked(&cooked, &live, b"old patch", "Custom decal").unwrap();
+            fs::write(backups.join(format!("{file}.bak")), b"old stock").unwrap();
+        }
+        fs::write(cooked.join("Updated.upk"), b"new stock").unwrap();
+        fs::write(install.0.join("Binaries/Win64/RocketLeague.exe"), b"new Rocket League build").unwrap();
+
+        let mut recovery = Recovery::capture(&cooked, PatcherCfg::default()).unwrap();
+        recovery.prepare(&cooked, true).unwrap();
+        assert!(Recovery::load(&cooked).unwrap().unwrap().reset_pending);
+        assert_eq!(fs::read(cooked.join("Updated.upk")).unwrap(), b"new stock");
+        assert_eq!(fs::read(cooked.join("Survivor.upk")).unwrap(), b"old stock");
+        assert!(!backups.join("Updated.upk.bak").exists());
+        assert_eq!(fs::read(recovery.archive(&cooked).join("Updated.upk.bak")).unwrap(), b"old stock");
+    }
+
+    #[test]
     fn compares_versions_for_named_legacy_upk_backups() {
         let install = Install::new();
         let cooked = install.cooked();
@@ -300,22 +407,43 @@ mod tests {
 }
 
 fn ensure_no_old_patch(cooked: &Path, backups: &Path, repatch: bool) -> Result<(), String> {
-    if let Some(file) = upk_history::remaining_patch(cooked, backups, repatch && keep_hud(cooked, backups)?)? {
+    if repatch {
+        if let Some(recorded) = backup_guard::recorded_build(backups)? {
+            let retained = retained_ui(cooked, backups, true)?;
+            upk_history::restore_repatch_baselines(cooked, backups, &recorded, &retained)?;
+            if let Some(file) = upk_history::remaining_repatch_item(cooked, backups, &recorded)? {
+                return Err(format!("Could not identify a clean baseline for {file}. Verify Rocket League's game files and retry repatch."));
+            }
+        } else if let Some(file) = upk_history::remaining_patch(cooked, backups, &Default::default())? {
+            return Err(format!("The build for the patch in {file} is unknown. Verify Rocket League's game files and retry repatch."));
+        }
+        return Ok(());
+    }
+    if let Some(recorded) = backup_guard::recorded_build(backups)? {
+        let retained = retained_ui(cooked, backups, true)?;
+        upk_history::restore_repatch_baselines(cooked, backups, &recorded, &retained)?;
+    }
+    let retained = retained_ui(cooked, backups, true)?;
+    if let Some(file) = upk_history::remaining_patch(cooked, backups, &retained)? {
         return Err(format!(
-            "{file} still contains an older Hebnix patch. Verify Rocket League's game files, then try again."
+            "Could not undo the recorded patch in {file}. Its matching baseline is missing or the patch history is incomplete."
         ));
     }
     Ok(())
 }
 
-// Repatch All rebuilds item patches. An unchanged HUD belongs to separate
-// features, and its restore points are still valid on the same game build.
-fn keep_hud(cooked: &Path, backups: &Path) -> Result<bool, String> {
-    let Some(recorded) = backup_guard::recorded_build(backups)? else {
-        return Ok(false);
-    };
-    if recorded != backup_guard::build_id(cooked)? {
-        return Ok(false);
+// Item recovery leaves UI features installed when their package and build
+// still match the recorded patch.
+fn retained_ui(
+    cooked: &Path,
+    backups: &Path,
+    repatch: bool,
+) -> Result<std::collections::HashSet<String>, String> {
+    if repatch
+        && let Some(recorded) = backup_guard::recorded_build(backups)?
+        && recorded == backup_guard::build_id(cooked)?
+    {
+        return upk_history::unchanged_ui_packages(cooked, backups, &recorded);
     }
-    upk_history::unchanged_hud(cooked, backups, &recorded)
+    Ok(Default::default())
 }

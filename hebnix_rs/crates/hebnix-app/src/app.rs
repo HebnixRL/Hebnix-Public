@@ -23,7 +23,7 @@ mod menu_textures;
 #[path = "ui/titles_tests.rs"]
 mod titles_tests;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.2.9";
+pub const APP_VERSION: &str = "2.3.0";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -740,6 +740,7 @@ fn apply_overlay_font(fonts_dir: &std::path::Path, settings: &crate::config::Set
     );
 }
 
+#[cfg(target_os = "linux")]
 enum TitlebarIcon {
     Close,
     Minimize,
@@ -747,6 +748,7 @@ enum TitlebarIcon {
 
 /// Hand-painted instead of a unicode glyph: the bundled font's coverage for those is
 /// inconsistent across systems.
+#[cfg(target_os = "linux")]
 fn titlebar_icon_button(ui: &mut egui::Ui, icon: TitlebarIcon) -> egui::Response {
     let size = egui::vec2(22.0, 22.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
@@ -837,7 +839,7 @@ impl HebnixApp {
             cc.egui_ctx.clone(),
         );
 
-        let show_changelog = base_dir.join(".first").exists();
+        let show_changelog = crate::maintenance::changelog_pending(&base_dir);
         let launch_marker = base_dir.join(".launch");
         if launch_marker.exists() {
             let _ = std::fs::remove_file(&launch_marker);
@@ -1496,15 +1498,20 @@ impl HebnixApp {
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    self.lan_commands.render(ui, &cooked_pc, &backups_dir);
+                    self.lan_commands.render(ui, &cooked_pc, &backups_dir, |error| {
+                        self.console.write(format!("[LAN chat commands] {error}"));
+                    });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    self.chat_paste.render(ui, &cooked_pc, &backups_dir);
+                    let rules = self.title_rules();
+                    self.chat_paste.render(ui, &cooked_pc, &backups_dir, rules, |error| {
+                        self.console.write(format!("[Chat Paste] {error}"));
+                    });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.instant_suite_mode) {
+                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
                         self.save_config();
                     }
                 });
@@ -2551,6 +2558,7 @@ impl HebnixApp {
 
     /// Custom titlebar: the window has no compositor chrome (decorations are off), so
     /// this thin strip is the drag handle and the only close/minimize buttons.
+    #[cfg(target_os = "linux")]
     fn render_titlebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
@@ -2795,7 +2803,9 @@ impl HebnixApp {
                 AppMsg::ChangelogFetched { result } => {
                     if let Ok(Some(entry)) = result {
                         self.changelog_popup = Some(entry);
-                        let _ = std::fs::remove_file(self.base_dir.join(".first"));
+                        if self.hidden {
+                            self.set_hidden(ctx, false);
+                        }
                     }
                 }
                 AppMsg::NotificationFetched(notification) => {
@@ -3244,7 +3254,7 @@ impl HebnixApp {
         }
     }
 
-    fn handle_game_event(&mut self, event: hebnix_sdk::stats::StatsEvent, ctx: &egui::Context) {
+    fn handle_game_event(&mut self, event: hebnix_sdk::stats::StatsEvent, _ctx: &egui::Context) {
         self.home.event(&event);
         let replay_event = self.replay_timeline.is_replay_event(&event);
         self.replay_timeline.event(&event, &self.ws_stats);
@@ -3257,6 +3267,10 @@ impl HebnixApp {
         }
         match event.event_type.as_str() {
             "MatchCreated" | "MatchStarted" => {
+                if !replay_event {
+                    let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
+                    crate::patcher::instant_suite::clear_match_end(&cooked);
+                }
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "UpdateState" => {
@@ -3288,6 +3302,15 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
+                if !replay_event && !self.match_ended {
+                    let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
+                    crate::patcher::instant_suite::match_ended(
+                        &cooked,
+                        event.match_guid.as_deref(),
+                        self.config.game_mods.instant_suite_private,
+                        self.config.game_mods.instant_suite_tournaments,
+                    );
+                }
                 self.in_match = false;
                 self.match_ended = true;
                 self.plugin_mgr.shared.borrow_mut().in_match = false;
@@ -3296,7 +3319,9 @@ impl HebnixApp {
             }
             "MatchDestroyed" => {
                 if !replay_event {
-                self.scoreboard.end_match();
+                    let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
+                    crate::patcher::instant_suite::match_destroyed(&cooked);
+                    self.scoreboard.end_match();
                 }
                 self.in_match = false;
                 self.match_ended = false;
@@ -3362,6 +3387,8 @@ impl HebnixApp {
                 self.console
                     .write("[Monitor] Connection lost. Halting listener...");
                 self.stats.stop();
+                let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
+                crate::patcher::instant_suite::match_destroyed(&cooked);
                 self.match_ended = false;
                 if self.in_match {
                     self.in_match = false;
@@ -3674,7 +3701,7 @@ impl HebnixApp {
         self.refresh_stats_api_viewer();
     }
 
-    fn execute_command(&mut self, raw: String) {
+    fn execute_command(&mut self, raw: String, ctx: &egui::Context) {
         let parts: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
         let cmd = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
 
@@ -3707,7 +3734,15 @@ impl HebnixApp {
                     .write("  quit                 - force kills the Rocket League process");
                 self.console
                     .write("  restart              - restarts Rocket League through Steam or Epic");
+                self.console
+                    .write("  repatch              - retries failed item patches");
+                self.console.write("  repatch all          - reapplies all active item patches");
             }
+            "repatch" => match parts.get(1).map(String::as_str) {
+                None => self.repatch_from_console(ctx, false),
+                Some(arg) if arg.eq_ignore_ascii_case("all") => self.repatch_from_console(ctx, true),
+                _ => self.console.write("[Console] Usage: repatch [all]"),
+            },
             "restart" => {
                 let path = self.config.settings.rl_path.clone();
                 match crate::winutil::restart_rocket_league(
@@ -3910,6 +3945,7 @@ impl HebnixApp {
     }
 
     fn render_console_tab(&mut self, ui: &mut egui::Ui) {
+        self.render_game_update_controls(ui);
         let plugin_names: Vec<String> = self
             .plugin_mgr
             .plugins
@@ -3918,7 +3954,7 @@ impl HebnixApp {
             .collect();
         let submitted = self.console.render(ui, &plugin_names);
         if let Some(cmd) = submitted {
-            self.execute_command(cmd);
+            self.execute_command(cmd, ui.ctx());
         }
     }
 
@@ -5855,6 +5891,7 @@ impl HebnixApp {
                     || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
                     || self.scoreboard.busy()
                     || self.workshop.maintenance_busy()
+                    || self.freeplay.patch_busy()
                     || self.replay_history_patch.busy()
                 {
                     self.maintenance.error = Some(t("maintenance-finish-patches"));
@@ -5909,7 +5946,7 @@ impl HebnixApp {
                 ("Hebbins", Some("https://github.com/Hebbins")),
                 ("·", None),
                 ("nixvio64", Some("https://github.com/nixvio64")),
-                ("&", None),
+                ("·", None),
                 ("xplodingeggo", Some("https://github.com/xplodingeggo")),
             ]);
             ui.add_space(6.0);
@@ -6369,6 +6406,7 @@ impl HebnixApp {
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
             self.changelog_popup = None;
+            let _ = std::fs::remove_file(self.base_dir.join(".first"));
         }
     }
 
@@ -7369,7 +7407,7 @@ impl eframe::App for HebnixApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.freeplay.poll_restart(ctx, &self.ws_stats, &self.config.settings.rl_path);
+        self.freeplay.poll_patch(ctx, &self.config.settings.rl_path);
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
                 crate::watchdog::finish_live_handoff();
@@ -7379,19 +7417,26 @@ impl eframe::App for HebnixApp {
             ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
-        if self.check_game_update() {
-            if self.hidden {
-                self.set_hidden(ctx, false);
-            }
-            self.handle_messages(ctx);
-            ctx.request_repaint_after(Duration::from_millis(250));
-            return;
-        }
-        self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
-        self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
-        self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
-        self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
         crate::maintenance::acknowledge_update();
+        ctx.request_repaint_after(Duration::from_secs(30));
+        self.title_patcher.poll();
+        if self.rank_patch.poll() {
+            self.save_config();
+        }
+        self.check_game_update(ctx);
+        let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
+        if !self.recovery_running() {
+            self.instant_suite.tick(&cooked, &cooked.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
+            if self.instant_suite.busy() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
+            self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
+            self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
+            self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
+        } else {
+            crate::patcher::instant_suite::suspend(&cooked);
+        }
         // eframe skips ui() while occluded, but controls must still run.
         crate::visibility::poll(ctx);
         self.handle_messages(ctx);
@@ -7417,17 +7462,11 @@ impl eframe::App for HebnixApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         crate::visibility::note_ui_frame(ctx);
-        if self.check_game_update() {
-            if self.hidden {
-                self.set_hidden(ctx, false);
-            }
-            self.render_game_update(ctx);
+        if self.recovery_running() {
+            self.render_game_update_controls(ui);
             return;
         }
 
-        if self.rank_patch.poll() {
-            self.save_config();
-        }
         if let Some((plugins, themes)) = self.pending_installs.take() {
             for plugin_id in plugins {
                 self.download_hebnix_plugin(&plugin_id);
@@ -7491,6 +7530,7 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
+            #[cfg(target_os = "linux")]
             egui::Panel::top("linux_titlebar").show(ui, |ui| self.render_titlebar(ui));
             if self.panel.active {
                 self.render_panel(ui);
@@ -7592,6 +7632,7 @@ impl eframe::App for HebnixApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         // the title bar's minimize button: hide to the tray, or minimize when there is no tray
+        #[cfg(target_os = "linux")]
         if ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("hbx_minimize_request"))).unwrap_or(false) {
             if self.tray.is_some() {
                 self.set_hidden(ctx, true);
@@ -8390,7 +8431,7 @@ impl HebnixApp {
             Tab::Spoofer => self.render_spoofer_tab(ui),
             Tab::Items => self.render_items_tab(ui),
             Tab::Patcher => self.render_upk_studio(ui),
-            Tab::Freeplay => self.freeplay.render(ui, &self.config.settings.rl_path, &self.ws_stats),
+            Tab::Freeplay => self.freeplay.render(ui, &self.config.settings.rl_path),
             Tab::GameMods => self.render_game_mods_tab(ui),
             Tab::Settings => self.render_settings_tab(ui),
             Tab::Plugins => self.render_plugins_tab(ui),

@@ -253,16 +253,18 @@ const IMPORT_JSON_BUILDS: [(&str, &str); 2] = [(r"..\..\TAGame\HebnixWorkshop.js
 const NAMES: [(&str, &str); 2] = [("TransformedLeftX", "LoadFileToString"), ("TargetFind", "ImportJSON")];
 
 pub(super) fn rename_names(upk: &mut UpkPackage, on: bool) -> Result<(), String> {
+    let keep_loader = super::instant_suite::has_native_bridge(upk) || super::workshop_host::has_freeplay_restart(upk);
     for (vanilla, patched) in NAMES {
         let index = upk.names.iter().position(|n| n == vanilla || n == patched)
             .ok_or_else(|| format!("{vanilla} is missing from {PACKAGE}"))?;
-        upk.rename_name(index, if on { patched } else { vanilla })?;
+        upk.rename_name(index, if on || (keep_loader && patched == NAMES[0].1) { patched } else { vanilla })?;
     }
     Ok(())
 }
 
 /// The unused names, renamed while the menu is enabled.
 fn names(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
+    let keep_loader = super::instant_suite::has_native_bridge(upk) || super::workshop_host::has_freeplay_restart(upk);
     NAMES
         .iter()
         .map(|(vanilla, patched)| {
@@ -271,7 +273,8 @@ fn names(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
                 .iter()
                 .position(|n| n == vanilla || n == patched)
                 .ok_or_else(|| format!("{vanilla} is missing from {PACKAGE}"))?;
-            Ok((upk.name_string_offset(index)?, (if on { patched } else { vanilla }).as_bytes().to_vec()))
+            let use_patched = on || (keep_loader && *patched == NAMES[0].1);
+            Ok((upk.name_string_offset(index)?, (if use_patched { patched } else { vanilla }).as_bytes().to_vec()))
         })
         .collect()
 }
@@ -570,6 +573,7 @@ fn create_match(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, Str
 const HOST: &str = "HbxHost.txt";
 const SOLO: &str = "HbxSolo.txt";
 const SOLO_GAME: &str = "HbxSoloGame.txt";
+const SOLO_OPTIONS: &str = "HbxSoloOptions.txt";
 const HEAT_HOST: &str = "HbxHeat.txt";
 const HEAT_MARKER: &str = "HbxHeat!";
 const HEAT_CLASS: &str = "TAGame.GameInfo_GodBall_TA";
@@ -618,13 +622,24 @@ pub fn store_solo_preferences(
 pub fn store_solo(cooked: &Path, tags: Option<&str>, heatseeker: bool) -> Result<(), String> {
     let path = solo_path(cooked);
     let game = path.with_file_name(SOLO_GAME);
+    let options = path.with_file_name(SOLO_OPTIONS);
     if heatseeker && tags.is_some() {
+        let options_text = tags.and_then(|tags| tags.split_once('?')).map_or(String::new(), |(_, options)| options.replace('?', ","));
+        super::upk_history::replace(&options, options_text.as_bytes())?;
         fs::write(&game, HEAT_CLASS).map_err(|e| format!("Could not write {}: {e}", game.display()))?;
     } else {
-        remove_if_present(&game)?;
+        if tags.is_some() {
+            super::upk_history::replace(&game, b"TAGame.GameInfo_Soccar_TA")?;
+        } else {
+            remove_if_present(&game)?;
+        }
+        remove_if_present(&options)?;
     }
     match tags {
-        Some(tags) => fs::write(&path, tags).map_err(|e| format!("Could not write {}: {e}", path.display())),
+        Some(tags) => {
+            let tags = tags.split('?').next().unwrap_or_default();
+            super::upk_history::replace(&path, tags.as_bytes())
+        }
         None => remove_if_present(&path),
     }
 }
@@ -632,7 +647,7 @@ pub fn store_solo(cooked: &Path, tags: Option<&str>, heatseeker: bool) -> Result
 /// The built-in Free Play picker and Workshop loader pass a private marker
 /// to AddGameTags to read the solo settings file. Other callers, including
 /// online free play and private matches, keep the game's original behavior.
-pub(super) fn edit_solo_freeplay(upk: &mut UpkPackage, on: bool) -> Result<bool, String> {
+pub(super) fn edit_solo_freeplay(upk: &mut UpkPackage, freeplay: bool, workshop: bool) -> Result<bool, String> {
     const ADD_TAGS: &str = "TravelManager_TA.AddGameTags";
     const PICK_MAP: &str = "GFxData_Training_TA.PlayFreeplayMap";
     let object = |name: &str| upk.find_object(name).ok_or_else(|| format!("{name} was not found"));
@@ -657,20 +672,30 @@ pub(super) fn edit_solo_freeplay(upk: &mut UpkPackage, on: bool) -> Result<bool,
             .raw(&(read.mem_size() as u16).to_le_bytes()).object(0).raw(&[0]).append(&read);
         call
     };
-    let mut patched = Script::new();
-    let jump = super::celebration::jump(&mut patched, 0x07, &mut Vec::new());
-    patched.raw(&[0xcc, 0x2b]).object(tags).raw(SOLO_MARKER).raw(&[0x16])
-        .raw(&[0x0f, 0x2b]).object(tags).raw(FREEPLAY_TAG)
-        .append(&load_into(SOLO, 0x2b, tags))
-        .append(&load_into(SOLO_GAME, 0x01, game));
-    super::celebration::land(&mut patched, jump);
-    let jump = super::celebration::jump(&mut patched, 0x07, &mut Vec::new());
-    patched.raw(&[0xcc, 0x2b]).object(tags).raw(&[0x1f]).raw(HEAT_MARKER.as_bytes()).raw(&[0, 0x16])
-        .raw(b"\x0f\x2b").object(tags).raw(b"\x1fBall_God\0")
-        .raw(b"\x0f\x01").object(game).raw(&[0x1f]).raw(HEAT_CLASS.as_bytes()).raw(&[0])
-        .append(&load_into(HEAT_HOST, 0x2b, tags));
-    super::celebration::land(&mut patched, jump);
-    patched.append(&vanilla);
+    let add_options = object("TravelManager_TA.AddOptions")?;
+    let build_patch = |with_options: bool| {
+        let mut patched = Script::new();
+        let jump = super::celebration::jump(&mut patched, 0x07, &mut Vec::new());
+        patched.raw(&[0xcc, 0x2b]).object(tags).raw(SOLO_MARKER).raw(&[0x16]);
+        if with_options {
+            patched.raw(&[0x0f, 0x2b]).object(tags).raw(&[0x1f, 0])
+                .append(&load_into(SOLO_OPTIONS, 0x2b, tags))
+                .raw(&[0x1c]).object(add_options).raw(&[0x2b]).object(tags).raw(&[0x16]);
+        }
+        patched.raw(&[0x0f, 0x2b]).object(tags).raw(FREEPLAY_TAG)
+            .append(&load_into(SOLO, 0x2b, tags))
+            .append(&load_into(SOLO_GAME, 0x01, game));
+        super::celebration::land(&mut patched, jump);
+        let jump = super::celebration::jump(&mut patched, 0x07, &mut Vec::new());
+        patched.raw(&[0xcc, 0x2b]).object(tags).raw(&[0x1f]).raw(HEAT_MARKER.as_bytes()).raw(&[0, 0x16])
+            .raw(b"\x0f\x2b").object(tags).raw(b"\x1fBall_God\0")
+            .raw(b"\x0f\x01").object(game).raw(&[0x1f]).raw(HEAT_CLASS.as_bytes()).raw(&[0])
+            .append(&load_into(HEAT_HOST, 0x2b, tags));
+        super::celebration::land(&mut patched, jump);
+        patched.append(&vanilla);
+        patched
+    };
+    let patched = build_patch(true);
 
     let add = export(upk, ADD_TAGS)?;
     let current = Script::of_function(&upk.image[add.serial_offset..add.serial_offset + add.serial_size])?;
@@ -683,10 +708,13 @@ pub(super) fn edit_solo_freeplay(upk: &mut UpkPackage, on: bool) -> Result<bool,
             && window.ends_with(&[0x16])
     }).ok_or("The Free Play picker changed layout in this Rocket League version")?;
     let at = picker.serial_offset + at + prefix.len();
-    if current.bytes() != vanilla.bytes() && current.bytes() != patched.bytes() {
+    if current.bytes() != vanilla.bytes() && current.bytes() != patched.bytes()
+        && current.bytes() != build_patch(false).bytes()
+    {
         return Err("AddGameTags changed layout in this Rocket League version".into());
     }
-    let (script, marker) = if on { (&patched, SOLO_MARKER) } else { (&vanilla, FREEPLAY_TAG) };
+    let script = if freeplay || workshop { &patched } else { &vanilla };
+    let marker = if freeplay { SOLO_MARKER } else { FREEPLAY_TAG };
     let update_picker = upk.image[at..at + marker.len()] != *marker;
     let update_tags = current.bytes() != script.bytes();
     if update_picker {
@@ -847,7 +875,8 @@ fn load_map(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String>
         patched.resize(check.len(), 0x0b);
         Ok(patched)
     };
-    let patched = statement(&file, 2, true)?;
+    let patched = statement(&file, 2, false)?;
+    let combined = statement(&file, 2, true)?;
     let previous = statement(&file, 2, false)?;
     let old = statement(&old_file, 1, false)?;
     // statement offsets in the code; the jumps removed with the check and its
@@ -868,7 +897,7 @@ fn load_map(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String>
             let current = upk.image.get(*at..*at + vanilla.len());
             current == Some(vanilla)
                 || current == Some(patched)
-                || (*at == code + 13 && (current == Some(&old) || current == Some(&previous)))
+                || (*at == code + 13 && (current == Some(&old) || current == Some(&previous) || current == Some(&combined)))
         })
     {
         return Err(format!("{path} changed layout in this Rocket League version"));
@@ -957,7 +986,7 @@ fn set_live(cooked: &Path, file: &str, values: Values, on: bool) -> Result<(), S
         let _ = fs::remove_file(&temp);
         return Err(format!("Patched {file} failed validation: {check:?}"));
     }
-    let copied = fs::copy(&temp, &live);
+    let copied = fs::rename(&temp, &live);
     let _ = fs::remove_file(&temp);
     copied
         .map(|_| ())
@@ -1119,17 +1148,20 @@ fn list_json(maps: &[WorkshopMap], lan: &[LanFields], downloads: &[Downloadable]
 /// Rewrite the menu's map list. Safe while the game runs: the game reads the
 /// ini at start-up and the json each time the menu opens.
 pub fn write_list(cooked: &Path, maps: &[WorkshopMap]) -> Result<(), String> {
+    static LIST_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LIST_WRITE.lock().map_err(|error| error.to_string())?;
     let _ = fs::remove_file(cooked.parent().unwrap_or(cooked).join("HebnixWorkshop.json"));
     let lan = lan_fields(cooked, maps);
     let downloads = if downloader_on(cooked) { DOWNLOADABLE.lock().map(|l| l.clone()).unwrap_or_default() } else { Vec::new() };
-    fs::write(list_path(cooked), list_json(maps, &lan, &downloads)).map_err(|e| format!("Could not write the map list: {e}"))?;
+    let json = list_json(maps, &lan, &downloads);
+    super::upk_history::replace(&list_path(cooked), json.as_bytes())?;
     let path = ini_path()?;
     let old = fs::read_to_string(&path).unwrap_or_default();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, with_section(&old, maps, &lan))
-        .map_err(|e| format!("Could not write {}: {e}", path.display()))
+    let updated = with_section(&old, maps, &lan);
+    super::upk_history::replace(&path, updated.as_bytes())
 }
 
 pub fn apply(
@@ -1138,6 +1170,10 @@ pub fn apply(
     folder: &Path,
     maps: &[WorkshopMap],
 ) -> Result<String, String> {
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before enabling the Workshop menu.".into());
+    }
+    super::backup_guard::check_install(cooked, backups)?;
     write_list(cooked, maps)?;
     set_all(cooked, true)?;
     // the menu works without the LAN controls, so a movie that can't be patched only costs those
@@ -1158,6 +1194,10 @@ pub fn apply(
 }
 
 pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before restoring the Workshop menu.".into());
+    }
+    super::backup_guard::check_install(cooked, backups)?;
     super::workshop_lan_trial::set_mode(cooked, "off")?;
     super::item_name::workshop_description(cooked, backups, false)?;
     set_all(cooked, false)?;
@@ -1166,7 +1206,6 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<String, String> {
     write_list(cooked, &[])?;
     let _ = fs::remove_file(list_path(cooked));
     let _ = fs::remove_file(host_path(cooked));
-    store_solo(cooked, None, false)?;
     remove_if_present(&host_path(cooked).with_file_name(HEAT_HOST))?;
     let _ = fs::remove_file(parked_path(cooked));
     let _ = fs::remove_dir_all(cooked.join(OLD_PREVIEWS));
@@ -1194,8 +1233,22 @@ pub fn upgrade_movie(cooked: &Path) -> Result<(), String> {
     if hebnix_sdk::process::is_rocket_league_running() {
         return Ok(());
     }
+    if super::backup_guard::update_required(cooked)? {
+        return Err("Rocket League files changed. Run repatch in the Hebnix Console before updating the Workshop patch.".into());
+    }
+    super::backup_guard::check_install(cooked, &backups)?;
     set_live(cooked, PACKAGE, tagame_values, true)?;
     super::workshop_menu_ui::apply(cooked, &backups)
+}
+
+pub(super) fn migrate_solo_preferences(cooked: &Path) -> Result<(), String> {
+    if let Some(tags) = read_solo(cooked)
+        && tags.contains('?')
+        && solo_path(cooked).with_file_name(SOLO_GAME).is_file()
+    {
+        store_solo(cooked, Some(&tags), true)?;
+    }
+    Ok(())
 }
 
 /// Put the patch back after another feature rewrote TAGame.upk from a backup.
@@ -1206,6 +1259,25 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
         super::workshop_lan_trial::reapply(cooked)?;
     }
     Ok(())
+}
+
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let source = archive.join(ENABLED);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let folder = fs::read_to_string(&source).map_err(|error| error.to_string())?;
+    super::backup_guard::check_install(cooked, &backups)?;
+    set_downloader(cooked, archive.join(DOWNLOADER).is_file() || downloader_on(cooked))?;
+    set_all(cooked, true)?;
+    super::workshop_menu_ui::apply(cooked, &backups)?;
+    super::workshop_lan_trial::recover_after_update(cooked, archive)?;
+    super::item_name::workshop_description(cooked, &backups, true)?;
+    if !list_path(cooked).is_file() {
+        crate::ui::workshop::ingame_menu::refresh(cooked)?;
+    }
+    super::upk_history::replace(&backups.join(ENABLED), folder.as_bytes())
 }
 
 #[cfg(test)]
@@ -1266,10 +1338,11 @@ mod tests {
         let source = PathBuf::from(std::env::var("HEBNIX_WORKSHOP_TEST_SOURCE").unwrap());
         let cooked = std::env::temp_dir().join(format!("hebnix-workshop-test-{}", rand::random::<u64>()));
         fs::create_dir_all(&cooked).unwrap();
-        let folder = source.parent().unwrap();
-        for file in [PACKAGE, ENGINE] {
-            fs::copy(folder.join(file), cooked.join(file)).unwrap();
-        }
+        fs::copy(&source, cooked.join(PACKAGE)).unwrap();
+        let engine = source.with_file_name(ENGINE);
+        let engine = if engine.is_file() { engine }
+            else { source.parent().unwrap().parent().unwrap().join(ENGINE) };
+        fs::copy(engine, cooked.join(ENGINE)).unwrap();
         set_all(&cooked, false).unwrap();
         let snapshot = |file| {
             let package = UpkPackage::load(&cooked.join(file)).unwrap();
@@ -1283,7 +1356,7 @@ mod tests {
         set_all(&cooked, true).unwrap();
         assert!(status(&cooked).unwrap());
         let mut installed = UpkPackage::load(&cooked.join(PACKAGE)).unwrap();
-        assert!(!edit_solo_freeplay(&mut installed, true).unwrap());
+        assert!(!edit_solo_freeplay(&mut installed, false, true).unwrap());
         drop(installed);
         set_all(&cooked, false).unwrap();
         assert!(!status(&cooked).unwrap());

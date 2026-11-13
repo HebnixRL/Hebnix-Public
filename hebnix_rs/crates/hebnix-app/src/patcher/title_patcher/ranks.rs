@@ -14,7 +14,7 @@ pub struct RankPick {
 
 fn apply(base: &Path, cooked: &Path, picks: &[RankPick]) -> Result<String, String> {
     if picks.is_empty() {
-        return run(base, cooked, true, None);
+        return run(base, cooked, true, None, None);
     }
     if picks
         .iter()
@@ -27,6 +27,7 @@ fn apply(base: &Path, cooked: &Path, picks: &[RankPick]) -> Result<String, Strin
         cooked,
         true,
         Some(&|raw| movie::rewrite(raw, &|data| abc::patch_ranks(data, picks))),
+        None,
     )
 }
 

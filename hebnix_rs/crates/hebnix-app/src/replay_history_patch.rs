@@ -148,6 +148,11 @@ pub(crate) fn set_enabled(game: &Path, on: bool) -> Result<(), String> {
 }
 
 fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool), String> {
+    use crate::patcher::workshop_host::{attach_freeplay_restart, detach_freeplay_restart};
+
+    // The Workshop restart handler uses absolute branch destinations. Remove
+    // it before editing the dispatcher prefix, then rebuild its destinations.
+    let restart = detach_freeplay_restart(package)?;
     let builder = Builder(package);
     let hooks = [
         (INIT, builder.logger()?, true, INIT_HASH),
@@ -157,7 +162,8 @@ fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool
     let mut changed = false;
     for (path, code, at_end, hash) in hooks {
         let (index, actual) = payload(package, path)?;
-        let vanilla = original(&actual, &code, at_end, hash)?;
+        let vanilla = original(&actual, &code, at_end, hash)
+            .map_err(|error| format!("{error} Auto Upload could not validate {path}."))?;
         enabled &= vanilla.is_some();
         let desired = match (target, vanilla) {
             (Some(true), None) => insert(&actual, &code, at_end)?,
@@ -166,6 +172,9 @@ fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool
         };
         package.replace_export_payload(index, &desired)?;
         changed = true;
+    }
+    if let Some(legacy) = restart {
+        attach_freeplay_restart(package, legacy)?;
     }
     Ok((enabled, changed))
 }
@@ -405,4 +414,28 @@ fn insert(before: &[u8], code: &Code, at_end: bool) -> Result<Vec<u8>, String> {
     after[40..44].copy_from_slice(&(word(before, 40) + code.memory as u32).to_le_bytes());
     after[44..48].copy_from_slice(&(word(before, 44) + code.bytes.len() as u32).to_le_bytes());
     Ok(after)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an installed TAGame.upk"]
+    fn auto_upload_preserves_workshop_restart() {
+        use crate::patcher::workshop_host::{attach_freeplay_restart, detach_freeplay_restart};
+
+        let source = PathBuf::from(std::env::var_os("HEBNIX_UPK_TEST_SOURCE").unwrap());
+        let mut package = UpkPackage::load(&source).unwrap();
+        if inspect(&mut package, None).unwrap().0 {
+            inspect(&mut package, Some(false)).unwrap();
+        }
+        detach_freeplay_restart(&mut package).unwrap();
+        attach_freeplay_restart(&mut package, 3).unwrap();
+        let before = payload(&package, COMMAND).unwrap().1;
+        assert_eq!(inspect(&mut package, Some(true)).unwrap(), (false, true));
+        assert_eq!(inspect(&mut package, None).unwrap(), (true, false));
+        assert_eq!(inspect(&mut package, Some(false)).unwrap(), (true, true));
+        assert_eq!(payload(&package, COMMAND).unwrap().1, before);
+    }
 }

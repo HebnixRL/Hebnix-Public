@@ -213,13 +213,13 @@ fn current_map_from_log(log: &str) -> Option<String> {
 }
 
 /// True once the requested map has finished loading, unless another travel
-/// has already started. The caller supplies the unique URL for its request.
-pub fn map_load_finished(expected_url: &str) -> bool {
+/// has already started. Engine-added URL options do not affect the map name.
+pub fn map_load_finished(expected_map: &str) -> bool {
     recent_launch_log().is_some_and(|log| {
         log.rsplit_once("Log: LoadMap: ")
             .and_then(|(_, load)| load.split_once('\n'))
             .is_some_and(|(url, events)| {
-                url.trim().eq_ignore_ascii_case(expected_url)
+                url.split('?').next().is_some_and(|map| map.trim().eq_ignore_ascii_case(expected_map))
                     && events.contains("Finished loading level:")
                     && !events.contains("DevNet: Browse:")
             })
@@ -233,7 +233,13 @@ fn match_playlist_at_last_load(text: &str) -> Option<i64> {
     if map.eq_ignore_ascii_case("MENU_Main_p") || map.starts_with("JoinGameTransition") {
         return None;
     }
-    if last_map_load_is_offline(text) {
+    let training = url.split('?').skip(1).any(|option| {
+        let Some((key, value)) = option.split_once('=') else { return false };
+        (key.eq_ignore_ascii_case("GameTags") && value.split(',').any(|tag| {
+            tag.eq_ignore_ascii_case("Freeplay") || tag.eq_ignore_ascii_case("Training")
+        })) || (key.eq_ignore_ascii_case("Game") && value.to_ascii_lowercase().contains("gameinfo_training"))
+    });
+    if training || last_map_load_is_offline(text) {
         return Some(0);
     }
     let boundary = before.rmatch_indices("LoadMap: ").find_map(|(at, marker)| {
@@ -266,6 +272,8 @@ fn playlist_is_scoped_to_the_join_for_the_loaded_map() {
     assert_eq!(match_playlist_at_last_load(&private.replace(",PlaylistId=6", "")), Some(6));
     assert_eq!(match_playlist_at_last_load(&format!("{private}\nLog: LoadMap: music_p")), None);
     assert_eq!(match_playlist_at_last_load(&format!("{private}\nLog: LoadMap: music_p?Offline")), Some(0));
+    assert_eq!(match_playlist_at_last_load(&format!("{private}\nLog: LoadMap: stadium_day_p?Game=TAGame.GameInfo_Soccar_TA?GameTags=Freeplay")), Some(0));
+    assert_eq!(match_playlist_at_last_load("Log: LoadMap: stadium_p?Game=TAGame.GameInfo_Training_TA"), Some(0));
     let tournament = format!("{private}\nOnline: TryToPlayOnlineWithAntiCheat PlaylistId=(34)\nLog: LoadMap: 127.0.0.1:9005/music_p");
     assert_eq!(match_playlist_at_last_load(&tournament), Some(34));
 }
@@ -393,7 +401,8 @@ fn hosted_map_in(text: &str) -> Option<String> {
     let line = text[text.rfind("LoadMap:")?..].lines().next()?;
     let target = line.strip_prefix("LoadMap:")?.trim();
     let (path, options) = target.split_once('?')?;
-    (options.split('?').any(|o| o == "Listen") && !path.is_empty()).then(|| path.to_string())
+    let has = |flag: &str| options.split('?').any(|option| option.eq_ignore_ascii_case(flag));
+    (has("Listen") && !has("HbxSoloPractice") && !path.is_empty()).then(|| path.to_string())
 }
 
 /// Parse Launch.log into session + game info. verify=true checks the Stats API
@@ -673,6 +682,7 @@ mod hosted_map_tests {
     fn freeplay_or_a_later_menu_load_is_not_hosting() {
         let freeplay = "[1.0] Log: LoadMap: E:\\maps\\n.udk?Game=TAGame.GameInfo_Soccar_TA?Workshop?GameTags=Freeplay\n";
         assert_eq!(hosted_map_in(freeplay), None);
+        assert_eq!(hosted_map_in(&HOSTING.replace("?Lan?Listen", "?HbxSoloPractice?Lan?Listen")), None);
         let after = format!("{HOSTING}[2.0] Log: LoadMap: MENU_Main_p?closed\n");
         assert_eq!(hosted_map_in(&after), None);
         assert_eq!(hosted_map_in("no loads"), None);

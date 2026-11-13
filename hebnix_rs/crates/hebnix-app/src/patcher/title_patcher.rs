@@ -50,6 +50,8 @@ struct Entry {
 struct Manifest {
     build: String,
     entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rules: Option<Vec<TitleOverride>>,
 }
 pub struct PackagePatch {
     pub methods: usize,
@@ -272,6 +274,29 @@ pub(super) fn toggle_boost_ring(cooked: &Path) -> Result<bool, String> {
 
 #[cfg(test)]
 #[test]
+#[ignore = "requires HEBNIX_END_GAME_MENU_FIXTURE"]
+fn titles_patch_end_game_menu_package() {
+    let source = PathBuf::from(std::env::var_os("HEBNIX_END_GAME_MENU_FIXTURE").unwrap());
+    let destination =
+        std::env::temp_dir().join(format!("hebnix-titles-{:016x}.upk", rand::random::<u64>()));
+    let result = stage_package(
+        &source,
+        &destination,
+        &[TitleOverride {
+            target_id: Some("XP_Veteran".into()),
+            original: None,
+            text: "Title test".into(),
+            color: 0xff0000,
+            glow: false,
+            glow_color: None,
+        }],
+    );
+    let _ = fs::remove_file(destination);
+    assert!(result.unwrap().methods > 0);
+}
+
+#[cfg(test)]
+#[test]
 fn team_ring_round_trips_real_hud_and_preserves_title_exports() {
     let Some(original) = std::env::var_os("HEBNIX_BOOST_HUD_FIXTURE").map(PathBuf::from) else {
         return;
@@ -420,6 +445,101 @@ fn movie_bytes(payload: &[u8], start: usize) -> Result<&[u8], String> {
         .ok_or("Truncated UI movie backup".into())
 }
 
+/// Change the HUD movie underneath Titles and rebuild its restore record on
+/// the new movie. The caller holds UI_PATCH_LOCK across the operation.
+pub(super) fn rebase_hud_movie(
+    cooked: &Path,
+    live: &Path,
+    original_file: &[u8],
+    mut package: UpkPackage,
+    index: usize,
+    fallback_rules: &[TitleOverride],
+    edit: &MovieEdit<'_>,
+) -> Result<bool, String> {
+    let root = folder(&crate::config::base_dir(), cooked, "title_upk");
+    let mut manifest = load_manifest(&root)?;
+    let Some(position) = manifest.entries.iter().position(|entry| {
+        entry.file.eq_ignore_ascii_case(BOOST_HUD) && entry.export == index
+    }) else {
+        return Ok(false);
+    };
+    let entry = &manifest.entries[position];
+    let without_ring = ring_variant(&package, index, false).ok().flatten();
+    let with_ring = if without_ring.is_none() {
+        ring_variant(&package, index, true).ok().flatten()
+    } else {
+        None
+    };
+    let matches_title_patch = hash(data(&package, index)?) == entry.patched
+        || without_ring.as_ref().or(with_ring.as_ref()).is_some_and(|payload| hash(payload) == entry.patched);
+    if manifest.build != backup_guard::build_id(cooked)? || !matches_title_patch {
+        return Err("The HUD differs from its Titles restore record. Reapply Titles before changing Chat Paste.".into());
+    }
+    let original = match read_snapshot(&root, &entry.original)? {
+        Some(bytes) => bytes,
+        None => data(&UpkPackage::load(&root.join(format!("{BOOST_HUD}.original")))?, index)?.to_vec(),
+    };
+    if hash(&original) != entry.original {
+        return Err("The HUD Titles baseline failed verification.".into());
+    }
+    package.replace_title_export(index, &original)?;
+    let rules = manifest.rules.as_deref().unwrap_or(fallback_rules);
+    if manifest.rules.is_none() {
+        let replay = rewrite_movie_export(&package, index, &|raw| movie::patch(raw, rules))?;
+        if !replay.is_some_and(|(payload, _)| hash(&payload) == entry.patched) {
+            return Err("Apply your current Titles settings before changing Chat Paste so Hebnix can save the active rules.".into());
+        }
+    }
+    if let Some(payload) = ring_variant(&package, index, false).ok().flatten() {
+        package.replace_title_export(index, &payload)?;
+    }
+    let Some((mut baseline, _)) = rewrite_movie_export(&package, index, edit)? else {
+        return Ok(true);
+    };
+    package.replace_title_export(index, &baseline)?;
+    if without_ring.is_some() {
+        baseline = ring_variant(&package, index, true)?
+            .ok_or("Could not preserve the team boost ring in the shared HUD.")?;
+        package.replace_title_export(index, &baseline)?;
+    }
+    let (patched, _) = rewrite_movie_export(&package, index, &|raw| movie::patch(raw, rules))?
+        .ok_or("Could not reapply Titles to the shared HUD movie.")?;
+    manifest.rules = Some(rules.to_vec());
+    let entry = &mut manifest.entries[position];
+    entry.original = hash(&baseline);
+    entry.patched = hash(&patched);
+    save_snapshot(&root, &entry.original, &baseline)?;
+    save_snapshot(&root, &entry.patched, &patched)?;
+    package.replace_title_export(index, &patched)?;
+
+    let manifest_path = root.join("manifest.json");
+    let original_manifest = fs::read(&manifest_path).map_err(|error| error.to_string())?;
+    let stage = root.join(format!("hud-{:016x}.pending", rand::random::<u64>()));
+    let result = (|| {
+        save_verified(&package, &stage)?;
+        let bytes = fs::read(&stage).map_err(|error| error.to_string())?;
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        if fs::read(live).map_err(|error| error.to_string())? != original_file {
+            return Err("The HUD changed while Chat Paste was being prepared.".into());
+        }
+        super::upk_history::replace(live, &bytes)?;
+        if let Err(error) = super::upk_history::replace(&manifest_path, &manifest_bytes) {
+            super::upk_history::replace(live, original_file)
+                .map_err(|rollback| format!("{error}. HUD rollback failed: {rollback}"))?;
+            return Err(error);
+        }
+        if let Err(error) = super::upk_history::record_linked(cooked, live, original_file, "Title overrides") {
+            super::upk_history::replace(live, original_file)
+                .and_then(|()| super::upk_history::replace(&manifest_path, &original_manifest))
+                .map_err(|rollback| format!("{error}. HUD rollback failed: {rollback}"))?;
+            return Err(error);
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(stage);
+    result.map(|()| true)
+}
+
 fn capture_legacy_patch(package: &UpkPackage, root: &Path, entry: &Entry) -> Result<(), String> {
     if snapshot(root, &entry.patched)?.is_file() {
         return Ok(());
@@ -536,10 +656,10 @@ fn baseline(
 
 pub fn apply(base: &Path, cooked: &Path, rules: &[TitleOverride]) -> Result<String, String> {
     validate_rules(rules)?;
-    run(base, cooked, false, Some(&|raw| movie::patch(raw, rules)))
+    run(base, cooked, false, Some(&|raw| movie::patch(raw, rules)), Some(rules))
 }
 pub fn restore(base: &Path, cooked: &Path) -> Result<String, String> {
-    run(base, cooked, false, None)
+    run(base, cooked, false, None, None)
 }
 pub(crate) fn restore_for_uninstall(base: &Path, cooked: &Path) -> Result<(), String> {
     if !load_manifest(&folder(base, cooked, "title_upk"))?
@@ -552,7 +672,7 @@ pub(crate) fn restore_for_uninstall(base: &Path, cooked: &Path) -> Result<(), St
         .entries
         .is_empty()
     {
-        run(base, cooked, true, None)?;
+        run(base, cooked, true, None, None)?;
     }
     Ok(())
 }
@@ -561,6 +681,7 @@ fn run(
     cooked: &Path,
     ranks: bool,
     edit: Option<&MovieEdit<'_>>,
+    rules: Option<&[TitleOverride]>,
 ) -> Result<String, String> {
     let _guard = UI_PATCH_LOCK
         .lock()
@@ -752,7 +873,7 @@ fn run(
                 ));
             }
         }
-        let manifest = Manifest { build, entries };
+        let manifest = Manifest { build, entries, rules: rules.map(<[TitleOverride]>::to_vec) };
         let manifest_result = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| e.to_string())
             .and_then(|bytes| {
@@ -787,20 +908,19 @@ fn run(
                 let _ = fs::remove_file(path);
             }
         }
-        if !ranks {
-            let history_label = if edit.is_some() {
-                "Title overrides"
-            } else {
-                "Restore Title overrides"
-            };
-            for (live, rollback) in &installed {
-                super::upk_history::record_linked(
-                    cooked,
-                    live,
-                    &fs::read(rollback).map_err(|e| e.to_string())?,
-                    history_label,
-                )?;
-            }
+        let history_label = match (ranks, edit.is_some()) {
+            (true, true) => "Rank display",
+            (true, false) => "Restore Rank display",
+            (false, true) => "Title overrides",
+            (false, false) => "Restore Title overrides",
+        };
+        for (live, rollback) in &installed {
+            super::upk_history::record_linked(
+                cooked,
+                live,
+                &fs::read(rollback).map_err(|e| e.to_string())?,
+                history_label,
+            )?;
         }
         Ok(match (ranks, edit.is_some()) {
             (true, true) => "Rank display applied. Start Rocket League to see your changes.".into(),

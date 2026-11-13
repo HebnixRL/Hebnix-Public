@@ -27,6 +27,7 @@ const FUNCTION: &str = "TextChatActor_TA.ServerSendMessageToPlayers";
 const END: [u8; 3] = [0x04, 0x0b, 0x4c];
 /// A string only the patch adds to the function.
 const MARKER: &str = "servertravel ";
+static PATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// What the game's own LAN host travels with, so a new map keeps the LAN match.
 const OPTIONS: &str = "?game=TAGame.GameInfo_Soccar_TA?Lan?listen";
 /// The reason the kicked player sees.
@@ -230,6 +231,24 @@ fn is_patched(upk: &UpkPackage) -> Result<bool, String> {
     Ok(Script::of_function(&payload(upk, index))?.bytes().windows(MARKER.len()).any(|w| w == MARKER.as_bytes()))
 }
 
+fn remove_commands(upk: &mut UpkPackage) -> Result<(), String> {
+    let mut script = Script::of_function(&payload(upk, function_index(upk)?))?;
+    let refs = refs(upk)?;
+    let probe = commands(&refs, 0);
+    let start = script.len().checked_sub(END.len() + probe.len())
+        .ok_or("LAN command block is truncated")?;
+    let base = script.mem_size().checked_sub(END.len() + probe.mem_size())
+        .ok_or("Invalid LAN command bytecode size")?;
+    let expected = commands(&refs, base);
+    if !script.bytes().ends_with(&END)
+        || script.bytes().get(start..start + probe.len()) != Some(expected.bytes())
+    {
+        return Err("The LAN command block differs from the installed patch layout.".into());
+    }
+    script.cut(start, expected.len(), expected.refs());
+    replace_script(upk, FUNCTION, &script)
+}
+
 /// Add the parser before the function returns.
 pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
     if is_patched(upk)? {
@@ -249,7 +268,8 @@ pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
 #[derive(Serialize, Deserialize)]
 struct Saved {
     build: String,
-    /// The function's export payload before the patch.
+    /// Older versions stored the whole function here. Removal now checks and
+    /// cuts the LAN block in the live function.
     original: Vec<u8>,
 }
 
@@ -275,68 +295,99 @@ fn ensure_closed() -> Result<(), String> {
 
 /// Write `upk` over the live package after proving the staged copy loads and
 /// has (or lacks) the patch.
-fn install(cooked: &Path, live: &Path, upk: &UpkPackage, patched: bool) -> Result<(), String> {
-    let temp = cooked.join("TAGame.upk.lan.tmp");
+fn install(cooked: &Path, live: &Path, before: &[u8], upk: &UpkPackage, patched: bool) -> Result<(), String> {
+    let temp = cooked.join(format!("TAGame.upk.lan-{:016x}.tmp", rand::random::<u64>()));
     upk.save_fast(&temp)?;
     let check = UpkPackage::load(&temp).and_then(|saved| is_patched(&saved));
     if check != Ok(patched) {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("Staged {PACKAGE} failed validation: {check:?}"));
     }
-    let copied = std::fs::copy(&temp, live);
+    let copied = std::fs::read(&temp).map_err(|e| e.to_string()).and_then(|after| {
+        super::upk_history::install_linked_from(cooked, live, before, &after, "LAN chat commands")
+    });
     let _ = std::fs::remove_file(&temp);
-    copied.map(|_| ()).map_err(|e| format!("Could not write {PACKAGE}: {e}"))
+    copied.map_err(|e| format!("Could not write {PACKAGE}: {e}"))
 }
 
 /// Turn the commands on.
 pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let _guard = PATCH_LOCK.lock().map_err(|_| "LAN command patch lock unavailable")?;
     ensure_closed()?;
     backup_guard::check_install(cooked, backups)?;
     let live = game_path::resolve(cooked, PACKAGE);
-    let mut upk = UpkPackage::load(&live)?;
-    if is_patched(&upk)? {
-        return Ok(());
+    let before = std::fs::read(&live).map_err(|e| e.to_string())?;
+    let mut upk = UpkPackage::from_bytes(before.clone())?;
+    let already_patched = is_patched(&upk)?;
+    let saved = Saved { build: backup_guard::build_id(cooked)?, original: Vec::new() };
+    if !already_patched {
+        apply(&mut upk)?;
     }
-    let saved = Saved { build: backup_guard::build_id(cooked)?, original: payload(&upk, function_index(&upk)?) };
-    apply(&mut upk)?;
-    install(cooked, &live, &upk, true)?;
     let path = saved_path(backups);
     std::fs::create_dir_all(path.parent().unwrap_or(backups)).map_err(|e| e.to_string())?;
-    std::fs::write(path, serde_json::to_vec(&saved).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+    let previous = std::fs::read(&path).ok();
+    super::upk_history::replace(&path, &serde_json::to_vec(&saved).map_err(|e| e.to_string())?)?;
+    if !already_patched && let Err(error) = install(cooked, &live, &before, &upk, true) {
+        if let Some(previous) = previous {
+            super::upk_history::replace(&path, &previous)?;
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Turn the commands off.
 pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
-    let Some(saved) = read_saved(backups) else {
-        return Ok(());
-    };
+    let _guard = PATCH_LOCK.lock().map_err(|_| "LAN command patch lock unavailable")?;
     ensure_closed()?;
     let live = game_path::resolve(cooked, PACKAGE);
-    let mut upk = UpkPackage::load(&live)?;
+    let before = std::fs::read(&live).map_err(|e| e.to_string())?;
+    let mut upk = UpkPackage::from_bytes(before.clone())?;
     if is_patched(&upk)? {
-        if saved.build != backup_guard::build_id(cooked)? {
-            return Err("The LAN commands backup belongs to another game build. Verify the game files.".into());
-        }
-        upk.replace_export_payload(function_index(&upk)?, &saved.original)?;
-        install(cooked, &live, &upk, false)?;
+        remove_commands(&mut upk)?;
+        install(cooked, &live, &before, &upk, false)?;
     }
-    let _ = std::fs::remove_dir_all(backups.join("LanCommands"));
+    let _ = std::fs::remove_file(saved_path(backups));
     Ok(())
 }
 
 /// Put the commands back after another feature rewrote TAGame.upk from a backup.
 pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let _guard = PATCH_LOCK.lock().map_err(|_| "LAN command patch lock unavailable")?;
     if !enabled(backups) {
         return Ok(());
     }
     let live = game_path::resolve(cooked, PACKAGE);
-    let mut upk = UpkPackage::load(&live)?;
+    let before = std::fs::read(&live).map_err(|e| e.to_string())?;
+    let mut upk = UpkPackage::from_bytes(before.clone())?;
     if is_patched(&upk)? {
         return Ok(());
     }
     ensure_closed()?;
     apply(&mut upk)?;
-    install(cooked, &live, &upk, true)
+    install(cooked, &live, &before, &upk, true)
+}
+
+pub(super) fn retain_recovery_state(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let Some(saved) = read_saved(archive) else { return Ok(()) };
+    if enabled(&backups) || !is_patched(&UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?)? {
+        return Ok(());
+    }
+    let path = saved_path(&backups);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+    super::upk_history::replace(&path, &serde_json::to_vec(&saved).map_err(|error| error.to_string())?)
+}
+
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {
+    retain_recovery_state(cooked, archive)?;
+    let backups = cooked.join("Backups");
+    if !enabled(&backups) && enabled(archive) {
+        enable(cooked, &backups)?;
+    }
+    Ok(())
 }
 
 /// Page state: the job writing the package.
@@ -352,11 +403,14 @@ impl State {
     }
 
     /// Draw the toggle.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path) {
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, mut report: impl FnMut(&str)) {
         use crate::i18n::t;
         if let Some(job) = &self.job {
             match job.try_recv() {
                 Ok(result) => {
+                    if let Err(error) = &result {
+                        report(error);
+                    }
                     self.status = result.unwrap_or_else(|e| e);
                     self.job = None;
                 }
@@ -426,11 +480,14 @@ mod tests {
     fn real_package() {
         let source = std::env::var("HEBNIX_UPK_TEST_SOURCE").unwrap();
         let mut upk = UpkPackage::load(Path::new(&source)).unwrap();
+        let original = payload(&upk, function_index(&upk).unwrap());
         apply(&mut upk).unwrap();
         let out = std::env::temp_dir().join("hebnix_lan_test.upk");
         upk.save_fast(&out).unwrap();
-        let reloaded = UpkPackage::load(&out).unwrap();
+        let mut reloaded = UpkPackage::load(&out).unwrap();
         let _ = std::fs::remove_file(out);
         assert!(is_patched(&reloaded).unwrap());
+        remove_commands(&mut reloaded).unwrap();
+        assert_eq!(payload(&reloaded, function_index(&reloaded).unwrap()), original);
     }
 }

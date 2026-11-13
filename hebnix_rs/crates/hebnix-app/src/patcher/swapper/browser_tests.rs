@@ -396,6 +396,8 @@ fn items_browser_applied_uses_manifest_and_pagination_uses_filtered_count() {
         source_upk: source.upk.clone(),
         target_name: target.name.clone(),
         target_upk: target.upk.clone(),
+        source_product: source.product_id,
+        target_product: target.product_id,
         target_bnk: None,
         paint: SwapPaint::Default,
         target_thumbnail: None,

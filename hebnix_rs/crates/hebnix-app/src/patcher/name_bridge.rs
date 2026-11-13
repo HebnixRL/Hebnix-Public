@@ -81,6 +81,26 @@ pub(crate) fn installed(game: &Path) -> Result<bool, String> {
     }
 }
 
+pub(in crate::patcher) fn retain_recovery_state(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let source = archive.join("NameBridge/receipt.json");
+    let destination = cooked.join("Backups/NameBridge/receipt.json");
+    if destination.is_file() || !source.is_file() {
+        return Ok(());
+    }
+    let mut saved: BridgeReceipt = serde_json::from_slice(&fs::read(source).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let live = super::super::game_path::resolve(cooked, "TAGame.upk");
+    let package = UpkPackage::load(&live)?;
+    if saved.version == 2 && (is_state(&package, &saved, true) || is_state(&package, &saved, false)) {
+        saved.build = super::super::backup_guard::build_id(cooked)?;
+        saved.source = live.to_string_lossy().into_owned();
+        fs::create_dir_all(destination.parent().unwrap()).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&saved).map_err(|error| error.to_string())?;
+        super::super::upk_history::replace(&destination, &bytes)?;
+    }
+    Ok(())
+}
+
 // Current Epic packages use standard UE bytecode. The old installation uses
 // remapped instructions and is intentionally rejected by the payload hashes.
 fn text(s: &str) -> Code {

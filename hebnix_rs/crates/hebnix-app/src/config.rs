@@ -237,7 +237,7 @@ impl Default for GameModsCfg {
         Self {
             forfeit_key: String::new(), celebration_key: String::new(), bots_freeplay_key: String::new(),
             forfeit_pad: String::new(), celebration_pad: String::new(), bots_freeplay_pad: String::new(),
-            instant_suite_mode: "requeue".into(), instant_suite_map: String::new(),
+            instant_suite_mode: "nothing".into(), instant_suite_map: String::new(),
             instant_suite_private: false, instant_suite_tournaments: false,
         }
     }

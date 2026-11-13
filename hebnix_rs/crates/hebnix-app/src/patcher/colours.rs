@@ -57,6 +57,8 @@ pub struct ColourSettings {
     /// the single colour older builds saved; moved into `custom_colours` on load
     #[serde(skip_serializing)]
     custom_colour: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    applied_car_colours: Option<CarColours>,
     pub applied: bool,
 }
 
@@ -117,6 +119,7 @@ impl Default for ColourSettings {
             car_colours: false,
             custom_colours: vec![[255, 0, 0]],
             custom_colour: None,
+            applied_car_colours: None,
             applied: false,
         }
     }
@@ -169,6 +172,10 @@ pub struct ColoursState {
 }
 
 impl ColoursState {
+    pub(crate) fn invalidate_active(&mut self) {
+        self.loaded_backups_dir = None;
+    }
+
     pub(crate) fn busy(&self) -> bool { self.busy }
 
     pub fn new() -> Self {
@@ -673,14 +680,8 @@ fn save_state(backups_dir: &Path, settings: &ColourSettings) -> Result<(), Strin
     fs::create_dir_all(backups_dir)
         .map_err(|error| format!("Could not create the state directory: {error}"))?;
     let path = backups_dir.join(STATE_NAME);
-    let temp = backups_dir.join(format!("{STATE_NAME}.tmp"));
     let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
-    fs::write(&temp, bytes).map_err(|error| format!("Could not save colour settings: {error}"))?;
-    if path.is_file() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("Could not replace colour settings: {error}"))?;
-    }
-    fs::rename(&temp, &path).map_err(|error| format!("Could not save colour settings: {error}"))
+    super::upk_history::replace(&path, &bytes)
 }
 
 fn load_boost_manifest(backups_dir: &Path) -> Result<BoostArenaManifest, String> {
@@ -814,56 +815,93 @@ fn restore_arena_boost_colours(cooked_pc: &Path, backups_dir: &Path) -> Result<(
         .map_err(|error| format!("Could not remove restored boost-pad data: {error}"))
 }
 
-fn apply(
-    cooked_pc: &Path,
-    backups_dir: &Path,
+fn colour_source(
+    cooked: &Path,
+    backups: &Path,
+    live: &[u8],
+) -> Result<(Vec<u8>, Option<ColourSettings>), String> {
+    let guid = package_guid(live)?;
+    let archive = super::game_update::Recovery::load(cooked)?.map(|recovery| recovery.archive(cooked));
+    let archived_settings = archive.as_ref().and_then(|dir| active_colour_settings(dir));
+    if let Ok(bytes) = fs::read(backups.join(BACKUP_NAME))
+        && package_guid(&bytes).ok() == Some(guid)
+        && Package::load(bytes.clone()).is_ok_and(|package| package.team_palette_offsets().is_ok())
+    {
+        return Ok((bytes, active_colour_settings(backups).or_else(|| archived_settings.clone())));
+    }
+    if Package::load(live.to_vec())?.team_palette_offsets().is_ok() {
+        return Ok((live.to_vec(), None));
+    }
+    if let Some(archive) = archive
+        && let Ok(bytes) = fs::read(archive.join(BACKUP_NAME))
+        && package_guid(&bytes).ok() == Some(guid)
+        && Package::load(bytes.clone()).is_ok_and(|package| package.team_palette_offsets().is_ok())
+    {
+        return Ok((bytes, archived_settings));
+    }
+    Err("The installed team palettes were already changed and no matching original colour backup was found.".into())
+}
+
+fn active_colour_settings(backups: &Path) -> Option<ColourSettings> {
+    let mut settings: ColourSettings = serde_json::from_slice(&fs::read(backups.join(STATE_NAME)).ok()?).ok()?;
+    settings.migrate();
+    settings.applied.then_some(settings)
+}
+
+pub(super) fn retain_recovery_baseline(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let Some(previous) = active_colour_settings(archive) else { return Ok(()) };
+    if active_colour_settings(&backups).is_some() {
+        return Ok(());
+    }
+    let live = fs::read(super::game_path::resolve(cooked, "TAGame.upk")).map_err(|error| error.to_string())?;
+    let Ok(original) = fs::read(archive.join(BACKUP_NAME)) else { return Ok(()) };
+    if package_guid(&original).ok() != Some(package_guid(&live)?)
+        || !Package::load(original.clone()).is_ok_and(|package| package.team_palette_offsets().is_ok())
+    {
+        return Ok(());
+    }
+    let cars = previous.applied_car_colours.clone().or_else(|| previous.car_colours_patch());
+    let stock = super::upk_package::UpkPackage::from_bytes(original.clone())?;
+    let changed = changed_colour_exports(&stock, render_colour_exports(&original, &previous, cars.as_ref())?)?;
+    let installed = super::upk_package::UpkPackage::from_bytes(live)?;
+    if changed.is_empty() || changed.iter().any(|(&index, desired)| {
+        let path = stock.object_path((index + 1) as i32);
+        let Some(live_index) = installed.find_object(&path).and_then(|id| id.checked_sub(1)) else {
+            return true;
+        };
+        let Ok(current) = colour_payload(&installed, live_index as usize) else { return true };
+        let Ok(baseline) = colour_payload(&stock, index) else { return true };
+        current != desired
+            && (current.len() != desired.len() || baseline.len() != desired.len()
+                || current.iter().zip(baseline).zip(desired)
+                    .any(|((&live, &stock), &patched)| stock != patched && live != patched))
+    }) {
+        return Ok(());
+    }
+    super::upk_history::replace(&backups.join(BACKUP_NAME), &original)?;
+    super::upk_history::replace(&backups.join("colours-build.sha256"), super::backup_guard::build_id(cooked)?.as_bytes())?;
+    save_state(&backups, &previous)
+}
+
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    retain_recovery_baseline(cooked, archive)?;
+    if active_colour_settings(&backups).is_none()
+        && let Some(settings) = active_colour_settings(archive)
+    {
+        let cars = settings.applied_car_colours.clone().or_else(|| settings.car_colours_patch());
+        apply(cooked, &backups, &settings, cars)?;
+    }
+    Ok(())
+}
+
+fn render_colour_exports(
+    original: &[u8],
     settings: &ColourSettings,
-    cars: Option<CarColours>,
-) -> Result<(), String> {
-    crate::patcher::backup_guard::prepare(
-        cooked_pc,
-        backups_dir,
-        "colours-build.sha256",
-        |name| name == BACKUP_NAME,
-    )?;
-    let live = crate::patcher::game_path::resolve(&cooked_pc, "TAGame.upk");
-    if !live.is_file() {
-        return Err(format!(
-            "TAGame.upk was not found in {}",
-            cooked_pc.display()
-        ));
-    }
-    fs::create_dir_all(backups_dir)
-        .map_err(|error| format!("Could not create the backup directory: {error}"))?;
-    // Clean up boost-pickup patches made by earlier builds. This path is kept
-    // only for migration; the Colours tab no longer applies boost changes.
-    restore_boost_texture_colours(cooked_pc, backups_dir)?;
-    restore_arena_boost_colours(cooked_pc, backups_dir)?;
-    let backup = backups_dir.join(BACKUP_NAME);
-    let live_bytes = fs::read(&live).map_err(|error| error.to_string())?;
-    let stale_backup = backup.is_file()
-        && package_guid(&fs::read(&backup).map_err(|error| error.to_string())?)?
-            != package_guid(&live_bytes)?;
-    if stale_backup {
-        let staged = backups_dir.join("TAGame.upk.bak.tmp");
-        fs::copy(&live, &staged).map_err(|error| {
-            format!("Could not prepare a backup of the updated TAGame.upk: {error}")
-        })?;
-        fs::remove_file(&backup)
-            .map_err(|error| format!("Could not remove the stale colour backup: {error}"))?;
-        fs::rename(&staged, &backup)
-            .map_err(|error| format!("Could not install the updated colour backup: {error}"))?;
-    } else if !backup.is_file() {
-        fs::copy(&live, &backup).map_err(|error| {
-            format!(
-                "Could not create pristine backup at {}: {error}",
-                backup.display()
-            )
-        })?;
-    }
-    let pristine = fs::read(&backup)
-        .map_err(|error| format!("Could not read the pristine colour source: {error}"))?;
-    let mut package = Package::load(pristine)?;
+    cars: Option<&CarColours>,
+) -> Result<Vec<u8>, String> {
+    let mut package = Package::load(original.to_vec())?;
     package.apply_team_colours(settings)?;
     if settings.heatseeker_glow {
         package.apply_heatseeker_colour(settings.heatseeker_max_speed)?;
@@ -871,76 +909,188 @@ fn apply(
     if settings.extended_palette {
         package.extend_palette()?;
     }
-    let mut output = package.save()?;
+    let output = package.save()?;
     drop(package);
-    if let Some(cars) = cars {
-        output = append_custom_car_colours(output, &cars)?;
+    match cars {
+        Some(cars) => append_custom_car_colours(output, cars),
+        None => Ok(output),
     }
-    let temp = cooked_pc.join("TAGame.upk.colours.tmp");
-    fs::write(&temp, &output)
-        .map_err(|error| format!("Could not write the patched temporary file: {error}"))?;
-    Package::load(fs::read(&temp).map_err(|error| error.to_string())?)
-        .map_err(|error| format!("Patched file validation failed: {error}"))?;
-    if let Err(error) = fs::copy(&temp, &live) {
-        let _ = fs::copy(&backup, &live);
-        let _ = fs::remove_file(&temp);
-        return Err(format!(
-            "Could not install the patched file; the pristine backup was restored: {error}"
-        ));
+}
+
+fn colour_payload(package: &super::upk_package::UpkPackage, index: usize) -> Result<&[u8], String> {
+    let export = package.exports.get(index).ok_or("Colour export is missing")?;
+    package.image.get(export.serial_offset..export.serial_offset + export.serial_size)
+        .ok_or_else(|| "Colour export is truncated".into())
+}
+
+fn changed_colour_exports(
+    original: &super::upk_package::UpkPackage,
+    raw: Vec<u8>,
+) -> Result<std::collections::HashMap<usize, Vec<u8>>, String> {
+    let patched = super::upk_package::UpkPackage::from_bytes(raw)?;
+    if original.names != patched.names || original.exports.len() != patched.exports.len() {
+        return Err("Colour patch changed the package tables.".into());
     }
-    let _ = fs::remove_file(&temp);
-    crate::patcher::workshop_menu::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::goal_explosion::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::forfeit_command::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::celebration::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::bots_freeplay::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::chat_export::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::lan_commands::reapply(cooked_pc, backups_dir)?;
+    let mut changes = std::collections::HashMap::new();
+    for index in 0..original.exports.len() {
+        let desired = colour_payload(&patched, index)?;
+        if desired != colour_payload(original, index)? {
+            changes.insert(index, desired.to_vec());
+        }
+    }
+    Ok(changes)
+}
+
+fn edit_live_colours(
+    cooked: &Path,
+    backups: &Path,
+    settings: Option<(&ColourSettings, Option<&CarColours>)>,
+) -> Result<(), String> {
+    use super::upk_package::UpkPackage;
+
+    let _lock = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
+    let live = super::game_path::resolve(cooked, "TAGame.upk");
+    let before = fs::read(&live).map_err(|error| error.to_string())?;
+    let (original_bytes, previous) = colour_source(cooked, backups, &before)?;
+    let original = UpkPackage::from_bytes(original_bytes.clone())?;
+    let desired = match settings {
+        Some((settings, cars)) => changed_colour_exports(&original, render_colour_exports(&original_bytes, settings, cars)?)?,
+        None => Default::default(),
+    };
+    let previous = match previous {
+        Some(previous) => {
+            let cars = previous.applied_car_colours.clone().or_else(|| previous.car_colours_patch());
+            changed_colour_exports(&original, render_colour_exports(&original_bytes, &previous, cars.as_ref())?)?
+        }
+        None => Default::default(),
+    };
+    let mut package = UpkPackage::from_bytes(before.clone())?;
+    let indices: HashSet<_> = desired.keys().chain(previous.keys()).copied().collect();
+    let mut changed = false;
+    for index in indices {
+        let path = original.object_path((index + 1) as i32);
+        let live_index = if index < package.exports.len()
+            && package.object_path((index + 1) as i32) == path
+        {
+            index
+        } else {
+            (0..package.exports.len())
+                .find(|&candidate| package.object_path((candidate + 1) as i32) == path)
+                .ok_or_else(|| format!("Colour export {path} is missing from the installed package."))?
+        };
+        let baseline = colour_payload(&original, index)?;
+        let old = previous.get(&index).map_or(baseline, Vec::as_slice);
+        let new = desired.get(&index).map_or(baseline, Vec::as_slice);
+        let current = colour_payload(&package, live_index)?;
+        if current == new {
+            continue;
+        }
+        if current == old || current == baseline {
+            if current.len() == new.len() {
+                package.patch(package.exports[live_index].serial_offset, new)?;
+            } else {
+                package.replace_export_payload(live_index, new)?;
+            }
+        } else if current.len() == baseline.len() && old.len() == baseline.len() && new.len() == baseline.len() {
+            let mut merged = current.to_vec();
+            for (i, byte) in merged.iter_mut().enumerate() {
+                if old[i] == baseline[i] && new[i] == baseline[i] {
+                    continue;
+                }
+                if *byte != baseline[i] && *byte != old[i] && *byte != new[i] {
+                    return Err(format!("Another patch changed a colour field in {path}."));
+                }
+                *byte = new[i];
+            }
+            package.patch(package.exports[live_index].serial_offset, &merged)?;
+        } else {
+            return Err(format!("Could not identify the existing colour data in {path}."));
+        }
+        changed = true;
+    }
+    if settings.is_some() {
+        super::upk_history::replace(&backups.join(BACKUP_NAME), &original_bytes)?;
+    }
+    if !changed {
+        return Ok(());
+    }
+    let stage = cooked.join(format!("TAGame.colours-{:016x}.tmp", rand::random::<u64>()));
+    let result = (|| {
+        package.save_fast(&stage)?;
+        let output = fs::read(&stage).map_err(|error| error.to_string())?;
+        UpkPackage::from_bytes(output.clone())?;
+        if hebnix_sdk::process::is_rocket_league_running() {
+            return Err("Rocket League opened while preparing the colour patch.".into());
+        }
+        super::upk_history::install_linked_from(cooked, &live, &before, &output, "Game Colours")
+    })();
+    let _ = fs::remove_file(stage);
+    result
+}
+
+fn apply(
+    cooked_pc: &Path,
+    backups_dir: &Path,
+    settings: &ColourSettings,
+    cars: Option<CarColours>,
+) -> Result<(), String> {
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before applying UPK Studio colours.".into());
+    }
+    super::backup_guard::prepare(cooked_pc, backups_dir, "colours-build.sha256", |name| name == BACKUP_NAME)?;
+    restore_boost_texture_colours(cooked_pc, backups_dir)?;
+    restore_arena_boost_colours(cooked_pc, backups_dir)?;
+    edit_live_colours(cooked_pc, backups_dir, Some((settings, cars.as_ref())))?;
     let mut saved = settings.clone();
     saved.applied = true;
+    saved.applied_car_colours = cars;
     save_state(backups_dir, &saved)
 }
 
 fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
-    crate::patcher::backup_guard::check(cooked_pc, backups_dir, "colours-build.sha256", |name| {
-        name == BACKUP_NAME
-    })?;
-    let live = crate::patcher::game_path::resolve(&cooked_pc, "TAGame.upk");
-    let backup = backups_dir.join(BACKUP_NAME);
-    if !backup.is_file() {
-        return Err(format!(
-            "No colour backup was found at {}.",
-            backup.display()
-        ));
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before restoring UPK Studio colours.".into());
     }
-    let original =
-        fs::read(&backup).map_err(|error| format!("Could not read the colour backup: {error}"))?;
-    Package::load(original.clone())
-        .map_err(|error| format!("The colour backup is invalid: {error}"))?;
-    if live.is_file()
-        && package_guid(&original)?
-            != package_guid(&fs::read(&live).map_err(|error| error.to_string())?)?
-    {
-        return Err(
-            "The colour backup belongs to an older Rocket League version and was not restored."
-                .into(),
-        );
-    }
+    super::backup_guard::check(cooked_pc, backups_dir, "colours-build.sha256", |name| name == BACKUP_NAME)?;
     restore_boost_texture_colours(cooked_pc, backups_dir)?;
     restore_arena_boost_colours(cooked_pc, backups_dir)?;
-    crate::patcher::heatseeker::restore(cooked_pc, backups_dir)?;
-    let temp = cooked_pc.join("TAGame.upk.colours.restore.tmp");
-    fs::write(&temp, &original)
-        .map_err(|error| format!("Could not prepare the restore: {error}"))?;
-    fs::copy(&temp, &live).map_err(|error| format!("Could not restore TAGame.upk: {error}"))?;
-    let _ = fs::remove_file(temp);
-    crate::patcher::workshop_menu::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::goal_explosion::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::forfeit_command::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::celebration::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::chat_export::reapply(cooked_pc, backups_dir)?;
-    crate::patcher::lan_commands::reapply(cooked_pc, backups_dir)?;
+    edit_live_colours(cooked_pc, backups_dir, None)?;
     save_state(backups_dir, &ColourSettings::default())
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires a local package and colour recovery archive"]
+fn archived_colour_baseline_preserves_live_hooks() {
+    let source = std::path::PathBuf::from(std::env::var_os("HEBNIX_COLOUR_TEST_COOKED").unwrap());
+    let recovery = super::game_update::Recovery::load(&source).unwrap().unwrap();
+    let root = std::env::temp_dir().join(format!("hebnix-colour-fixture-{}", std::process::id()));
+    let cooked = root.join("TAGame/CookedPCConsole");
+    let backups = cooked.join("Backups");
+    let archive = recovery.archive(&cooked);
+    fs::create_dir_all(&backups).unwrap();
+    fs::create_dir_all(&archive).unwrap();
+    fs::copy(source.join("TAGame.upk"), cooked.join("TAGame.upk")).unwrap();
+    recovery.save(&cooked).unwrap();
+    for name in [BACKUP_NAME, STATE_NAME] {
+        fs::copy(source.join("Backups").join(name), backups.join(name)).unwrap();
+        fs::copy(recovery.archive(&source).join(name), archive.join(name)).unwrap();
+    }
+    let dispatcher = || {
+        let package = super::upk_package::UpkPackage::load(&cooked.join("TAGame.upk")).unwrap();
+        let index = package.find_object("MatchStatsExporter_TA.ProcessSocketCommand").unwrap() as usize - 1;
+        colour_payload(&package, index).unwrap().to_vec()
+    };
+    let before = dispatcher();
+    let mut settings = ColourSettings::default();
+    settings.stadium_blue = [20, 45, 70];
+    edit_live_colours(&cooked, &backups, Some((&settings, None))).unwrap();
+    assert_eq!(dispatcher(), before);
+    settings.applied = true;
+    save_state(&backups, &settings).unwrap();
+    edit_live_colours(&cooked, &backups, None).unwrap();
+    assert_eq!(dispatcher(), before);
+    let _ = fs::remove_dir_all(root);
 }
 
 pub(crate) fn restore_for_uninstall(cooked: &Path, backups: &Path) -> Result<(), String> {
@@ -1295,65 +1445,56 @@ impl Package {
         Ok(())
     }
 
-    fn apply_team_colours(&mut self, settings: &ColourSettings) -> Result<(), String> {
-        let signatures = [
-            (
-                BLUE_DEFAULT,
-                settings.stadium_blue,
-                settings.hud_colours.then_some(settings.hud_blue),
-            ),
-            (BLUE_COLOUR_BLIND, settings.stadium_blue, None),
-            (
-                ORANGE_DEFAULT,
-                settings.stadium_orange,
-                settings.hud_colours.then_some(settings.hud_orange),
-            ),
-            (ORANGE_COLOUR_BLIND, settings.stadium_orange, None),
-        ];
-        let mut found = 0;
-        for (signature, stadium, hud) in signatures {
+    fn team_palette_offsets(&self) -> Result<[usize; 4], String> {
+        let mut offsets = [0; 4];
+        for (offset, signature) in offsets.iter_mut().zip([
+            BLUE_DEFAULT, BLUE_COLOUR_BLIND, ORANGE_DEFAULT, ORANGE_COLOUR_BLIND,
+        ]) {
             let needle = hex::decode(signature).map_err(|error| error.to_string())?;
-            let positions = find_all(&self.image, &needle);
-            if let Some(offset) = positions.into_iter().find(|offset| {
-                self.chunks
-                    .iter()
-                    .any(|chunk| *offset >= chunk.u_off && *offset < chunk.u_off + chunk.u_size)
-            }) {
-                if let Some(index) = self
-                    .chunks
-                    .iter()
-                    .position(|chunk| offset >= chunk.u_off && offset < chunk.u_off + chunk.u_size)
-                {
-                    self.modified_chunks.insert(index);
+            let in_chunk = |offset: &usize| self.chunks.iter().any(|chunk| {
+                *offset >= chunk.u_off && *offset + needle.len() <= chunk.u_off + chunk.u_size
+            });
+            let team = self.exports.iter().filter(|export| {
+                self.name_of(export.object_name)
+                    .is_some_and(|name| matches!(strip_suffix(name), "Team1" | "Team2"))
+            }).find_map(|export| {
+                let start = export.serial_offset;
+                let bytes = self.image.get(start..start + export.serial_size)?;
+                bytes.windows(needle.len()).position(|bytes| bytes == needle)
+                    .map(|offset| start + offset).filter(in_chunk)
+            });
+            *offset = team.or_else(|| find_all(&self.image, &needle).into_iter().find(in_chunk))
+                .ok_or("An original team colour palette is missing.")?;
+        }
+        Ok(offsets)
+    }
+
+    fn apply_team_colours(&mut self, settings: &ColourSettings) -> Result<(), String> {
+        let colours = [
+            (settings.stadium_blue, settings.hud_colours.then_some(settings.hud_blue)),
+            (settings.stadium_blue, None),
+            (settings.stadium_orange, settings.hud_colours.then_some(settings.hud_orange)),
+            (settings.stadium_orange, None),
+        ];
+        for (offset, (stadium, hud)) in self.team_palette_offsets()?.into_iter().zip(colours) {
+            if settings.stadium_colours {
+                for index in 0..3 {
+                    self.patch_colour(offset + index * 16, stadium)?;
                 }
-                if settings.stadium_colours {
-                    write_colour_list(&mut self.image, offset, stadium)?;
+            }
+            if let Some(hud) = hud {
+                for distance in [120, 72] {
+                    self.patch_colour(offset.checked_sub(distance).ok_or("HUD colour offset underflow")?, hud)?;
                 }
-                if let Some(hud) = hud {
-                    write_rgb(
-                        &mut self.image,
-                        offset
-                            .checked_sub(120)
-                            .ok_or("HUD colour offset underflow")?,
-                        hud,
-                    )?;
-                    write_rgb(
-                        &mut self.image,
-                        offset
-                            .checked_sub(72)
-                            .ok_or("HUD colour offset underflow")?,
-                        hud,
-                    )?;
-                }
-                found += 1;
             }
         }
-        if found != 4 {
-            return Err(format!(
-                "Only {found}/4 team colour palettes were found.                  This Rocket League version may be unsupported."
-            ));
-        }
         Ok(())
+    }
+
+    fn patch_colour(&mut self, offset: usize, colour: [u8; 3]) -> Result<(), String> {
+        let mut bytes = [0; 12];
+        write_rgb(&mut bytes, 0, colour)?;
+        self.patch_bytes(offset, &bytes)
     }
 
     fn boost_material_targets(&self) -> Result<Vec<BoostMaterialTarget>, String> {
@@ -2241,13 +2382,6 @@ fn decompress_chunk(raw: &[u8], chunk: Chunk) -> Result<Vec<u8>, String> {
         return Err("A compressed chunk expanded to the wrong size.".into());
     }
     Ok(output)
-}
-
-fn write_colour_list(image: &mut [u8], offset: usize, colour: [u8; 3]) -> Result<(), String> {
-    for index in 0..3 {
-        write_rgb(image, offset + index * 16, colour)?;
-    }
-    Ok(())
 }
 
 fn write_rgb(image: &mut [u8], offset: usize, colour: [u8; 3]) -> Result<(), String> {

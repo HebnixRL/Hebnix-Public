@@ -181,6 +181,21 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
     }
 }
 
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path, scale: f32) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let package = UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?;
+    if !is_patched(&package, function_index(&package)?)? {
+        return enable(cooked, &backups, scale);
+    }
+    let saved = read_saved(archive).ok_or("Goal explosion restore state is missing")?;
+    if saved.build != backup_guard::build_id(cooked)? {
+        return Err("Goal explosion still contains a patch from an older build. Verify the game files and retry repatch.".into());
+    }
+    let path = saved_path(&backups);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+    super::upk_history::replace(&path, &serde_json::to_vec(&saved).map_err(|error| error.to_string())?)
+}
+
 /// Page state: the slider and the job writing the package.
 pub struct State {
     scale: f32,

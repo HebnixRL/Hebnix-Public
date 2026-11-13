@@ -125,6 +125,10 @@ pub(super) struct ActiveSwap {
     pub(super) source_upk: String,
     pub(super) target_name: String,
     pub(super) target_upk: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_product: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_product: Option<i64>,
     #[serde(default)]
     target_bnk: Option<String>,
     #[serde(default)]
@@ -235,6 +239,33 @@ impl ActiveSwap {
                 .unwrap_or_else(|| {
                     !item.shared_package || self.target_name.eq_ignore_ascii_case(&item.name)
                 })
+    }
+
+    fn catalog_item<'a>(&self, items: &'a [SwapItem], source: bool) -> Option<&'a SwapItem> {
+        let (product, name) = if source {
+            (self.source_product, &self.source_name)
+        } else {
+            (self.target_product, &self.target_name)
+        };
+        let matches = |item: &&SwapItem| {
+            if source { self.source_matches(item) } else { self.target_matches(item) }
+        };
+        if let Some(product) = product {
+            let mut candidates = items.iter().filter(|item| item.product_id == Some(product));
+            let first = candidates.next()?;
+            return if candidates.clone().next().is_none() {
+                Some(first)
+            } else {
+                std::iter::once(first).chain(candidates).find(matches)
+            };
+        }
+        items.iter().find(matches).or_else(|| {
+            // Older manifests have no product ID. A unique name can still
+            // resolve a package renamed by the current catalogue.
+            let mut candidates = items.iter().filter(|item| item.name.eq_ignore_ascii_case(name));
+            let first = candidates.next()?;
+            candidates.next().is_none().then_some(first)
+        })
     }
 }
 
@@ -1283,6 +1314,8 @@ impl SwapperState {
                 source_upk: source.upk.clone(),
                 target_name: target.name.clone(),
                 target_upk: target.upk.clone(),
+                source_product: source.product_id,
+                target_product: target.product_id,
                 target_bnk,
                 paint,
                 target_thumbnail,
@@ -1934,6 +1967,8 @@ impl SwapperState {
                 source_upk: source.upk.clone(),
                 target_name: target.name.clone(),
                 target_upk: target.upk.clone(),
+                source_product: source.product_id,
+                target_product: target.product_id,
                 target_bnk: None,
                 paint,
                 target_thumbnail: None,
@@ -1981,10 +2016,7 @@ impl SwapperState {
                 report.skipped_indexes.push(index);
                 continue;
             };
-            let Some(source) = items
-                .iter()
-                .find(|item| saved.source_matches(item))
-                .cloned()
+            let Some(source) = saved.catalog_item(&items, true).cloned()
             else {
                 report.skipped.push(format!(
                     "{}: item is not in the local {} catalog",
@@ -1994,10 +2026,7 @@ impl SwapperState {
                 report.skipped_indexes.push(index);
                 continue;
             };
-            let Some(target) = items
-                .iter()
-                .find(|item| saved.target_matches(item))
-                .cloned()
+            let Some(target) = saved.catalog_item(&items, false).cloned()
             else {
                 report.skipped.push(format!(
                     "{}: target is not in the local {} catalog",
@@ -3456,6 +3485,8 @@ mod variant_catalog_tests {
             source_upk: bronze.upk.clone(),
             target_name: silver.name.clone(),
             target_upk: silver.upk.clone(),
+            source_product: bronze.product_id,
+            target_product: silver.product_id,
             target_bnk: None,
             paint: SwapPaint::Default,
             target_thumbnail: None,
@@ -3470,6 +3501,11 @@ mod variant_catalog_tests {
         assert!(saved.target_matches(silver));
         assert!(!saved.target_matches(bronze));
         assert_eq!(saved.key(), item_identity(silver));
+        let mut updated = silver.clone();
+        updated.upk = "UpdatedSeasonTwelve.upk".into();
+        updated.path = Some("UpdatedSeasonTwelve.Silver".into());
+        let catalog = [bronze.clone(), updated];
+        assert_eq!(saved.catalog_item(&catalog, false).unwrap().upk, "UpdatedSeasonTwelve.upk");
     }
 }
 
