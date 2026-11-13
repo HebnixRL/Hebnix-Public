@@ -1433,6 +1433,7 @@ impl LiteApp {
             .collapsible(false)
             .resizable(false)
             .default_width(520.0)
+            .max_height(ctx.content_rect().height() * 0.85)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {

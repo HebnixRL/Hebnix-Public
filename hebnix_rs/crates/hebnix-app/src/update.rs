@@ -129,42 +129,47 @@ pub fn render_changelog(ui: &mut eframe::egui::Ui, entry: &ChangelogEntry) {
     }
     ui.add_space(8.0);
 
-    for line in entry
-        .changelog
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        let trimmed = line.trim();
-        // the [Added]/[Fixed]/[Removed] tags come from the server and stay as
-        // they are, only the label shown for them is translated
-        let (prefix, body, colour) = if let Some(body) = trimmed.strip_prefix("[Added]") {
-            (
-                crate::i18n::t("changelog-added"),
-                body.trim().trim_start_matches(':').trim(),
-                eframe::egui::Color32::from_rgb(46, 204, 113),
-            )
-        } else if let Some(body) = trimmed.strip_prefix("[Fixed]") {
-            (
-                crate::i18n::t("changelog-fixed"),
-                body.trim().trim_start_matches(':').trim(),
-                eframe::egui::Color32::from_rgb(52, 152, 219),
-            )
-        } else if let Some(body) = trimmed.strip_prefix("[Removed]") {
-            (
-                crate::i18n::t("changelog-removed"),
-                body.trim().trim_start_matches(':').trim(),
-                eframe::egui::Color32::from_rgb(231, 76, 60),
-            )
-        } else {
-            (String::new(), trimmed, ui.visuals().text_color())
-        };
-        ui.horizontal_wrapped(|ui| {
-            if !prefix.is_empty() {
-                ui.label(eframe::egui::RichText::new(&prefix).strong().color(colour));
+    // the window is capped in height, so the list scrolls instead of pushing the title bar and X off-screen
+    eframe::egui::ScrollArea::vertical()
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for line in entry
+                .changelog
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+            {
+                let trimmed = line.trim();
+                // the [Added]/[Fixed]/[Removed] tags come from the server and stay as
+                // they are, only the label shown for them is translated
+                let (prefix, body, colour) = if let Some(body) = trimmed.strip_prefix("[Added]") {
+                    (
+                        crate::i18n::t("changelog-added"),
+                        body.trim().trim_start_matches(':').trim(),
+                        eframe::egui::Color32::from_rgb(46, 204, 113),
+                    )
+                } else if let Some(body) = trimmed.strip_prefix("[Fixed]") {
+                    (
+                        crate::i18n::t("changelog-fixed"),
+                        body.trim().trim_start_matches(':').trim(),
+                        eframe::egui::Color32::from_rgb(52, 152, 219),
+                    )
+                } else if let Some(body) = trimmed.strip_prefix("[Removed]") {
+                    (
+                        crate::i18n::t("changelog-removed"),
+                        body.trim().trim_start_matches(':').trim(),
+                        eframe::egui::Color32::from_rgb(231, 76, 60),
+                    )
+                } else {
+                    (String::new(), trimmed, ui.visuals().text_color())
+                };
+                ui.horizontal_wrapped(|ui| {
+                    if !prefix.is_empty() {
+                        ui.label(eframe::egui::RichText::new(&prefix).strong().color(colour));
+                    }
+                    ui.label(body);
+                });
             }
-            ui.label(body);
         });
-    }
 }
 
 /// Shared with the popup; the worker never blocks the UI thread.
