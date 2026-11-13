@@ -1,6 +1,9 @@
 use super::*;
 use crate::patcher::thumbnail_patcher as patches;
 
+pub(super) const ITEM_THUMBNAIL_HEIGHT: f32 = 120.0;
+pub(super) const ITEM_THUMBNAIL_CARD_HEIGHT: f32 = 208.0;
+
 #[derive(Clone)]
 struct Selection {
     file: String,
@@ -45,6 +48,8 @@ impl Default for State {
 }
 
 impl State {
+    pub(super) fn busy(&self) -> bool { self.pending.is_some() }
+
     fn reload(&mut self, backups: &Path) {
         match patches::load(backups) {
             Ok(manifest) => {
@@ -114,6 +119,29 @@ impl SwapperState {
         backups: &Path,
         owned_ids: &HashSet<i64>,
     ) {
+        ui.heading(t("nav-item-thumbnails"));
+        self.render_thumbnail_patcher_content(ui, cooked, backups, owned_ids);
+    }
+
+    pub fn render_owned_thumbnail_patcher(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        backups: &Path,
+        inventory: &mut crate::owned_inventory::OwnedInventory,
+    ) {
+        ui.heading(t("nav-item-thumbnails"));
+        inventory.show(ui);
+        self.render_thumbnail_patcher_content(ui, cooked, backups, &inventory.ids);
+    }
+
+    fn render_thumbnail_patcher_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        backups: &Path,
+        owned_ids: &HashSet<i64>,
+    ) {
         self.collect_thumbnails();
         // Finish an operation before changing installs, so its result cannot leak into another game.
         if let Some(receiver) = &self.thumbnail_editor.pending {
@@ -142,7 +170,6 @@ impl SwapperState {
             self.thumbnail_editor.status = None;
             self.thumbnail_editor.reload(backups);
         }
-        ui.heading(t("thumbnail-patcher-title"));
         ui.weak(t("thumbnail-patcher-description"));
         if let Some(status) = &self.thumbnail_editor.status {
             match status {
@@ -278,7 +305,7 @@ impl SwapperState {
         let start = self.thumbnail_editor.page * page_size;
         egui::ScrollArea::vertical()
             .id_salt("thumbnail-patcher-items")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in entries
                     .iter()
                     .skip(start)
@@ -293,7 +320,7 @@ impl SwapperState {
                     ui.horizontal_top(|ui| {
                         for selection in row {
                             ui.allocate_ui_with_layout(
-                                egui::vec2(width, 208.0),
+                                egui::vec2(width, ITEM_THUMBNAIL_CARD_HEIGHT),
                                 egui::Layout::top_down(egui::Align::Center),
                                 |ui| {
                                     browser::frame(ui, false).show(ui, |ui| {
@@ -307,7 +334,8 @@ impl SwapperState {
                                                 selection.file, selection.kind
                                             ),
                                             preview,
-                                            120.0,
+                                            ITEM_THUMBNAIL_HEIGHT,
+                                            true,
                                         );
                                         browser::name(ui, &selection.name, &selection.file);
                                         if ui
@@ -326,7 +354,7 @@ impl SwapperState {
                         }
                     });
                 }
-            });
+            }));
     }
 
     fn render_thumbnail_selection(
@@ -344,7 +372,7 @@ impl SwapperState {
             ui.vertical(|ui| {
                 ui.set_width(110.0);
                 ui.label(t("thumbnail-patcher-current"));
-                browser::preview(ui, "editor-current", preview, 100.0);
+                browser::preview(ui, "editor-current", preview, 100.0, false);
             });
             if let Some(png) = self.thumbnail_editor.replacement.clone() {
                 ui.vertical(|ui| {
@@ -355,6 +383,7 @@ impl SwapperState {
                         "editor-replacement",
                         browser::Preview::Ready(png),
                         100.0,
+                        false,
                     );
                 });
             }
@@ -458,7 +487,7 @@ impl SwapperState {
         }
         egui::ScrollArea::vertical()
             .id_salt("thumbnail-patcher-active")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for package in packages {
                     for patch in package.patches {
                         ui.push_id((&package.file, patch.export), |ui| {
@@ -480,6 +509,7 @@ impl SwapperState {
                                             &format!("patched/{}|{}", package.file, patch.export),
                                             preview,
                                             100.0,
+                                            false,
                                         );
                                     });
                                     ui.vertical(|ui| {
@@ -503,7 +533,7 @@ impl SwapperState {
                         });
                     }
                 }
-            });
+            }));
     }
 }
 

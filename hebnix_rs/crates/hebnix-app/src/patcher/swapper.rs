@@ -55,14 +55,14 @@ impl SwapCategory {
     pub fn label(self) -> String {
         match self {
             Self::Antennas => t("label-antennas"),
-            Self::Anthems => t("label-anthems"),
-            Self::Borders => t("label-borders"),
-            Self::Bodies => t("label-bodies"),
+            Self::Anthems => t("studio-player-anthems"),
+            Self::Borders => t("nav-avatar-borders"),
+            Self::Bodies => t("nav-car-bodies"),
             Self::Boosts => t("label-boosts"),
-            Self::Engines => t("label-engines"),
-            Self::Goals => t("label-goals"),
-            Self::Finishes => t("label-finishes"),
-            Self::Banners => t("label-banners"),
+            Self::Engines => t("nav-engine-sounds"),
+            Self::Goals => t("nav-goal-explosions"),
+            Self::Finishes => t("nav-paint-finishes"),
+            Self::Banners => t("nav-player-banners"),
             Self::Skins => t("label-decals"),
             Self::Toppers => t("label-toppers"),
             Self::Trails => t("label-trails"),
@@ -119,16 +119,20 @@ struct SwapItem {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ActiveSwap {
+pub(super) struct ActiveSwap {
     category: String,
-    source_name: String,
-    source_upk: String,
-    target_name: String,
-    target_upk: String,
+    pub(super) source_name: String,
+    pub(super) source_upk: String,
+    pub(super) target_name: String,
+    pub(super) target_upk: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_product: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_product: Option<i64>,
     #[serde(default)]
     target_bnk: Option<String>,
     #[serde(default)]
-    paint: SwapPaint,
+    pub(super) paint: SwapPaint,
     #[serde(default)]
     target_thumbnail: Option<String>,
     #[serde(default)]
@@ -137,6 +141,27 @@ struct ActiveSwap {
     target_asset: Option<String>,
     #[serde(default)]
     asset_override: bool,
+}
+
+pub(super) fn history_manifest(
+    backups: &Path,
+    file: &str,
+    swap: Option<ActiveSwap>,
+) -> Result<(PathBuf, Option<Vec<u8>>, Vec<u8>), String> {
+    let path = backups.join("swapper_swaps.json");
+    let old = match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut active: Vec<ActiveSwap> = match &old {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|error| error.to_string())?,
+        None => Vec::new(),
+    };
+    active.retain(|entry| entry.asset_override || !entry.target_upk.eq_ignore_ascii_case(file));
+    active.extend(swap);
+    let new = serde_json::to_vec_pretty(&active).map_err(|error| error.to_string())?;
+    Ok((path, old, new))
 }
 
 fn item_identity(item: &SwapItem) -> String {
@@ -215,6 +240,59 @@ impl ActiveSwap {
                     !item.shared_package || self.target_name.eq_ignore_ascii_case(&item.name)
                 })
     }
+
+    fn catalog_item<'a>(&self, items: &'a [SwapItem], source: bool) -> Option<&'a SwapItem> {
+        let (product, name) = if source {
+            (self.source_product, &self.source_name)
+        } else {
+            (self.target_product, &self.target_name)
+        };
+        let matches = |item: &&SwapItem| {
+            if source { self.source_matches(item) } else { self.target_matches(item) }
+        };
+        if let Some(product) = product {
+            let mut candidates = items.iter().filter(|item| item.product_id == Some(product));
+            let first = candidates.next()?;
+            return if candidates.clone().next().is_none() {
+                Some(first)
+            } else {
+                std::iter::once(first).chain(candidates).find(matches)
+            };
+        }
+        items.iter().find(matches).or_else(|| {
+            // Older manifests have no product ID. A unique name can still
+            // resolve a package renamed by the current catalogue.
+            let mut candidates = items.iter().filter(|item| item.name.eq_ignore_ascii_case(name));
+            let first = candidates.next()?;
+            candidates.next().is_none().then_some(first)
+        })
+    }
+}
+
+/// One BakkesMod item: the swap category, the product equipped in the stock loadout,
+/// the BakkesMod product to show instead, and its paint (0 = none).
+pub struct SwapPick {
+    pub category: SwapCategory,
+    pub stock_product: i64,
+    pub product: i64,
+    pub paint: u8,
+}
+
+/// BakkesMod equip slot to swap category. Body is not applied by BakkesMod, and the
+/// finish slots have no swap category here, so those return `None`.
+pub fn category_for_equip_slot(slot: u8) -> Option<SwapCategory> {
+    Some(match slot {
+        1 => SwapCategory::Skins,
+        2 => SwapCategory::Wheels,
+        3 => SwapCategory::Boosts,
+        4 => SwapCategory::Antennas,
+        5 => SwapCategory::Toppers,
+        13 => SwapCategory::Engines,
+        14 => SwapCategory::Trails,
+        15 => SwapCategory::Goals,
+        18 => SwapCategory::Anthems,
+        _ => return None,
+    })
 }
 
 #[derive(Default)]
@@ -403,10 +481,11 @@ pub struct SwapperState {
     swap_paint: HashMap<String, SwapPaint>,
     recolour_category: SwapCategory,
     recolour_search: String,
-    recolour_selected: Option<String>,
+    recolour_selected: Vec<String>,
     recolour_paint: SwapPaint,
     recolour_page: usize,
     recolour_show_applied: bool,
+    recolour_painted_only: bool,
     recolour_status: Option<Result<String, String>>,
     swap_speed: HashMap<String, f32>,
     /// set from the Items animation speed tab; shows the speed picker on swap rows
@@ -416,6 +495,8 @@ pub struct SwapperState {
 }
 
 impl SwapperState {
+    pub(crate) fn busy(&self) -> bool { self.name_editor.busy() || self.thumbnail_editor.busy() }
+
     pub fn new(base_dir: &Path) -> Self {
         let (thumbnail_jobs, jobs) = unbounded::<(String, PathBuf, String, egui::Context)>();
         let (results, thumbnail_results) = unbounded();
@@ -511,10 +592,11 @@ impl SwapperState {
             swap_paint: HashMap::new(),
             recolour_category: SwapCategory::Bodies,
             recolour_search: String::new(),
-            recolour_selected: None,
+            recolour_selected: Vec::new(),
             recolour_paint: SwapPaint::Default,
             recolour_page: 0,
             recolour_show_applied: false,
+            recolour_painted_only: false,
             recolour_status: None,
             swap_speed: HashMap::new(),
             speed_enabled: false,
@@ -828,7 +910,7 @@ impl SwapperState {
     fn save_active(&self, backups_dir: &Path) -> Result<(), String> {
         fs::create_dir_all(backups_dir).map_err(|error| error.to_string())?;
         let bytes = serde_json::to_vec_pretty(&self.active).map_err(|error| error.to_string())?;
-        fs::write(Self::manifest_path(backups_dir), bytes).map_err(|error| error.to_string())
+        super::upk_history::replace(&Self::manifest_path(backups_dir), &bytes)
     }
 
     fn apply_swap(
@@ -841,7 +923,10 @@ impl SwapperState {
         cooked_pc: &Path,
         backups_dir: &Path,
     ) -> Result<(), String> {
-        backup_guard::synchronize_install(cooked_pc, backups_dir)?;
+        backup_guard::check_install(cooked_pc, backups_dir)?;
+        for file in [&source.upk, &target.upk] {
+            super::upk_history::check_live_package(cooked_pc, &cooked_pc.join(file))?;
+        }
         if target.shared_package
             && self.active.iter().any(|swap| {
                 !swap.asset_override && swap.target_upk.eq_ignore_ascii_case(&target.upk)
@@ -875,6 +960,12 @@ impl SwapperState {
         if !target_live.is_file() && !target_backup.is_file() {
             return Err(format!("Target UPK not found: {}", target_live.display()));
         }
+        let before = if target_live.is_file() {
+            fs::read(&target_live)
+        } else {
+            fs::read(&target_backup)
+        }
+        .map_err(|error| error.to_string())?;
         if !target_backup.exists() {
             fs::copy(&target_live, &target_backup)
                 .map_err(|error| format!("Failed to back up {}: {error}", target.upk))?;
@@ -886,184 +977,391 @@ impl SwapperState {
             &source_live
         };
         let asset_override = category == SwapCategory::Skins && target.shared_package;
-        if asset_override {
-            let source_asset = source
-                .path
-                .as_deref()
-                .ok_or("This decal has no catalog asset path")?;
-            let target_asset = target
-                .path
-                .as_deref()
-                .ok_or("This shared decal has no catalog asset path")?;
-            let (carrier, asset) = super::decal_variant::make_carrier(
-                copy_source,
-                source_asset,
-                target_asset,
-                cooked_pc,
-                &self.base_dir,
-            )?;
-            painted_swap::bake(&cooked_pc.join(&carrier), &source.upk, paint)?;
-            if crate::speed_patch::is_active(speed) {
-                crate::speed_patch::apply(&cooked_pc.join(&carrier), None, speed)?;
-            }
-            super::decal_variant::link_product(
-                &cooked_pc.join(carrier),
-                &asset,
-                &target_live,
-                &target_backup,
-                target_asset,
-                &self.base_dir,
-            )?;
-        } else if same_item {
-            painted_swap::recolour_for_target(copy_source, &target_live, &source.upk, paint)?;
-        } else {
-            painted_swap::patch_for_target(
-                copy_source,
-                &target_backup,
-                &target_live,
-                &self.base_dir,
-                source.path.as_deref(),
-                target.path.as_deref(),
-                &source.upk,
-                paint,
-            )
-            .map_err(|error| {
-                format!("Failed to patch {} for {}: {error}", source.upk, target.upk)
-            })?;
+        let previous = self
+            .active
+            .iter()
+            .find(|swap| swap.target_matches(target))
+            .cloned();
+        let mut sidecars = Vec::new();
+        if let Some(previous) = &previous {
+            sidecars.extend(
+                previous
+                    .target_bnk
+                    .iter()
+                    .chain(previous.target_thumbnail.iter())
+                    .cloned(),
+            );
         }
-        if !asset_override && crate::speed_patch::is_active(speed) {
-            match crate::speed_patch::apply(&target_live, Some(&target_backup), speed) {
-                Ok(0) => {}
-                Ok(count) => {
-                    tracing::info!("[Speed] {}: scaled {count} animation values", target.upk)
-                }
-                Err(error) => tracing::warn!("[Speed] {}: {error}", target.upk),
-            }
+        if !same_item && category == SwapCategory::Boosts {
+            sidecars.extend(
+                target
+                    .audio_bnk
+                    .iter()
+                    .filter(|name| cooked_pc.join(name).is_file())
+                    .cloned(),
+            );
         }
-        let mut target_bnk = None;
-        if category == SwapCategory::Boosts && !same_item {
-            if let (Some(source_name), Some(target_name)) =
-                (source.audio_bnk.as_deref(), target.audio_bnk.as_deref())
-            {
-                let source_live = cooked_pc.join(source_name);
-                let target_live = cooked_pc.join(target_name);
-                let target_backup = backups_dir.join(format!("{target_name}.bak"));
-                if !source_live.is_file() || !target_live.is_file() {
-                    let _ = fs::copy(
-                        backups_dir.join(format!("{}.bak", target.upk)),
-                        cooked_pc.join(&target.upk),
-                    );
-                    return Err(format!(
-                        "Boost audio bank missing: {} or {}",
-                        source_live.display(),
-                        target_live.display()
-                    ));
-                }
-                if !target_backup.is_file() {
-                    fs::copy(&target_live, &target_backup)
-                        .map_err(|error| format!("Failed to back up {target_name}: {error}"))?;
-                }
-                if let Err(error) = patch_boost_bnk(&source_live, &target_backup, &target_live) {
-                    let _ = fs::copy(
-                        backups_dir.join(format!("{}.bak", target.upk)),
-                        cooked_pc.join(&target.upk),
-                    );
-                    return Err(error);
-                }
-                target_bnk = Some(target_name.to_string());
-            }
-        }
-        let mut target_thumbnail = None;
-        if !asset_override
-            && let (Some(source_name), Some(target_name)) = (
+        if !asset_override {
+            if let (Some(source_name), Some(target_name)) = (
                 inferred_thumbnail(category, source, cooked_pc),
                 inferred_thumbnail(category, target, cooked_pc),
-            )
-        {
-            if !source_name.eq_ignore_ascii_case(&target_name) {
-                let source_live = cooked_pc.join(&source_name);
-                let target_live = cooked_pc.join(&target_name);
-                let source_backup = backups_dir.join(format!("{source_name}.bak"));
-                let target_backup = backups_dir.join(format!("{target_name}.bak"));
-                if !target_backup.is_file() {
-                    fs::copy(&target_live, &target_backup).map_err(|error| {
-                        format!("Failed to back up thumbnail {target_name}: {error}")
-                    })?;
+            ) {
+                if !source_name.eq_ignore_ascii_case(&target_name) {
+                    sidecars.push(target_name);
                 }
-                let thumbnail_source = if source_backup.is_file() {
-                    &source_backup
-                } else {
-                    &source_live
-                };
-                let thumbnail_result = (|| {
-                    let donor_asset = crate::cosmetic_upk::thumbnail_asset_path(
-                        thumbnail_source,
-                        &self.base_dir,
-                        source.path.as_deref(),
-                    )?;
-                    let target_asset = crate::cosmetic_upk::thumbnail_asset_path(
-                        &target_backup,
-                        &self.base_dir,
-                        target.path.as_deref(),
-                    )?;
-                    crate::cosmetic_upk::patch_for_target(
-                        thumbnail_source,
-                        &target_backup,
-                        &target_live,
-                        &self.base_dir,
-                        Some(&donor_asset),
-                        Some(&target_asset),
+            }
+        }
+        sidecars.retain(|name| cooked_pc.join(name).is_file());
+        sidecars.sort_unstable();
+        sidecars.dedup();
+        let swap_before = if asset_override {
+            None
+        } else {
+            Some(super::upk_history::swap_point(
+                cooked_pc,
+                backups_dir,
+                &target.upk,
+                &sidecars,
+                previous,
+            )?)
+        };
+        let previous_active = self.active.clone();
+        let result = (|| {
+            let editable = !asset_override && category.supports_recolour();
+            let mut history_recipe = None;
+            let mut paint = paint;
+            if editable {
+                let donor_live = fs::read(&source_live).ok();
+                let donor_recolour = self.active.iter().find(|swap| {
+                    swap.source_upk.eq_ignore_ascii_case(&source.upk)
+                        && swap.target_upk.eq_ignore_ascii_case(&source.upk)
+                        && !swap.asset_override
+                });
+                if !same_item
+                    && paint == SwapPaint::Default
+                    && let Some(donor) = donor_recolour
+                {
+                    paint = donor.paint;
+                }
+                let prior = super::upk_history::current_recipe(cooked_pc, &source_live)?
+                    .filter(|recipe| recipe.donor.eq_ignore_ascii_case(&source.upk));
+                let legacy_baseline = donor_recolour.and_then(|_| fs::read(&source_backup).ok());
+                let (donor, alignment) = if let Some(prior) = prior {
+                    if !same_item && paint == SwapPaint::Default {
+                        paint = prior.paint;
+                    }
+                    (
+                        super::upk_history::recipe_input(cooked_pc, &prior)?,
+                        prior.alignment,
                     )
+                } else if let Some((baseline, settings)) = donor_live
+                    .as_deref()
+                    .into_iter()
+                    .chain(legacy_baseline.as_deref())
+                    .find_map(|bytes| {
+                        super::wheel_alignment::live_settings(cooked_pc, &source.upk, bytes)
+                    })
+                    .filter(|_| {
+                        category == SwapCategory::Bodies
+                            && !self.active.iter().any(|swap| {
+                                swap.target_upk.eq_ignore_ascii_case(&source.upk)
+                                    && swap.source_upk != swap.target_upk
+                            })
+                    })
+                {
+                    (baseline, Some(settings))
+                } else {
+                    (
+                        fs::read(copy_source).map_err(|error| error.to_string())?,
+                        None,
+                    )
+                };
+                let token = rand::random::<u64>();
+                let donor_dir = backups_dir.join(format!("donor-{token}"));
+                let target_dir = backups_dir.join(format!("target-{token}"));
+                let staged_donor = donor_dir.join(format!("{}.bak", source.upk));
+                let staged_target = target_dir.join(format!("{}.bak", target.upk));
+                let result = (|| {
+                    fs::create_dir(&target_dir).map_err(|error| error.to_string())?;
+                    let baseline = if same_item {
+                        donor
+                    } else {
+                        fs::create_dir(&donor_dir).map_err(|error| error.to_string())?;
+                        fs::write(&staged_donor, donor).map_err(|error| error.to_string())?;
+                        super::cosmetic_upk::patch_for_target(
+                            &staged_donor,
+                            &target_backup,
+                            &staged_target,
+                            &self.base_dir,
+                            source.path.as_deref(),
+                            target.path.as_deref(),
+                        )?;
+                        if crate::speed_patch::is_active(speed) {
+                            if let Err(error) = crate::speed_patch::apply(
+                                &staged_target,
+                                Some(&target_backup),
+                                speed,
+                            ) {
+                                tracing::warn!("[Speed] {}: {error}", target.upk);
+                            }
+                        }
+                        fs::read(&staged_target).map_err(|error| error.to_string())?
+                    };
+                    let recipe = super::upk_history::Recipe {
+                        baseline: super::upk_history::baseline(cooked_pc, &baseline)?,
+                        caption: if same_item {
+                            source.name.clone()
+                        } else {
+                            format!("{} → {}", source.name, target.name)
+                        },
+                        donor: source.upk.clone(),
+                        paint,
+                        alignment: if category == SwapCategory::Bodies {
+                            Some(alignment.unwrap_or_default())
+                        } else {
+                            None
+                        },
+                        owned_paint: same_item,
+                    };
+                    let bytes = super::upk_history::render_recipe(cooked_pc, &recipe)?;
+                    fs::write(&staged_target, bytes).map_err(|error| error.to_string())?;
+                    fs::rename(&staged_target, &target_live).map_err(|error| error.to_string())?;
+                    Ok::<_, String>(recipe)
                 })();
-                if let Err(error) = thumbnail_result {
-                    let _ = fs::copy(
-                        backups_dir.join(format!("{}.bak", target.upk)),
-                        cooked_pc.join(&target.upk),
-                    );
-                    if let Some(target_bnk) = target_bnk.as_deref() {
+                let _ = fs::remove_file(&staged_donor);
+                let _ = fs::remove_file(&staged_target);
+                let _ = fs::remove_dir(&donor_dir);
+                let _ = fs::remove_dir(&target_dir);
+                history_recipe = Some(result?);
+            } else if asset_override {
+                let source_asset = source
+                    .path
+                    .as_deref()
+                    .ok_or("This decal has no catalog asset path")?;
+                let target_asset = target
+                    .path
+                    .as_deref()
+                    .ok_or("This shared decal has no catalog asset path")?;
+                let (carrier, asset) = super::decal_variant::make_carrier(
+                    copy_source,
+                    source_asset,
+                    target_asset,
+                    cooked_pc,
+                    &self.base_dir,
+                )?;
+                if same_item {
+                    painted_swap::bake_owned(&cooked_pc.join(&carrier), &source.upk, paint)?;
+                } else {
+                    painted_swap::bake(&cooked_pc.join(&carrier), &source.upk, paint)?;
+                }
+                if crate::speed_patch::is_active(speed) {
+                    crate::speed_patch::apply(&cooked_pc.join(&carrier), None, speed)?;
+                }
+                super::decal_variant::link_product(
+                    &cooked_pc.join(carrier),
+                    &asset,
+                    &target_live,
+                    &target_backup,
+                    target_asset,
+                    &self.base_dir,
+                )?;
+            } else {
+                painted_swap::patch_for_target(
+                    copy_source,
+                    &target_backup,
+                    &target_live,
+                    &self.base_dir,
+                    source.path.as_deref(),
+                    target.path.as_deref(),
+                    &source.upk,
+                    paint,
+                )
+                .map_err(|error| {
+                    format!("Failed to patch {} for {}: {error}", source.upk, target.upk)
+                })?;
+            }
+            if !editable && !asset_override && crate::speed_patch::is_active(speed) {
+                match crate::speed_patch::apply(&target_live, Some(&target_backup), speed) {
+                    Ok(0) => {}
+                    Ok(count) => {
+                        tracing::info!("[Speed] {}: scaled {count} animation values", target.upk)
+                    }
+                    Err(error) => tracing::warn!("[Speed] {}: {error}", target.upk),
+                }
+            }
+            let mut target_bnk = None;
+            if category == SwapCategory::Boosts && !same_item {
+                if let (Some(source_name), Some(target_name)) =
+                    (source.audio_bnk.as_deref(), target.audio_bnk.as_deref())
+                {
+                    let source_live = cooked_pc.join(source_name);
+                    let target_live = cooked_pc.join(target_name);
+                    let target_backup = backups_dir.join(format!("{target_name}.bak"));
+                    if !source_live.is_file() || !target_live.is_file() {
                         let _ = fs::copy(
-                            backups_dir.join(format!("{target_bnk}.bak")),
-                            cooked_pc.join(target_bnk),
+                            backups_dir.join(format!("{}.bak", target.upk)),
+                            cooked_pc.join(&target.upk),
                         );
+                        return Err(format!(
+                            "Boost audio bank missing: {} or {}",
+                            source_live.display(),
+                            target_live.display()
+                        ));
                     }
-                    let _ = fs::copy(&target_backup, &target_live);
-                    return Err(format!("Thumbnail patch failed: {error}"));
+                    if !target_backup.is_file() {
+                        fs::copy(&target_live, &target_backup)
+                            .map_err(|error| format!("Failed to back up {target_name}: {error}"))?;
+                    }
+                    if let Err(error) = patch_boost_bnk(&source_live, &target_backup, &target_live)
+                    {
+                        let _ = fs::copy(
+                            backups_dir.join(format!("{}.bak", target.upk)),
+                            cooked_pc.join(&target.upk),
+                        );
+                        return Err(error);
+                    }
+                    target_bnk = Some(target_name.to_string());
                 }
-                target_thumbnail = Some(target_name);
             }
-        }
-        if same_item {
-            // Recolouring replaces the previous visual swap with this item's
-            // own asset. Restore its original audio/preview too, retaining the
-            // backup tracking until Restore cleans up the whole change.
-            if let Some(previous) = self.active.iter().find(|swap| swap.target_matches(target)) {
-                for (name, tracked) in [
-                    (&previous.target_bnk, &mut target_bnk),
-                    (&previous.target_thumbnail, &mut target_thumbnail),
-                ] {
-                    if let Some(name) = name {
-                        fs::copy(backups_dir.join(format!("{name}.bak")), cooked_pc.join(name))
+            let mut target_thumbnail = None;
+            if !asset_override
+                && let (Some(source_name), Some(target_name)) = (
+                    inferred_thumbnail(category, source, cooked_pc),
+                    inferred_thumbnail(category, target, cooked_pc),
+                )
+            {
+                if !source_name.eq_ignore_ascii_case(&target_name) {
+                    let source_live = cooked_pc.join(&source_name);
+                    let target_live = cooked_pc.join(&target_name);
+                    let source_backup = backups_dir.join(format!("{source_name}.bak"));
+                    let target_backup = backups_dir.join(format!("{target_name}.bak"));
+                    if !target_backup.is_file() {
+                        fs::copy(&target_live, &target_backup).map_err(|error| {
+                            format!("Failed to back up thumbnail {target_name}: {error}")
+                        })?;
+                    }
+                    let thumbnail_source = if source_backup.is_file() {
+                        &source_backup
+                    } else {
+                        &source_live
+                    };
+                    let thumbnail_result = (|| {
+                        let donor_asset = crate::cosmetic_upk::thumbnail_asset_path(
+                            thumbnail_source,
+                            &self.base_dir,
+                            source.path.as_deref(),
+                        )?;
+                        let target_asset = crate::cosmetic_upk::thumbnail_asset_path(
+                            &target_backup,
+                            &self.base_dir,
+                            target.path.as_deref(),
+                        )?;
+                        crate::cosmetic_upk::patch_for_target(
+                            thumbnail_source,
+                            &target_backup,
+                            &target_live,
+                            &self.base_dir,
+                            Some(&donor_asset),
+                            Some(&target_asset),
+                        )
+                    })();
+                    if let Err(error) = thumbnail_result {
+                        let _ = fs::copy(
+                            backups_dir.join(format!("{}.bak", target.upk)),
+                            cooked_pc.join(&target.upk),
+                        );
+                        if let Some(target_bnk) = target_bnk.as_deref() {
+                            let _ = fs::copy(
+                                backups_dir.join(format!("{target_bnk}.bak")),
+                                cooked_pc.join(target_bnk),
+                            );
+                        }
+                        let _ = fs::copy(&target_backup, &target_live);
+                        return Err(format!("Thumbnail patch failed: {error}"));
+                    }
+                    target_thumbnail = Some(target_name);
+                }
+            }
+            if same_item {
+                // Recolouring replaces the previous visual swap with this item's
+                // own asset. Restore its original audio/preview too, retaining the
+                // backup tracking until Restore cleans up the whole change.
+                if let Some(previous) = self.active.iter().find(|swap| swap.target_matches(target))
+                {
+                    for (name, tracked) in [
+                        (&previous.target_bnk, &mut target_bnk),
+                        (&previous.target_thumbnail, &mut target_thumbnail),
+                    ] {
+                        if let Some(name) = name {
+                            fs::copy(
+                                backups_dir.join(format!("{name}.bak")),
+                                cooked_pc.join(name),
+                            )
                             .map_err(|error| format!("Failed to restore {name}: {error}"))?;
-                        *tracked = Some(name.clone());
+                            *tracked = Some(name.clone());
+                        }
                     }
                 }
             }
+            let label = if same_item {
+                format!("{} · {}", target.name, paint.description())
+            } else {
+                format!("{} → {}", source.name, target.name)
+            };
+            let active = ActiveSwap {
+                category: category.slug().to_string(),
+                source_name: source.name.clone(),
+                source_upk: source.upk.clone(),
+                target_name: target.name.clone(),
+                target_upk: target.upk.clone(),
+                source_product: source.product_id,
+                target_product: target.product_id,
+                target_bnk,
+                paint,
+                target_thumbnail,
+                source_asset: source.path.clone(),
+                target_asset: target.path.clone(),
+                asset_override,
+            };
+            self.active.retain(|swap| !swap.target_matches(target));
+            self.active.push(active.clone());
+            self.save_active(backups_dir)?;
+            if let Some(previous) = &swap_before {
+                let after = super::upk_history::swap_point(
+                    cooked_pc,
+                    backups_dir,
+                    &target.upk,
+                    &sidecars,
+                    Some(active.clone()),
+                )?;
+                super::upk_history::record_swap(
+                    cooked_pc,
+                    &target_live,
+                    &before,
+                    &label,
+                    history_recipe,
+                    super::upk_history::SwapTransition {
+                        before: previous.clone(),
+                        after,
+                    },
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err()
+            && let Some(previous) = &swap_before
+        {
+            self.active = previous_active;
+            let recovery = super::upk_history::replace(&target_live, &before)
+                .and_then(|()| {
+                    super::upk_history::recover_swap_point(cooked_pc, backups_dir, previous)
+                })
+                .and_then(|()| self.save_active(backups_dir));
+            if let Err(error) = recovery {
+                return Err(format!("{} Rollback failed: {error}", result.unwrap_err()));
+            }
         }
-        self.active.retain(|swap| !swap.target_matches(target));
-        self.active.push(ActiveSwap {
-            category: category.slug().to_string(),
-            source_name: source.name.clone(),
-            source_upk: source.upk.clone(),
-            target_name: target.name.clone(),
-            target_upk: target.upk.clone(),
-            target_bnk,
-            paint,
-            target_thumbnail,
-            source_asset: source.path.clone(),
-            target_asset: target.path.clone(),
-            asset_override,
-        });
-        self.save_active(backups_dir)
+        result
     }
 
     fn restore_all(
@@ -1122,6 +1420,7 @@ impl SwapperState {
             .cloned()
             && active.asset_override
         {
+            super::upk_history::check_live_package(cooked_pc, &cooked_pc.join(&active.target_upk))?;
             super::decal_variant::restore_product(
                 &cooked_pc.join(&active.target_upk),
                 &backups_dir.join(format!("{}.bak", active.target_upk)),
@@ -1135,53 +1434,103 @@ impl SwapperState {
         }
         let backup = backups_dir.join(format!("{target_upk}.bak"));
         let live = cooked_pc.join(target_upk);
+        super::upk_history::check_live_package(cooked_pc, &live)?;
         if !backup.is_file() {
             return Err(format!("Backup not found: {}", backup.display()));
         }
-        if live.exists() {
-            fs::remove_file(&live)
-                .map_err(|error| format!("Failed to remove {}: {error}", live.display()))?;
-        }
-        if let Err(error) = fs::copy(&backup, &live) {
-            return Err(format!("Failed to restore {target_upk}: {error}"));
-        }
-        fs::remove_file(&backup)
-            .map_err(|error| format!("Failed to remove {}: {error}", backup.display()))?;
-        if let Some(target_bnk) = self
+        let before = fs::read(&live)
+            .or_else(|_| fs::read(&backup))
+            .map_err(|error| error.to_string())?;
+        let active = self
             .active
             .iter()
             .find(|swap| swap.target_upk.eq_ignore_ascii_case(target_upk))
-            .and_then(|swap| swap.target_bnk.as_deref())
-        {
-            let bnk_backup = backups_dir.join(format!("{target_bnk}.bak"));
-            let bnk_live = cooked_pc.join(target_bnk);
-            if bnk_backup.is_file() {
-                fs::copy(&bnk_backup, &bnk_live)
-                    .map_err(|error| format!("Failed to restore {target_bnk}: {error}"))?;
-                fs::remove_file(&bnk_backup).map_err(|error| {
-                    format!("Failed to remove {}: {error}", bnk_backup.display())
-                })?;
-            }
-        }
-        if let Some(thumbnail) = self
-            .active
+            .cloned();
+        let sidecars = active
             .iter()
-            .find(|swap| swap.target_upk.eq_ignore_ascii_case(target_upk))
-            .and_then(|swap| swap.target_thumbnail.as_deref())
-        {
-            let thumb_backup = backups_dir.join(format!("{thumbnail}.bak"));
-            let thumb_live = cooked_pc.join(thumbnail);
-            if thumb_backup.is_file() {
-                fs::copy(&thumb_backup, &thumb_live)
-                    .map_err(|error| format!("Failed to restore {thumbnail}: {error}"))?;
-                fs::remove_file(&thumb_backup).map_err(|error| {
-                    format!("Failed to remove {}: {error}", thumb_backup.display())
-                })?;
+            .flat_map(|swap| swap.target_bnk.iter().chain(swap.target_thumbnail.iter()))
+            .filter(|name| cooked_pc.join(name).is_file())
+            .cloned()
+            .collect::<Vec<_>>();
+        let previous =
+            super::upk_history::swap_point(cooked_pc, backups_dir, target_upk, &sidecars, active)?;
+        let previous_active = self.active.clone();
+        let result = (|| {
+            super::upk_history::replace(
+                &live,
+                &fs::read(&backup).map_err(|error| error.to_string())?,
+            )?;
+            fs::remove_file(&backup)
+                .map_err(|error| format!("Failed to remove {}: {error}", backup.display()))?;
+            if let Some(target_bnk) = self
+                .active
+                .iter()
+                .find(|swap| swap.target_upk.eq_ignore_ascii_case(target_upk))
+                .and_then(|swap| swap.target_bnk.as_deref())
+            {
+                let bnk_backup = backups_dir.join(format!("{target_bnk}.bak"));
+                let bnk_live = cooked_pc.join(target_bnk);
+                if bnk_backup.is_file() {
+                    fs::copy(&bnk_backup, &bnk_live)
+                        .map_err(|error| format!("Failed to restore {target_bnk}: {error}"))?;
+                    fs::remove_file(&bnk_backup).map_err(|error| {
+                        format!("Failed to remove {}: {error}", bnk_backup.display())
+                    })?;
+                }
+            }
+            if let Some(thumbnail) = self
+                .active
+                .iter()
+                .find(|swap| swap.target_upk.eq_ignore_ascii_case(target_upk))
+                .and_then(|swap| swap.target_thumbnail.as_deref())
+            {
+                let thumb_backup = backups_dir.join(format!("{thumbnail}.bak"));
+                let thumb_live = cooked_pc.join(thumbnail);
+                if thumb_backup.is_file() {
+                    super::upk_history::replace(
+                        &thumb_live,
+                        &fs::read(&thumb_backup).map_err(|error| error.to_string())?,
+                    )?;
+                    fs::remove_file(&thumb_backup).map_err(|error| {
+                        format!("Failed to remove {}: {error}", thumb_backup.display())
+                    })?;
+                }
+            }
+            self.active
+                .retain(|swap| !swap.target_upk.eq_ignore_ascii_case(target_upk));
+            self.save_active(backups_dir)?;
+            let after = super::upk_history::swap_point(
+                cooked_pc,
+                backups_dir,
+                target_upk,
+                &sidecars,
+                None,
+            )?;
+            super::upk_history::record_swap(
+                cooked_pc,
+                &live,
+                &before,
+                "Restore item",
+                None,
+                super::upk_history::SwapTransition {
+                    before: previous.clone(),
+                    after,
+                },
+            )?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.active = previous_active;
+            let recovery = super::upk_history::replace(&live, &before)
+                .and_then(|()| {
+                    super::upk_history::recover_swap_point(cooked_pc, backups_dir, &previous)
+                })
+                .and_then(|()| self.save_active(backups_dir));
+            if let Err(error) = recovery {
+                return Err(format!("{} Rollback failed: {error}", result.unwrap_err()));
             }
         }
-        self.active
-            .retain(|swap| !swap.target_upk.eq_ignore_ascii_case(target_upk));
-        self.save_active(backups_dir)
+        result
     }
 
     fn apply_recolour(
@@ -1204,30 +1553,35 @@ impl SwapperState {
         }
     }
 
-    pub fn render_recolour_controls(&mut self, ui: &mut egui::Ui, tx: &Sender<AppMsg>) {
+    pub fn render_recolour_categories(&mut self, ui: &mut egui::Ui) {
         let before = self.recolour_category;
-        egui::ComboBox::from_id_salt("recolour_category")
-            .selected_text(self.recolour_category.label())
-            .show_ui(ui, |ui| {
-                for category in SwapCategory::ALL
-                    .into_iter()
-                    .filter(|c| c.supports_recolour())
-                {
-                    ui.selectable_value(&mut self.recolour_category, category, category.label());
-                }
-            });
+        let mut categories: Vec<_> = SwapCategory::ALL.into_iter().filter(|c| c.supports_recolour()).collect();
+        categories.sort_by_key(|category| category.label().to_lowercase());
+        for category in categories {
+            ui.selectable_value(&mut self.recolour_category, category, category.label());
+        }
+        if before != self.recolour_category {
+            self.recolour_selected.clear();
+            self.recolour_status = None;
+            self.recolour_page = 0;
+        }
+    }
+
+    pub fn render_recolour_controls(&mut self, ui: &mut egui::Ui, tx: &Sender<AppMsg>) {
         if ui.button(t("app-reload-catalogs")).clicked() {
             let _ = tx.send(AppMsg::ReloadCatalogs);
         }
         let filter_changed = ui
-            .checkbox(&mut self.recolour_show_applied, t("recolour-show-recoloured"))
+            .checkbox(
+                &mut self.recolour_show_applied,
+                t("recolour-show-recoloured"),
+            )
             .on_hover_text(t("recolour-show-recoloured-hint"))
             .changed();
-        if before != self.recolour_category {
-            self.recolour_selected = None;
-            self.recolour_status = None;
-        }
-        if before != self.recolour_category || filter_changed {
+        let painted_filter_changed = ui
+            .checkbox(&mut self.recolour_painted_only, t("recolour-painted-only"))
+            .changed();
+        if filter_changed || painted_filter_changed {
             self.recolour_page = 0;
         }
     }
@@ -1239,10 +1593,12 @@ impl SwapperState {
         backups_dir: &Path,
         tx: &Sender<AppMsg>,
         owned_ids: &HashSet<i64>,
+        owned_paints: &crate::owned_inventory::OwnedPaints,
     ) {
         self.collect_thumbnails();
         self.load_active(backups_dir);
         ui.add_space(8.0);
+        ui.weak(t("recolour-multi-hint"));
         if browser::search(ui, &mut self.recolour_search, t("recolour-search")) {
             self.recolour_page = 0;
         }
@@ -1257,7 +1613,7 @@ impl SwapperState {
             }
         }
         if owned_ids.is_empty() {
-            self.recolour_selected = None;
+            self.recolour_selected.clear();
             ui.weak(t("recolour-no-inventory"));
             return;
         }
@@ -1280,6 +1636,10 @@ impl SwapperState {
             .filter(|(index, item)| {
                 can_recolour_owned(category, item, owned_ids)
                     && resolved[*index].available
+                    && (!self.recolour_painted_only
+                        || item
+                            .product_id
+                            .is_some_and(|id| owned_paints.contains_key(&id)))
                     && (!self.recolour_show_applied
                         || self.active.iter().any(|active| {
                             active.category == category.slug()
@@ -1290,27 +1650,57 @@ impl SwapperState {
             .map(|(index, _)| index)
             .collect();
         // Account/catalogue changes must invalidate the selection before an action.
-        let selected = self.recolour_selected.as_ref().and_then(|key| {
-            owned
-                .iter()
-                .copied()
-                .find(|&index| item_identity(&items[index]) == *key)
-        });
-        if selected.is_none() {
-            self.recolour_selected = None;
-        }
-        if let Some(index) = selected {
-            let item = &items[index];
+        let owned_by_key: HashMap<_, _> = owned
+            .iter()
+            .map(|&index| (item_identity(&items[index]), index))
+            .collect();
+        self.recolour_selected
+            .retain(|key| owned_by_key.contains_key(key));
+        let selected: Vec<_> = self
+            .recolour_selected
+            .iter()
+            .map(|key| owned_by_key[key])
+            .collect();
+        if let Some(&index) = selected.first() {
             ui.separator();
-            ui.strong(item_label(category, item));
-            ui.push_id(("recolour_paint", category, item_identity(item)), |ui| {
+            let item = &items[index];
+            if selected.len() == 1 {
+                ui.strong(item_label(category, item));
+                if let Some(paints) = item.product_id.and_then(|id| owned_paints.get(&id)) {
+                    let colours = paints
+                        .iter()
+                        .map(|&id| painted_swap::factory_paint_label(id))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    ui.weak(t_args(
+                        "recolour-owned-paints",
+                        &[("paints", colours.into())],
+                    ));
+                    ui.weak(t("recolour-all-copies"));
+                }
+            } else {
+                ui.strong(t_args(
+                    "recolour-multi-selected",
+                    &[("count", (selected.len() as i64).into())],
+                ));
+            }
+            ui.push_id(("recolour_paint", category), |ui| {
                 painted_swap::controls(ui, &mut self.recolour_paint)
             });
-            let active = self
+            let active_items: Vec<_> = selected
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    self.active
+                        .iter()
+                        .any(|active| active.target_matches(&items[index]))
+                })
+                .collect();
+            if let Some(active) = self
                 .active
                 .iter()
-                .find(|active| active.target_matches(item));
-            if let Some(active) = active {
+                .find(|active| selected.len() == 1 && active.target_matches(item))
+            {
                 ui.weak(t_args(
                     "recolour-applied",
                     &[
@@ -1323,7 +1713,7 @@ impl SwapperState {
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
-                        self.recolour_paint != SwapPaint::Default || active.is_some(),
+                        self.recolour_paint != SwapPaint::Default || !active_items.is_empty(),
                         egui::Button::new(if self.recolour_paint == SwapPaint::Default {
                             t("recolour-restore-original")
                         } else {
@@ -1335,7 +1725,10 @@ impl SwapperState {
                     requested = Some(self.recolour_paint);
                 }
                 if ui
-                    .add_enabled(active.is_some(), egui::Button::new(t("app-restore")))
+                    .add_enabled(
+                        !active_items.is_empty(),
+                        egui::Button::new(t("app-restore")),
+                    )
                     .clicked()
                 {
                     requested = Some(SwapPaint::Default);
@@ -1343,30 +1736,63 @@ impl SwapperState {
             });
             if let Some(paint) = requested {
                 if !crate::messages::block_item_action_if_game_running(tx) {
-                    let result = self
-                        .apply_recolour(category, item, paint, owned_ids, cooked_pc, backups_dir)
-                        .map(|()| {
-                            if paint == SwapPaint::Default {
-                                t_args(
-                                    "recolour-restored",
-                                    &[("item", item_label(category, item).into())],
-                                )
-                            } else {
-                                t_args(
-                                    "recolour-recoloured",
-                                    &[
-                                        ("item", item_label(category, item).into()),
-                                        ("paint", paint.description().into()),
-                                    ],
-                                )
-                            }
-                        });
-                    let log = match &result {
-                        Ok(message) => format!("[Recolour] {message}"),
-                        Err(error) => format!("[Recolour] Error: {error}"),
+                    let targets = if paint == SwapPaint::Default {
+                        &active_items
+                    } else {
+                        &selected
                     };
-                    let _ = tx.send(AppMsg::Log(log));
-                    self.recolour_status = Some(result);
+                    let mut successes = Vec::new();
+                    let mut failures = Vec::new();
+                    for &index in targets {
+                        let item = &items[index];
+                        let label = item_label(category, item);
+                        match self.apply_recolour(
+                            category,
+                            item,
+                            paint,
+                            owned_ids,
+                            cooked_pc,
+                            backups_dir,
+                        ) {
+                            Ok(()) => {
+                                let message = if paint == SwapPaint::Default {
+                                    t_args("recolour-restored", &[("item", label.into())])
+                                } else {
+                                    t_args(
+                                        "recolour-recoloured",
+                                        &[
+                                            ("item", label.into()),
+                                            ("paint", paint.description().into()),
+                                        ],
+                                    )
+                                };
+                                let _ = tx.send(AppMsg::Log(format!("[Recolour] {message}")));
+                                successes.push(message);
+                            }
+                            Err(error) => {
+                                let message = format!("{label}: {error}");
+                                let _ = tx.send(AppMsg::Log(format!("[Recolour] {message}")));
+                                failures.push(message);
+                            }
+                        }
+                    }
+                    let summary = if targets.len() == 1 {
+                        successes.pop().unwrap_or_default()
+                    } else {
+                        t_args(
+                            "recolour-multi-result",
+                            &[
+                                ("count", (successes.len() as i64).into()),
+                                ("total", (targets.len() as i64).into()),
+                            ],
+                        )
+                    };
+                    self.recolour_status = Some(if failures.is_empty() {
+                        Ok(summary)
+                    } else {
+                        failures.insert(0, summary);
+                        Err(failures.join("\n").trim().to_owned())
+                    });
                 }
             }
         }
@@ -1396,11 +1822,11 @@ impl SwapperState {
                 self.queue_thumbnail(ui, category, filename, cooked_pc, &items[index]);
             }
         }
-        let tile_height = browser::tile_height(ui);
+        let tile_height = browser::TILE_HEIGHT;
         egui::ScrollArea::vertical()
             .id_salt("recolour_items")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(columns) {
                     ui.columns(columns, |columns| {
                         for (column, &index) in row.iter().enumerate() {
@@ -1414,7 +1840,7 @@ impl SwapperState {
                                 category,
                                 item,
                                 thumbnail,
-                                selected == Some(index),
+                                selected.contains(&index),
                                 self.active.iter().any(|active| {
                                     active.category == category.slug()
                                         && active.target_matches(item)
@@ -1423,24 +1849,136 @@ impl SwapperState {
                             )
                             .clicked()
                             {
-                                self.recolour_selected = Some(item_identity(item));
-                                self.recolour_paint = self
-                                    .active
-                                    .iter()
-                                    .find(|active| active.target_matches(item))
-                                    .map_or(SwapPaint::Default, |active| active.paint);
+                                let key = item_identity(item);
+                                if !self.recolour_selected.is_empty()
+                                    && columns[column].input(|input| input.modifiers.ctrl)
+                                {
+                                    if let Some(position) = self
+                                        .recolour_selected
+                                        .iter()
+                                        .position(|selected| selected == &key)
+                                    {
+                                        self.recolour_selected.remove(position);
+                                    } else {
+                                        self.recolour_selected.push(key);
+                                    }
+                                } else {
+                                    self.recolour_selected.clear();
+                                    self.recolour_selected.push(key);
+                                    self.recolour_paint = self
+                                        .active
+                                        .iter()
+                                        .find(|active| active.target_matches(item))
+                                        .map_or(SwapPaint::Default, |active| active.paint);
+                                }
                                 self.recolour_status = None;
                             }
                         }
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
     }
 
     pub fn active_count(&mut self, backups_dir: &Path) -> usize {
         self.load_active(backups_dir);
         self.active.len()
+    }
+
+    pub(super) fn history_item_name(&self, file: &str) -> Option<&str> {
+        SwapCategory::ALL.iter().find_map(|category| {
+            self.catalogs.get(category)?.iter()
+                .find(|item| item.upk.eq_ignore_ascii_case(file))
+                .map(|item| item.name.as_str())
+        })
+    }
+
+    pub(crate) fn show_body_preview(&mut self, ui: &mut egui::Ui, cooked_pc: &Path, id: i64) {
+        self.show_loadout_preview(ui, cooked_pc, SwapCategory::Bodies, id);
+    }
+
+    pub(crate) fn show_loadout_preview(&mut self, ui: &mut egui::Ui, cooked_pc: &Path, category: SwapCategory, id: i64) {
+        let item = self.catalogs.get(&category).and_then(|items| {
+            items.iter().find(|item| item.product_id == Some(id))
+        }).cloned();
+        let mut preview = browser::Preview::Missing;
+        if let Some(item) = item {
+            if let Some(filename) = preview_thumbnail(category, &item, cooked_pc) {
+                self.collect_thumbnails();
+                self.queue_thumbnail(ui, category, &filename, cooked_pc, &item);
+                preview = self.browser_preview(category, &item, &ResolvedItem {
+                    thumbnail: Some(filename),
+                    available: true,
+                });
+            }
+        }
+        if matches!(preview, browser::Preview::Missing | browser::Preview::Failed(_)) {
+            preview = browser::Preview::Ready(crate::ui::browser::fallback_image(Path::new("")));
+        }
+        browser::preview(ui, &format!("loadout-body-{id}"), preview, 64.0, false);
+    }
+
+    /// Catalog name of a product, if it is in the local catalog.
+    pub fn product_name(&self, category: SwapCategory, product_id: i64) -> Option<String> {
+        let items = self.catalogs.get(&category)?;
+        let item = items.iter().find(|item| item.product_id == Some(product_id))?;
+        Some(item.name.clone())
+    }
+
+    pub(crate) fn loadout_item_compatible(&self, category: SwapCategory, product: i64, body: i64) -> bool {
+        if category != SwapCategory::Skins { return true; }
+        let body_name = self.product_name(SwapCategory::Bodies, body);
+        self.catalogs.get(&category).is_some_and(|items| items.iter().any(|item| {
+            item.product_id == Some(product) && (
+                item.car_product_id == Some(body)
+                || item.car_name.as_deref().is_some_and(is_universal_car)
+                || item.car_name.as_ref().zip(body_name.as_ref()).is_some_and(|(car, body)| normalized_label(car) == normalized_label(body))
+            )
+        }))
+    }
+
+    /// Swap entries for a preset: each pick shows `product` where `stock_product` is equipped.
+    /// Returns the entries and the reasons picks were skipped.
+    pub fn bakkes_preset_swaps(&self, picks: &[SwapPick]) -> (Vec<Value>, Vec<String>) {
+        let mut swaps = Vec::new();
+        let mut skipped = Vec::new();
+        for pick in picks {
+            let Some(items) = self.catalogs.get(&pick.category) else {
+                skipped.push(format!("{}: catalog unavailable", pick.category.slug()));
+                continue;
+            };
+            let find = |id: i64| items.iter().find(|item| item.product_id == Some(id));
+            let (Some(source), Some(target)) = (find(pick.stock_product), find(pick.product)) else {
+                skipped.push(format!(
+                    "{}: product {} or stock {} is not in the catalog",
+                    pick.category.slug(),
+                    pick.product,
+                    pick.stock_product
+                ));
+                continue;
+            };
+            let paint = match pick.paint {
+                0 => SwapPaint::Default,
+                paint => SwapPaint::Preset(paint),
+            };
+            let swap = ActiveSwap {
+                category: pick.category.slug().to_string(),
+                source_name: source.name.clone(),
+                source_upk: source.upk.clone(),
+                target_name: target.name.clone(),
+                target_upk: target.upk.clone(),
+                source_product: source.product_id,
+                target_product: target.product_id,
+                target_bnk: None,
+                paint,
+                target_thumbnail: None,
+                source_asset: source.path.clone(),
+                target_asset: target.path.clone(),
+                asset_override: false,
+            };
+            swaps.push(serde_json::to_value(swap).expect("swap serializes"));
+        }
+        (swaps, skipped)
     }
 
     pub fn apply_preset_swaps(
@@ -1478,10 +2016,7 @@ impl SwapperState {
                 report.skipped_indexes.push(index);
                 continue;
             };
-            let Some(source) = items
-                .iter()
-                .find(|item| saved.source_matches(item))
-                .cloned()
+            let Some(source) = saved.catalog_item(&items, true).cloned()
             else {
                 report.skipped.push(format!(
                     "{}: item is not in the local {} catalog",
@@ -1491,10 +2026,7 @@ impl SwapperState {
                 report.skipped_indexes.push(index);
                 continue;
             };
-            let Some(target) = items
-                .iter()
-                .find(|item| saved.target_matches(item))
-                .cloned()
+            let Some(target) = saved.catalog_item(&items, false).cloned()
             else {
                 report.skipped.push(format!(
                     "{}: target is not in the local {} catalog",
@@ -1825,11 +2357,11 @@ impl SwapperState {
                 self.queue_thumbnail(ui, category, filename, cooked_pc, &items[target_index]);
             }
         }
-        let tile_height = browser::tile_height(ui);
+        let tile_height = browser::TILE_HEIGHT;
         egui::ScrollArea::vertical()
             .id_salt(("swapper_walkthrough_targets", category))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, &target_index) in row.iter().enumerate() {
@@ -1861,7 +2393,7 @@ impl SwapperState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
 
         if apply {
             let Some(target_index) = self.walkthrough_target else {
@@ -1917,6 +2449,39 @@ impl SwapperState {
         tx: &Sender<AppMsg>,
         owned_ids: &HashSet<i64>,
     ) -> bool {
+        self.render_tab_with_inventory(ui, category, cooked_pc, backups_dir, tx, owned_ids, None)
+    }
+
+    pub fn render_owned_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        backups_dir: &Path,
+        tx: &Sender<AppMsg>,
+        inventory: &mut crate::owned_inventory::OwnedInventory,
+    ) -> bool {
+        self.render_tab_with_inventory(
+            ui,
+            category,
+            cooked_pc,
+            backups_dir,
+            tx,
+            &HashSet::new(),
+            Some(inventory),
+        )
+    }
+
+    fn render_tab_with_inventory(
+        &mut self,
+        ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        backups_dir: &Path,
+        tx: &Sender<AppMsg>,
+        owned_ids: &HashSet<i64>,
+        inventory: Option<&mut crate::owned_inventory::OwnedInventory>,
+    ) -> bool {
         let mut owned_filter_requested = false;
         self.load_active(backups_dir);
         self.collect_thumbnails();
@@ -1928,7 +2493,7 @@ impl SwapperState {
             self.walkthrough_target = None;
         }
         ui.horizontal_top(|ui| {
-            ui.heading(category.label());
+            crate::theme::page_heading(ui, category.label());
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                 egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true),
@@ -1982,6 +2547,18 @@ impl SwapperState {
                 },
             );
         });
+        let owned_snapshot = inventory.map(|inventory| {
+            inventory.show_with_actions(ui, |ui| {
+                if ui.checkbox(&mut self.owned_only, t("tab-show-only-owned-replacements")).changed() {
+                    owned_filter_requested = self.owned_only;
+                }
+            });
+            inventory.ids.clone()
+        });
+        let owned_ids = owned_snapshot.as_ref().unwrap_or(owned_ids);
+        if owned_snapshot.is_none() && ui.checkbox(&mut self.owned_only, t("tab-show-only-owned-replacements")).changed() {
+            owned_filter_requested = self.owned_only;
+        }
         ui.weak(t(&format!("items-browser-subtitle-{}", category.slug())));
         ui.add_space(8.0);
         let selecting_target =
@@ -2005,17 +2582,9 @@ impl SwapperState {
                 self.page.insert(category, 0);
             }
         }
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(&mut self.owned_only, t("tab-show-only-owned-replacements"))
-                .changed()
-            {
-                owned_filter_requested = self.owned_only;
-            }
-            if self.owned_only && owned_ids.is_empty() {
-                ui.weak(t("items-browser-no-owned-products"));
-            }
-        });
+        if self.owned_only && owned_ids.is_empty() {
+            ui.weak(t("items-browser-no-owned-products"));
+        }
         ui.add_space(6.0);
 
         if self.walkthrough_mode {
@@ -2040,11 +2609,12 @@ impl SwapperState {
                 }
             }
             egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
+                .fill(egui::Color32::from_white_alpha(24))
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.vertical_centered(|ui| {
                         ui.strong(if self.walkthrough_step == WalkthroughStep::SelectSource {
                             t("tab-walkthrough-find-item")
                         } else {
@@ -2253,11 +2823,11 @@ impl SwapperState {
                 });
                 ui.add_space(8.0);
             }
-            let tile_height = browser::tile_height(ui);
+            let tile_height = browser::TILE_HEIGHT;
             egui::ScrollArea::vertical()
                 .id_salt(("swapper_walkthrough_sources", category))
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     for row in visible.chunks(column_count) {
                         ui.columns(column_count, |columns| {
                             for (column, &source_index) in row.iter().enumerate() {
@@ -2292,14 +2862,14 @@ impl SwapperState {
                         });
                         ui.add_space(6.0);
                     }
-                });
+                }));
             return owned_filter_requested;
         }
         let mut action: Option<(usize, usize, bool, SwapPaint, f32)> = None;
         egui::ScrollArea::vertical()
             .id_salt(("swapper_grid", category))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, &source_index) in row.iter().enumerate() {
@@ -2341,10 +2911,14 @@ impl SwapperState {
                                 |ui| {
                                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                     let tile_width = ui.available_width();
-                                    ui.set_min_height(238.0);
+                                            // Manual mode cards include several controls under the
+                                            // preview. Give the image a taller viewport and reserve
+                                            // enough card height so the preview and controls don't
+                                            // get squeezed into a short strip.
+                                            ui.set_min_height(330.0);
                                     ui.vertical_centered(|ui| {
                                         let source_label = item_label(category, source);
-                                        browser::preview(ui, &key, thumbnail, 100.0);
+                                                browser::preview(ui, &key, thumbnail, 150.0, true);
                                         browser::name(ui, &source_label, &source.upk);
                                         if category == SwapCategory::Skins {
                                             ui.add(
@@ -2513,7 +3087,7 @@ impl SwapperState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
         if let Some((source_index, target_index, restoring, paint, speed)) = action {
             if crate::messages::block_item_action_if_game_running(tx) {
                 return owned_filter_requested;
@@ -2604,6 +3178,88 @@ mod recolour_tests {
     }
 
     #[test]
+    fn body_swap_inherits_history_edits_and_keeps_them_independent() {
+        use crate::patcher::{upk_history, wheel_alignment};
+        let Some(game) = std::env::var_os("HEBNIX_RECOLOUR_GAME_DIR").map(PathBuf::from) else {
+            return;
+        };
+        let root =
+            std::env::temp_dir().join(format!("hebnix-history-fixture-{}", rand::random::<u64>()));
+        let cooked = root.join("TAGame/CookedPCConsole");
+        let backups = cooked.join("Backups");
+        fs::create_dir_all(&cooked).unwrap();
+        fs::create_dir_all(root.join("Binaries/Win64")).unwrap();
+        fs::write(root.join("Binaries/Win64/RocketLeague.exe"), b"fixture").unwrap();
+
+        let source = catalog_item(SwapCategory::Bodies, "Body_Grain_SF.upk");
+        let target = catalog_item(SwapCategory::Bodies, "Body_Octane_SF.upk");
+        for item in [&source, &target] {
+            let backup = game.join("Backups").join(format!("{}.bak", item.upk));
+            fs::copy(
+                if backup.is_file() {
+                    backup
+                } else {
+                    game.join(&item.upk)
+                },
+                cooked.join(&item.upk),
+            )
+            .unwrap();
+        }
+        let target_live = cooked.join(&target.upk);
+        let original = fs::read(&target_live).unwrap();
+        let alignment = serde_json::from_str(r#"{"camber":10,"vertical":1,"lateral":2}"#).unwrap();
+        wheel_alignment::transaction(
+            &cooked,
+            &source.upk,
+            alignment,
+            wheel_alignment::TransactionAction::Apply,
+        )
+        .unwrap();
+        let source_live = cooked.join(&source.upk);
+        let mut source_edit = upk_history::current_recipe(&cooked, &source_live)
+            .unwrap()
+            .unwrap();
+        source_edit.paint = SwapPaint::Custom([32, 128, 240]);
+        upk_history::edit_current(&cooked, &source.upk, source_edit.clone()).unwrap();
+        let source_bytes = fs::read(&source_live).unwrap();
+
+        let mut swapper = SwapperState::new(&root);
+        swapper
+            .apply_swap(
+                SwapCategory::Bodies,
+                &source,
+                &target,
+                SwapPaint::Default,
+                1.0,
+                &cooked,
+                &backups,
+            )
+            .unwrap();
+        let mut swap_edit = upk_history::current_recipe(&cooked, &target_live)
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap_edit.alignment, Some(alignment));
+        assert_eq!(swap_edit.paint, source_edit.paint);
+        let painted = fs::read(&target_live).unwrap();
+        swap_edit.paint = SwapPaint::Default;
+        upk_history::edit_current(&cooked, &target.upk, swap_edit).unwrap();
+        assert_ne!(fs::read(&target_live).unwrap(), painted);
+        assert_eq!(
+            upk_history::current_recipe(&cooked, &target_live)
+                .unwrap()
+                .unwrap()
+                .alignment,
+            Some(alignment)
+        );
+        assert_eq!(fs::read(source_live).unwrap(), source_bytes);
+        swapper
+            .restore_swap(&target.upk, &cooked, &backups)
+            .unwrap();
+        assert_eq!(fs::read(&target_live).unwrap(), original);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn recolour_round_trip_and_preset_replay_with_installed_assets() {
         let Some(game) = std::env::var_os("HEBNIX_RECOLOUR_GAME_DIR").map(PathBuf::from) else {
             return;
@@ -2618,6 +3274,7 @@ mod recolour_tests {
         let mut state = SwapperState::new(&root);
         let owned = HashSet::from([123]);
         for (category, file) in [
+            (SwapCategory::Bodies, "Body_Grain_SF.upk"),
             (SwapCategory::Bodies, "Body_Backfire_SF.upk"),
             (SwapCategory::Wheels, "wheel_hiro_SF.upk"),
             (SwapCategory::Boosts, "Boost_Standard_SF.upk"),
@@ -2647,6 +3304,40 @@ mod recolour_tests {
                 .unwrap();
             let coloured = fs::read(&live).unwrap();
             assert_ne!(coloured, pristine);
+            if file == "Body_Grain_SF.upk" {
+                use crate::patcher::upk_package::{UpkPackage, strip};
+                let attributes = |path: &Path| {
+                    let package = UpkPackage::load(path).unwrap();
+                    let mut classes = Vec::new();
+                    for export in &package.exports {
+                        if !strip(&package.class_of(export)).starts_with("ProductAsset_") {
+                            continue;
+                        }
+                        let (props, _) = package.serialized_props(export).unwrap();
+                        for array in props.iter().filter(|p| p.name == "Attributes") {
+                            let at = export.serial_offset + array.value_offset;
+                            let count = package.read_int(at).unwrap();
+                            for index in 0..count as usize {
+                                let reference = package.read_int(at + 4 + index * 4).unwrap();
+                                classes.push(if reference == 0 {
+                                    String::new()
+                                } else {
+                                    package.reference_class(reference).unwrap().1
+                                });
+                            }
+                        }
+                    }
+                    classes
+                };
+                let mut original = attributes(&backups.join(format!("{file}.bak")));
+                let original_count = original.len();
+                original.retain(|class| class != "ProductAttribute_PaintSettings_TA");
+                assert!(
+                    original.len() < original_count,
+                    "Fennec must exercise factory paint suppression"
+                );
+                assert_eq!(attributes(&live), original);
+            }
             assert_eq!(
                 fs::read(backups.join(format!("{file}.bak"))).unwrap(),
                 pristine
@@ -2794,6 +3485,8 @@ mod variant_catalog_tests {
             source_upk: bronze.upk.clone(),
             target_name: silver.name.clone(),
             target_upk: silver.upk.clone(),
+            source_product: bronze.product_id,
+            target_product: silver.product_id,
             target_bnk: None,
             paint: SwapPaint::Default,
             target_thumbnail: None,
@@ -2808,6 +3501,11 @@ mod variant_catalog_tests {
         assert!(saved.target_matches(silver));
         assert!(!saved.target_matches(bronze));
         assert_eq!(saved.key(), item_identity(silver));
+        let mut updated = silver.clone();
+        updated.upk = "UpdatedSeasonTwelve.upk".into();
+        updated.path = Some("UpdatedSeasonTwelve.Silver".into());
+        let catalog = [bronze.clone(), updated];
+        assert_eq!(saved.catalog_item(&catalog, false).unwrap().upk, "UpdatedSeasonTwelve.upk");
     }
 }
 
@@ -2842,11 +3540,11 @@ mod theme_content_space_tests {
             ui.horizontal(|ui|{for label in ["Item Swapper","Item Spawner","Animation Speed","Wheel Alignment","Ball Appearance"] {let _=ui.selectable_label(label=="Item Swapper",label);}});
             ui.separator();
             theme::secondary_navigation(ui,"space_test_categories").show(ui,|ui| {
-                egui::ScrollArea::vertical().auto_shrink([false,false]).show(ui,|ui| {
+                egui::ScrollArea::vertical().auto_shrink([false,false]).show(ui,|ui| crate::panel::followed(ui, |ui| {
                     for label in ["Ball Patcher","Boost Patcher","Decal Patcher","Car Patcher"] {let _=ui.selectable_label(false,label);}
                     ui.separator();
                     for category in SwapCategory::ALL {let _=ui.selectable_label(category==SwapCategory::Bodies,category.label());}
-                });
+                }));
             });
             egui::CentralPanel::default().frame(crate::i18n::layout::subtab_content_frame()).show(ui,|ui| {
                 assert!(!swapper.render_tab(ui,SwapCategory::Bodies,&cooked,&backups,&tx,&HashSet::new()));

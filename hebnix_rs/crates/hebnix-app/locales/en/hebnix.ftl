@@ -19,6 +19,60 @@ tab-colours = Colours
 tab-settings = Settings
 tab-plugins = Plugins
 tab-replays = Replays
+tab-game-mods = Game Mods
+tab-freeplay = Freeplay
+delete-backups = Delete backups
+delete-backups-confirm = Yes, delete backups
+delete-backups-cancel = Cancel
+delete-backups-note = Main use: after a game update, when the old backups no longer match the game. Deletes Hebnix's copies of the original game files. Mods that are on stay on, but can no longer be turned off. To get clean files, use Verify game files in Epic or Steam.
+game-mod-forfeit = Forfeit command
+game-mod-forfeit-description = Adds a Forfeit command you can bind to a key, to start the forfeit vote in matches that allow it. Rocket League must be closed to switch it on or off.
+game-mod-forfeit-key = Forfeit key
+game-mod-forfeit-on = Forfeit command is on.
+game-mod-forfeit-off = Forfeit command is off.
+game-mod-controller-button = Controller button
+game-mod-press-a-button = Press a button on your controller...
+game-mod-no-controller-button = None
+game-mod-bind-controller = Bind controller
+game-mod-clear-controller = Clear
+game-mod-chat-export = Chat export
+game-mod-chat-export-description = Saves the text chat you see in matches to a file, one JSON line per message, for plugins to read. Rocket League must be closed to switch it on or off.
+game-mod-chat-export-on = Chat export is on.
+game-mod-chat-export-off = Chat export is off.
+game-mod-lan-commands = LAN chat commands
+game-mod-lan-commands-description = When you host a LAN match, type !map <map name> (for example !map Stadium_P) in the text chat to change the map, or !kick <player name> to kick a player. Only the host can use them. Rocket League must be closed to switch it on or off.
+game-mod-lan-commands-on = LAN chat commands are on.
+game-mod-lan-commands-off = LAN chat commands are off.
+game-mod-chat-paste = Chat paste
+game-mod-chat-paste-description = Lets you paste text into the match chat box with Ctrl+V. Rocket League must be closed to switch it on or off.
+game-mod-chat-paste-on = Chat paste is on.
+game-mod-chat-paste-off = Chat paste is off.
+game-mod-celebration-key = Celebration key
+game-mod-celebration-on = Celebration command is on.
+game-mod-celebration-off = Celebration command is off.
+game-mod-instant-suite = Instant suite
+game-mod-instant-suite-description = When a match ends, automatically requeue, go to freeplay, leave to the main menu or load a Workshop map as the winner screen appears. Rocket League must be closed to switch it on or off. The action can be changed while you play, but Hebnix has to be open for it to happen.
+game-mod-instant-suite-mode = After a match
+game-mod-instant-suite-private = Enable for private matches and training
+game-mod-instant-suite-tournaments = Enable for tournaments
+game-mod-instant-suite-mode-nothing = Do nothing
+game-mod-instant-suite-mode-requeue = Requeue
+game-mod-instant-suite-mode-freeplay = Go to freeplay
+game-mod-instant-suite-mode-menu = Leave to main menu
+game-mod-instant-suite-mode-workshop = Load a Workshop map
+game-mod-instant-suite-map = Map
+game-mod-instant-suite-pick-map = Pick a map
+game-mod-instant-suite-reload-maps = Reload
+game-mod-instant-suite-needs-menu = Enable the in-game Workshop menu (Workshop tab) first. It loads the map.
+game-mod-instant-suite-on = Instant suite is on.
+game-mod-instant-suite-off = Instant suite is off.
+game-mod-celebration = Celebration
+game-mod-celebration-description = Adds a Celebration command you can bind to a key, to put the cars on the podium in freeplay whenever you like. Rocket League must be closed to switch it on or off.
+game-mod-bots-freeplay = Bots in freeplay
+game-mod-bots-freeplay-key = Bots in freeplay key
+game-mod-bots-freeplay-on = Bots in freeplay command is on.
+game-mod-bots-freeplay-off = Bots in freeplay command is off.
+game-mod-bots-freeplay-description = Adds a bot to freeplay each time you press the key you bind it to. Rocket League must be closed to switch it on or off.
 app-automatically-upload-replays = Auto Save/Upload Replays
 tab-about = About
 
@@ -65,9 +119,18 @@ settings-heading-action-button = Action Button
 settings-keybind-label = Open/Close Keybind:
 settings-keybind-listening = Listening...
 settings-keybind-set = Set Keybind
+settings-appearance-general = General
+settings-appearance-theme = Theme
 settings-theme-label = Theme:
+settings-import-themes = Import Themes
 settings-open-fonts-folder = Open Fonts Folder
 settings-opacity-label = Window Opacity:
+settings-overlay-font-label = Overlay font:
+settings-overlay-font-default = Default
+settings-overlay-font-weight-label = Overlay font weight:
+settings-overlay-font-weight-hint = Only for variable fonts (like Lexend-VariableFont_wght). Bold is what plugins draw with bold = true.
+settings-overlay-font-weight-regular = Regular
+settings-overlay-font-weight-bold = Bold
 console-themes-rescanned = Themes directory rescanned and updated.
 console-theme-changed = Theme changed to '{ $theme }'.
 console-theme-failed = Theme '{ $theme }' failed to load. Defaulted to Dark mode. Check theme_errors.txt
@@ -185,7 +248,7 @@ console-swapper-restored =
     }.
 
 ## app.rs
-presets-presets = Presets
+presets-presets = Swapper presets
 presets-save-and-restore-named-collections-of = Save and restore named collections of your current item changes.
 presets-name = Name:
 presets-include-patches = Include patches
@@ -196,7 +259,7 @@ presets-no-presets-saved = No presets saved.
 presets-preset-contents-are-shown-above-applying = Preset contents are shown above; applying a preset will be enabled alongside the patch restore/apply operations.
 spoofer-spoofer-settings = Spoofer Settings
 spoofer-name-title = Name & Title
-spoofer-rank = Rank
+spoofer-rank = Ranks
 spoofer-friends = Friends
 spoofer-enable-spoofer = Enable Spoofer
 spoofer-account-proxy = Account Proxy
@@ -232,7 +295,9 @@ spoofer-search = Search:
 spoofer-revert-all = Revert All
 spoofer-spoofed-name = Spoofed Name
 spoofer-rank-spoofing = Rank Spoofing
-spoofer-enable-rank-spoofing = Enable Rank Spoofing
+spoofer-apply-ranks = Apply ranks
+spoofer-restore-ranks = Restore ranks
+spoofer-restore-ranks-help = Restore the original rank display for all playlists. Your selections are kept for next time.
 spoofer-mmr = MMR
 overlay-order-drag-to-reorder-renders-based-on = Drag to reorder. Renders based on number order.
 plugins-install-plugin = Install Plugin
@@ -291,6 +356,12 @@ recolour-scope = Changes affect local game assets and all copies of the item. En
 recolour-search = Search owned items
 recolour-show-recoloured = Show Recoloured Items
 recolour-show-recoloured-hint = Show only owned items with a colour currently applied.
+recolour-painted-only = Show only factory-painted items
+recolour-owned-paints = Owned factory colours: { $paints }
+recolour-all-copies = The local recolour applies to all copies that use this asset.
+recolour-multi-hint = Hold Ctrl and click to select multiple items in this category.
+recolour-multi-selected = { $count } items selected
+recolour-multi-result = Updated { $count } of { $total } items.
 recolour-no-inventory = No owned products were found. Refresh the selected account's inventory above.
 recolour-loading-catalogue = Loading item catalogue…
 recolour-applied = Applied: { $item } · { $paint }
@@ -327,6 +398,19 @@ app-rlapi = RLAPI
 app-ball-appearance = Ball Appearance
 app-car-patcher = Car Patcher
 app-wheel-alignment = Wheel Alignment
+nav-goal-explosion-scale = Goal Explosion Scale
+goal-explosion-description = Make goal explosions bigger or smaller, including your own. Rocket League must be closed.
+goal-explosion-apply = Apply
+goal-explosion-restore = Restore
+goal-explosion-applied = Goal explosions are now { $scale }x.
+goal-explosion-restored = Goal explosions are back to normal.
+goal-explosion-active = Goal explosions are { $scale }x.
+goal-explosion-volume-title = Goal explosion volume
+goal-explosion-volume-description = Make goal explosion sounds quieter, muted, or a little louder (up to +6 dB). Rocket League must be closed.
+goal-explosion-volume-mute = Muted
+goal-explosion-volume-applied = Goal explosion volume is now { $db } dB.
+goal-explosion-volume-restored = Goal explosion volume is back to normal.
+goal-explosion-volume-active = Goal explosion volume is { $db } dB.
 app-hebnix-has-initialised-statsapi-please-r = Hebnix has initialised StatsAPI. Please restart Rocket League to initialise Hebnix.
 presets-delete = Delete
 spoofer-requires-admin-for-hosts-file-intercepti = Requires Admin for hosts-file interception
@@ -355,9 +439,7 @@ rl-launch-setup-non-steam-shortcuts-can-t-pass = Non-Steam shortcuts can't pass 
 install-modal-install-from-hebnix = ☁
     
     Install from Hebnix
-install-modal-install-from-zip = 📁
-    
-    Install from .ZIP
+install-modal-install-from-zip = 📁 Install from .ZIP
 hebnix-install-no-plugins-found = No plugins found.
 hebnix-install-enable = Enable
 hebnix-install-installing = Installing...
@@ -490,6 +572,11 @@ player-maps-imported-not-on-the-workshop = (imported, not on the Workshop)
 player-maps-you-have-it = you have it
 player-maps-from-the-cdn = From the CDN
 player-maps-from-this-player = From this player
+player-maps-hosting = Hosting now: { $name }
+player-maps-download-to-workshop = Download to Workshop menu
+join-mismatch = { $name } is hosting a map you do not have, so joining failed.
+join-mismatch-title = Missing map
+join-mismatch-dismiss = Dismiss
 multiplayer-help-button-using-a-vpn-proxy-or-having = Using a VPN/proxy, or having issues? Read this
 multiplayer-help-button-opens-the-workshop-multiplayer-help-page = Opens the Workshop multiplayer help page on GitHub
 render-browse-maps = Browse Maps
@@ -660,10 +747,6 @@ plugin-settings-display-name-configuration = { $display_name } Configuration
 about-version-app-version-a-safe-eac = Version { $version }
     
     A safe, EAC-compliant Mod Loader for Rocket League with integrated Spoofer & Item Changer.
-    
-    hebnix.com
-    
-    Built by Hebbins & nixvio64.
     
     Press { $hotkey } to show/hide Hebnix.
 statsapi-notice-couldn-t-write-the-file-err = Couldn't write the file:
@@ -881,7 +964,6 @@ launch-multiplayer-starting-rocket-league-on-the-workshop = Starting Rocket Leag
 finish-multiplayer-launch-rocket-league-is-starting-on-the = Rocket League is starting on the Workshop network.
 start-relay-the-workshop-network-is-not-ready = The Workshop network is not ready.
 start-relay-starting-the-workshop-lan-relay = Starting the Workshop LAN relay...
-finish-relay-started-relaying-host-or-join-from-rocket = Relaying - host or join from Rocket League's own LAN match screen.
 shutdown-multiplayer-rocket-league-closed-keeping-the-session = Rocket League closed. Keeping the session open in case it comes back...
 tick-shutdown-grace-rocket-league-reconnected = Rocket League reconnected.
 tick-shutdown-grace-workshop-multiplayer-stopped-because-roc = Workshop multiplayer stopped because Rocket League closed.
@@ -914,6 +996,10 @@ admin-prompt-owned-filter-needs-proxy =
 
 ## patcher/boost_patcher.rs
 tab-boost-meter-patcher = Boost Meter Patcher
+boost-team-ring-toggle = Toggle team-coloured ring
+boost-team-ring-hint = Use your team colour for the boost ring when Team-Colored Boost Meter is enabled in Rocket League’s Interface settings.
+boost-team-ring-enabled = Team-coloured boost ring enabled.
+boost-team-ring-disabled = Original boost ring colour restored.
 tab-are-you-sure-you-want-to = Are you sure you want to delete '{ $boost_to_delete }'?
 tab-no-boost-meters-found-in-the = No boost meters found in the /boosts/ directory.
 tab-no-boost-meters-match-your-search = No boost meters match your search.
@@ -931,6 +1017,10 @@ render-boost-meter-and-scoreboard = Boost meter and scoreboard.
 render-match-stadium = Match stadium
 render-extended-colour-palette = Extended colour palette
 render-add-pure-white-to-pure-black = Add pure white to pure black to the darkest garage row
+render-custom-car-colours = Custom car colours
+render-apply-custom-car-colours = Add custom colours to the car palette
+render-custom-car-colours-hint = Adds your colours below the existing garage palette for primary and accent. Apply Colours and restart Rocket League to see them.
+colours-custom-colour = Colour
 render-only-you-see-these-colours-disable = Only you see these colours. Disable this and apply again to put the original palette row back.
 render-heatseeker-ball-glow = Heatseeker ball glow
 render-override-the-maximum-speed-glow-locally = Override the maximum-speed glow locally
@@ -1002,10 +1092,12 @@ toast-clear = Clear all
 toast-empty = Nothing here yet. Plugins show up here when they send a toast.
 
 ## Workshop multiplayer over tailcat
-multiplayer-connect-intro = Connects you to everyone else on Workshop multiplayer. Host or join from Rocket League's own LAN match screen once it's up; Rocket League keeps working online the whole time, and Hebnix doesn't need to run as administrator.
+multiplayer-connect-intro = Connect to Workshop Multiplayer, then host or join from Rocket League's LAN match screen. Online play stays available and Hebnix can run without administrator access.
 multiplayer-relay-only-hover = Sends all multiplayer traffic through relay servers instead of straight to other players, so they never see your real IP address. Matches will have higher ping.
 multiplayer-set-a-match-password = Everyone connected can see your LAN match, so set a match password in Rocket League if it's private.
 multiplayer-connected = Connected
+multiplayer-show-player-online-toasts = Show player online notifications
+multiplayer-player-is-online = { $name } Is Online
 multiplayer-no-other-players-online = No other players are on right now.
 multiplayer-players-online = { $count ->
     [one] 1 other player on
@@ -1024,3 +1116,28 @@ multiplayer-rocket-league-is-starting = Rocket League is starting.
 spoofer-http-only = Uses the HTTP proxy only. The WebSocket bypass is no longer available.
 spoofer-http-proxy = HTTP Proxy
 spoofer-websocket-proxy = WebSocket Proxy
+
+## hosts file repair
+hosts-repair-done = [Hosts] The hosts file was not valid UTF-8 and was converted. Your original is saved at { $backup }.
+render-arena-look-note = Experimental. The arena you play keeps its own goals, boost pads and physics, only the scenery changes. Restore from Active changes below.
+nav-scoreboard = Scoreboard
+scoreboard-show-mmr = Show MMR
+req-clock-warning-title = PC clock may be out of sync
+req-clock-warning-body = Hebnix could not authenticate the request. Sync your PC clock in your system’s date and time settings, then try again.
+
+game-update-title = Rocket League files changed
+game-update-choice = Repatch all active items using the installed Rocket League files, or clear all active items.
+game-update-close-game = Close Rocket League before continuing.
+game-update-reload-catalogs = Reload Catalogs
+game-update-loading-catalogs = Loading item catalogs...
+game-update-working = Repatching active items…
+game-update-repatch = Repatch All
+game-update-clear = Clear Active Items
+scoreboard-unanonymize = Unanonymize Players
+scoreboard-enable-unanonymize = Enable unanonymizing
+scoreboard-ignore-self = Ignore self
+scoreboard-enable-mmr = Enable MMR display
+scoreboard-current-playlist = Show current playlist
+scoreboard-current-gamemode = Show current gamemode
+scoreboard-manual-selection = Choose a playlist manually
+scoreboard-choose-mode = Choose a gamemode

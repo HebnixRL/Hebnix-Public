@@ -14,6 +14,15 @@ mod messages;
 mod monitor;
 mod notifications;
 mod overlay;
+mod panel {
+    // Lite has no controller panel. Shared scroll areas render their contents directly.
+    pub(crate) fn followed<R>(
+        ui: &mut eframe::egui::Ui,
+        add: impl FnOnce(&mut eframe::egui::Ui) -> R,
+    ) -> R {
+        add(ui)
+    }
+}
 mod plugins;
 mod runtime_assets;
 mod recovery_tasks;
@@ -22,6 +31,7 @@ mod theme;
 mod toast;
 mod tray;
 mod update;
+mod maintenance;
 mod ui_work;
 mod ui {
     pub mod console;
@@ -124,8 +134,18 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    let relocation = maintenance::relocate_on_launch(true);
+    #[cfg(windows)]
+    if matches!(&relocation, Ok(true)) {
+        return Ok(());
+    }
     let base_dir = config::base_dir();
     setup_logging(&base_dir);
+    #[cfg(windows)]
+    if let Err(error) = relocation {
+        tracing::warn!("Hebnix Lite installation: {error}");
+    }
     tracing::info!(
         safe_rendering = window_state::safe_rendering(),
         "main window rendering mode"
@@ -142,6 +162,8 @@ fn main() -> eframe::Result {
     if let Err(error) = recovery_tasks::cleanup_websocket_once(&base_dir) {
         tracing::warn!("WebSocket proxy cleanup: {error}");
     }
+    let shortcut_base = base_dir.clone();
+    std::thread::spawn(move || maintenance::first_launch_shortcut(&shortcut_base));
     // after the instance guard, so only one copy prompts
     webview::runtime::ensure_present();
     let config = config::Config::load(&base_dir);

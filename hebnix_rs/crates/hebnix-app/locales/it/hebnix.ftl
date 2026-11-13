@@ -396,6 +396,11 @@ player-maps-imported-not-on-the-workshop = (importata, non nel Workshop)
 player-maps-you-have-it = ce l'hai
 player-maps-from-the-cdn = Dal CDN
 player-maps-from-this-player = Da questo giocatore
+player-maps-hosting = Sta ospitando: { $name }
+player-maps-download-to-workshop = Scarica nel menu Workshop
+join-mismatch = { $name } ospita una mappa che non hai, quindi l'accesso è fallito.
+join-mismatch-title = Mappa mancante
+join-mismatch-dismiss = Chiudi
 multiplayer-help-button-using-a-vpn-proxy-or-having = Usi una VPN/proxy o hai problemi? Leggi qui
 multiplayer-help-button-opens-the-workshop-multiplayer-help-page = Apre la pagina di aiuto del multiplayer Workshop su GitHub
 render-browse-maps = Sfoglia mappe
@@ -513,10 +518,6 @@ about-version-app-version-a-safe-eac =
     Versione { $version }
 
     Un mod loader sicuro e conforme a EAC per Rocket League con Spoofer e cambia-oggetti integrati.
-
-    hebnix.com
-
-    Creato da Hebbins e nixvio64.
 
     Premi { $hotkey } per mostrare/nascondere Hebnix.
 statsapi-notice-couldn-t-write-the-file-err =
@@ -739,3 +740,6 @@ speed-patch-description = Scala le velocità di scorrimento e rotazione di skin 
 speed-patch-multiplier = Velocità
 speed-patch-roundtrip-mismatch = Discrepanza nel ciclo completo della patch di velocità
 app-speed-patch = Velocità animazione
+
+nav-scoreboard = Tabellone
+scoreboard-show-mmr = Mostra MMR

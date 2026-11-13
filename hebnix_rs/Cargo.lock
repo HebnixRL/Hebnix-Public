@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "hebnix-app"
-version = "2.2.6"
+version = "2.3.0"
 dependencies = [
  "ab_glyph",
  "aes",
@@ -2580,6 +2580,7 @@ dependencies = [
  "egui_extras",
  "embed-manifest",
  "embed-resource",
+ "encoding_rs",
  "evdev",
  "flate2",
  "fluent-bundle",
@@ -2645,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "hebnix-sdk"
-version = "2.2.6"
+version = "2.3.0"
 dependencies = [
  "aes",
  "base64 0.21.7",

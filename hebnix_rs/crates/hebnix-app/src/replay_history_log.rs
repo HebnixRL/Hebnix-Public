@@ -50,7 +50,7 @@ pub fn read(path: &Path, player: &str) -> Result<Value, String> {
         }
     }
     if matches.is_empty() {
-        return Err("Waiting for Rocket League's live history export. The background history bridge and -FORCELOGFLUSH must be installed before launch.".into());
+        return Err("Waiting for Rocket League's live MatchHistory export.".into());
     }
     Ok(json!({"LocalPlayerID":player,"Matches":matches.into_values().collect::<Vec<_>>()}))
 }

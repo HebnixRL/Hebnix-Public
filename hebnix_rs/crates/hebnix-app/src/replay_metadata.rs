@@ -8,6 +8,7 @@ pub struct ReplayMetadata {
     pub title: String,
     pub goals: Vec<(i64, String, i64)>,
     pub ids: Vec<String>,
+    pub match_guid: Option<String>,
 }
 
 // Read the bounded Unreal property header only; never deserialize the network stream.
@@ -76,6 +77,10 @@ pub fn read(path: &Path) -> Result<ReplayMetadata, String> {
         title,
         goals,
         ids,
+        match_guid: ["MatchGUID", "MatchGuid"]
+            .iter()
+            .find_map(|key| props.get(*key).and_then(Value::as_str))
+            .map(str::to_owned),
     })
 }
 

@@ -39,6 +39,14 @@ const PALETTE: [(&str, [f32; 3]); 18] = [
     ("Onyx", [0.04943346, 0.04943346, 0.04943346]),
     ("Platinum", [0.78931373, 0.7817507, 0.7667436]),
 ];
+
+pub(crate) fn factory_paint_label(id: i64) -> String {
+    usize::try_from(id - 1)
+        .ok()
+        .and_then(|index| PALETTE.get(index))
+        .map_or_else(|| format!("Paint {id}"), |(name, _)| (*name).into())
+}
+
 impl SwapPaint {
     pub const ALL: [Self; 20] = [
         Self::Default,
@@ -96,7 +104,7 @@ impl SwapPaint {
     }
     pub fn description(self) -> String {
         if self == Self::Default {
-            return "Default (uncoloured)".into();
+            return "Default (original appearance)".into();
         }
         let [r, g, b] = self.rgb();
         format!("{} #{r:02X}{g:02X}{b:02X}", self.label())
@@ -404,15 +412,25 @@ fn vector_parameter(
 /// original asset, even though the staged filename now identifies the owned item.
 /// Known structures are required; unsupported layouts fail before writing.
 pub fn bake(path: &Path, donor: &str, paint: SwapPaint) -> Result<usize, String> {
-    bake_impl(path, donor, paint, true)
+    bake_impl(path, donor, paint, true, false)
+}
+
+pub(super) fn bake_owned(path: &Path, donor: &str, paint: SwapPaint) -> Result<usize, String> {
+    bake_impl(path, donor, paint, true, true)
 }
 
 /// Audit the same patch plan without writing to the installed game package.
 pub(crate) fn inspect_paint(path: &Path, donor: &str, paint: SwapPaint) -> Result<usize, String> {
-    bake_impl(path, donor, paint, false)
+    bake_impl(path, donor, paint, false, false)
 }
 
-fn bake_impl(path: &Path, donor: &str, paint: SwapPaint, write: bool) -> Result<usize, String> {
+fn bake_impl(
+    path: &Path,
+    donor: &str,
+    paint: SwapPaint,
+    write: bool,
+    owned: bool,
+) -> Result<usize, String> {
     if matches!(paint, SwapPaint::Preset(id) if id == 0 || id as usize > PALETTE.len()) {
         return Err("Invalid paint preset".into());
     }
@@ -430,10 +448,83 @@ fn bake_impl(path: &Path, donor: &str, paint: SwapPaint, write: bool) -> Result<
         std::fs::copy(path, &staged).map_err(|e| e.to_string())?;
         let materials = bake_materials(&staged, donor, paint, true)?;
         let runtime = runtime_parameters::bake(&staged, paint, true)?;
+        if owned {
+            suppress_factory_paint(&staged)?;
+        }
         std::fs::copy(&staged, path).map_err(|e| e.to_string())?;
         Ok(materials + runtime)
     })();
     let _ = std::fs::remove_file(&staged);
+    result
+}
+
+// The equipped instance's factory paint is applied through the product's
+// PaintSettings attribute. Remove that route after baking its material and
+// effect settings so factory paint cannot overwrite the local colour.
+fn suppress_factory_paint(path: &Path) -> Result<(), String> {
+    let mut package = UpkPackage::load(path)?;
+    let mut updates = Vec::new();
+    for export in &package.exports {
+        if !strip(&package.class_of(export)).starts_with("ProductAsset_") {
+            continue;
+        }
+        let (props, _) = package.serialized_props(export)?;
+        let Some(array) = props
+            .iter()
+            .find(|p| p.name == "Attributes" && p.tag_type == "ArrayProperty")
+        else {
+            continue;
+        };
+        let at = export.serial_offset + array.value_offset;
+        let count = package.read_int(at)?;
+        if count < 0 || array.size != 4 + count as usize * 4 {
+            return Err("Invalid product attribute array".into());
+        }
+        let mut value = vec![0; 4];
+        for index in 0..count as usize {
+            let reference = package.read_int(at + 4 + index * 4)?;
+            if reference == 0
+                || package.reference_class(reference)?.1 != "ProductAttribute_PaintSettings_TA"
+            {
+                value.extend(reference.to_le_bytes());
+            }
+        }
+        if value.len() == array.size {
+            continue;
+        }
+        let remaining = ((value.len() - 4) / 4) as i32;
+        value[..4].copy_from_slice(&remaining.to_le_bytes());
+        let mut bytes =
+            package.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec();
+        bytes[array.tag_offset + 16..array.tag_offset + 20]
+            .copy_from_slice(&(value.len() as i32).to_le_bytes());
+        bytes.splice(array.value_offset..array.value_offset + array.size, value);
+        updates.push((export.table_index, bytes));
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    for (index, bytes) in &updates {
+        package.replace_export_payload(*index, bytes)?;
+    }
+    let prepared = path.with_extension("paint-settings.tmp");
+    let result = (|| {
+        package.save(&prepared)?;
+        let check = UpkPackage::load(&prepared)?;
+        for (index, bytes) in &updates {
+            let export = &check.exports[*index];
+            if check
+                .image
+                .get(export.serial_offset..export.serial_offset + export.serial_size)
+                != Some(bytes.as_slice())
+            {
+                return Err("Factory paint override verification failed".into());
+            }
+        }
+        std::fs::copy(&prepared, path).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(prepared);
     result
 }
 
@@ -573,7 +664,7 @@ pub fn recolour_for_target(
     let staged = staging.join(destination.file_name().ok_or("No destination filename")?);
     let result = (|| {
         std::fs::copy(source, &staged).map_err(|e| e.to_string())?;
-        bake(&staged, donor_filename, paint)?;
+        bake_owned(&staged, donor_filename, paint)?;
         std::fs::copy(&staged, destination).map_err(|e| e.to_string())?;
         Ok(())
     })();
@@ -660,6 +751,34 @@ fn local_colour_parameter(name: &str) -> bool {
     )
 }
 
+fn has_imported_paint_settings(package: &UpkPackage) -> Result<bool, String> {
+    for export in &package.exports {
+        if !strip(&package.class_of(export)).starts_with("ProductAsset_") {
+            continue;
+        }
+        let (props, _) = package.serialized_props(export)?;
+        for array in props
+            .iter()
+            .filter(|p| p.name == "Attributes" && p.tag_type == "ArrayProperty")
+        {
+            let at = export.serial_offset + array.value_offset;
+            let count = package.read_int(at)?;
+            if count < 0 || array.size != 4 + count as usize * 4 {
+                return Err("Invalid product attribute array".into());
+            }
+            for index in 0..count as usize {
+                let reference = package.read_int(at + 4 + index * 4)?;
+                if reference < 0
+                    && package.reference_class(reference)?.1 == "ProductAttribute_PaintSettings_TA"
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 // Prefer the asset's paint settings. Without inventory paint metadata, use
 // explicit material colour controls belonging to the visual product itself.
 fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usize, String> {
@@ -709,6 +828,7 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     let mut runtime_material_parameters = HashSet::new();
     let mut painted_switches = HashSet::new();
     let mut material_overrides = Vec::new();
+    let mut painted_skins: HashMap<usize, HashSet<i32>> = HashMap::new();
     for e in &package.exports {
         if strip(&package.class_of(e)) == "ProductOverride_ParticleSystemColorParameter_TA" {
             let (props, _) = package.serialized_props(e)?;
@@ -840,6 +960,24 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
             .iter()
             .filter(|p| p.name == "MaterialGroups" && p.struct_name == "PaintMaterialGroup")
         {
+            let skin = if let Some(owner) = e
+                .outer_index
+                .checked_sub(1)
+                .and_then(|index| package.exports.get(index as usize))
+                .filter(|owner| strip(&package.class_of(owner)) == "ProductAsset_Skin_TA")
+            {
+                let (fields, _) = package.serialized_props(owner)?;
+                fields
+                    .iter()
+                    .find(|p| p.name == "Skin" && p.tag_type == "ObjectProperty" && p.size == 4)
+                    .map(|p| {
+                        let offset = owner.serial_offset + p.value_offset;
+                        Ok::<_, String>((offset, package.read_int(offset)?))
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
             let start = e.serial_offset + group.value_offset;
             let (fields, _) = package.nested_props(start, start + group.size)?;
             for array in fields
@@ -871,13 +1009,26 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
                             .or_default()
                             .insert(parameter.clone());
                         let (fields, _) = package.serialized_props(material)?;
-                        reference = match fields
+                        let parent = match fields
                             .iter()
                             .find(|p| p.name == "Parent" && p.tag_type == "ObjectProperty")
                         {
                             Some(p) => package.read_int(material.serial_offset + p.value_offset)?,
                             None => 0,
                         };
+                        // A paint group can name a precompiled painted variant of
+                        // the default skin. Equip that variant even on an unpainted
+                        // inventory item so its shader uses the baked colour.
+                        if let Some((offset, normal)) = skin {
+                            if normal > 0
+                                && reference != normal
+                                && parent == normal
+                                && strip(&class) == "MaterialInstanceConstant"
+                            {
+                                painted_skins.entry(offset).or_default().insert(reference);
+                            }
+                        }
+                        reference = parent;
                     }
                 }
             }
@@ -1031,6 +1182,12 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     for (_, parameter, offset) in &material_overrides {
         if parameter_names.contains(parameter) {
             changes.push((*offset, bytes.clone()));
+        }
+    }
+    for (offset, variants) in painted_skins {
+        if variants.len() == 1 {
+            let reference = variants.into_iter().next().unwrap();
+            changes.push((offset, reference.to_le_bytes().to_vec()));
         }
     }
     // Baked paint has to use the painted effect even when the equipped inventory
@@ -1271,6 +1428,12 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     changes.sort_by_key(|(at, _)| *at);
     changes.dedup_by_key(|(at, _)| *at);
     if changes.len() == routing_changes && insertions.is_empty() {
+        // Common wheels such as OEM keep their real paint settings/materials
+        // in Startup.upk. Their seek-free package only imports those objects;
+        // absence of local parameters does not mean the wheel is unpaintable.
+        if has_imported_paint_settings(&package)? {
+            return Err("This item's paint settings are stored in a shared game package, such as Startup.upk. Recolouring shared paint assets is not supported yet. No change was installed.".into());
+        }
         return Err("This item has no editable local colour parameters. Its colours may be fixed in textures or controlled by the game. No change was installed.".into());
     }
     if !write {
@@ -1306,4 +1469,42 @@ fn bake_declared_paint(path: &Path, paint: SwapPaint, write: bool) -> Result<usi
     })();
     let _ = std::fs::remove_file(temporary);
     result
+}
+
+#[cfg(test)]
+mod shared_paint_tests {
+    use super::*;
+
+    #[test]
+    fn oem_reports_shared_paint_without_installing_a_change() {
+        let Some(game) = std::env::var_os("HEBNIX_RECOLOUR_GAME_DIR") else {
+            return;
+        };
+        let game = std::path::PathBuf::from(game);
+        let name = "WHEEL_Star_SF.upk";
+        let backup = game.join("Backups").join(format!("{name}.bak"));
+        let source = if backup.is_file() {
+            backup
+        } else {
+            game.join(name)
+        };
+        let original = std::fs::read(&source).unwrap();
+        let package = UpkPackage::load(&source).unwrap();
+        assert!(has_imported_paint_settings(&package).unwrap());
+        let audit = inspect_paint(&source, name, SwapPaint::Crimson).unwrap_err();
+        assert!(audit.contains("shared game package"), "{audit}");
+        let root = std::env::temp_dir().join(format!("hebnix-oem-paint-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let destination = root.join(name);
+        let sentinel = b"previous installed content";
+        std::fs::write(&destination, sentinel).unwrap();
+        let error =
+            recolour_for_target(&source, &destination, name, SwapPaint::Crimson).unwrap_err();
+        assert_eq!(error, audit);
+        assert_eq!(std::fs::read(&destination).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_file(destination).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 }

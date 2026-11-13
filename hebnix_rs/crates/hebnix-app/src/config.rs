@@ -6,9 +6,35 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_RL_PATH: &str = r"C:\Program Files\Epic Games\rocketleague";
-pub const DEFAULT_STATSAPI_PATH: &str =
-    r"C:\Program Files\Epic Games\rocketleague\TAGame\Config\DefaultStatsAPI.ini";
+/// default Rocket League install dir: the Epic path on Windows, the Steam
+/// library path on Linux (`~/.steam/steam/steamapps/common/rocketleague`).
+#[cfg(not(target_os = "linux"))]
+pub fn default_rl_path() -> String {
+    r"C:\Program Files\Epic Games\rocketleague".to_string()
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_rl_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".steam/steam/steamapps/common/rocketleague")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn default_statsapi_path() -> String {
+    r"C:\Program Files\Epic Games\rocketleague\TAGame\Config\DefaultStatsAPI.ini".to_string()
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_statsapi_path() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".steam/steam/steamapps/common/rocketleague/TAGame/Config/DefaultStatsAPI.ini")
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -41,6 +67,9 @@ pub struct SettingsCfg {
     pub language: String,
     /// Main tab selected when Hebnix starts.
     pub default_tab: String,
+    /// One-time migration to the Home dashboard; later startup choices persist.
+    #[serde(default)]
+    pub home_default_migrated: bool,
     /// main window bg opacity (0.5-1.0)
     pub window_opacity: f32,
     pub start_in_tray: bool,
@@ -54,6 +83,20 @@ pub struct SettingsCfg {
     pub allow_draw_on_hebnix_focus: bool,
     pub toast_position: crate::toast::ToastPos,
     pub restrict_hotkey_to_hebnix_or_rocket_league: bool,
+    pub panel_enabled: bool,
+    /// overlay font file stem from fonts/ (empty = bundled default)
+    pub overlay_font: String,
+    /// overlay regular / bold weights, only used by variable fonts
+    pub overlay_font_weight: u32,
+    pub overlay_font_bold_weight: u32,
+    /// Controller side panel: show every page, not just the in-game ones (maps, plugins).
+    pub panel_advanced: bool,
+    /// Controller side panel: dock on the left edge instead of the right.
+    pub panel_left: bool,
+    /// Controller side panel width, as a share of the game window (0.2 to 0.5).
+    pub panel_width: f32,
+    /// Controller side panel: slide in like a drawer.
+    pub panel_animate: bool,
     /// Relaunch elevated on start when requested by the user.
     pub run_as_admin: bool,
     /// Publish Hebnix/Rocket League activity to the local Discord client.
@@ -80,19 +123,28 @@ impl Default for SettingsCfg {
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
             language: crate::i18n::AUTO.to_string(),
-            default_tab: "Console".to_string(),
+            default_tab: "Home".to_string(),
+            home_default_migrated: true,
             window_opacity: 0.96,
             start_in_tray: false,
             close_to_tray: false,
-            rl_path: DEFAULT_RL_PATH.to_string(),
+            rl_path: default_rl_path(),
             rl_path_confirmed: false,
-            statsapi_path: DEFAULT_STATSAPI_PATH.to_string(),
+            statsapi_path: default_statsapi_path(),
             suppress_left_alerts: false,
             suppress_fullscreen_warning: false,
             suppress_statsapi_rate_warning: false,
             allow_draw_on_hebnix_focus: true,
             toast_position: Default::default(),
             restrict_hotkey_to_hebnix_or_rocket_league: true,
+            overlay_font: String::new(),
+            overlay_font_weight: 400,
+            overlay_font_bold_weight: 700,
+            panel_advanced: false,
+            panel_enabled: true,
+            panel_left: false,
+            panel_width: 0.30,
+            panel_animate: true,
             run_as_admin: false,
             discord_rich_presence: true,
             discord_rocket_league_only: false,
@@ -156,6 +208,39 @@ pub enum PatchSource {
 pub struct SpeedPatchCfg {
     /// show a speed picker on the Items page decal and swap rows
     pub items_page: bool,
+}
+
+/// Game Mods page settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameModsCfg {
+    /// Rocket League key name the forfeit command is bound to.
+    pub forfeit_key: String,
+    /// Rocket League key name the celebration command is bound to.
+    pub celebration_key: String,
+    /// Rocket League key name the bots in freeplay command is bound to.
+    pub bots_freeplay_key: String,
+    /// Controller buttons (XboxTypeS_ names without the prefix) for the same commands, empty for none.
+    pub forfeit_pad: String,
+    pub celebration_pad: String,
+    pub bots_freeplay_pad: String,
+    /// What Instant Suite does when a match ends: requeue, freeplay, menu or workshop.
+    pub instant_suite_mode: String,
+    /// The map Instant Suite's workshop action loads, by path.
+    pub instant_suite_map: String,
+    pub instant_suite_private: bool,
+    pub instant_suite_tournaments: bool,
+}
+
+impl Default for GameModsCfg {
+    fn default() -> Self {
+        Self {
+            forfeit_key: String::new(), celebration_key: String::new(), bots_freeplay_key: String::new(),
+            forfeit_pad: String::new(), celebration_pad: String::new(), bots_freeplay_pad: String::new(),
+            instant_suite_mode: "nothing".into(), instant_suite_map: String::new(),
+            instant_suite_private: false, instant_suite_tournaments: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +433,33 @@ fn normalize_action_entries(
     *entries = normalized;
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScoreboardMmrSource {
+    #[default]
+    Playlist,
+    Gamemode,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScoreboardCfg {
+    pub ignore_self: bool,
+    pub mmr_source: ScoreboardMmrSource,
+    pub fixed_playlist: Option<i64>,
+}
+
+impl Default for ScoreboardCfg {
+    fn default() -> Self {
+        Self {
+            ignore_self: true,
+            mmr_source: ScoreboardMmrSource::Playlist,
+            fixed_playlist: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -358,7 +470,9 @@ pub struct Config {
     pub rl_launch: RlLaunchCfg,
     pub patcher: PatcherCfg,
     pub speed_patch: SpeedPatchCfg,
+    pub game_mods: GameModsCfg,
     pub replay_upload: ReplayUploadCfg,
+    pub scoreboard: ScoreboardCfg,
     pub action_button: ActionButtonCfg,
     /// enabled state keyed by plugin slug
     pub plugins: BTreeMap<String, bool>,

@@ -328,6 +328,8 @@ impl Default for State {
 }
 
 impl State {
+    pub(crate) fn busy(&self) -> bool { self.running }
+
     /// Returns true when the saved settings changed.
     pub fn render(
         &mut self,
@@ -349,7 +351,8 @@ impl State {
             }
         }
         let mut changed = false;
-        ui.heading(t("speed-patch-title"));
+        ui.heading(t("app-speed-patch"));
+        ui.separator();
         ui.weak(t("speed-patch-description"));
         ui.add_space(8.0);
         changed |= ui
@@ -447,13 +450,15 @@ fn run_job(
     let backup = backups_dir.join(format!("{name}.bak"));
     match job {
         Job::Patch => {
-            crate::patcher::backup_guard::synchronize_install(cooked_pc, backups_dir)?;
+            super::upk_history::check_live_package(cooked_pc, package)?;
             std::fs::create_dir_all(backups_dir).map_err(|e| e.to_string())?;
             if !backup.is_file() {
                 std::fs::copy(package, &backup)
                     .map_err(|e| format!("Failed to back up {name}: {e}"))?;
             }
+            let before = std::fs::read(package).map_err(|e| e.to_string())?;
             let count = apply(package, Some(&backup), speed)?;
+            super::upk_history::record(cooked_pc, package, &before, &format!("Speed ×{:.2}", clamp(speed)), None)?;
             Ok(if count == 0 {
                 t_args("speed-patch-nothing", &[("file", name.into())])
             } else {
@@ -472,7 +477,7 @@ fn run_job(
             if !backup.is_file() {
                 return Err(t_args("speed-patch-no-backup", &[("file", name.into())]));
             }
-            std::fs::copy(&backup, package)
+            super::upk_history::install_copy(cooked_pc, &backup, package, "Restore speed")
                 .map_err(|e| format!("Failed to restore {name}: {e}"))?;
             Ok(t_args("speed-patch-restored", &[("file", name.into())]))
         }

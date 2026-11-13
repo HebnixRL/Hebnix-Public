@@ -3,11 +3,19 @@ use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui;
 use hebnix_sdk::save_file::{self, SaveAccount, SaveData};
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
-pub fn product_ids(save: &SaveData) -> Result<HashSet<i64>, String> {
+pub type OwnedPaints = HashMap<i64, BTreeSet<i64>>;
+
+#[derive(Default)]
+struct OwnedProducts {
+    ids: HashSet<i64>,
+    paints: OwnedPaints,
+}
+
+fn owned_products(save: &SaveData) -> Result<OwnedProducts, String> {
     if !save
         .raw_properties
         .get("OnlineProducts")
@@ -25,12 +33,35 @@ pub fn product_ids(save: &SaveData) -> Result<HashSet<i64>, String> {
             return Err("This save contains an unsupported inventory entry.".into());
         }
     }
-    Ok(save
+    let mut products = OwnedProducts::default();
+    for product in save
         .inventory()
         .into_iter()
-        .map(|product| product.product_id)
-        .filter(|id| *id > 0)
-        .collect())
+        .filter(|product| product.product_id > 0)
+    {
+        products.ids.insert(product.product_id);
+        for attribute in product.attributes.as_array().into_iter().flatten() {
+            let attribute = if attribute.is_object() {
+                attribute
+            } else {
+                attribute
+                    .as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| save.objects.get(index))
+                    .ok_or("Invalid saved product attribute reference.")?
+            };
+            if attribute["__type"] == "TAGame.ProductAttribute_Painted_TA"
+                && let Some(paint) = attribute["PaintID"].as_i64().filter(|&id| id > 0)
+            {
+                products
+                    .paints
+                    .entry(product.product_id)
+                    .or_default()
+                    .insert(paint);
+            }
+        }
+    }
+    Ok(products)
 }
 
 fn selected_account_path(accounts: &[SaveAccount], selected: Option<&Path>) -> Option<PathBuf> {
@@ -49,11 +80,12 @@ fn selected_account_path(accounts: &[SaveAccount], selected: Option<&Path>) -> O
 #[derive(Default)]
 pub struct OwnedInventory {
     pub ids: HashSet<i64>,
+    pub paints: OwnedPaints,
     pub title_ids: HashSet<String>,
     accounts: Vec<SaveAccount>,
     selected: Option<PathBuf>,
     result: Option<
-        Receiver<Result<(Vec<SaveAccount>, PathBuf, HashSet<i64>, HashSet<String>), String>>,
+        Receiver<Result<(Vec<SaveAccount>, PathBuf, OwnedProducts, HashSet<String>), String>>,
     >,
     error: Option<String>,
     initial_refresh_attempted: bool,
@@ -85,13 +117,13 @@ impl OwnedInventory {
                     .ok_or("No Rocket League account save was found in the detected save folder.")?;
                 let save = save_file::load(&path, true)
                     .map_err(|e| format!("Could not read inventory: {e}"))?;
-                let ids = product_ids(&save)?;
+                let products = owned_products(&save)?;
                 let titles = save
                     .owned_title_ids()?
                     .into_iter()
                     .map(|id| id.to_ascii_lowercase())
                     .collect();
-                Ok((accounts, path, ids, titles))
+                Ok((accounts, path, products, titles))
             })();
             let _ = tx.send(result);
             ctx.request_repaint();
@@ -109,10 +141,11 @@ impl OwnedInventory {
         if let Some(result) = self.result.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.result = None;
             match result {
-                Ok((accounts, path, ids, titles)) => {
+                Ok((accounts, path, products, titles)) => {
                     self.accounts = accounts;
                     self.selected = Some(path);
-                    self.ids = ids;
+                    self.ids = products.ids;
+                    self.paints = products.paints;
                     self.title_ids = titles;
                     self.error = None;
                 }
@@ -120,6 +153,7 @@ impl OwnedInventory {
                     self.accounts.clear();
                     self.selected = None;
                     self.ids.clear();
+                    self.paints.clear();
                     self.title_ids.clear();
                     self.error = Some(error);
                 }
@@ -150,6 +184,7 @@ impl OwnedInventory {
             let changed = before != self.selected;
             if changed {
                 self.ids.clear();
+                self.paints.clear();
                 self.title_ids.clear();
             }
             let refresh = ui
@@ -221,7 +256,7 @@ mod tests {
         tx.send(Ok((
             Vec::new(),
             PathBuf::from("first.save"),
-            HashSet::new(),
+            OwnedProducts::default(),
             HashSet::new(),
         )))
         .unwrap();
@@ -270,17 +305,40 @@ mod tests {
             ],
             ..empty_save()
         };
-        assert_eq!(product_ids(&save).unwrap(), HashSet::from([4659, 4681]));
+        assert_eq!(
+            owned_products(&save).unwrap().ids,
+            HashSet::from([4659, 4681])
+        );
+    }
+    #[test]
+    fn reads_factory_paints_from_owned_instances_only() {
+        let save = SaveData {
+            raw_properties: json!({"OnlineProducts":[0,1,2]}),
+            objects: vec![
+                json!({"__type":"TAGame.OnlineProduct_TA","ProductID":1,"Attributes":[4]}),
+                json!({"__type":"TAGame.OnlineProduct_TA","ProductID":1,"Attributes":[
+                    {"__type":"TAGame.ProductAttribute_Painted_TA","PaintID":12}
+                ]}),
+                json!({"__type":"TAGame.OnlineProduct_TA","ProductID":2}),
+                json!({"__type":"TAGame.OnlineProduct_TA","ProductID":3,"Attributes":[4]}),
+                json!({"__type":"TAGame.ProductAttribute_Painted_TA","PaintID":8}),
+            ],
+            ..empty_save()
+        };
+        let owned = owned_products(&save).unwrap();
+        assert_eq!(owned.ids, HashSet::from([1, 2]));
+        assert_eq!(owned.paints, [(1, BTreeSet::from([8, 12]))].into());
     }
     #[test]
     fn missing_inventory_is_reported_while_empty_inventory_is_valid() {
-        assert!(product_ids(&empty_save()).is_err());
+        assert!(owned_products(&empty_save()).is_err());
         assert!(
-            product_ids(&SaveData {
+            owned_products(&SaveData {
                 raw_properties: json!({"OnlineProducts":[]}),
                 ..empty_save()
             })
             .unwrap()
+            .ids
             .is_empty()
         );
     }
@@ -290,6 +348,6 @@ mod tests {
             raw_properties: json!({"OnlineProducts":[99]}),
             ..empty_save()
         };
-        assert!(product_ids(&save).is_err());
+        assert!(owned_products(&save).is_err());
     }
 }

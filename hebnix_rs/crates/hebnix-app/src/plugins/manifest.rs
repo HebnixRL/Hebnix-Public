@@ -107,11 +107,13 @@ pub fn discover_plugins(plugin_dir: &Path) -> Vec<DiscoveredPlugin> {
                     });
                 } else {
                     let missing = manifest.entry.clone();
-                    found.push(broken(
+                    let mut plugin = broken(
                         &name,
                         &path,
                         format!("plugin.toml points at {missing}, which isn't there"),
-                    ));
+                    );
+                    plugin.manifest.name = manifest.name;
+                    found.push(plugin);
                 }
             }
         }

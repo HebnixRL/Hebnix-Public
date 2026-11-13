@@ -90,7 +90,7 @@ impl RlApiPanel {
         status: &str,
     ) -> Option<Action> {
         let mut action = None;
-        ui.heading(t("app-rlapi"));
+        crate::theme::page_heading(ui, t("app-rlapi"));
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
@@ -142,14 +142,14 @@ impl RlApiPanel {
         egui::ScrollArea::vertical()
             .id_salt("rlapi_payload_scroll")
             .max_height(170.0)
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.payload)
                         .code_editor()
                         .desired_rows(7)
                         .desired_width(f32::INFINITY),
                 );
-            });
+            }));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
@@ -188,7 +188,7 @@ impl RlApiPanel {
         ui.label(t("rlapi-response"));
         egui::ScrollArea::vertical()
             .id_salt("rlapi_response_scroll")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 // &str is a read-only TextBuffer; selection and copying still work.
                 let mut text = self.response.as_str();
                 ui.add(
@@ -197,7 +197,7 @@ impl RlApiPanel {
                         .desired_rows(12)
                         .desired_width(f32::INFINITY),
                 );
-            });
+            }));
         action
     }
 }

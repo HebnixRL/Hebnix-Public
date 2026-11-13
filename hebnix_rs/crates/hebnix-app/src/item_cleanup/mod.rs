@@ -1,7 +1,9 @@
 //! Count and remove tracked items. No spawning, replay, or match transport.
 mod save_cleanup;
 
-pub use save_cleanup::{apply_loadout_edit, loadout_export, loadout_names};
+pub use save_cleanup::{
+    apply_loadout_edit, loadout_export, loadout_export_bakkes, loadout_order, loadout_owned_instances, loadout_preset, loadout_summaries,
+};
 mod store;
 
 use std::collections::BTreeSet;

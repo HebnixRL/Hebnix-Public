@@ -92,7 +92,7 @@ pub struct ThemeWidgetState {
 }
 
 /// look for a .ttf or .otf in fonts_dir with this name
-fn find_font_file(fonts_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+pub fn find_font_file(fonts_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
     for ext in ["ttf", "otf"] {
         let candidate = fonts_dir.join(format!("{name}.{ext}"));
         if candidate.is_file() {
@@ -111,12 +111,38 @@ fn find_font_file(fonts_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
             continue;
         }
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            if stem.eq_ignore_ascii_case(name) {
+            // exact stem, or a family name followed by a variant suffix:
+            // "Lexend" matches "Lexend-VariableFont_wght.ttf"
+            let (stem, name_lc) = (stem.to_ascii_lowercase(), name.to_ascii_lowercase());
+            let variant = stem.strip_prefix(name_lc.as_str()).is_some_and(|rest| {
+                matches!(rest.chars().next(), Some('-' | '_' | ' '))
+            });
+            if stem == name_lc || variant {
                 return Some(path);
             }
         }
     }
     None
+}
+
+/// stems of the .ttf/.otf files in fonts_dir, sorted (Linux overlay font picker)
+#[cfg(target_os = "linux")]
+pub fn list_fonts(fonts_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fonts_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
+        })
+        .filter_map(|path| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names
 }
 
 /// switches the app's font to whatever's in fonts_dir. falls back to the

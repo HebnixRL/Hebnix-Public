@@ -22,7 +22,7 @@ use std::time::Duration;
 pub use hosting::HostSession;
 pub use map_sync::{
     LocalInfo, MAP_SYNC_PORT, MAX_MAP_BYTES, MapFileProvider, MapProvider, PeerOffer, SlotMap,
-    TransferProgress, fetch_map_file, hash_file, is_local_map_id, local_map_id, valid_map_id,
+    TransferProgress, fetch_map_file, hash_file, is_local_map_id, local_map_id, valid_map_id, valid_package_stem,
 };
 pub use models::{
     CreateRoomRequest, JoinRoomRequest, JoinedRoom, LeaveRoomRequest, Room,

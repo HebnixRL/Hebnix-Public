@@ -1174,7 +1174,7 @@ pub fn patch_boost_meter(
         .map_err(|e| format!("Failed to create backup directory: {e}"))?;
     // Validate the installed package before it can become the new pristine backup.
     let live_raw = fs::read(&upk_path).map_err(|e| format!("Failed to read {}: {e}", GFX_UPK))?;
-    EncryptedPackage::load(live_raw, key_file)
+    let mut package = EncryptedPackage::load(live_raw, key_file)
         .map_err(|e| format!("Installed {} is not a valid package: {e}", GFX_UPK))?;
     crate::patcher::backup_guard::prepare(
         Path::new(game_dir),
@@ -1189,7 +1189,7 @@ pub fn patch_boost_meter(
     }
 
     let vanilla_raw = fs::read(&backup_upk).map_err(|e| format!("Failed to read backup: {}", e))?;
-    let mut package = EncryptedPackage::load(vanilla_raw, key_file).map_err(|error| {
+    let vanilla = EncryptedPackage::load(vanilla_raw, key_file).map_err(|error| {
         format!(
             "Could not open the pristine GFX_Hud_SF backup: {error}. If this backup was made from a broken patch, restore/verify Rocket League and remove {} before trying again",
             backup_upk.display()
@@ -1202,34 +1202,106 @@ pub fn patch_boost_meter(
     let mut patched_texture_count = 0usize;
 
     for (json_key, export_name, width, height) in TEXTURE_EXPORTS {
-        if let Some(png_bytes) = png_data_map.get(json_key) {
+        let (start, end) = package.texture_range(export_name, width, height)?;
+        let encoded;
+        let bytes = if let Some(png_bytes) = png_data_map.get(json_key) {
             let img = image::load_from_memory(png_bytes)
                 .map_err(|e| format!("Failed to load {}: {}", json_key, e))?
                 .to_rgba8();
             let resized = resize_rgba_isolated(&img, width as u32, height as u32);
-            let dxt5_data = image_to_dxt5_with_alpha(&resized, width, height);
-            let (start, end) = package.texture_range(export_name, width, height)?;
-            if dxt5_data.len() != end - start {
-                return Err(format!(
-                    "{}: DXT5 encoded size {} != expected {}",
-                    json_key,
-                    dxt5_data.len(),
-                    end - start
-                ));
-            }
-            package.logical_data[start..end].copy_from_slice(&dxt5_data);
-            package.mark_modified_range(start, end)?;
+            encoded = image_to_dxt5_with_alpha(&resized, width, height);
             patched_texture_count += 1;
+            encoded.as_slice()
+        } else {
+            // Restore omitted pack layers from the backup while keeping the
+            // live HUD movie, which may also contain team ring and title edits.
+            let (start, end) = vanilla.texture_range(export_name, width, height)?;
+            &vanilla.logical_data[start..end]
+        };
+        if bytes.len() != end - start {
+            return Err(format!("{json_key}: unexpected boost texture size"));
+        }
+        if package.logical_data[start..end] != *bytes {
+            package.logical_data[start..end].copy_from_slice(bytes);
+            package.mark_modified_range(start, end)?;
         }
     }
 
     if patched_texture_count == 0 {
         return Err("The selected boost pack contains no recognized texture images".to_string());
     }
+    install_boost_textures(&upk_path, &package)?;
+    crate::patcher::chat_paste::reapply(Path::new(game_dir), Path::new(backup_dir))
+}
 
-    let final_out = repack_package(&package)?;
-    fs::write(&upk_path, &final_out).map_err(|e| format!("Failed to write patched UPK: {}", e))?;
-    Ok(())
+fn install_boost_textures(path: &Path, package: &EncryptedPackage) -> Result<(), String> {
+    if package.modified_chunks.is_empty() {
+        return Ok(());
+    }
+    let _guard = super::title_patcher::UI_PATCH_LOCK.lock().map_err(|_| "UI patch lock unavailable")?;
+    let bytes = repack_package(package)?;
+    let staged = path.with_extension(format!("boost-textures-{:016x}.tmp", rand::random::<u64>()));
+    let result = (|| {
+        fs::write(&staged, bytes).map_err(|error| error.to_string())?;
+        if fs::read(path).map_err(|error| error.to_string())? != package.raw {
+            return Err("The HUD changed while the boost textures were being prepared.".into());
+        }
+        let cooked = path.parent().ok_or("Missing HUD package directory")?;
+        super::upk_history::install_copy(cooked, &staged, path, "Boost meter textures")
+    })();
+    let _ = fs::remove_file(staged);
+    result
+}
+
+fn restore_boost_textures(path: &Path, backup: &Path) -> Result<(), String> {
+    let original =
+        fs::read(backup).map_err(|error| format!("Could not read boost backup: {error}"))?;
+    let vanilla = EncryptedPackage::load(original, Path::new(""))?;
+    let live = fs::read(path).map_err(|error| error.to_string())?;
+    let mut package = EncryptedPackage::load(live, Path::new(""))?;
+    for (_, export, width, height) in TEXTURE_EXPORTS {
+        let (start, end) = package.texture_range(export, width, height)?;
+        let (original_start, original_end) = vanilla.texture_range(export, width, height)?;
+        let original = &vanilla.logical_data[original_start..original_end];
+        if package.logical_data[start..end] != *original {
+            package.logical_data[start..end].copy_from_slice(original);
+            package.mark_modified_range(start, end)?;
+        }
+    }
+    install_boost_textures(path, &package)
+}
+
+#[test]
+fn team_ring_survives_boost_texture_apply_and_restore() {
+    let Some(original) = std::env::var_os("HEBNIX_BOOST_HUD_FIXTURE") else {
+        return;
+    };
+    let root = std::env::temp_dir().join(format!(
+        "hebnix-ring-textures-{:016x}",
+        rand::random::<u64>()
+    ));
+    let cooked = root.join("TAGame/CookedPCConsole");
+    let backups = cooked.join("Backups");
+    let live = cooked.join(GFX_UPK);
+    fs::create_dir_all(&cooked).unwrap();
+    fs::create_dir_all(root.join("Binaries/Win64")).unwrap();
+    fs::write(root.join("Binaries/Win64/RocketLeague.exe"), b"fixture").unwrap();
+    fs::copy(original, &live).unwrap();
+    assert!(super::title_patcher::toggle_boost_ring(&cooked).unwrap());
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    patch_boost_meter(
+        &cooked.to_string_lossy(),
+        &backups.to_string_lossy(),
+        Path::new(""),
+        &HashMap::from([("Fill".into(), png.into_inner())]),
+    )
+    .unwrap();
+    restore_boost_textures(&live, &backups.join(format!("{GFX_UPK}.bak"))).unwrap();
+    assert!(!super::title_patcher::toggle_boost_ring(&cooked).unwrap());
+    fs::remove_file(live).unwrap();
 }
 
 #[derive(Deserialize)]
@@ -1259,6 +1331,7 @@ pub struct BoostItem {
 
 enum BoostOp {
     Applied(String),
+    TeamRingChanged(bool),
     Restored,
     Error(String),
 }
@@ -1455,12 +1528,13 @@ impl BoostPatcherState {
                 return;
             }
             let backup_gfx = backups_dir_clone.join(format!("{}.bak", GFX_UPK));
-            if backup_gfx.exists() && fs::copy(&backup_gfx, &cooked_pc_clone.join(GFX_UPK)).is_ok()
+            let op = match restore_boost_textures(&cooked_pc_clone.join(GFX_UPK), &backup_gfx)
+                .and_then(|()| crate::patcher::chat_paste::reapply(&cooked_pc_clone, &backups_dir_clone))
             {
-                let _ = local_tx.send(BoostOp::Restored);
-            } else {
-                let _ = local_tx.send(BoostOp::Error("No backup found to restore.".into()));
-            }
+                Ok(()) => BoostOp::Restored,
+                Err(error) => BoostOp::Error(error),
+            };
+            let _ = local_tx.send(op);
             ctx_clone.request_repaint();
         });
     }
@@ -1501,6 +1575,14 @@ impl BoostPatcherState {
                     self.active_boost = Some(name.clone());
                     config.patcher.active_boost = Some(name.clone());
                     let _ = tx.send(AppMsg::Log(format!("[Boost] Successfully applied {name}!")));
+                }
+                BoostOp::TeamRingChanged(enabled) => {
+                    let key = if enabled {
+                        "boost-team-ring-enabled"
+                    } else {
+                        "boost-team-ring-disabled"
+                    };
+                    let _ = tx.send(AppMsg::Log(format!("[Boost] {}", t(key))));
                 }
                 BoostOp::Restored => {
                     self.active_boost = None;
@@ -1575,38 +1657,31 @@ impl BoostPatcherState {
         ctx: &egui::Context,
         config: &mut Config,
     ) {
-        while let Ok(op) = self.local_rx.try_recv() {
-            self.processing_target = None;
-            match op {
-                BoostOp::Applied(name) => {
-                    self.active_boost = Some(name.clone());
-                    config.patcher.active_boost = self.active_boost.clone();
-                    let _ = config.save(&self.base_dir);
-                    let _ = tx.send(AppMsg::Log(format!(
-                        "[Boost] Successfully applied {}!",
-                        name
-                    )));
-                }
-                BoostOp::Restored => {
-                    self.active_boost = None;
-                    config.patcher.active_boost = None;
-                    let _ = config.save(&self.base_dir);
-                    let _ = tx.send(AppMsg::Log(
-                        "[Boost] Restored original boost successfully.".to_string(),
-                    ));
-                }
-                BoostOp::Error(e) => {
-                    if e.starts_with("Rocket League was updated") {
-                        self.active_boost = None;
-                        config.patcher.active_boost = None;
-                        let _ = config.save(&self.base_dir);
-                    }
-                    let _ = tx.send(AppMsg::Log(format!("[Boost] Error: {}", e)));
-                }
-            }
-        }
+        self.poll_ops(tx, config);
 
-        crate::ui::browser::header(ui, t("tab-boost-meter-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-boost-meter"), |ui| {
+            if ui
+                .add_enabled(
+                    self.processing_target.is_none(),
+                    egui::Button::new(t("boost-team-ring-toggle")),
+                )
+                .on_hover_text(t("boost-team-ring-hint"))
+                .clicked()
+                && !crate::messages::block_item_action_if_game_running(tx)
+            {
+                self.processing_target = Some(t("boost-team-ring-toggle"));
+                let cooked = cooked_pc.to_path_buf();
+                let result = self.local_tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let op = match super::title_patcher::toggle_boost_ring(&cooked) {
+                        Ok(enabled) => BoostOp::TeamRingChanged(enabled),
+                        Err(error) => BoostOp::Error(error),
+                    };
+                    let _ = result.send(op);
+                    ctx.request_repaint();
+                });
+            }
             if ui.button(t("btn-refresh")).clicked() {
                 if self.source == PatchSource::Catalog {
                     self.catalog.refresh(ctx);
@@ -1716,7 +1791,7 @@ impl BoostPatcherState {
         egui::ScrollArea::vertical()
             .id_salt("patcher_boosts_scroll")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, boost) in row.iter().enumerate() {
@@ -1725,7 +1800,7 @@ impl BoostPatcherState {
                                 |ui| {
                                     ui.set_min_height(190.0);
                                     ui.vertical_centered(|ui| {
-                                        let size = egui::vec2(120.0, 90.0);
+                                        let size = egui::vec2(ui.available_width(), 120.0);
                                         let (rect, _) =
                                             ui.allocate_exact_size(size, egui::Sense::hover());
                                         if let Some(bytes) = &boost.background_image {
@@ -1842,7 +1917,7 @@ impl BoostPatcherState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
 
         if let Some(boost_to_delete) = self.confirm_delete.clone() {
             let mut close = false;

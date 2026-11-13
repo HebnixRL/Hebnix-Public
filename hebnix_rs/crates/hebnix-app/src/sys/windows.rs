@@ -13,7 +13,13 @@ use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, CreateMutexW, GetCurrentProcessId, GetCurrentThreadId,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MENU, keybd_event,
+};
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 
@@ -157,7 +163,29 @@ fn focus_window(hwnd: HWND) -> bool {
         if SetForegroundWindow(hwnd).as_bool() {
             return true;
         }
-        SwitchToThisWindow(hwnd, true); // alt-tab's path, no AttachThreadInput needed
+        // Windows only lets the process that got the last input event take the foreground,
+        // and pad presses don't count. A tap of Alt is an input event from us, which is why
+        // this works right after you click the panel and breaks once you click into the game.
+        keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        if SetForegroundWindow(hwnd).as_bool() {
+            return true;
+        }
+        // a pad press isn't input Windows counts, so the lock above refuses. Sharing the
+        // foreground thread's input state lifts it for this one call.
+        let foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), None);
+        let own_thread = GetCurrentThreadId();
+        if foreground_thread != 0
+            && foreground_thread != own_thread
+            && AttachThreadInput(own_thread, foreground_thread, true).as_bool()
+        {
+            let focused = SetForegroundWindow(hwnd).as_bool();
+            let _ = AttachThreadInput(own_thread, foreground_thread, false);
+            if focused {
+                return true;
+            }
+        }
+        SwitchToThisWindow(hwnd, true); // alt-tab's path
         GetForegroundWindow() == hwnd
     }
 }

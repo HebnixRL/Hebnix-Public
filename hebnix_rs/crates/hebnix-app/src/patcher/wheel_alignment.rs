@@ -17,6 +17,31 @@ pub struct Settings {
     lateral: f32,
 }
 impl Settings {
+    pub(super) fn description(self) -> String {
+        format!(
+            "{}° · {:+.2} ↕ · {:+.2} ↔",
+            self.camber, self.vertical, self.lateral
+        )
+    }
+
+    pub(super) fn history_controls(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::Slider::new(&mut self.camber, -30.0..=30.0)
+                .step_by(0.25)
+                .text(t("render-camber-degrees")),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.vertical, -15.0..=15.0)
+                .step_by(0.25)
+                .text(t("render-up-down")),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.lateral, -15.0..=15.0)
+                .step_by(0.25)
+                .text(t("render-left-right-track-width")),
+        );
+    }
+
     fn validate(self) -> Result<(), String> {
         if !self.camber.is_finite()
             || !self.vertical.is_finite()
@@ -75,7 +100,7 @@ fn adjusted(q: [f32; 4], position: [f32; 3], left: bool, s: Settings) -> ([f32; 
         ],
     )
 }
-fn build(baseline: &Path, output: &Path, s: Settings) -> Result<(), String> {
+pub(super) fn build(baseline: &Path, output: &Path, s: Settings) -> Result<(), String> {
     s.validate()?;
     let mut p = UpkPackage::load(baseline)?;
     // Resolve the usable local body mesh, including an already-swapped mesh. Some legacy
@@ -216,6 +241,23 @@ fn record_dir(cooked: &Path, file: &str) -> PathBuf {
     cooked.join("Backups").join("WheelAlignment").join(file)
 }
 
+pub(super) fn live_settings(
+    cooked: &Path,
+    file: &str,
+    current: &[u8],
+) -> Option<(Vec<u8>, Settings)> {
+    let dir = record_dir(cooked, file);
+    let record: Record =
+        serde_json::from_slice(&fs::read(dir.join("alignment.json")).ok()?).ok()?;
+    if record.version != 1 || record.installed_hash != hash(current) {
+        return None;
+    }
+    let baseline = fs::read(dir.join("baseline.upk.bak"))
+        .or_else(|_| fs::read(dir.join("baseline.upk")))
+        .ok()?;
+    (hash(&baseline) == record.baseline_hash).then_some((baseline, record.settings))
+}
+
 fn package_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
     let current = dir.join(format!("{name}.upk.bak"));
     let legacy = dir.join(format!("{name}.upk"));
@@ -256,13 +298,74 @@ fn migrate_legacy_package_files(cooked: &Path) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TransactionAction {
+pub(super) enum TransactionAction {
     Apply,
     Revert,
     RevertAndForget,
 }
 
-fn transaction(
+pub(super) fn recovery_settings(cooked: &Path) -> Result<Vec<(String, Settings)>, String> {
+    let dir = cooked.join("Backups/WheelAlignment");
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut settings = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path().join("alignment.json");
+        if path.is_file() {
+            let record: Record = serde_json::from_slice(&read(&path)?).map_err(|error| error.to_string())?;
+            if record.settings != Settings::default() {
+                settings.push((entry.file_name().to_string_lossy().into_owned(), record.settings));
+            }
+        }
+    }
+    Ok(settings)
+}
+
+pub(crate) fn restore_for_uninstall(cooked: &Path) -> Result<(), String> {
+    let root = cooked.join("Backups/WheelAlignment");
+    if !root.exists() { return Ok(()); }
+    for entry in fs::read_dir(root).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().join("alignment.json").is_file() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let live = cooked.join(&file);
+            if let Some(mut recipe) = super::upk_history::current_recipe(cooked, &live)?
+                && recipe.owned_paint
+                && recipe.donor.eq_ignore_ascii_case(&file)
+            {
+                recipe.paint = super::painted_swap::SwapPaint::Default;
+                recipe.alignment = Some(Settings::default());
+                super::upk_history::edit_current(cooked, &file, recipe)?;
+            } else {
+                transaction(cooked, &file, Settings::default(), TransactionAction::RevertAndForget)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove a car's record. Returns the error when only the old files could not be deleted.
+fn retire(dir: &Path, file: &str) -> Result<Option<std::io::Error>, String> {
+    // Rename first so the car disappears from the active record set atomically. A uniquely
+    // named remnant is ignored by refresh_edited if Windows cannot remove it immediately.
+    let retired = dir.with_file_name(format!(
+        ".removed-{file}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::rename(dir, &retired)
+        .map_err(|e| format!("The alignment record could not be removed: {e}"))?;
+    Ok(fs::remove_dir_all(&retired).err())
+}
+
+pub(super) fn transaction(
     cooked: &Path,
     file: &str,
     settings: Settings,
@@ -271,14 +374,7 @@ fn transaction(
     ensure_closed()?;
     settings.validate()?;
     let backups = cooked.join("Backups");
-    match action {
-        TransactionAction::Apply => {
-            super::backup_guard::synchronize_install(cooked, &backups)?;
-        }
-        TransactionAction::Revert | TransactionAction::RevertAndForget => {
-            super::backup_guard::check_install(cooked, &backups)?;
-        }
-    }
+    super::backup_guard::check_install(cooked, &backups)?;
     if Path::new(file).components().count() != 1
         || !file.to_ascii_lowercase().ends_with(".upk")
         || file.contains(['/', '\\', ':'])
@@ -292,6 +388,19 @@ fn transaction(
     let current = read(&live)?;
     let current_hash = hash(&current);
     let dir = record_dir(cooked, file);
+    if action != TransactionAction::RevertAndForget
+        && let Some(mut recipe) = super::upk_history::current_recipe(cooked, &live)?
+        && recipe.alignment.is_some()
+        && live_settings(cooked, file, &current).is_none()
+    {
+        recipe.alignment = Some(if action == TransactionAction::Apply {
+            settings
+        } else {
+            Settings::default()
+        });
+        super::upk_history::edit_current(cooked, file, recipe)?;
+        return Ok(t("upk-history-saved"));
+    }
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     // A directory lock protects against another Hebnix instance applying concurrently.
     let lock = dir.join("operation.lock");
@@ -310,13 +419,40 @@ fn transaction(
     let stage = package_file(&dir, "candidate")?;
     let previous = package_file(&dir, "previous")?;
     let mut record = if metadata.exists() {
-        let r: Record = serde_json::from_slice(&read(&metadata)?)
+        let mut r: Record = serde_json::from_slice(&read(&metadata)?)
             .map_err(|e| format!("Invalid alignment backup: {e}"))?;
         if r.version != 1 || hash(&read(&baseline)?) != r.baseline_hash {
             return Err("Alignment backup failed validation".into());
         }
-        if current_hash != r.installed_hash {
-            return Err("This UPK changed outside Wheel Alignment. Refusing to overwrite a swap/custom body or game update. Restore that later patch first; alignment backup retained.".into());
+        if current_hash == r.baseline_hash {
+            // Verify Game Files or a history restore put the baseline back.
+            r.installed_hash = current_hash.clone();
+            r.settings = Settings::default();
+        } else if current_hash != r.installed_hash {
+            // The record is stale: something else wrote this package since. Keeping it
+            // would block every later action, so drop it instead of refusing forever.
+            if action == TransactionAction::Revert {
+                return Err("This UPK changed outside Wheel Alignment. Refusing to overwrite a swap/custom body or game update. Restore that later patch first; alignment backup retained.".into());
+            }
+            if action == TransactionAction::RevertAndForget
+                && let Some(mut recipe) = super::upk_history::current_recipe(cooked, &live)?
+                && recipe.alignment.is_some()
+            {
+                recipe.alignment = Some(Settings::default());
+                super::upk_history::edit_current(cooked, file, recipe)?;
+            }
+            drop(_lock);
+            let leftover = retire(&dir, file)?;
+            if action == TransactionAction::Apply {
+                // Capture the package as it is now as the new baseline.
+                return transaction(cooked, file, settings, action);
+            }
+            return Ok(match leftover {
+                Some(error) => format!(
+                    "Old alignment record removed from the modified list. Old recovery files could not be deleted: {error}"
+                ),
+                None => "Old alignment record removed. The package was left as it is.".into(),
+            });
         }
         r
     } else {
@@ -365,7 +501,20 @@ fn transaction(
     if action == TransactionAction::Apply && settings != Settings::default() {
         record.adjustments = record.adjustments.saturating_add(1);
     }
+    let prior_metadata = read(&metadata)?;
     let next = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    let mut recipe = match super::upk_history::current_recipe(cooked, &live)? {
+        Some(recipe) => recipe,
+        None => super::upk_history::Recipe {
+            baseline: super::upk_history::baseline(cooked, &read(&baseline)?)?,
+            caption: String::new(),
+            donor: file.to_owned(),
+            paint: super::painted_swap::SwapPaint::Default,
+            alignment: None,
+            owned_paint: true,
+        },
+    };
+    recipe.alignment = Some(record.settings);
     // Save the exact immediately preceding state as an additional recovery copy.
     write(&previous, &current)?;
     if let Err(error) = (|| {
@@ -373,9 +522,17 @@ fn transaction(
         if hash(&read(&live)?) != record.installed_hash {
             return Err("Installed hash mismatch".into());
         }
-        write_record(&metadata, &next)
+        write_record(&metadata, &next)?;
+        super::upk_history::record(
+            cooked,
+            &live,
+            &current,
+            &t("app-wheel-alignment"),
+            Some(recipe),
+        )
     })() {
-        let rollback = write(&live, &current);
+        let rollback =
+            write(&live, &current).and_then(|()| write_record(&metadata, &prior_metadata));
         return Err(format!(
             "{error}; rollback {}",
             if rollback.is_ok() {
@@ -386,20 +543,8 @@ fn transaction(
         ));
     }
     if action == TransactionAction::RevertAndForget {
-        // Rename first so the car disappears from the active record set atomically. A uniquely
-        // named remnant is ignored by refresh_edited if Windows cannot remove it immediately.
         drop(_lock);
-        let retired = dir.with_file_name(format!(
-            ".removed-{file}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        fs::rename(&dir, &retired)
-            .map_err(|e| format!("Alignment reverted, but its record could not be removed: {e}"))?;
-        if let Err(error) = fs::remove_dir_all(&retired) {
+        if let Some(error) = retire(&dir, file)? {
             return Ok(format!(
                 "Alignment reverted and removed from the modified list. Old recovery files could not be deleted: {error}"
             ));
@@ -425,6 +570,8 @@ pub struct WheelAlignmentState {
     edited_root: Option<PathBuf>,
 }
 impl WheelAlignmentState {
+    pub(crate) fn busy(&self) -> bool { self.receiver.is_some() }
+
     fn refresh_edited(&mut self, cooked: &Path) {
         self.edited.clear();
         if let Ok(entries) = fs::read_dir(cooked.join("Backups").join("WheelAlignment")) {
@@ -489,124 +636,138 @@ impl WheelAlignmentState {
                 }
             }
         }
-        ui.heading(t("app-wheel-alignment"));
         if self.edited_root.as_deref() != Some(cooked) {
             self.refresh_edited(cooked);
         }
         let busy = self.receiver.is_some();
         let rl_open = hebnix_sdk::process::is_rocket_league_running();
         let mut action = None;
-        ui.add_enabled_ui(!busy, |ui| {
-            egui::ComboBox::from_id_salt("wheel_alignment_car")
-                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                .selected_text(
-                    self.cars
-                        .get(self.selected)
-                        .map(|c| c.0.as_str())
-                        .unwrap_or("Load car catalog"),
-                )
-                .show_ui(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .hint_text(t("render-filter-cars")),
-                    );
-                    ui.separator();
-                    for (i, (name, _)) in self.cars.iter().enumerate() {
-                        if name.to_lowercase().contains(&self.search.to_lowercase())
-                            && ui.selectable_value(&mut self.selected, i, name).clicked()
-                        {
-                            ui.close();
-                        }
-                    }
-                });
-            let Some((_, file)) = self.cars.get(self.selected) else {
-                ui.label(t("render-car-catalog-is-not-available-yet"));
-                return;
-            };
-            let dir = record_dir(cooked, file);
-            if self.loaded.as_ref() != Some(&dir) {
-                self.settings = read(&dir.join("alignment.json"))
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-                    .map(|r| r.settings)
-                    .unwrap_or_default();
-                self.loaded = Some(dir.clone());
-            }
-            ui.add(
-                egui::Slider::new(&mut self.settings.camber, -30.0..=30.0)
-                    .step_by(0.5)
-                    .text(t("render-camber-degrees")),
-            );
-            ui.weak(t("render-negative-tops-inward-positive-tops-outwa"));
-            ui.add(
-                egui::Slider::new(&mut self.settings.vertical, -15.0..=15.0)
-                    .step_by(0.25)
-                    .text(t("render-up-down")),
-            );
-            ui.weak(t("render-positive-up-negative-down-values-are"));
-            ui.add(
-                egui::Slider::new(&mut self.settings.lateral, -15.0..=15.0)
-                    .step_by(0.25)
-                    .text(t("render-left-right-track-width")),
-            );
-            ui.weak(t("render-mirrored-adjustment-positive-moves-both"));
-            if ui
-                .add_enabled(!rl_open, egui::Button::new(t("render-apply-alignment")))
-                .on_disabled_hover_text(t("render-close-rocket-league-before-changing-alig"))
-                .clicked()
-            {
-                action = Some((file.clone(), self.settings, TransactionAction::Apply));
-            }
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(t("app-wheel-alignment"));
             ui.separator();
-            ui.heading(t("render-revert-settings"));
-            if ui.button(t("render-revert-to-0")).clicked() {
-                self.settings = Settings::default();
-            }
-            ui.label(t_args(
-                "render-edited-cars-edited",
-                &[("edited", (self.edited.len()).to_string().into())],
-            ));
-            egui::ScrollArea::vertical()
-                .id_salt("alignment_edited_cars")
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for (file, reverted) in &self.edited {
-                        let index = self.cars.iter().position(|(_, path)| path == file);
-                        let name = index.map(|i| self.cars[i].0.as_str()).unwrap_or(file);
-                        let label = if *reverted {
-                            format!("{name} — reverted")
-                        } else {
-                            name.to_string()
-                        };
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(index == Some(self.selected), label)
-                                .clicked()
+            ui.add_enabled_ui(!busy, |ui| {
+                egui::ComboBox::from_id_salt("wheel_alignment_car")
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .selected_text(
+                        self.cars
+                            .get(self.selected)
+                            .map(|c| c.0.as_str())
+                            .unwrap_or("Load car catalog"),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.search)
+                                .hint_text(t("render-filter-cars")),
+                        );
+                        ui.separator();
+                        for (i, (name, _)) in self.cars.iter().enumerate() {
+                            if name.to_lowercase().contains(&self.search.to_lowercase())
+                                && ui.selectable_value(&mut self.selected, i, name).clicked()
                             {
-                                if let Some(i) = index {
-                                    self.selected = i;
-                                }
+                                ui.close();
                             }
-                            if ui
-                                .add_enabled(!rl_open, egui::Button::new("X"))
-                                .on_disabled_hover_text(t(
-                                    "render-close-rocket-league-before-restoring-ali",
-                                ))
-                                .clicked()
-                            {
-                                action = Some((
-                                    file.clone(),
-                                    Settings::default(),
-                                    TransactionAction::RevertAndForget,
-                                ));
-                            }
-                        });
-                    }
-                    if self.edited.is_empty() {
-                        ui.weak(t("render-no-cars-adjusted-yet"));
-                    }
-                });
+                        }
+                    });
+                let Some((_, file)) = self.cars.get(self.selected) else {
+                    ui.label(t("render-car-catalog-is-not-available-yet"));
+                    return;
+                };
+                let dir = record_dir(cooked, file);
+                if self.loaded.as_ref() != Some(&dir) {
+                    self.settings = super::upk_history::current_recipe(cooked, &cooked.join(file))
+                        .ok().flatten().and_then(|recipe| recipe.alignment)
+                        .or_else(|| read(&dir.join("alignment.json"))
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+                            .map(|r| r.settings))
+                        .unwrap_or_default();
+                    self.loaded = Some(dir.clone());
+                }
+                ui.add(
+                    egui::Slider::new(&mut self.settings.camber, -30.0..=30.0)
+                        .step_by(0.5)
+                        .text(t("render-camber-degrees")),
+                );
+                ui.weak(t("render-negative-tops-inward-positive-tops-outwa"));
+                ui.add(
+                    egui::Slider::new(&mut self.settings.vertical, -15.0..=15.0)
+                        .step_by(0.25)
+                        .text(t("render-up-down")),
+                );
+                ui.weak(t("render-positive-up-negative-down-values-are"));
+                ui.add(
+                    egui::Slider::new(&mut self.settings.lateral, -15.0..=15.0)
+                        .step_by(0.25)
+                        .text(t("render-left-right-track-width")),
+                );
+                ui.weak(t("render-mirrored-adjustment-positive-moves-both"));
+                if ui
+                    .add_enabled(!rl_open, egui::Button::new(t("render-apply-alignment")))
+                    .on_disabled_hover_text(t("render-close-rocket-league-before-changing-alig"))
+                    .clicked()
+                {
+                    action = Some((file.clone(), self.settings, TransactionAction::Apply));
+                }
+            });
         });
+        if self.cars.get(self.selected).is_some() {
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.heading(t("render-revert-settings"));
+                ui.separator();
+                ui.add_enabled_ui(!busy, |ui| {
+                    if ui.button(t("render-revert-to-0")).clicked() {
+                        self.settings = Settings::default();
+                    }
+                    ui.label(t_args(
+                        "render-edited-cars-edited",
+                        &[("edited", (self.edited.len()).to_string().into())],
+                    ));
+                    egui::ScrollArea::vertical()
+                        .id_salt("alignment_edited_cars")
+                        .max_height(200.0)
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
+                            for (file, reverted) in &self.edited {
+                                let index = self.cars.iter().position(|(_, path)| path == file);
+                                let name = index.map(|i| self.cars[i].0.as_str()).unwrap_or(file);
+                                let label = if *reverted {
+                                    format!("{name} — reverted")
+                                } else {
+                                    name.to_string()
+                                };
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(index == Some(self.selected), label)
+                                        .clicked()
+                                    {
+                                        if let Some(i) = index {
+                                            self.selected = i;
+                                        }
+                                    }
+                                    if ui
+                                        .add_enabled(!rl_open, egui::Button::new("X"))
+                                        .on_disabled_hover_text(t(
+                                            "render-close-rocket-league-before-restoring-ali",
+                                        ))
+                                        .clicked()
+                                    {
+                                        action = Some((
+                                            file.clone(),
+                                            Settings::default(),
+                                            TransactionAction::RevertAndForget,
+                                        ));
+                                    }
+                                });
+                            }
+                            if self.edited.is_empty() {
+                                ui.weak(t("render-no-cars-adjusted-yet"));
+                            }
+                        }));
+                });
+            });
+        }
         if let Some((file, settings, action)) = action {
             let cooked = cooked.to_path_buf();
             let (tx, rx) = mpsc::channel();
@@ -619,9 +780,52 @@ impl WheelAlignmentState {
                 ctx.request_repaint();
             });
         }
-        if busy {
-            ui.spinner();
+        ui.add_space(8.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Status");
+            ui.separator();
+            if busy {
+                ui.spinner();
+            }
+            ui.label(&self.status);
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_records_can_be_forgotten_without_touching_the_package() {
+        let root = std::env::temp_dir().join(format!("hebnix-alignment-{}", rand::random::<u64>()));
+        let cooked = root.join("TAGame/CookedPCConsole");
+        fs::create_dir_all(&cooked).unwrap();
+        fs::create_dir_all(root.join("Binaries/Win64")).unwrap();
+        fs::write(root.join("Binaries/Win64/RocketLeague.exe"), b"test build").unwrap();
+        super::super::backup_guard::check_install(&cooked, &cooked.join("Backups")).unwrap();
+        let file = "Body_Octane_SF.upk";
+        let live = cooked.join(file);
+        let dir = record_dir(&cooked, file);
+        // Once replaced by other bytes, once put back to the baseline by a file verify.
+        for current in [&b"replaced elsewhere"[..], b"stock"] {
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("baseline.upk.bak"), b"stock").unwrap();
+            let record = Record {
+                version: 1,
+                baseline_hash: hash(b"stock"),
+                installed_hash: hash(b"aligned"),
+                settings: Settings { camber: -15., vertical: 0., lateral: 0. },
+                adjustments: 1,
+            };
+            fs::write(dir.join("alignment.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+            fs::write(&live, current).unwrap();
+            transaction(&cooked, file, Settings::default(), TransactionAction::RevertAndForget)
+                .unwrap();
+            assert!(!dir.exists());
+            assert_eq!(fs::read(&live).unwrap(), current);
         }
-        ui.label(&self.status);
+        let _ = fs::remove_dir_all(root);
     }
 }

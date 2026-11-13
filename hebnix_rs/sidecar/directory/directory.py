@@ -11,7 +11,8 @@ and gets back everyone currently announced, itself included:
 
     {"peers": [{"id": "...", "token": "...", "name": "..."}, ...]}
 
-An entry that isn't refreshed for TTL seconds is dropped. Nothing is written
+A clean departure sends DELETE with the same id and token. An entry that
+isn't refreshed for TTL seconds is dropped. Nothing is written
 to disk. The key is the same for every Hebnix build (baked in at build time),
 so it only keeps casual scrapers out; matches are protected by their in-game
 LAN password, as with the old headscale setup.
@@ -63,7 +64,7 @@ def clean_name(value):
     return value[:64]
 
 
-def announce(body, client):
+def announce(body, client, *, departing=False):
     """returns (status, reply)"""
     try:
         data = json.loads(body)
@@ -85,6 +86,11 @@ def announce(body, client):
             del _entries[key]
         for ip in [ip for ip, stamps in _recent.items() if not stamps or now - stamps[-1] > 60]:
             del _recent[ip]
+        if departing:
+            current = _entries.get(entry_id)
+            if current and current[1]["token"] == token:
+                del _entries[entry_id]
+            return 200, {}
         if entry_id not in _entries and len(_entries) >= MAX_ENTRIES:
             return 503, {"error": "the directory is full"}
         _entries[entry_id] = (now + TTL, entry)
@@ -105,6 +111,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
+        self.update_directory(departing=False)
+
+    def do_DELETE(self):
+        self.update_directory(departing=True)
+
+    def update_directory(self, *, departing):
         if self.headers.get("X-Hebnix-Key", "") != KEY:
             return self.reply(403, {"error": "forbidden"})
         length = int(self.headers.get("Content-Length") or 0)
@@ -112,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {"error": "bad request"})
         body = self.rfile.read(length)
         client = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
-        status, reply = announce(body, client)
+        status, reply = announce(body, client, departing=departing)
         self.reply(status, reply)
 
     def do_GET(self):

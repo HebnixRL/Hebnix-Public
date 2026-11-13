@@ -427,7 +427,13 @@ pub fn display_map_name(internal: &str) -> String {
         .next()
         .unwrap_or(internal)
         .trim_end_matches(".upk");
-    let key = leaf.to_ascii_lowercase();
+    let mut key = leaf.to_ascii_lowercase();
+    if key.starts_with("p_") {
+        key.drain(..2);
+        if !key.ends_with("_p") {
+            key.push_str("_p");
+        }
+    }
     let known = match key.as_str() {
         "stadium_p" => "DFH Stadium",
         "stadium_day_p" => "DFH Stadium (Day)",

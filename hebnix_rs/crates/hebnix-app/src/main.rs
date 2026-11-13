@@ -7,10 +7,6 @@ mod replay_scan;
 mod replay_timeline;
 mod replay_source;
 mod replay_history_log;
-#[cfg(target_os = "windows")]
-mod replay_history_patch;
-#[cfg(target_os = "linux")]
-#[path = "replay_history_patch_linux.rs"]
 mod replay_history_patch;
 mod patcher;
 mod ball {
@@ -45,6 +41,8 @@ mod dpi_fix;
 #[path = "dpi_fix_linux.rs"]
 mod dpi_fix;
 mod epic_connection;
+mod panel;
+mod preview_server;
 #[cfg(target_os = "windows")]
 mod hotkey;
 #[cfg(target_os = "linux")]
@@ -78,6 +76,8 @@ mod patch_core {
     pub use crate::patcher::patch_core::*;
 }
 mod plugins;
+mod profile_pictures;
+mod scoreboard;
 mod presets;
 #[cfg(target_os = "windows")]
 mod rl_launch;
@@ -109,6 +109,7 @@ mod tray;
 mod ui;
 mod ui_work;
 mod update;
+mod maintenance;
 mod upk_keys {
     pub use crate::patcher::upk_keys::*;
 }
@@ -320,12 +321,19 @@ fn main() -> eframe::Result {
 
 #[cfg(target_os = "windows")]
 fn main() -> eframe::Result {
-    let base_dir = config::base_dir();
     if let Some(parent_pid) = watchdog::parent_pid() {
         watchdog::run(parent_pid);
         return Ok(());
     }
+    let relocation = maintenance::relocate_on_launch(false);
+    if matches!(&relocation, Ok(true)) {
+        return Ok(());
+    }
+    let base_dir = config::base_dir();
     setup_logging(&base_dir);
+    if let Err(error) = relocation {
+        tracing::warn!("Hebnix installation: {error}");
+    }
     deep_link::register_and_queue_from_args(&base_dir);
     if let Err(error) = runtime_assets::ensure_present(&base_dir) {
         tracing::warn!("failed to prepare Hebnix runtime assets: {error}");
@@ -367,8 +375,11 @@ fn main() -> eframe::Result {
         winutil::focus_existing_instance();
         return Ok(());
     };
+    let shortcut_base = base_dir.clone();
+    std::thread::spawn(move || maintenance::first_launch_shortcut(&shortcut_base));
     tracing::info!("startup single-instance guard acquired");
 
+    hosts_file::repair_at_startup();
     spoofer::restore_if_crashed(&base_dir);
     tracing::info!("checking legacy WebSocket cleanup");
     if let Err(error) = spoofer::cleanup_websocket_once(&base_dir) {
@@ -388,9 +399,7 @@ fn main() -> eframe::Result {
         ])
         .with_min_inner_size([app::MIN_WIDTH, app::MIN_HEIGHT])
         .with_transparent(!window_state::safe_rendering())
-        .with_visible(!cfg.settings.start_in_tray || window_state::safe_rendering()
-            || replay_history_patch::resume_operation().is_some()
-            || replay_history_patch::admin_restart_canceled());
+        .with_visible(!cfg.settings.start_in_tray || window_state::safe_rendering());
     if let Some(icon) = load_window_icon(&base_dir) {
         viewport = viewport.with_icon(icon);
     }

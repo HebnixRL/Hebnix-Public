@@ -34,7 +34,9 @@ impl HebnixApp {
                         .layout(egui::Layout::top_down(egui::Align::Center)),
                     |ui| {
                         ui.set_width(content_width);
-                        self.render_name_content(ui, content_width);
+                        crate::i18n::layout::bordered_panel(ui, |ui| {
+                            self.render_name_content(ui, ui.available_width());
+                        });
                     },
                 );
                 let height = response.response.rect.height();
@@ -60,7 +62,8 @@ impl HebnixApp {
         let mut completed = false;
         let mut chosen_name = None;
 
-        ui.heading("Name");
+        ui.heading(crate::i18n::t("nav-player-name"));
+        ui.separator();
         ui.weak("Choose your display name");
         ui.add_space(spacing.y * 2.0);
 

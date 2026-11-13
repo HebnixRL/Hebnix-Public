@@ -184,14 +184,15 @@ func main() {
 	if err != nil || !base.Is4() || !base.IsLoopback() {
 		fatal("-alias-base must be two octets of a loopback address, like 127.10")
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	if *stdinEOF {
 		go func() {
 			io.Copy(io.Discard, os.Stdin)
-			log.Print("stdin closed, exiting")
-			os.Exit(0)
+			cancel()
 		}()
 	}
-	run(ports, base.As4())
+	run(ctx, ports, base.As4())
 }
 
 func parsePorts(list string) ([]uint16, error) {
@@ -246,9 +247,14 @@ type node struct {
 	serverFlows map[tailcat.ConnPacketConn]struct{}
 }
 
-func run(ports []uint16, aliasBase [4]byte) {
+func run(ctx context.Context, ports []uint16, aliasBase [4]byte) {
+	id := os.Getenv("HEBNIX_WORKSHOP_NODE_ID")
+	if _, err := hex.DecodeString(id); len(id) != 16 || err != nil {
+		id = randomID()
+	}
+	id = strings.ToLower(id)
 	n := &node{
-		id:          randomID(),
+		id:          id,
 		aliasBase:   aliasBase,
 		peers:       map[string]*peer{},
 		serverFlows: map[tailcat.ConnPacketConn]struct{}{},
@@ -292,9 +298,15 @@ func run(ports []uint16, aliasBase [4]byte) {
 	defer srv.Close()
 	token := string(srv.TailcatAddr())
 
+	// A cancelled request may already have registered us on the server.
+	// Withdraw with a fresh, short deadline before the parent kills the helper.
+	defer withdraw(*directory, n.id, token)
 	announced := false
 	announce := func() {
-		list, err := announceTo(*directory, n.id, token, *name)
+		list, err := announceTo(ctx, *directory, n.id, token, *name)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			log.Printf("directory: %v", err)
 			if !announced {
@@ -311,8 +323,12 @@ func run(ports []uint16, aliasBase [4]byte) {
 	announce()
 	tick := time.NewTicker(announceEvery)
 	status := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	defer status.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-tick.C:
 			announce()
 		case <-status.C:
@@ -328,9 +344,9 @@ type directoryEntry struct {
 }
 
 // announces this node and returns everyone else currently announced
-func announceTo(url, id, token, name string) ([]directoryEntry, error) {
+func announceTo(ctx context.Context, url, id, token, name string) ([]directoryEntry, error) {
 	body, _ := json.Marshal(directoryEntry{ID: id, Token: token, Name: name})
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -359,6 +375,23 @@ func announceTo(url, id, token, name string) ([]directoryEntry, error) {
 		}
 	}
 	return others, nil
+}
+
+// Older directory deployments rely on the heartbeat expiry instead.
+func withdraw(url, id, token string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	body, _ := json.Marshal(directoryEntry{ID: id, Token: token})
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hebnix-Key", os.Getenv(directoryKeyEnv))
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 // connects to newly listed players and drops the ones no longer listed

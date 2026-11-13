@@ -354,6 +354,54 @@ impl Abc {
         })
     }
 }
+/// Title edits append constants and change their own getters. Rank edits
+/// change different getters and use existing names and inline constants.
+pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<Vec<u8>>> {
+    if before == after || live == before {
+        return Ok(None);
+    }
+    if live == after {
+        return Ok(Some(before.to_vec()));
+    }
+    let (current, old, new) = (Abc::parse(live)?, Abc::parse(before)?, Abc::parse(after)?);
+    let header_end = |abc: &Abc, len| abc.bodies.first().map_or(len, |body| body.span.start);
+    let mut output = select_original(
+        &live[..header_end(&current, live.len())],
+        &before[..header_end(&old, before.len())],
+        &after[..header_end(&new, after.len())],
+    )?
+    .to_vec();
+
+    if current.bodies.len() != old.bodies.len() || current.bodies.len() != new.bodies.len() {
+        return Err("Method count changed in shared UI bytecode".into());
+    }
+    for ((current, old), new) in current.bodies.iter().zip(&old.bodies).zip(&new.bodies) {
+        if current.id != old.id || current.id != new.id {
+            return Err("Method order changed in shared UI bytecode".into());
+        }
+        output.extend_from_slice(select_original(
+            &live[current.span.clone()],
+            &before[old.span.clone()],
+            &after[new.span.clone()],
+        )?);
+    }
+    if output == live {
+        return Ok(None);
+    }
+    Abc::parse(&output)?;
+    Ok(Some(output))
+}
+
+fn select_original<'a>(live: &'a [u8], before: &'a [u8], after: &[u8]) -> Result<&'a [u8]> {
+    if before == after || live == before {
+        Ok(live)
+    } else if live == after {
+        Ok(before)
+    } else {
+        Err("Another edit changed the same UI bytecode".into())
+    }
+}
+
 struct Constants<'a> {
     strings: &'a mut Vec<String>,
     uints: &'a mut Vec<u32>,
@@ -436,7 +484,13 @@ fn skip_debug(r: &mut Reader<'_>) -> Result<()> {
 fn prologue_len(code: &[u8]) -> Result<usize> {
     let mut r = Reader { data: code, at: 0 };
     skip_debug(&mut r)?;
-    if r.take(2)? != [0xd0, 0x30] {
+    match r.byte()? {
+        0xd0 => {}                  // getlocal_0
+        0x62 if r.index()? == 0 => {} // getlocal 0
+        _ => return Err("Unsupported title method prologue".into()),
+    }
+    skip_debug(&mut r)?;
+    if r.byte()? != 0x30 {
         return Err("Unsupported title method prologue".into());
     }
     Ok(r.at)
@@ -473,7 +527,10 @@ fn native_player_value<'a>(
         .find(|body| body.id == method)
         .ok_or("Missing match title getter body")?;
     let code = &data[body.code.clone()];
-    let start = prologue_len(code)?;
+    let owner = &abc.name(class.name)?.full;
+    let start = prologue_len(code).map_err(|error| {
+        format!("{error} in {owner}.{name} (starts with {:02x?})", &code[..code.len().min(8)])
+    })?;
     let mut r = Reader {
         data: code,
         at: start,
@@ -603,6 +660,423 @@ fn local_selected_title(
         bind(code, at, end)?;
     }
     Ok(())
+}
+
+/// A call with no arguments and no result, run at the end of a method.
+#[derive(Clone, Copy)]
+pub(in crate::patcher) enum Call<'a> {
+    /// `this.name()`
+    This(&'a str),
+    /// `Class.name()` on a static method of another class, given as `package:Class`.
+    Static { class: &'a str, name: &'a str },
+}
+
+const RETURN_VOID: u8 = 0x47;
+const GET_LOCAL_0: u8 = 0xd0;
+const GET_LEX: u8 = 0x60;
+const CALL_PROP_VOID: u8 = 0x4f;
+
+/// Insert `calls` just before the final `returnvoid` of `class.method` (an
+/// instance method; `class` is `package:Class`). Every name used is already in
+/// the ABC, so no constant pool changes: a method's own trait name is a
+/// multiname that calls it. Branches stay valid because they are relative and
+/// the insert point is the last instruction. Returns None when the movie has
+/// no such class.
+pub(in crate::patcher) fn append_calls(
+    data: &[u8],
+    class: &str,
+    method: &str,
+    calls: &[Call<'_>],
+) -> Result<Option<(Vec<u8>, usize)>> {
+    let abc = Abc::parse(data)?;
+    let Some(owner) = abc
+        .classes
+        .iter()
+        .find(|c| abc.name(c.name).is_ok_and(|n| n.full == class))
+    else {
+        return Ok(None);
+    };
+    let trait_method = |traits: &[Trait], name: &str| {
+        traits
+            .iter()
+            .find(|t| (1..=3).contains(&t.kind) && abc.name(t.name).is_ok_and(|n| n.local == name))
+            .copied_name_and_method()
+    };
+    let (_, id) = trait_method(&owner.fields, method)
+        .ok_or_else(|| format!("{class} has no method {method}"))?;
+    let body = abc
+        .bodies
+        .iter()
+        .find(|b| b.id == id)
+        .ok_or("Method has no body")?;
+    if body.exceptions != 0 {
+        return Err(format!("{class}.{method} has exception handlers"));
+    }
+    let code = &data[body.code.clone()];
+    if code.last() != Some(&RETURN_VOID) {
+        return Err(format!("{class}.{method} does not end in returnvoid"));
+    }
+    let mut inserted = Vec::new();
+    for call in calls {
+        match *call {
+            Call::This(name) => {
+                let (multiname, _) = trait_method(&owner.fields, name)
+                    .ok_or_else(|| format!("{class} has no method {name}"))?;
+                inserted.push(GET_LOCAL_0);
+                op(&mut inserted, CALL_PROP_VOID, multiname);
+                put(&mut inserted, 0);
+            }
+            Call::Static {
+                class: target,
+                name,
+            } => {
+                let target = abc
+                    .classes
+                    .iter()
+                    .find(|c| abc.name(c.name).is_ok_and(|n| n.full == target))
+                    .ok_or_else(|| format!("Missing class {target}"))?;
+                let (multiname, _) = trait_method(&target.statics, name)
+                    .ok_or_else(|| format!("Missing static method {name}"))?;
+                op(&mut inserted, GET_LEX, target.name);
+                op(&mut inserted, CALL_PROP_VOID, multiname);
+                put(&mut inserted, 0);
+            }
+        }
+    }
+    if code.ends_with(&[&inserted[..], &[RETURN_VOID]].concat()) {
+        return Err(format!("{class}.{method} already has these calls"));
+    }
+    let mut new_code = code[..code.len() - 1].to_vec();
+    new_code.extend(&inserted);
+    new_code.push(RETURN_VOID);
+    Ok(Some((replace_body_code(data, body, &new_code), 1)))
+}
+
+/// The embedded Workshop movie supplies this method. Leaving it as a
+/// no-op keeps the Workshop and LAN controls available without a downloader.
+pub(in crate::patcher) fn disable_workshop_downloader(data: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+    let abc = Abc::parse(data)?;
+    let mut matches = abc.classes.iter().flat_map(|class| &class.fields).filter_map(|field| {
+        (abc.name(field.name).ok()?.local == "hbxToggleDl").then_some(field.method).flatten()
+    });
+    let Some(method) = matches.next() else { return Ok(None) };
+    if matches.next().is_some() {
+        return Err("Ambiguous Workshop downloader method".into());
+    }
+    let body = abc.bodies.iter().find(|body| body.id == method && body.exceptions == 0)
+        .ok_or("Missing Workshop downloader method body")?;
+    Ok(Some((replace_body_code(data, body, &[RETURN_VOID]), 1)))
+}
+
+/// Return the offset of the Instant Suite method's first instruction after
+/// its scope setup. Leaving the method in place preserves all ABC indexes.
+pub(in crate::patcher) fn instant_suite_hook(data: &[u8]) -> Result<Option<(usize, bool)>> {
+    if !data.windows(6).any(|bytes| bytes == b"hbxAsk") {
+        return Ok(None);
+    }
+    let abc = Abc::parse(data)?;
+    let Some(class) = abc.classes.iter().find(|class| {
+        abc.name(class.name).is_ok_and(|name| name.local == "WinnerPrompt")
+    }) else {
+        return Ok(None);
+    };
+    let Some(method) = class.fields.iter().find_map(|field| {
+        (abc.name(field.name).ok()?.local == "hbxAsk").then_some(field.method).flatten()
+    }) else {
+        return Ok(None);
+    };
+    let body = abc.bodies.iter().find(|body| body.id == method)
+        .ok_or("Instant Suite method has no body")?;
+    match data[body.code.clone()].get(..4) {
+        Some([0xd0, 0x30, 0xd0, 0x66]) => Ok(Some((body.code.start + 2, true))),
+        Some([0xd0, 0x30, RETURN_VOID, 0x66]) => Ok(Some((body.code.start + 2, false))),
+        _ => Err("Instant Suite method layout changed".into()),
+    }
+}
+
+pub(in crate::patcher) const INSTANT_SUITE_ACTION: &str = "GetSCT";
+
+pub(in crate::patcher) fn has_instant_suite_bridge(data: &[u8]) -> bool {
+    data.windows(b"HEBNIX_INSTANT_SUITE_BRIDGE".len()).any(|bytes| bytes == b"HEBNIX_INSTANT_SUITE_BRIDGE")
+}
+
+/// Replace the retired image request with a bounded poll of the native Shell bridge.
+pub(in crate::patcher) fn instant_suite_bridge(data: &[u8], enabled: bool) -> Result<Option<(Vec<u8>, usize)>> {
+    if instant_suite_hook(data)?.is_none() {
+        return Ok(None);
+    }
+    let abc = Abc::parse(data)?;
+    let class = abc.classes.iter().find(|class| {
+        abc.name(class.name).is_ok_and(|name| name.full == "prompts:WinnerPrompt")
+    }).ok_or("Winner prompt class is missing")?;
+    let method = |name: &str| {
+        let id = class.fields.iter().find_map(|field| {
+            (abc.name(field.name).ok()?.local == name).then_some(field.method).flatten()
+        }).ok_or_else(|| format!("Missing winner method {name}"))?;
+        abc.bodies.iter().find(|body| body.id == id && body.exceptions == 0)
+            .ok_or_else(|| format!("Missing winner method body {name}"))
+    };
+    let name = |full: &str| {
+        abc.names.iter().position(|name| name.full == full)
+            .ok_or_else(|| format!("Missing winner property {full}"))
+    };
+    let hooks = name("projectx.proxy:UIShellHooks")?;
+    let native = name(":SHELL_CallUnrealFunction")?;
+    let listener = name(":hbxNone")?;
+    let deadline = name(":hbxL")?;
+    let done = name(":hbxDone")?;
+    let date = name(":Date")?;
+    let time = name(":time")?;
+    let add = name(":addEventListener")?;
+    let remove = name(":removeEventListener")?;
+    let got = name(":hbxGot")?;
+    let mut strings = abc.strings.values.clone();
+    let mut uints = Vec::new();
+    let mut constants = Constants { strings: &mut strings, uints: &mut uints };
+    let frame = constants.string("enterFrame");
+    let shell_class = constants.string("GFxShell_TA");
+    let shell = constants.string("Shell");
+    let get_key = constants.string("GetKeyForAction");
+    let action = constants.string(INSTANT_SUITE_ACTION);
+    constants.string("HEBNIX_INSTANT_SUITE_BRIDGE");
+    let clock = |code: &mut Vec<u8>| {
+        op(code, 0x5d, date); // findpropstrict Date
+        op(code, 0x4a, date); // constructprop Date()
+        put(code, 0);
+        op(code, 0x66, time);
+    };
+    let event_listener = |code: &mut Vec<u8>, operation| {
+        code.push(0xd0);
+        op(code, 0x2c, frame);
+        code.push(0xd0);
+        op(code, 0x66, listener);
+        op(code, 0x4f, operation);
+        put(code, 2);
+    };
+    let mut ask = vec![0xd0, 0x30, if enabled { 0xd0 } else { RETURN_VOID }];
+    op(&mut ask, 0x66, done);
+    let start = branch(&mut ask, 0x12); // iffalse
+    ask.push(RETURN_VOID);
+    let at = ask.len();
+    bind(&mut ask, start, at)?;
+    ask.extend([0xd0, 0x26]); // this, true
+    op(&mut ask, 0x61, done);
+    ask.push(0xd0);
+    clock(&mut ask);
+    op(&mut ask, 0x25, 5_000); // pushshort
+    ask.push(0xa0); // add
+    op(&mut ask, 0x61, deadline);
+    event_listener(&mut ask, add);
+    ask.extend([0xd0, 0x20]); // this, null
+    op(&mut ask, 0x4f, listener);
+    ask.extend([1, RETURN_VOID]);
+
+    // The native function returns decimal epoch milliseconds followed by one
+    // action digit. Expired or empty replies keep polling until the deadline.
+    let mut poll = vec![0xd0, 0x30];
+    clock(&mut poll);
+    poll.extend([0x75, 0xd5, 0xd1, 0xd0]); // convert_d; now = local1
+    op(&mut poll, 0x66, deadline);
+    let expired = branch(&mut poll, 0x18); // ifge
+    op(&mut poll, 0x60, hooks);
+    op(&mut poll, 0x66, native);
+    let unavailable = branch(&mut poll, 0x12);
+    op(&mut poll, 0x60, hooks);
+    op(&mut poll, 0x2c, shell_class);
+    op(&mut poll, 0x2c, shell);
+    poll.extend([0x24, 0]);
+    op(&mut poll, 0x2c, get_key);
+    op(&mut poll, 0x2c, action);
+    poll.push(0x27); // false
+    op(&mut poll, 0x46, native);
+    poll.extend([6, 0x75, 0xd6, 0xd2, 0xd1, 0x24, 10, 0xa2]); // reply, now * 10
+    let fresh = branch(&mut poll, 0x17); // ifgt
+    let at = poll.len();
+    bind(&mut poll, unavailable, at)?;
+    poll.push(RETURN_VOID);
+    let at = poll.len();
+    bind(&mut poll, fresh, at)?;
+    event_listener(&mut poll, remove);
+    poll.extend([0xd0, 0xd2, 0x24, 10, 0xa4, 0x73]); // this, int(reply % 10)
+    op(&mut poll, 0x4f, got);
+    poll.extend([1, RETURN_VOID]);
+    let at = poll.len();
+    bind(&mut poll, expired, at)?;
+    event_listener(&mut poll, remove);
+    poll.push(RETURN_VOID);
+
+    let got_body = method("hbxGot")?;
+    let old = &data[got_body.code.clone()];
+    // Retain the original action dispatch, replacing event.target.width
+    // with the command digit passed by the poller.
+    let mut dispatch = vec![0xd0, 0x30, 0xd1, 0x73, 0xd6];
+    let mut reader = Reader { data: old, at: 3 };
+    if reader.byte()? != 0x66 || abc.name(reader.index()?)?.local != "target"
+        || reader.byte()? != 0x66 || abc.name(reader.index()?)?.local != "width"
+        || reader.take(2)? != [0x73, 0xd6]
+    {
+        return Err("Unexpected Instant Suite action dispatch".into());
+    }
+    dispatch.extend_from_slice(&old[reader.at..]);
+
+    let removed = method("handleRemovedFromStage")?;
+    let old = &data[removed.code.clone()];
+    if old.last() != Some(&RETURN_VOID) {
+        return Err("Unexpected winner prompt removal handler".into());
+    }
+    let mut cleanup = old[..old.len() - 1].to_vec();
+    event_listener(&mut cleanup, remove);
+    cleanup.extend([0xd0, 0x27]); // this, false
+    op(&mut cleanup, 0x61, done);
+    cleanup.push(RETURN_VOID);
+    let mut edits = Vec::new();
+    for (body, code, locals) in [
+        (method("hbxAsk")?, ask, 2),
+        (method("hbxNone")?, poll, 3),
+        (got_body, dispatch, 3),
+        (removed, cleanup, removed.locals),
+    ] {
+        let mut replacement = Vec::new();
+        for value in [body.id, body.stack.max(8), locals, body.init_scope, body.max_scope, code.len()] {
+            put(&mut replacement, value);
+        }
+        replacement.extend(code);
+        replacement.extend_from_slice(&data[body.code.end..body.span.end]);
+        edits.push((body.span.clone(), replacement));
+    }
+    let mut pool = Vec::new();
+    put(&mut pool, strings.len());
+    pool.extend_from_slice(&data[abc.strings.entries..abc.strings.span.end]);
+    for value in &strings[abc.strings.count..] {
+        put(&mut pool, value.len());
+        pool.extend(value.as_bytes());
+    }
+    edits.push((abc.strings.span, pool));
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut output = data.to_vec();
+    for (range, bytes) in edits.into_iter().rev() {
+        output.splice(range, bytes);
+    }
+    if instant_suite_hook(&output)?.map(|(_, on)| on) != Some(enabled) {
+        return Err("Instant Suite bridge validation failed".into());
+    }
+    Ok(Some((output, 1)))
+}
+
+fn replace_body_code(data: &[u8], body: &Body, new_code: &[u8]) -> Vec<u8> {
+    let mut rebuilt = Vec::new();
+    put(&mut rebuilt, body.id);
+    // Each call leaves at most a class and a receiver on the operand stack.
+    put(&mut rebuilt, body.stack.max(2));
+    put(&mut rebuilt, body.locals);
+    put(&mut rebuilt, body.init_scope);
+    put(&mut rebuilt, body.max_scope);
+    put(&mut rebuilt, new_code.len());
+    rebuilt.extend(new_code);
+    rebuilt.extend(&data[body.code.end..body.span.end]);
+    let mut out = data[..body.span.start].to_vec();
+    out.extend(rebuilt);
+    out.extend(&data[body.span.end..]);
+    out
+}
+
+/// Extend the team's existing colour transform to the visible boost fill.
+/// The fingerprint guards the two branch offsets we relocate and the
+/// multiname operands reused from the inspected HUD method.
+pub(in crate::patcher) fn patch_boost_ring(
+    data: &[u8],
+    enable: bool,
+) -> Result<Option<(Vec<u8>, usize)>> {
+    use sha2::{Digest, Sha256};
+
+    let abc = Abc::parse(data)?;
+    let Some(owner) = abc.classes.iter().find(|class| {
+        abc.name(class.name)
+            .is_ok_and(|name| name.full == "tagame.hud:BoostMeterView")
+    }) else {
+        return Ok(None);
+    };
+    let field = |name: &str| {
+        owner
+            .fields
+            .iter()
+            .find(|field| abc.name(field.name).is_ok_and(|entry| entry.local == name))
+            .ok_or_else(|| format!("Boost HUD is missing {name}"))
+    };
+    let method = field("onTeamColorChanged")?
+        .method
+        .ok_or("Missing boost colour handler")?;
+    let body = abc
+        .bodies
+        .iter()
+        .find(|body| body.id == method)
+        .ok_or("Missing boost colour handler body")?;
+    let code = &data[body.code.clone()];
+    const ORIGINAL: &str = "d646e74d8c2eb0ea3ffb40ddd7db79a99d7d133df2b65fe2ce7e7057df98c93f";
+    const TEAM_DISABLED_BRANCH: usize = 21;
+    const END_OF_TEAM_BLOCK: usize = 231;
+    const START_OF_NORMAL_BLOCK: usize = 235;
+    const FINAL_RETURN: usize = 378;
+
+    let mut receiver = vec![GET_LOCAL_0];
+    op(&mut receiver, 0x66, field("fillProgressBar")?.name);
+    // Copy the existing transform getter and setter on backgroundMovieClip.
+    const TRANSFORM: &[u8] = &[0x66, 0x96, 0x53];
+    const SET_COLOR_TRANSFORM: &[u8] = &[0x61, 0x99, 0x03];
+    receiver.extend(TRANSFORM);
+    let mut team = receiver.clone();
+    // this.m_teamStyle.colorTransform
+    team.extend([GET_LOCAL_0, 0x66, 0xac, 0x1d, 0x66, 0x99, 0x03]);
+    team.extend(SET_COLOR_TRANSFORM);
+    let mut normal = receiver;
+    // new ColorTransform() restores the original texture colours.
+    normal.extend([0x5d, 0x08, 0x4a, 0x08, 0x00]);
+    normal.extend(SET_COLOR_TRANSFORM);
+    if body.exceptions != 0 {
+        return Err("This Rocket League build has an unsupported boost HUD colour handler".into());
+    }
+    let patched = code.len() == FINAL_RETURN + 1 + team.len() + normal.len()
+        && code[END_OF_TEAM_BLOCK..].starts_with(&team)
+        && code.ends_with(&[normal.as_slice(), &[RETURN_VOID]].concat());
+    if patched {
+        let mut original = code[..END_OF_TEAM_BLOCK].to_vec();
+        let jump = branch(&mut original, 0x10);
+        original.extend(&code[START_OF_NORMAL_BLOCK + team.len()..FINAL_RETURN + team.len()]);
+        original.push(RETURN_VOID);
+        bind(&mut original, TEAM_DISABLED_BRANCH, START_OF_NORMAL_BLOCK)?;
+        bind(&mut original, jump, FINAL_RETURN)?;
+        if hex::encode(Sha256::digest(&original)) != ORIGINAL {
+            return Err("The team-coloured boost ring was modified by another patch".into());
+        }
+        return Ok((!enable).then(|| (replace_body_code(data, body, &original), 1)));
+    }
+    if !enable {
+        return Ok(None);
+    }
+    if hex::encode(Sha256::digest(code)) != ORIGINAL {
+        return Err("This Rocket League build has an unsupported boost HUD colour handler".into());
+    }
+
+    let mut replacement = code[..END_OF_TEAM_BLOCK].to_vec();
+    replacement.extend(team);
+    let jump = branch(&mut replacement, 0x10);
+    let normal_start = replacement.len();
+    replacement.extend(&code[START_OF_NORMAL_BLOCK..FINAL_RETURN]);
+    replacement.extend(normal);
+    let return_at = replacement.len();
+    replacement.push(RETURN_VOID);
+    bind(&mut replacement, TEAM_DISABLED_BRANCH, normal_start)?;
+    bind(&mut replacement, jump, return_at)?;
+    Ok(Some((replace_body_code(data, body, &replacement), 1)))
+}
+
+trait NameAndMethod {
+    fn copied_name_and_method(self) -> Option<(usize, usize)>;
+}
+impl NameAndMethod for Option<&Trait> {
+    fn copied_name_and_method(self) -> Option<(usize, usize)> {
+        self.and_then(|t| t.method.map(|m| (t.name, m)))
+    }
 }
 
 /// Returns None for ABCs without the game's title API. Existing indices remain
@@ -776,7 +1250,13 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
             .find(|body| body.id == *id)
             .ok_or("Title getter has no body")?;
         let original = &data[body.code.clone()];
-        let prologue = prologue_len(original)?;
+        let prologue = prologue_len(original).map_err(|error| {
+            let field = row.as_ref().map_or("GetTitleData", |(_, field)| field);
+            format!(
+                "{error} in {field} (method {id}, starts with {:02x?})",
+                &original[..original.len().min(8)]
+            )
+        })?;
         if body.exceptions != 0 || body.max_scope <= body.init_scope {
             return Err(format!(
                 "Unsupported title method framing: method {id}, exceptions {}, scope {}->{}, prefix {:02x?}",
@@ -1010,6 +1490,16 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn title_prologue_accepts_equivalent_scope_setup() {
+        assert_eq!(prologue_len(&[0x62, 0, 0x30, 0x60]).unwrap(), 3);
+        assert_eq!(prologue_len(&[0xd0, 0xf0, 1, 0x30, 0x60]).unwrap(), 4);
+        assert_eq!(prologue_len(&[0x62, 0, 0xf1, 1, 0x30, 0x60]).unwrap(), 5);
+        assert!(prologue_len(&[0x62, 1, 0x30, 0x60]).is_err());
+        assert!(prologue_len(&[0xd0, 0x1c, 0x60]).is_err()); // pushwith
+        assert!(prologue_len(&[0x62, 0x80]).is_err());
+    }
 
     #[test]
     fn native_getter_debug_metadata_after_prologue() {
@@ -1617,3 +2107,8 @@ mod tests {
         }
     }
 }
+
+#[path = "rank_abc.rs"]
+mod rank_abc;
+use super::RankPick;
+pub(super) use rank_abc::patch as patch_ranks;

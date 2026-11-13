@@ -3,8 +3,11 @@
 //! Keeping these modules together makes the patching boundary explicit while
 //! the compatibility re-exports in main.rs preserve the existing call sites.
 pub mod background_merger;
+pub mod map_swap;
 pub mod anthem_patcher;
 pub mod backup_guard;
+pub mod game_update;
+pub mod delete_backups;
 pub mod game_path;
 pub mod ball;
 pub mod ball_visual;
@@ -16,12 +19,27 @@ pub mod cosmetic_thumbnail;
 pub mod cosmetic_upk;
 pub mod decal_patcher;
 pub mod decal_variant;
+pub mod goal_explosion;
+pub mod goal_explosion_volume;
 pub mod heatseeker;
 pub mod item_name;
 pub mod menu_map;
+pub mod workshop_menu;
+pub mod workshop_menu_ui;
 pub mod painted_swap;
 pub mod patch_core;
 pub mod rl_font;
+pub mod script_patch;
+pub mod chat_export;
+pub mod lan_commands;
+pub mod chat_paste;
+pub mod actions;
+pub mod dispatcher;
+pub mod celebration;
+pub mod bots_freeplay;
+pub mod forfeit_command;
+pub mod workshop_host;
+pub mod instant_suite;
 pub mod title_icons;
 pub mod speed_patch;
 pub mod title_patcher;
@@ -29,7 +47,11 @@ pub mod thumbnail_patcher;
 pub mod swapper;
 pub mod upk_keys;
 pub mod upk_package;
+pub mod workshop_lan_trial;
+pub mod workshop_slots;
+pub mod profile_pictures;
 pub mod wheel_alignment;
+pub mod uninstall;
 
 use crate::config::PatchSource;
 use crate::i18n::t;
@@ -55,3 +77,4 @@ pub(crate) fn patch_source_selector(ui: &mut eframe::egui::Ui, source: &mut Patc
     })
     .inner
 }
+pub mod upk_history;

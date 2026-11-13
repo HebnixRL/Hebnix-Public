@@ -1035,7 +1035,7 @@ pub mod mutators {
         }
         final_file.extend_from_slice(&num_array1[num9_end_b7..]);
 
-        fs::write(game_path, &final_file).map_err(|e| e.to_string())?;
+        crate::patcher::upk_history::install_linked(Path::new(game_dir), Path::new(game_path), &final_file, "Ball textures")?;
 
         Ok("ok".to_string())
     }
@@ -1622,7 +1622,8 @@ pub mod gameinfo {
                     if !bak_path.is_file() {
                         fs::copy(&target_path, &bak_path).map_err(|e| e.to_string())?;
                     }
-                    fs::write(&target_path, result).map_err(|e| e.to_string())?;
+                    let cooked = target_path.parent().ok_or("Missing ball package directory")?;
+                    crate::patcher::upk_history::install_linked(cooked, &target_path, &result, "Ball textures")?;
                     return Ok(true);
                 }
                 offset = end;

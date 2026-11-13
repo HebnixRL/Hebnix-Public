@@ -195,7 +195,7 @@ impl PatchCatalog {
         egui::ScrollArea::vertical()
             .id_salt(format!("{}_catalog", self.kind))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if visible.is_empty() {
                     ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
@@ -220,7 +220,7 @@ impl PatchCatalog {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
         if let Some(item_id) = action {
             if self.downloaded(&item_id) {
                 return Some(self.zip(&item_id));

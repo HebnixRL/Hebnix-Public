@@ -1739,7 +1739,7 @@ fn restore_package_texture_regions(
     }
     // Keep appended TFC chunks until Restore All: other active packages may
     // still point to data appended after this package was patched.
-    fs::copy(&package_backup, game_dir.join(package_name))
+    super::upk_history::install_linked(game_dir, &game_dir.join(package_name), &fs::read(&package_backup).map_err(|e| e.to_string())?, "Restore decal")
         .map_err(|error| format!("Failed to restore {package_name}: {error}"))?;
     Ok(())
 }
@@ -2310,7 +2310,7 @@ fn patch_decal_on_skin(
         repack_package(&package)?
     };
     progress(0.9, &t("patch-decal-on-skin-encrypting-patched-upk"));
-    fs::write(&upk_path, &final_out).map_err(|e| format!("Failed to write patched UPK: {}", e))?;
+    super::upk_history::install_linked(game_dir, &upk_path, &final_out, "Custom decal")?;
     progress(1.0, &t("patch-decal-on-skin-decal-patch-complete"));
     Ok((target_upk, patched_fields))
 }
@@ -2328,7 +2328,7 @@ fn restore_decal_candidates(
     for target_upk in target_candidates {
         let backup_upk = backups_dir.join(format!("{target_upk}.bak"));
         if backup_upk.is_file() {
-            fs::copy(&backup_upk, cooked_pc.join(target_upk))
+            super::upk_history::install_linked(cooked_pc, &cooked_pc.join(target_upk), &fs::read(&backup_upk).map_err(|e| e.to_string())?, "Restore decal")
                 .map_err(|error| format!("Failed to restore {target_upk}: {error}"))?;
             restored_package = true;
         }
@@ -2433,6 +2433,22 @@ fn restore_all_decal_files(
         .unwrap_or_default();
     restore_decal_candidates(target_candidates, cooked_pc, backups_dir)?;
     Ok(package_count + tfc_count)
+}
+
+pub(crate) fn restore_for_uninstall(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let mut targets = Vec::new();
+    let mut has_regions = false;
+    for entry in fs::read_dir(backups).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(target) = name.strip_suffix(".upk.bak") {
+            targets.push(format!("{target}.upk"));
+        }
+        has_regions |= name.ends_with("_tfc.bin") || name.ends_with("_APPENDLEN.txt");
+    }
+    if !targets.is_empty() { restore_all_decal_files(&targets, cooked, backups)?; }
+    else if has_regions { return Err("Texture recovery data has no matching package backup. Verify Rocket League files before uninstalling.".into()); }
+    Ok(())
 }
 
 fn decal_catalog_id(value: Option<&Value>) -> Option<i32> {
@@ -2930,9 +2946,7 @@ impl DecalPatcherState {
         if crate::messages::block_item_action_if_game_running(tx) {
             return Ok(());
         }
-        if crate::patcher::backup_guard::synchronize_install(cooked_pc, backups_dir)? {
-            self.active_decals.clear();
-        }
+        crate::patcher::backup_guard::check_install(cooked_pc, backups_dir)?;
         self.validate_key_file()?;
 
         let decal_name_owned = decal_name.to_string();
@@ -3582,7 +3596,7 @@ impl DecalPatcherState {
                 .id_salt("patcher_active_decals_scroll")
                 .min_scrolled_height(0.0)
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(ui, |ui| crate::panel::followed(ui, |ui| {
                     if self.active_decals.is_empty() {
                         ui.weak(t("tab-no-active-decal-patches"));
                         return;
@@ -3655,7 +3669,7 @@ impl DecalPatcherState {
                             ui.separator();
                         });
                     }
-                });
+                }));
         });
         restore
     }
@@ -3671,6 +3685,7 @@ impl DecalPatcherState {
         owned_inventory: &mut crate::owned_inventory::OwnedInventory,
     ) {
         self.handle_op_result(tx, config);
+        ui.heading(t("nav-decals"));
         owned_inventory.show_with_actions(ui, |ui| {
             let label = "Show only owned items";
             let width = ui.spacing().icon_width
@@ -3707,7 +3722,7 @@ impl DecalPatcherState {
         let busy = self.processing_target.is_some();
         let key_ok = self.validate_key_file().is_ok();
 
-        crate::ui::browser::header(ui, t("app-decal-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-decals"), |ui| {
             if ui.button(t("btn-refresh")).clicked() {
                 if self.source == PatchSource::Catalog {
                     self.catalog.refresh(ctx);
@@ -3875,7 +3890,7 @@ impl DecalPatcherState {
                     .id_salt("patcher_decals_scroll")
                     .min_scrolled_height(0.0)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         if visible.is_empty() {
                             ui.add_space(20.0);
                             ui.vertical_centered(|ui| {
@@ -3898,18 +3913,13 @@ impl DecalPatcherState {
                                         |ui| {
                                             ui.set_min_height(245.0);
                                             ui.vertical_centered(|ui| {
-                                                let size = egui::vec2(
-                                                    ui.available_width().min(120.0),
-                                                    90.0,
-                                                );
+                                                let size = egui::vec2(ui.available_width(), 120.0);
                                                 if let Some(bytes) = decal.preview_image.as_ref() {
-                                                    ui.add(
-                                                        egui::Image::from_bytes(
-                                                            format!("bytes://decal/{}", decal.name),
-                                                            bytes.clone(),
-                                                        )
-                                                        .fit_to_exact_size(size),
+                                                    let image = egui::Image::from_bytes(
+                                                        format!("bytes://decal/{}", decal.name),
+                                                        bytes.clone(),
                                                     );
+                                                    ui.add(crate::ui::browser::cover_image(ui, image, size));
                                                 } else {
                                                     ui.add_sized(
                                                         size,
@@ -4156,7 +4166,7 @@ impl DecalPatcherState {
                             });
                             ui.add_space(6.0);
                         }
-                    });
+                    }));
             },
         );
 
@@ -4263,7 +4273,7 @@ impl DecalPatcherState {
         // show the desktop through the entire app while a decal was running.
         let decal_tab_rect = ui.available_rect_before_wrap();
 
-        ui.heading(t("app-decal-patcher"));
+        ui.heading(t("nav-decals"));
         ui.add_space(4.0);
 
         let key_ok = self.validate_key_file().is_ok();
@@ -4451,7 +4461,7 @@ impl DecalPatcherState {
                         .id_salt("available_decals")
                         .auto_shrink([false, false])
                         .max_height(400.0)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             if filtered.is_empty() {
                                 ui.label(
                                     egui::RichText::new(t("tab-legacy-no-decals-found"))
@@ -4470,18 +4480,16 @@ impl DecalPatcherState {
                                             |ui| {
                                                 ui.set_min_height(172.0);
                                                 ui.vertical_centered(|ui| {
-                                                    let size = egui::vec2(140.0, 96.0);
+                                                    let size = egui::vec2(ui.available_width(), 120.0);
                                                     if let Some(bytes) = &decal.preview_image {
-                                                        ui.add(
-                                                            egui::Image::from_bytes(
-                                                                format!(
-                                                                    "bytes://decal/preview/{}",
-                                                                    decal.name
-                                                                ),
-                                                                bytes.clone(),
-                                                            )
-                                                            .fit_to_exact_size(size),
+                                                        let image = egui::Image::from_bytes(
+                                                            format!(
+                                                                "bytes://decal/preview/{}",
+                                                                decal.name
+                                                            ),
+                                                            bytes.clone(),
                                                         );
+                                                        ui.add(crate::ui::browser::cover_image(ui, image, size));
                                                     } else {
                                                         ui.add_sized(
                                                             size,
@@ -4534,7 +4542,7 @@ impl DecalPatcherState {
                                 });
                                 ui.add_space(6.0);
                             }
-                        });
+                        }));
                 },
             );
 

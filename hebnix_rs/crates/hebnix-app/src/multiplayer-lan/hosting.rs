@@ -58,6 +58,13 @@ impl HostSession {
             .unwrap_or_default()
     }
 
+    /// poll every peer for their maps right away
+    pub fn poll_now(&self) {
+        if let Some(map_sync) = &self.map_sync {
+            map_sync.poll_now();
+        }
+    }
+
     /// hides a player's maps and refuses their map sync connections for the
     /// rest of this session
     pub fn block(&self, ip: std::net::IpAddr, label: String) {

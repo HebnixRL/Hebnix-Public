@@ -3061,7 +3061,8 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                                 req = req.header(k, v);
                             }
                         }
-                        if url.starts_with("https://req.hebnix.com/") {
+                        let is_req = url.starts_with("https://req.hebnix.com/");
+                        if is_req {
                             match hebnix_sdk::req_auth::app_token() {
                                 Ok(token) => req = req.header("X-App-Token", token),
                                 Err(error) => {
@@ -3077,6 +3078,11 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                             }
                         }
                         let (status, body, hdrs) = send_req_full(req);
+                        if is_req && status == 498 {
+                            if let Ok(error) = serde_json::from_slice(&body) {
+                                hebnix_sdk::req_auth::observe_response(status, &error);
+                            }
+                        }
                         let _ = thread_tx.send(AppMsg::PluginHttpResult {
                             slug,
                             req_id,
@@ -3554,6 +3560,7 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                         text: color("text"),
                         duration: opts.as_ref().and_then(|t| t.get::<f32>("duration").ok()),
                         image,
+                        failed: false,
                     },
                 });
                 Ok(())
@@ -4209,9 +4216,9 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                     let height = height.unwrap_or(260.0).max(48.0);
                     egui::ScrollArea::vertical()
                         .max_height(height)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             ui.monospace(&display_text);
-                        });
+                        }));
                 });
                 Ok(())
             })?,
@@ -4426,13 +4433,13 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                     .max_height(max_height.max(20.0))
                     .auto_shrink([false, true])
                     .stick_to_bottom(true)
-                    .show(outer, |inner| {
+                    .show(outer, |inner| crate::panel::followed(inner, |inner| {
                         with_ui_scope(inner, || {
                             if let Err(e) = f.call::<()>(ui_tbl.clone()) {
                                 tracing::warn!("plugin ui.scroll_area callback error: {e}");
                             }
                         });
-                    });
+                    }));
             });
             Ok(())
         })?,

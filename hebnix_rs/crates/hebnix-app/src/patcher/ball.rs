@@ -361,7 +361,7 @@ impl PatcherState {
                             continue;
                         }
                         let live_path = cooked_pc_clone.join(&live_file_name);
-                        match fs::copy(&backup, &live_path) {
+                        match fs::read(&backup).map_err(|error| error.to_string()).and_then(|bytes| super::upk_history::install_linked(&cooked_pc_clone, &live_path, &bytes, "Restore ball textures")) {
                             Ok(_) => restored += 1,
                             Err(error) => errors.push(format!("{live_name}.upk: {error}")),
                         }
@@ -653,13 +653,13 @@ impl PatcherState {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("patcher_subtabs")
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.selectable_value(
                             &mut self.subtab,
                             PatcherSubTab::Ball,
                             t("render-ball"),
                         );
-                    });
+                    }));
             });
 
         egui::CentralPanel::default()
@@ -824,7 +824,7 @@ impl PatcherState {
 
         self.render_delete_confirmation(ctx, tx);
 
-        crate::ui::browser::header(ui, t("app-ball-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-ball-textures"), |ui| {
             if ui.button(t("btn-refresh")).clicked() {
                 if self.source == PatchSource::Catalog {
                     self.catalog.refresh(ctx);
@@ -933,7 +933,7 @@ impl PatcherState {
         egui::ScrollArea::vertical()
             .id_salt("patcher_balls_scroll")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(column_count) {
                     ui.columns(column_count, |columns| {
                         for (column, ball) in row.iter().enumerate() {
@@ -942,15 +942,13 @@ impl PatcherState {
                                 |ui| {
                                     ui.set_min_height(190.0);
                                     ui.vertical_centered(|ui| {
-                                        let size = egui::vec2(120.0, 90.0);
+                                        let size = egui::vec2(ui.available_width(), 120.0);
                                         if let Some(bytes) = &ball.image_bytes {
-                                            ui.add(
-                                                egui::Image::from_bytes(
-                                                    format!("bytes://ball/{}", ball.name),
-                                                    bytes.clone(),
-                                                )
-                                                .fit_to_exact_size(size),
+                                            let image = egui::Image::from_bytes(
+                                                format!("bytes://ball/{}", ball.name),
+                                                bytes.clone(),
                                             );
+                                            ui.add(crate::ui::browser::cover_image(ui, image, size));
                                         } else {
                                             ui.add_sized(
                                                 size,
@@ -1023,7 +1021,7 @@ impl PatcherState {
                     });
                     ui.add_space(6.0);
                 }
-            });
+            }));
     }
 
     fn import_zip(&mut self, zip_path: &Path, tx: &Sender<AppMsg>) -> bool {

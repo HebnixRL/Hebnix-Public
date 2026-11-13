@@ -3,8 +3,8 @@
 //! all of it lives in memory only, closing hebnix wipes it.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -18,9 +18,14 @@ use crate::i18n::{t, t_args};
 use crate::overlay::{self, Rgba};
 
 pub const HISTORY_MAX: usize = 150;
+// a progress card nobody has updated for this long is dropped
+const PROGRESS_STALE: Duration = Duration::from_secs(30);
+const PROGRESS_MAX: usize = 3;
 const TEXT_MAX: usize = 2000;
 const PREVIEW_MAX: usize = 90;
 const DEF_SECS: f32 = 4.0;
+const FAILED_SECS: f32 = 15.0;
+const FAILED_ACCENT: [u8; 4] = [235, 87, 87, 255];
 const MIN_SECS: f32 = 1.5;
 const MAX_SECS: f32 = 5.0;
 const FADE_IN: f32 = 0.25;
@@ -93,6 +98,8 @@ pub struct ToastStyle {
     pub duration: Option<f32>,
     // full path, already checked against the plugin assets folder
     pub image: Option<String>,
+    // a failure: red and on screen long enough to read
+    pub failed: bool,
 }
 
 /// "#rrggbb" or "#rrggbbaa"
@@ -160,6 +167,48 @@ impl Stamp {
             format!("{:02}/{:02} {clock}", self.day, self.month)
         }
     }
+}
+
+/// where file work anywhere in the app reports to the overlay
+static SINK: OnceLock<(crossbeam_channel::Sender<crate::messages::AppMsg>, eframe::egui::Context)> =
+    OnceLock::new();
+
+pub fn install_sink(tx: crossbeam_channel::Sender<crate::messages::AppMsg>, ctx: eframe::egui::Context) {
+    let _ = SINK.set((tx, ctx));
+}
+
+/// a running job as a card with a bar. fraction None is unknown length. `done`
+/// removes the card and leaves one normal toast with the text.
+pub fn report(key: &str, text: &str, fraction: Option<f32>, done: bool) {
+    send(key, text, fraction, done, false);
+}
+
+/// the job failed: its card goes and a red toast stays up long enough to read
+pub fn report_failed(key: &str, text: &str) {
+    send(key, text, None, true, true);
+}
+
+fn send(key: &str, text: &str, fraction: Option<f32>, done: bool, failed: bool) {
+    if let Some((tx, ctx)) = SINK.get() {
+        let _ = tx.send(crate::messages::AppMsg::Progress {
+            key: key.to_string(),
+            text: text.to_string(),
+            fraction,
+            done,
+            failed,
+        });
+        ctx.request_repaint();
+    }
+}
+
+struct Card {
+    key: String,
+    text: String,
+    fraction: Option<f32>,
+    touched: Instant,
+    started: Instant,
+    fit_w: f32,
+    fit: String,
 }
 
 pub struct PluginTag {
@@ -259,14 +308,18 @@ impl Current {
             },
             title: group.tag.name.clone(),
             age: 0.0,
-            secs: style
-                .duration
-                .filter(|s| s.is_finite())
-                .map_or(DEF_SECS, |s| s.clamp(MIN_SECS, MAX_SECS)),
+            secs: if style.failed {
+                FAILED_SECS
+            } else {
+                style
+                    .duration
+                    .filter(|s| s.is_finite())
+                    .map_or(DEF_SECS, |s| s.clamp(MIN_SECS, MAX_SECS))
+            },
             fit_w: -1.0,
             title_fit: String::new(),
             body_fit: String::new(),
-            accent: style.accent.unwrap_or(DEF_ACCENT),
+            accent: style.accent.unwrap_or(if style.failed { FAILED_ACCENT } else { DEF_ACCENT }),
             bg: style.background.unwrap_or(DEF_BG),
             text,
             body_col,
@@ -284,6 +337,7 @@ pub struct ToastCenter {
     waiting: VecDeque<Group>,
     current: Option<Current>,
     last_tick: Option<Instant>,
+    cards: Vec<Card>,
 }
 
 impl ToastCenter {
@@ -293,11 +347,13 @@ impl ToastCenter {
             return;
         }
         let tag = self.tag(slug, name);
+        let (line, cut) = preview(text);
+        let preview = if cut { format!("{line}...") } else { line.to_string() };
+        // a waiting toast from the same sender shows the newest text instead of a count
         if let Some(group) = self.waiting.iter_mut().find(|g| g.tag.slug == slug) {
-            group.count += 1;
+            group.preview = preview;
+            group.style = style;
         } else {
-            let (line, cut) = preview(text);
-            let preview = if cut { format!("{line}...") } else { line.to_string() };
             self.waiting.push_back(Group {
                 tag: Arc::clone(&tag),
                 count: 1,
@@ -316,6 +372,38 @@ impl ToastCenter {
         });
         self.next_id += 1;
         self.unread = self.unread.saturating_add(1);
+    }
+
+    pub fn progress(&mut self, key: &str, text: &str, fraction: Option<f32>, done: bool, failed: bool) {
+        if done {
+            self.cards.retain(|c| c.key != key);
+            if failed {
+                let style = ToastStyle { failed: true, ..ToastStyle::default() };
+                self.push("hebnix-failed", "Hebnix: failed", text, style);
+            } else {
+                self.push("hebnix", "Hebnix", text, ToastStyle::default());
+            }
+            return;
+        }
+        let now = Instant::now();
+        let fraction = fraction.filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));
+        let text = clip_text(text);
+        if let Some(card) = self.cards.iter_mut().find(|c| c.key == key) {
+            card.text = text.to_string();
+            card.fraction = fraction;
+            card.touched = now;
+            card.fit_w = -1.0;
+        } else if self.cards.len() < PROGRESS_MAX {
+            self.cards.push(Card {
+                key: key.to_string(),
+                text: text.to_string(),
+                fraction,
+                touched: now,
+                started: now,
+                fit_w: -1.0,
+                fit: String::new(),
+            });
+        }
     }
 
     fn tag(&mut self, slug: &str, name: &str) -> Arc<PluginTag> {
@@ -340,6 +428,7 @@ impl ToastCenter {
     /// the game has focus, so nothing is missed alt tabbed.
     pub fn update(&mut self, game_focused: bool) -> bool {
         let now = Instant::now();
+        self.cards.retain(|c| c.touched.elapsed() < PROGRESS_STALE);
         if !game_focused {
             self.last_tick = None;
             return false;
@@ -357,25 +446,26 @@ impl ToastCenter {
         if self.current.is_none() {
             self.current = self.waiting.pop_front().map(Current::new);
         }
-        self.current.is_some()
+        self.current.is_some() || !self.cards.is_empty()
     }
 
     /// a toast is on screen right now
     pub fn showing(&self) -> bool {
-        self.current.is_some() && self.last_tick.is_some()
+        (self.current.is_some() || !self.cards.is_empty()) && self.last_tick.is_some()
     }
 
     /// something is showing or queued
     pub fn has_work(&self) -> bool {
-        self.current.is_some() || !self.waiting.is_empty()
+        self.current.is_some() || !self.waiting.is_empty() || !self.cards.is_empty()
     }
 
     pub fn draw(&mut self, w: f32, h: f32, pos: ToastPos) {
+        let s = (h / 1080.0).clamp(0.7, 2.5);
+        let (cw, ch, margin) = (380.0 * s, 64.0 * s, 24.0 * s);
+        self.draw_cards(w, h, pos, s, (cw, ch, margin));
         let Some(cur) = &mut self.current else {
             return;
         };
-        let s = (h / 1080.0).clamp(0.7, 2.5);
-        let (cw, ch, margin) = (380.0 * s, 64.0 * s, 24.0 * s);
         let f = if cur.age < FADE_IN {
             cur.age / FADE_IN
         } else if cur.age > cur.secs - FADE_OUT {
@@ -442,6 +532,46 @@ impl ToastCenter {
             false,
             Some((tx, inner)),
         );
+    }
+
+    /// progress cards sit under the toast, or above it at the bottom
+    fn draw_cards(&mut self, w: f32, h: f32, pos: ToastPos, s: f32, (cw, ch, margin): (f32, f32, f32)) {
+        let shown = if self.current.is_some() { 1.0 } else { 0.0 };
+        let x = if pos.is_left() { margin } else { w - margin - cw };
+        for (i, card) in self.cards.iter_mut().enumerate() {
+            let step = (ch + 8.0 * s) * (i as f32 + shown);
+            let y = match pos.row() {
+                Row::Top => margin + step,
+                Row::Mid => (h - ch) / 2.0 + step,
+                Row::Bottom => h - margin - ch - step,
+            };
+            let col = |c: [u8; 4]| Rgba(c[0], c[1], c[2], c[3]);
+            rect_styled(x, y, cw, ch, col(DEF_BG), col([255, 255, 255, 45]), 1.0, true, 9.0 * s);
+            let accent = col(DEF_ACCENT);
+            rect_styled(x + 9.0 * s, y + 12.0 * s, 3.0 * s, ch - 24.0 * s, accent, accent, 0.0, true, 1.5 * s);
+            let tx = x + 24.0 * s;
+            let inner = x + cw - 14.0 * s - tx;
+            if (card.fit_w - inner).abs() > 0.5 {
+                card.fit = fit_text(&card.text, 13.0 * s, true, inner);
+                card.fit_w = inner;
+            }
+            overlay::text(tx, y + 12.0 * s, &card.fit, col(DEF_TEXT), 13.0 * s, "", "", true, Some((tx, inner)));
+            // known length fills left to right, unknown sweeps a short block
+            let (bar_y, bar_h) = (y + 40.0 * s, 6.0 * s);
+            let track = Rgba(255, 255, 255, 40);
+            rect_styled(tx, bar_y, inner, bar_h, track, track, 0.0, true, bar_h / 2.0);
+            let (fx, fw) = match card.fraction {
+                Some(f) => (tx, inner * f),
+                None => {
+                    let t = (card.started.elapsed().as_secs_f32() * 0.8).fract();
+                    let len = inner * 0.3;
+                    (tx + (inner - len) * t, len)
+                }
+            };
+            if fw > 1.0 {
+                rect_styled(fx, bar_y, fw, bar_h, accent, accent, 0.0, true, bar_h / 2.0);
+            }
+        }
     }
 
     pub fn history(&self) -> impl DoubleEndedIterator<Item = &Toast> {

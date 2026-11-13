@@ -34,6 +34,8 @@ pub enum AppMsg {
     WindowMode(WindowMode),
     ToggleVisibility,
     TrayToggleVisibility,
+    // controller chord: open or close the docked side panel
+    TogglePanel,
     TrayQuit,
     HotkeyCaptured(Option<String>),
     // should the main window be topmost (RL or hebnix focused)
@@ -54,14 +56,9 @@ pub enum AppMsg {
     BackgroundChangerDone(Result<String, String>),
     MenuMapDone(Result<String, String>),
     BackgroundChangerProgress(String),
-    WorkshopMultiplayerProgress(String),
     // result of starting the multiplayer sidecar and its first announce
     WorkshopTailnetStarted {
         result: Result<std::sync::Arc<crate::multiplayer_lan::TailcatSidecarHandle>, String>,
-    },
-    // result of starting Rocket League for Workshop multiplayer
-    WorkshopMultiplayerLaunched {
-        result: Result<(), String>,
     },
     // fires whether this peer ended up hosting or joining inside Rocket
     // League - the relay itself doesn't care which, see hosting.rs
@@ -98,6 +95,14 @@ pub enum AppMsg {
         name: String,
         text: String,
         style: crate::toast::ToastStyle,
+    },
+    // file work with a bar, see toast::report
+    Progress {
+        key: String,
+        text: String,
+        fraction: Option<f32>,
+        done: bool,
+        failed: bool,
     },
     // http result, slug picks the plugin that asked
     PluginHttpRes {
@@ -166,6 +171,8 @@ pub enum AppMsg {
     ChangelogFetched {
         result: Result<Option<crate::update::ChangelogEntry>, String>,
     },
+    AppUpdateReady { staged: std::path::PathBuf },
+    MaintenanceFinished { result: Result<(), String> },
     AppUpdateFailed {
         error: String,
     },
@@ -180,6 +187,7 @@ pub enum AppMsg {
     SendWsCommand(hebnix_sdk::stats::websocket::WsCommand),
     // another player turned Workshop multiplayer on or off
     TailcatPeer {
+        id: String,
         name: String,
         online: bool,
     },

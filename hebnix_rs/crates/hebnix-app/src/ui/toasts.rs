@@ -96,7 +96,7 @@ impl ToastView {
             .id_salt("toast_view")
             .max_height((ui.ctx().content_rect().height() - 230.0).clamp(100.0, 460.0))
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if center.history().next().is_none() {
                     ui.label(t("toast-empty"));
                     return;
@@ -114,6 +114,17 @@ impl ToastView {
                         (false, false) => line.to_string(),
                     };
                     let open = self.open.contains(&toast.id);
+                    // CollapsingHeader normally extends its text regardless of
+                    // the UI's wrap mode. Lay it out within the remaining width.
+                    let text_width = (ui.available_width()
+                        - ui.spacing().indent
+                        - ui.spacing().button_padding.x).max(0.0);
+                    let head = egui::WidgetText::from(head).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Wrap),
+                        text_width,
+                        egui::TextStyle::Button,
+                    );
                     // the header id wraps around so egui memory stays small, open state is ours
                     let shown = egui::CollapsingHeader::new(head)
                         .id_salt(toast.id % (HISTORY_MAX as u64 * 2))
@@ -127,14 +138,14 @@ impl ToastView {
                                 .weak()
                                 .size(11.0),
                             );
-                            ui.add(egui::Label::new(&*toast.text).selectable(true));
+                            ui.add(egui::Label::new(&*toast.text).wrap().selectable(true));
                             ui.add_space(4.0);
                         });
                     if shown.header_response.clicked() && !self.open.remove(&toast.id) {
                         self.open.insert(toast.id);
                     }
                 }
-            });
+            }));
     }
 }
 
@@ -225,11 +236,11 @@ mod tests {
         )
     }
 
-    fn text_pos(output: &egui::FullOutput, text: &str) -> egui::Pos2 {
-        fn visit(shape: &egui::epaint::Shape, text: &str, found: &mut Vec<egui::Pos2>) {
+    fn text_shape<'a>(output: &'a egui::FullOutput, text: &str) -> &'a egui::epaint::TextShape {
+        fn visit<'a>(shape: &'a egui::epaint::Shape, text: &str, found: &mut Vec<&'a egui::epaint::TextShape>) {
             match shape {
                 egui::epaint::Shape::Text(shape) if shape.galley.text() == text => {
-                    found.push(shape.pos + shape.galley.size() * 0.5);
+                    found.push(shape);
                 }
                 egui::epaint::Shape::Vec(shapes) => {
                     for shape in shapes {
@@ -245,8 +256,13 @@ mod tests {
         }
         found
             .into_iter()
-            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .max_by(|a, b| a.pos.x.total_cmp(&b.pos.x))
             .unwrap_or_else(|| panic!("Missing text: {text}"))
+    }
+
+    fn text_pos(output: &egui::FullOutput, text: &str) -> egui::Pos2 {
+        let shape = text_shape(output, text);
+        shape.pos + shape.galley.size() * 0.5
     }
 
     fn click(ctx: &egui::Context, view: &mut ToastView, center: &mut ToastCenter, pos: egui::Pos2) {
@@ -266,6 +282,33 @@ mod tests {
                 ],
             );
         }
+    }
+
+    #[test]
+    fn long_notifications_wrap_in_both_collapsed_and_expanded_rows() {
+        let ctx = egui::Context::default();
+        let mut view = ToastView { bell_open: true, ..Default::default() };
+        let mut center = ToastCenter::default();
+        let message = format!("Workshop could not load {}", "unbroken-file-name".repeat(10));
+        center.push("example", "Example", &message, Default::default());
+        let (line, _) = preview(&message);
+        let heading = format!("Example: {line}...");
+        for _ in 0..3 {
+            frame(&ctx, &mut view, &mut center, vec![]);
+        }
+        let output = frame(&ctx, &mut view, &mut center, vec![]);
+        let collapsed = text_shape(&output, &heading);
+        assert!(collapsed.galley.rows.len() > 1);
+        assert!(collapsed.galley.size().x <= 360.0);
+
+        click(&ctx, &mut view, &mut center, text_pos(&output, &heading));
+        for _ in 0..3 {
+            frame(&ctx, &mut view, &mut center, vec![]);
+        }
+        let output = frame(&ctx, &mut view, &mut center, vec![]);
+        let expanded = text_shape(&output, &message);
+        assert!(expanded.galley.rows.len() > 1);
+        assert!(expanded.galley.size().x <= 360.0);
     }
 
     #[test]

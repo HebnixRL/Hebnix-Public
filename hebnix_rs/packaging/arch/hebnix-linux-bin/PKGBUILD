@@ -5,7 +5,7 @@ pkgname=hebnix-linux-bin
 # glibc tarball, which is built on Ubuntu and links libxdo.so.3 instead of the
 # libxdo.so.4 Arch provides. The release workflow bumps pkgver and sha256sums
 # and publishes the built package to the pacman repo on R2.
-pkgver=2.2.6
+pkgver=2.3.0
 pkgrel=1
 pkgdesc="Rocket League overlay, stats tracker and item-changer for Linux (Hyprland/wlroots), prebuilt upstream binary"
 arch=('x86_64')

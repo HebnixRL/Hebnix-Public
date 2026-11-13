@@ -7,6 +7,7 @@ use eframe::egui;
 use serde::Deserialize;
 
 use crate::messages::AppMsg;
+use crate::patcher::background_merger::SCENERY_DONORS;
 
 const ARENAS: &[(&str, &str)] = &[
     ("Stadium_P", "DFH Stadium"),
@@ -55,19 +56,13 @@ const ARENAS: &[(&str, &str)] = &[
     ("FF_Dusk_P", "Estadio Vida"),
 ];
 
-const SCENERY_DONORS: &[(&str, &str)] = &[
-    ("ShatterShot_VFX", "Core 707 — scenery"),
-    (
-        "BG_Stadium_10A_P",
-        "DFH Stadium (10th Anniversary) — scenery",
-    ),
-    ("BG_NeoTokyo_Arcade", "Neo Tokyo (Arcade) — scenery"),
-    ("BG_NeoTokyo_Hax", "Neo Tokyo (Hacked) — scenery"),
-    ("BG_Woods_Day_P", "Drift Woods (Day) — scenery"),
-    ("UtopiaStadium_P", "Utopia Coliseum — scenery"),
-    ("BG_FNI_Stadium", "Forbidden Temple (Fire & Ice) — scenery"),
-];
 const NO_BACKGROUND: &str = "__HBNX_NO_BACKGROUND__";
+const ARENA_LOOK: &str = " — full arena look";
+
+/// The arena package behind an `arena:` donor.
+fn arena_of(donor: &str) -> Option<&str> {
+    donor.strip_prefix(crate::patcher::background_merger::ARENA_DONOR_PREFIX)
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -115,6 +110,8 @@ impl Default for BackgroundChangerState {
 }
 
 impl BackgroundChangerState {
+    pub(super) fn busy(&self) -> bool { self.busy }
+
     fn cooked_dir(rl_path: &str) -> PathBuf {
         Path::new(rl_path).join("TAGame").join("CookedPCConsole")
     }
@@ -142,6 +139,9 @@ impl BackgroundChangerState {
                 .unwrap_or(file_name)
                 .replace(['_', '-'], " ");
         }
+        if let Some(arena) = arena_of(package) {
+            return format!("{}{ARENA_LOOK}", Self::display_name(arena));
+        }
         ARENAS
             .iter()
             .chain(SCENERY_DONORS.iter())
@@ -154,6 +154,7 @@ impl BackgroundChangerState {
         let display = Self::display_name(package);
         display
             .strip_suffix(" — scenery")
+            .or_else(|| display.strip_suffix(ARENA_LOOK))
             .unwrap_or(&display)
             .to_string()
     }
@@ -186,6 +187,14 @@ impl BackgroundChangerState {
                 custom: false,
             })
             .collect();
+        for index in &self.installed_hosts {
+            let (package, display) = ARENAS[*index];
+            self.installed_donors.push(DonorEntry {
+                package: format!("{}{package}", crate::patcher::background_merger::ARENA_DONOR_PREFIX),
+                display: format!("{display}{ARENA_LOOK}"),
+                custom: false,
+            });
+        }
         if let Ok(backgrounds) = crate::patcher::background_merger::custom_backgrounds_dir() {
             if let Ok(entries) = std::fs::read_dir(backgrounds) {
                 for path in entries.flatten().map(|entry| entry.path()) {
@@ -284,8 +293,13 @@ impl BackgroundChangerState {
             )
             .map(
                 |helper_message| match (command, host.as_deref(), donor.as_deref()) {
+                    ("apply", Some(host), Some(donor)) if arena_of(donor).is_some() => format!(
+                        "{} now looks like {}.",
+                        Self::message_name(host),
+                        Self::message_name(donor)
+                    ),
                     ("apply", Some(host), Some(donor)) => format!(
-                        "{} now uses {}'s fog, sky, and background.",
+                        "{} now uses {}'s background.",
                         Self::message_name(host),
                         Self::message_name(donor)
                     ),
@@ -343,44 +357,49 @@ impl BackgroundChangerState {
         std::thread::spawn(move || {
             let mut applied = 0usize;
             let mut failed = 0usize;
-            for (index, host) in targets.iter().enumerate() {
-                let result = crate::patcher::background_merger::run(
-                    "apply",
-                    &cooked,
-                    &state,
-                    Some(host),
-                    Some(&donor),
-                );
-                let message = match result {
-                    Ok(_) => {
-                        applied += 1;
-                        format!(
-                            "Applied {} to {} ({}/{}).",
-                            Self::message_name(&donor),
-                            Self::message_name(host),
-                            index + 1,
-                            total
-                        )
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        let message = format!(
-                            "Could not apply {} to {} ({}/{}): {error}",
-                            Self::message_name(&donor),
-                            Self::message_name(host),
-                            index + 1,
-                            total
-                        );
-                        if error.starts_with("Close Rocket League") {
-                            let _ = tx.send(AppMsg::BackgroundChangerDone(Err(message)));
-                            ctx.request_repaint();
-                            return;
+            let mut skipped = skipped;
+            let result = crate::patcher::background_merger::apply_all(
+                &cooked,
+                &state,
+                &targets,
+                &donor,
+                |index, host, result| {
+                    let message = match result {
+                        Ok(true) => {
+                            applied += 1;
+                            format!(
+                                "Applied {} to {} ({}/{}).",
+                                Self::message_name(&donor),
+                                Self::message_name(host),
+                                index + 1,
+                                total
+                            )
                         }
-                        message
-                    }
-                };
-                let _ = tx.send(AppMsg::BackgroundChangerProgress(message));
+                        Ok(false) => {
+                            skipped += 1;
+                            format!("Skipped {} ({}/{}), which already has a background change.",
+                                Self::message_name(host), index + 1, total)
+                        }
+                        Err(error) => {
+                            failed += 1;
+                            format!(
+                                "Could not apply {} to {} ({}/{}): {error}",
+                                Self::message_name(&donor),
+                                Self::message_name(host),
+                                index + 1,
+                                total
+                            )
+                        }
+                    };
+                    let _ = tx.send(AppMsg::BackgroundChangerProgress(message));
+                    ctx.request_repaint();
+                },
+            );
+            if let Err(error) = result {
+                let message = format!("{error} Applied to {applied} maps before stopping.");
+                let _ = tx.send(AppMsg::BackgroundChangerDone(Err(message)));
                 ctx.request_repaint();
+                return;
             }
             let summary = format!(
                 "Applied {} to {applied} maps; skipped {skipped} existing changes; {failed} failed.",
@@ -433,32 +452,28 @@ impl BackgroundChangerState {
             self.refresh(rl_path);
         }
         let ctx = ui.ctx().clone();
-        ui.heading(t("render-background-changer"));
-        ui.label(t("render-keep-an-arena-s-gameplay-and"));
-        ui.small(t("render-approved-sources-are-filtered-to-keep"));
-        if let Ok(path) = crate::patcher::background_merger::custom_backgrounds_dir() {
-            ui.small(t_args(
-                "render-custom-backgrounds-are-loaded-from-path",
-                &[("path", path.display().to_string().into())],
-            ));
-        }
-        ui.add_space(8.0);
-        ui.colored_label(
-            egui::Color32::from_rgb(230, 170, 60),
-            t("render-close-rocket-league-before-applying-or"),
-        );
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(t("nav-arena-backgrounds"));
+            ui.separator();
+            ui.label(t("render-keep-an-arena-s-gameplay-and"));
+            ui.add_space(8.0);
+            ui.weak(t("render-close-rocket-league-before-applying-or"));
+        });
         ui.add_space(12.0);
 
-        if self.installed_hosts.is_empty() {
-            ui.label(t("render-no-supported-arena-packages-were-found"));
-            if ui.button(t("render-scan-again")).clicked() {
-                self.refresh(rl_path);
+        let has_arenas = !self.installed_hosts.is_empty();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(t("render-apply-background"));
+            ui.separator();
+            if !has_arenas {
+                ui.label(t("render-no-supported-arena-packages-were-found"));
+                if ui.button(t("render-scan-again")).clicked() {
+                    self.refresh(rl_path);
+                }
+                return;
             }
-            return;
-        }
-
-        ui.group(|ui| {
-            ui.set_min_width(520.0);
             ui.label(t("render-when-you-play"));
             egui::ComboBox::from_id_salt("background_host")
                 .selected_text(Self::display_name(&self.host))
@@ -562,7 +577,8 @@ impl BackgroundChangerState {
             let valid = !self.busy
                 && !self.host.is_empty()
                 && !self.donor.is_empty()
-                && (self.donor == NO_BACKGROUND || self.host != self.donor);
+                && (self.donor == NO_BACKGROUND
+                    || self.host != arena_of(&self.donor).unwrap_or(&self.donor));
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -592,7 +608,10 @@ impl BackgroundChangerState {
                     self.open_background_folder();
                 }
             });
-            if self.donor != NO_BACKGROUND {
+            if arena_of(&self.donor).is_some() {
+                ui.small(t("render-arena-look-note"));
+            }
+            if self.donor != NO_BACKGROUND && arena_of(&self.donor).is_none() {
                 let can_apply_all =
                     !self.busy && !self.donor.is_empty() && !self.bulk_targets().is_empty();
                 if ui
@@ -605,10 +624,14 @@ impl BackgroundChangerState {
                     self.apply_all_prompt = true;
                 }
             }
-            if self.host == self.donor && self.donor != NO_BACKGROUND {
+            if arena_of(&self.donor).unwrap_or(&self.donor) == self.host && self.donor != NO_BACKGROUND {
                 ui.small(t("render-choose-two-different-arenas"));
             }
         });
+
+        if !has_arenas {
+            return;
+        }
 
         if self.apply_all_prompt {
             let targets = self.bulk_targets().len();
@@ -653,54 +676,60 @@ impl BackgroundChangerState {
         }
 
         ui.add_space(10.0);
-        if self.busy {
-            ui.spinner();
-        }
-        ui.label(&self.status);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Status");
+            ui.separator();
+            if self.busy {
+                ui.spinner();
+            }
+            ui.label(&self.status);
+        });
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
+        let mut restore = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.heading(t("render-active-changes"));
+            ui.separator();
             if ui.button(t("btn-refresh")).clicked() {
                 self.refresh(rl_path);
             }
-        });
-
-        let mut restore = None;
-        let mut rows: Vec<_> = self
-            .active
-            .iter()
-            .map(|(host, swap)| (host.clone(), swap.donor.clone()))
-            .collect();
-        rows.sort_by(|a, b| Self::display_name(&a.0).cmp(&Self::display_name(&b.0)));
-        if rows.is_empty() {
-            ui.label(t("render-no-arena-backgrounds-are-changed"));
-        } else {
-            egui::Grid::new("active_background_changes")
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong(t("render-arena"));
-                    ui.strong(t("render-borrowed-background"));
-                    ui.end_row();
-                    for (host, donor) in rows {
-                        ui.label(Self::display_name(&host));
-                        ui.label(Self::display_name(&donor));
-                        if ui
-                            .add_enabled(!self.busy, egui::Button::new(t("app-restore")))
-                            .clicked()
-                        {
-                            restore = Some(host);
-                        }
+            let mut rows: Vec<_> = self
+                .active
+                .iter()
+                .map(|(host, swap)| (host.clone(), swap.donor.clone()))
+                .collect();
+            rows.sort_by(|a, b| Self::display_name(&a.0).cmp(&Self::display_name(&b.0)));
+            if rows.is_empty() {
+                ui.label(t("render-no-arena-backgrounds-are-changed"));
+            } else {
+                egui::Grid::new("active_background_changes")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong(t("render-arena"));
+                        ui.strong(t("render-borrowed-background"));
                         ui.end_row();
-                    }
-                });
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!self.busy, egui::Button::new(t("app-restore-all")))
-                .clicked()
-            {
-                self.launch("reset", rl_path, None, None, tx, &ctx);
+                        for (host, donor) in rows {
+                            ui.label(Self::display_name(&host));
+                            ui.label(Self::display_name(&donor));
+                            if ui
+                                .add_enabled(!self.busy, egui::Button::new(t("app-restore")))
+                                .clicked()
+                            {
+                                restore = Some(host);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new(t("app-restore-all")))
+                    .clicked()
+                {
+                    self.launch("reset", rl_path, None, None, tx, &ctx);
+                }
             }
-        }
+        });
         if let Some(host) = restore {
             self.launch("undo", rl_path, Some(host), None, tx, &ctx);
         }

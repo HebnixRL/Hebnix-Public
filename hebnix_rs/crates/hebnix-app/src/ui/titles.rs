@@ -249,7 +249,10 @@ fn column(ui: &mut egui::Ui, width: f32, height: f32, content: impl FnOnce(&mut 
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_width(width);
-            content(ui);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                content(ui);
+            });
         },
     );
 }
@@ -297,7 +300,7 @@ impl HebnixApp {
         self.spoofer_titles.remove(index);
     }
 
-    fn title_rules(&self) -> Vec<crate::patcher::title_patcher::TitleOverride> {
+    pub(super) fn title_rules(&self) -> Vec<crate::patcher::title_patcher::TitleOverride> {
         self.spoofer_titles
             .iter()
             .map(|title| {
@@ -355,22 +358,17 @@ impl HebnixApp {
             .drafts
             .retain(|(key, _)| key.is_none_or(|i| i < self.spoofer_titles.len()));
         self.title_patcher.poll();
-        ui.heading("Titles");
-        self.owned_inventory.show(ui);
         let mut changed = !self.spoofer_title_enabled;
         self.spoofer_title_enabled = true;
-        ui.horizontal_wrapped(|ui| {
-            ui.weak(format!(
-                "{} owned titles in the selected save",
-                self.owned_inventory.title_ids.len()
-            ));
-            changed |= ui
-                .checkbox(&mut self.title_only_owned, "Show only owned replacements")
-                .changed();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Titles");
+            ui.separator();
+            self.owned_inventory.show(ui);
+            if self.title_patcher.busy() {
+                ui.label("Title patch operation in progress. Editing will resume when it finishes.");
+            }
         });
-        if self.title_patcher.busy() {
-            ui.label("Title patch operation in progress. Editing will resume when it finishes.");
-        }
         ui.add_space(6.0);
         // Columns always divide the available viewport. Only the two lists scroll.
         let total = ui.available_width();
@@ -401,6 +399,7 @@ impl HebnixApp {
 
     fn render_title_library(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         ui.heading("Copy Title");
+        ui.separator();
         ui.label("Browse titles and copy one to edit.");
         ui.add(
             egui::TextEdit::singleline(&mut self.spoofer_title_copy_filter)
@@ -553,6 +552,7 @@ impl HebnixApp {
 
     fn render_title_editor(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         ui.heading("Edit Title");
+        ui.separator();
         ui.add_space(4.0);
         ui.add_enabled_ui(!self.title_patcher.busy(), |ui| {
             ui.horizontal(|ui| {
@@ -776,6 +776,7 @@ impl HebnixApp {
 
     fn render_applied_titles(&mut self, ui: &mut egui::Ui, changed: &mut bool) {
         ui.heading("Applied Titles");
+        ui.separator();
         ui.weak("Apply your list to update this client.");
         ui.add_space(4.0);
         let footer_height = (egui::TextStyle::Body.resolve(ui.style()).size * 6.5).max(108.0);
@@ -787,7 +788,7 @@ impl HebnixApp {
             .max_height(list_height)
             .min_scrolled_height(list_height)
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if self.spoofer_titles.is_empty() {
                     ui.weak("No title replacements added yet");
                 }
@@ -905,7 +906,7 @@ impl HebnixApp {
                         ui.separator();
                     });
                 }
-            });
+            }));
         if let Some(index) = edit {
             self.switch_title_editor(Some(index));
             *changed = true;
@@ -966,7 +967,7 @@ impl HebnixApp {
                 self.title_editor.restore_confirmation = true;
             }
         });
-        egui::ScrollArea::vertical().id_salt("titles_patch_status").min_scrolled_height(0.0).max_height(ui.available_height().max(0.0)).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("titles_patch_status").min_scrolled_height(0.0).max_height(ui.available_height().max(0.0)).auto_shrink([false, false]).show(ui, |ui| crate::panel::followed(ui, |ui| {
             if !closed { ui.weak(if self.first_status { "Checking whether Rocket League is running…" } else { "Close Rocket League to Apply or Restore." }); }
             else if let Some(error) = validation { if !self.spoofer_titles.is_empty() { ui.label(error); } }
             if self.title_patcher.busy() {
@@ -991,7 +992,7 @@ impl HebnixApp {
                     self.title_patcher.status = "Could not restart as administrator.".into();
                 }
             }
-        });
+        }));
     }
 
     fn render_title_restore_confirmation(&mut self, ctx: &egui::Context) {

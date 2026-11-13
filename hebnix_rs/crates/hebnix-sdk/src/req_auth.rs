@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
@@ -5,6 +6,22 @@ use md5::{Digest, Md5};
 use sha1::Sha1;
 
 include!(concat!(env!("OUT_DIR"), "/req_key.rs"));
+
+static CLOCK_WARNING_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Record a token rejection from a req.hebnix.com response for the app UI.
+pub fn observe_response(status: u16, body: &serde_json::Value) {
+    if status == 498
+        && body.get("error").and_then(serde_json::Value::as_str)
+            == Some("Incorrect application token")
+    {
+        CLOCK_WARNING_PENDING.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn take_clock_warning() -> bool {
+    CLOCK_WARNING_PENDING.swap(false, Ordering::Relaxed)
+}
 
 fn decode_base32(value: &str) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
@@ -80,5 +97,18 @@ mod tests {
     #[test]
     fn missing_key_is_an_error() {
         assert!(token_at("", 59).is_err());
+    }
+
+    #[test]
+    fn clock_warning_requires_both_status_and_token_error() {
+        let token_error = serde_json::json!({"error": "Incorrect application token"});
+        observe_response(401, &token_error);
+        observe_response(498, &serde_json::json!({"error": "Other error"}));
+        assert!(!take_clock_warning());
+
+        observe_response(498, &token_error);
+        observe_response(498, &token_error);
+        assert!(take_clock_warning());
+        assert!(!take_clock_warning());
     }
 }

@@ -127,7 +127,7 @@ impl TrackerClient {
         let response = match agent.get(&url)
             .set("X-App-Token", &token)
             .set("Accept", "application/json")
-            .set("User-Agent", "Hebnix/2.2.6")
+            .set("User-Agent", concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
             .timeout(self.timeout)
             .call()
         {
@@ -135,7 +135,14 @@ impl TrackerClient {
             Err(ureq::Error::Status(404, _)) => {
                 return Err("NOT_FOUND_404: profile service returned 404".to_string());
             }
-            Err(ureq::Error::Status(status, _)) => {
+            Err(ureq::Error::Status(status, response)) => {
+                if status == 498 {
+                    let reader = response.into_reader().take(RESPONSE_MAX_BYTES);
+                    if let Ok(body) = serde_json::from_reader::<_, serde_json::Value>(reader) {
+                        tracing::warn!("profile service 498 body: {body}");
+                        crate::req_auth::observe_response(status, &body);
+                    }
+                }
                 return Err(format!("profile service returned HTTP {status}"));
             }
             Err(ureq::Error::Transport(error)) => {
@@ -267,8 +274,7 @@ fn parse_rank(value: &Value, playlist_id: i64) -> PlaylistRank {
         mmr: value
             .get("mmr")
             .and_then(number_f64)
-            .map(|mmr| mmr.round() as i64)
-            .unwrap_or(0),
+            .map(|mmr| mmr.round() as i64),
         matches_played: value
             .get("matches_played")
             .and_then(number_i64)

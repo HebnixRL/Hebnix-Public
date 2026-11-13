@@ -515,10 +515,9 @@ impl CarPatcherState {
                 return Err("This car requires a prepared body package.".to_string());
             }
         }
-        let replace_result = fs::copy(&staged, &live_path);
+        let replace_result = super::upk_history::install_copy(cooked_pc, &staged, &live_path, &car.name);
         let _ = fs::remove_file(&staged);
         if let Err(error) = replace_result {
-            let _ = fs::copy(&backup_path, &live_path);
             return Err(format!(
                 "Could not replace {}: {error}",
                 live_path.display()
@@ -595,7 +594,7 @@ impl CarPatcherState {
         if !backup.is_file() {
             return Err(format!("No original backup exists for {target_upk}"));
         }
-        fs::copy(&backup, cooked_pc.join(&target_upk))
+        super::upk_history::install_copy(cooked_pc, &backup, &cooked_pc.join(&target_upk), "Restore car model")
             .map_err(|error| format!("Could not restore {target_upk}: {error}"))?;
         let patch_name = self.active_cars.remove(&target_upk).unwrap_or_default();
         config.patcher.active_cars = self.active_cars.clone();
@@ -638,7 +637,7 @@ impl CarPatcherState {
         tx: &Sender<AppMsg>,
         config: &mut Config,
     ) {
-        crate::ui::browser::header(ui, t("app-car-patcher"), |ui| {
+        crate::ui::browser::header(ui, t("nav-car-models"), |ui| {
             if ui
                 .add_enabled(
                     !self.active_cars.is_empty(),
@@ -730,27 +729,23 @@ impl CarPatcherState {
             .skip(self.page * page_size)
             .take(page_size)
             .collect();
-        let row_height = (ui.available_height()
-            - ui.spacing().item_spacing.y * (crate::ui::browser::ROWS - 1) as f32)
-            / crate::ui::browser::ROWS as f32;
-        let tile_height = crate::ui::browser::tile_height(ui).min(row_height);
         let mut action = None;
         egui::ScrollArea::vertical()
             .id_salt("car_patcher_local")
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in visible.chunks(columns) {
                     ui.columns(columns, |uis| {
                         for (column, car) in row.iter().enumerate() {
                             if let Some(clicked) =
-                                self.render_tile(&mut uis[column], car, tile_height)
+                                self.render_tile(&mut uis[column], car)
                             {
                                 action = Some((car.clone(), clicked));
                             }
                         }
                     });
                 }
-            });
+            }));
         if let Some((car, action)) = action {
             let result = match action {
                 TileAction::Apply => self.apply(&car, cooked_pc, backups_dir, tx, config),
@@ -770,7 +765,39 @@ impl CarPatcherState {
         }
     }
 
-    fn render_tile(&self, ui: &mut egui::Ui, car: &CarPatch, height: f32) -> Option<TileAction> {
+    fn patch_image(&self, car: &CarPatch) -> egui::Image<'static> {
+        let bytes = car
+            .thumbnail
+            .clone()
+            .unwrap_or_else(|| self.fallback_image.clone());
+        egui::Image::from_bytes(
+            format!(
+                "bytes://car-patch/{}/{:08x}",
+                car.json_path.display(),
+                crc32fast::hash(&bytes)
+            ),
+            bytes,
+        )
+    }
+
+    pub(crate) fn active_preview(&self, target: &str, name: &str) -> Option<egui::Image<'static>> {
+        let matching = self.cars.iter().filter(|car| car.name == name);
+        matching
+            .clone()
+            .find(|car| {
+                self.resolve_body(car.body_id)
+                    .is_ok_and(|body| body.upk_path == target)
+            })
+            .or_else(|| {
+                // The active view can open before the body catalogue is ready.
+                let mut matching = matching;
+                let car = matching.next()?;
+                matching.next().is_none().then_some(car)
+            })
+            .map(|car| self.patch_image(car))
+    }
+
+    fn render_tile(&self, ui: &mut egui::Ui, car: &CarPatch) -> Option<TileAction> {
         let resolved = self.resolve_body(car.body_id);
         let active = resolved
             .as_ref()
@@ -778,13 +805,6 @@ impl CarPatcherState {
             .and_then(|target| self.active_cars.get(&target.upk_path));
         let applied = active.is_some_and(|name| name == &car.name);
         let style = crate::ui::browser::frame(ui, applied);
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
-            egui::Sense::hover(),
-        );
-        ui.painter()
-            .rect_filled(rect, style.corner_radius, style.fill);
-        let content = rect.shrink(10.0);
         let body_font = egui::TextStyle::Body.resolve(ui.style());
         let subtitle_font = egui::FontId::new((body_font.size - 2.0).max(10.0), body_font.family);
         let subtitle_height = ui.fonts_mut(|fonts| fonts.row_height(&subtitle_font));
@@ -795,27 +815,25 @@ impl CarPatcherState {
             + subtitle_height
             + button_height
             + ui.spacing().item_spacing.y * 3.0;
-        let image_rect = egui::Rect::from_min_max(
+        let width = ui.available_width();
+        let image_height = (width - 20.0).max(1.0) * 2.0 / 3.0;
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(width, image_height + footer_height + 20.0),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_filled(rect, style.corner_radius, style.fill);
+        let content = rect.shrink(10.0);
+        let image_rect = egui::Rect::from_min_size(
             content.min,
-            egui::pos2(content.right(), content.bottom() - footer_height),
+            egui::vec2(content.width(), image_height),
         );
-        let bytes = car
-            .thumbnail
-            .clone()
-            .unwrap_or_else(|| self.fallback_image.clone());
-        ui.place(
-            image_rect,
-            egui::Image::from_bytes(
-                format!(
-                    "bytes://car-patch/{}/{:08x}",
-                    car.json_path.display(),
-                    crc32fast::hash(&bytes)
-                ),
-                bytes,
-            )
-            .fit_to_exact_size(image_rect.size())
-            .maintain_aspect_ratio(true),
-        );
+        let image = self.patch_image(car);
+        let image = if car.thumbnail.is_some() {
+            crate::ui::browser::cover_image(ui, image, image_rect.size())
+        } else {
+            image.fit_to_exact_size(image_rect.size())
+        };
+        ui.place(image_rect, image);
         let footer = egui::Rect::from_min_max(
             egui::pos2(
                 content.left(),

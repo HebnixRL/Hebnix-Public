@@ -297,6 +297,7 @@ impl ArchiveBrowser {
         let downloading = self.downloading.load(Ordering::Relaxed);
 
         ui.heading(t("render-no-api-key-use-the-rl"));
+        ui.separator();
         ui.label(t("render-if-you-can-t-get-a"));
         ui.hyperlink_to(
             t("render-open-the-rl-workshop-archive-request"),
@@ -355,7 +356,7 @@ impl ArchiveBrowser {
                     egui::ScrollArea::vertical()
                         .id_salt("archive_maps")
                         .max_height(260.0)
-                        .show(ui, |ui| {
+                        .show(ui, |ui| crate::panel::followed(ui, |ui| {
                             for map in shown {
                                 ui.horizontal(|ui| {
                                     if ui
@@ -380,7 +381,8 @@ impl ArchiveBrowser {
                                     }
                                 });
                             }
-                        });
+                            crate::panel::follow_focus(ui);
+                        }));
                 }
                 Some(Err(error)) => {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);

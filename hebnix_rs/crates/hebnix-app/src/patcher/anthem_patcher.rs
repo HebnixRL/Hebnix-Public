@@ -444,6 +444,8 @@ fn apply(
 }
 
 impl AnthemPatcherState {
+    pub(crate) fn busy(&self) -> bool { self.receiver.is_some() }
+
     pub fn new(base: &Path, config: &Config) -> Self {
         let (thumbnail_jobs, jobs) =
             crossbeam_channel::unbounded::<(String, PathBuf, egui::Context)>();
@@ -610,6 +612,12 @@ impl AnthemPatcherState {
             apply(&cooked, active, saved)
         });
     }
+    pub(crate) fn repatch(&mut self, active: HashMap<String, String>, cooked: &Path, ctx: &egui::Context) {
+        let saved = self.saved.clone();
+        let cooked = cooked.to_path_buf();
+        self.job(ctx, "Repatching anthems...", move || apply(&cooked, active, saved));
+    }
+
     pub fn restore_all(&mut self, cooked: &Path, ctx: &egui::Context) {
         let saved = self.saved.clone();
         let cooked = cooked.to_path_buf();
@@ -665,7 +673,7 @@ impl AnthemPatcherState {
             if self.editor.is_some() {
                 egui::ScrollArea::vertical()
                     .id_salt("anthem_editor")
-                    .show(ui, |ui| self.render_editor(ui, cooked));
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| self.render_editor(ui, cooked)));
             } else {
                 self.render_list(ui, cooked, owned_ids);
             }
@@ -740,7 +748,6 @@ impl AnthemPatcherState {
     }
     fn render_list(&mut self, ui: &mut egui::Ui, cooked: &Path, owned_ids: &HashSet<i64>) {
         let ctx = ui.ctx().clone();
-        ui.heading("Anthem Patcher");
         ui.weak("Select an anthem to import audio and choose its playback sections.");
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -799,7 +806,7 @@ impl AnthemPatcherState {
         let preview_height = (row_height - 92.0).clamp(40.0, 200.0);
         egui::ScrollArea::vertical()
             .id_salt("anthem_list")
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 for row in entries
                     .iter()
                     .skip(self.page * page_size)
@@ -854,7 +861,7 @@ impl AnthemPatcherState {
                         }
                     });
                 }
-            });
+            }));
     }
     fn render_editor(&mut self, ui: &mut egui::Ui, cooked: &Path) {
         let ctx = ui.ctx().clone();

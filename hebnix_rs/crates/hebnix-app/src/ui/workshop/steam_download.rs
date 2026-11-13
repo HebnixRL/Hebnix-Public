@@ -398,7 +398,7 @@ pub(super) fn read_item_info(dir: &Path) -> Option<ItemInfo> {
 
 type Log<'a> = &'a (dyn Fn(&str) + Sync);
 
-fn fetch_details(wid: &str) -> Result<WorkshopDetails, String> {
+pub(super) fn fetch_details(wid: &str) -> Result<WorkshopDetails, String> {
     let response = ureq::post(STEAM_DETAILS_URL)
         .timeout(Duration::from_secs(15))
         .send_form(&[("itemcount", "1"), ("publishedfileids[0]", wid)])
@@ -698,7 +698,7 @@ impl SteamDownloader {
             .get_or_insert_with(|| load_settings(runtime_dir));
         let busy = self.busy.load(Ordering::Relaxed);
 
-        ui.heading(t("render-download-from-the-steam-workshop"));
+        crate::theme::page_heading(ui, t("render-download-from-the-steam-workshop"));
         ui.label(t("render-paste-a-rocket-league-workshop-link"));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -777,11 +777,11 @@ impl SteamDownloader {
                 egui::ScrollArea::vertical()
                     .max_height(140.0)
                     .stick_to_bottom(true)
-                    .show(ui, |ui| {
+                    .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         for line in &shared.log {
                             ui.small(line);
                         }
-                    });
+                    }));
             }
         }
         // hand a finished map over exactly once

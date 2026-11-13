@@ -5,7 +5,26 @@ use std::time::Duration;
 use eframe::egui;
 use serde::Deserialize;
 
+use crate::i18n::t;
+
 const ENDPOINT: &str = "https://api.hebnix.com/notifications";
+
+pub fn render_clock_warning(ctx: &egui::Context, open: &mut bool) -> bool {
+    *open |= hebnix_sdk::req_auth::take_clock_warning();
+    if !*open {
+        return false;
+    }
+
+    let modal = egui::Modal::new(egui::Id::new("req_clock_warning")).show(ctx, |ui| {
+        ui.set_width(400.0_f32.min((ctx.content_rect().width() - 48.0).max(120.0)));
+        ui.heading(t("req-clock-warning-title"));
+        ui.add(egui::Label::new(t("req-clock-warning-body")).wrap());
+        ui.add_space(8.0);
+        ui.button(t("btn-ok")).clicked()
+    });
+    *open = !modal.inner;
+    true
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Notification {
@@ -47,9 +66,9 @@ pub fn render_popup(ctx: &egui::Context, notification: &Notification) -> bool {
         ui.separator();
         egui::ScrollArea::vertical()
             .max_height((ctx.content_rect().height() * 0.6).max(80.0))
-            .show(ui, |ui| {
+            .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.add(egui::Label::new(&notification.message).wrap());
-            });
+            }));
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if let Some(url) = notification.link_url() {

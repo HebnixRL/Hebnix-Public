@@ -46,7 +46,7 @@ const MAX_TRANSFERS: usize = 2;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(15);
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const ACCEPT_IDLE: Duration = Duration::from_millis(200);
 /// anything smaller can't be a real map
 const MIN_SHARED_BYTES: u64 = 1024;
@@ -78,6 +78,12 @@ pub struct SlotMap {
     pub slot: String,
     pub id: String,
     pub name: String,
+    /// original package filename without its extension, separate from the title
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file: String,
+    /// package name the host loaded it under (a map slot), when not `file`
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub package: String,
     /// imported by the player rather than from the workshop cdn (derived
     /// from the id on receive, never taken from the wire)
     #[serde(default)]
@@ -318,9 +324,16 @@ pub struct MapSync {
     /// players blocked this session, with the name they had when blocked:
     /// their maps are hidden and their connections dropped
     blocked: Arc<Mutex<HashMap<IpAddr, String>>>,
+    /// set to poll every peer now instead of waiting out the interval
+    poll_now: Arc<AtomicBool>,
 }
 
 impl MapSync {
+    /// ask for a round of peer polling right away, e.g. when the game wants fresh names
+    pub fn poll_now(&self) {
+        self.poll_now.store(true, Ordering::Relaxed);
+    }
+
     pub fn start(
         sidecar: Arc<TailcatSidecarHandle>,
         provider: MapProvider,
@@ -330,36 +343,44 @@ impl MapSync {
         let stop = sync.stop.clone();
         let offers = sync.offers.clone();
         let blocked = sync.blocked.clone();
+        let poll_now = sync.poll_now.clone();
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
+                poll_now.store(false, Ordering::Relaxed);
                 let mut found = Vec::new();
                 if let Ok(peers) = sidecar.peers_now() {
-                    let peers = peers
+                    let peers: Vec<_> = peers
                         .into_iter()
                         .filter(|peer| peer.online)
-                        .take(MAX_POLLED_PEERS);
-                    for peer in peers {
-                        let Ok(ip) = peer.tailnet_ip.parse::<IpAddr>() else {
-                            continue;
-                        };
-                        if !peer_allowed(ip) || is_blocked(&blocked, ip) {
-                            continue;
+                        .take(MAX_POLLED_PEERS)
+                        .filter_map(|peer| {
+                            let ip = peer.tailnet_ip.parse::<IpAddr>().ok()?;
+                            (peer_allowed(ip) && !is_blocked(&blocked, ip)).then_some((ip, peer))
+                        })
+                        .collect();
+                    // peers are asked together so one slow or offline player does not hold up the rest
+                    thread::scope(|scope| {
+                        let asked: Vec<_> = peers
+                            .iter()
+                            .map(|(ip, _)| scope.spawn(move || fetch_peer_info(*ip, MAP_SYNC_PORT)))
+                            .collect();
+                        for ((ip, peer), asked) in peers.iter().zip(asked) {
+                            if let Ok(Ok(info)) = asked.join() {
+                                found.push(PeerOffer {
+                                    ip: *ip,
+                                    player_name: info.player_name,
+                                    hostname: clean_name(&peer.hostname),
+                                    maps: info.maps,
+                                });
+                            }
                         }
-                        if let Ok(info) = fetch_peer_info(ip, MAP_SYNC_PORT) {
-                            found.push(PeerOffer {
-                                ip,
-                                player_name: info.player_name,
-                                hostname: clean_name(&peer.hostname),
-                                maps: info.maps,
-                            });
-                        }
-                    }
+                    });
                 }
                 if let Ok(mut current) = offers.lock() {
                     *current = found;
                 }
                 let mut waited = Duration::ZERO;
-                while waited < POLL_INTERVAL && !stop.load(Ordering::Relaxed) {
+                while waited < POLL_INTERVAL && !stop.load(Ordering::Relaxed) && !poll_now.load(Ordering::Relaxed) {
                     thread::sleep(ACCEPT_IDLE);
                     waited += ACCEPT_IDLE;
                 }
@@ -423,6 +444,7 @@ impl MapSync {
             stop,
             offers: Arc::new(Mutex::new(Vec::new())),
             blocked,
+            poll_now: Arc::new(AtomicBool::new(false)),
         };
         Ok((sync, port))
     }
@@ -624,6 +646,8 @@ pub fn fetch_peer_info(peer: IpAddr, port: u16) -> Result<PeerInfoReply, String>
             .filter(|map| valid_map_id(&map.id))
             .take(MAX_MAPS_PER_PEER)
             .map(|map| SlotMap {
+                file: if valid_package_stem(&map.file) { map.file.clone() } else { String::new() },
+                package: if crate::patcher::workshop_slots::is_slot(&map.package) { map.package.clone() } else { String::new() },
                 local: is_local_map_id(&map.id),
                 name: clean_name(&map.name),
                 author: clean_name(&map.author),
@@ -632,6 +656,18 @@ pub fn fetch_peer_info(peer: IpAddr, port: u16) -> Result<PeerInfoReply, String>
             })
             .collect(),
     })
+}
+
+pub fn valid_package_stem(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    !value.is_empty()
+        && value.len() <= 180
+        && !value.ends_with(['.', ' '])
+        && !value.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|', '.'])
+        && !value.chars().any(char::is_control)
+        && !matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        && !(upper.len() == 4 && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit())
 }
 
 /// downloads a map from a peer into `dest`. the file only lands at `dest` if
@@ -743,6 +779,20 @@ fn download(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn package_filename_is_separate_and_cannot_escape_its_folder() {
+        for invalid in ["", "../map", "C:\\map", "..", "map.udk", "map\n", "CON", "lpt1", "map "] {
+            assert!(!valid_package_stem(invalid), "{invalid:?}");
+        }
+        assert!(valid_package_stem("Noob_Dribble-v2"));
+        let legacy: SlotMap = serde_json::from_str(r#"{"slot":"Hosting","id":"123","name":"Readable title"}"#).unwrap();
+        assert!(legacy.file.is_empty());
+        let current = SlotMap { file: "Noob_Dribble-v2".into(), ..legacy };
+        let restored: SlotMap = serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(restored.file, "Noob_Dribble-v2");
+        assert_eq!(restored.name, "Readable title");
+    }
 
     fn slot(id: &str) -> SlotMap {
         SlotMap {
