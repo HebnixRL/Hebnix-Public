@@ -1,8 +1,7 @@
 //! Instant Suite. When a match ends Rocket League shows the winner prompt
 //! (GFX_WinnerMenu_SF, prompts.WinnerPrompt). As it announces the winner, the
-//! patched movie asks Hebnix's preview server what to do (see
-//! assets/instant-suite/README.md), so the action can change while the game
-//! runs. Hebnix only answers right after the Stats API's MatchEnded:
+//! patched movie reads a short-lived action through the native Shell bridge
+//! after the Stats API's MatchEnded:
 //!
 //!   requeue   this.onQuickRequeue()            queue again, as the Play Again button does
 //!   freeplay  this.handleFreeplayRequest()     go to freeplay, as the Free Play button does
@@ -18,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PACKAGE: &str = "GFX_WinnerMenu_SF.upk";
 
@@ -32,65 +31,156 @@ const MOVIE: Movie = Movie {
 pub const MODES: [&str; 4] = ["requeue", "freeplay", "menu", "workshop"];
 pub const DEFAULT_MODE: &str = "nothing";
 
-/// What the movie is told: the PNG width it reads, 0 for nothing.
+/// What the movie is told: an action digit, 0 for nothing.
 static CODE: AtomicU8 = AtomicU8::new(0);
-/// When the Stats API last said a match ended. The movie only gets an answer
-/// right after one, so a winner left over from an earlier match does nothing.
-static ENDED: Mutex<Option<Instant>> = Mutex::new(None);
-const ENDED_FOR: Duration = Duration::from_secs(30);
-/// The movie asks as the winner shows, the same moment MatchEnded is sent: wait this long for it.
-const WAIT_FOR_END: Duration = Duration::from_secs(3);
+static LAST_MATCH: Mutex<Option<String>> = Mutex::new(None);
+const COMMAND: &str = "HbxInstant.txt";
+const ENABLED: &str = "InstantSuite.enabled";
+const ACTION_LIFETIME: Duration = Duration::from_secs(8);
 
 fn permits_match(playlist: Option<i64>, private: bool, tournaments: bool) -> bool {
     match playlist {
-        Some(6) => private,
+        Some(0 | 6) => private,
         Some(22 | 34) => tournaments,
         Some(id) => id >= 0,
         None => false,
     }
 }
 
-pub fn match_ended(private: bool, tournaments: bool) {
-    let allowed = wanted()
-        && permits_match(hebnix_sdk::log::current_match_playlist(), private, tournaments);
-    if let Ok(mut ended) = ENDED.lock() {
-        *ended = allowed.then(Instant::now);
-    }
+fn command_path(cooked: &Path) -> PathBuf {
+    cooked.parent().unwrap_or(cooked).join(COMMAND)
 }
 
-pub fn clear_match_end() {
-    if let Ok(mut ended) = ENDED.lock() {
-        *ended = None;
-    }
+fn command_value(now: SystemTime, action: u8) -> Option<String> {
+    (1..=4).contains(&action).then_some(())?;
+    let expiry = now.checked_add(ACTION_LIFETIME)?.duration_since(UNIX_EPOCH).ok()?;
+    Some(format!("{}{action}", expiry.as_millis()))
 }
 
-/// The width of the image the preview server answers the movie with, or None
-/// to answer 404 so the winner screen stays. Blocks up to WAIT_FOR_END.
-pub fn served_width() -> Option<u32> {
-    let asked = Instant::now();
-    loop {
-        // Take the event while holding the lock so simultaneous requests
-        // cannot both trigger the winner action.
-        if ENDED.lock().ok().and_then(|mut e| e.take()).is_some_and(|at| at.elapsed() < ENDED_FOR) {
-            return match CODE.load(Ordering::Relaxed) {
-                0 => None,
-                n => Some(u32::from(n)),
-            };
+pub fn match_ended(cooked: &Path, guid: Option<&str>, private: bool, tournaments: bool) {
+    let action = CODE.load(Ordering::Relaxed);
+    if action == 0 || !permits_match(hebnix_sdk::log::current_match_playlist(), private, tournaments) {
+        clear_match_end(cooked);
+        return;
+    }
+    let Ok(mut last) = LAST_MATCH.lock() else { return };
+    if guid.is_some() && last.as_deref() == guid {
+        return;
+    }
+    if let Some(value) = command_value(SystemTime::now(), action) {
+        if let Err(error) = super::upk_history::replace(&command_path(cooked), value.as_bytes()) {
+            tracing::warn!("Instant Suite could not send the match action: {error}");
+            return;
         }
-        if asked.elapsed() >= WAIT_FOR_END {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+        *last = guid.map(str::to_owned);
     }
 }
 
-/// Whether the preview server must run for Instant Suite.
-pub fn wanted() -> bool {
-    CODE.load(Ordering::Relaxed) != 0
+pub fn clear_match_end(cooked: &Path) {
+    let path = command_path(cooked);
+    if path.is_file() {
+        let _ = super::upk_history::replace(&path, b"0");
+    }
+}
+
+pub fn match_destroyed(cooked: &Path) {
+    clear_match_end(cooked);
+    if let Ok(mut last) = LAST_MATCH.lock() {
+        *last = None;
+    }
+}
+
+pub fn suspend(cooked: &Path) {
+    if CODE.swap(0, Ordering::Relaxed) != 0 {
+        clear_match_end(cooked);
+    }
 }
 
 fn code(mode: &str) -> u8 {
     MODES.iter().position(|m| *m == mode).map_or(0, |i| i as u8 + 1)
+}
+
+const BRIDGE: &str = "GFxShell_TA.GetKeyForAction";
+const BRIDGE_PATH: &str = r"..\..\TAGame\HbxInstant.txt";
+
+pub(super) fn has_native_bridge(upk: &UpkPackage) -> bool {
+    upk.find_object(BRIDGE)
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| upk.exports.get(index as usize))
+        .is_some_and(|export| upk.image[export.serial_offset..export.serial_offset + export.serial_size]
+            .windows(BRIDGE_PATH.len()).any(|bytes| bytes == BRIDGE_PATH.as_bytes()))
+}
+
+/// Shell.GetKeyForAction is a native-backed GFx method with a string return
+/// slot. Handle one reserved action and run the original body for other keys.
+fn edit_bridge(upk: &mut UpkPackage, enabled: bool) -> Result<bool, String> {
+    use super::script_patch::{Script, replace_script};
+    let object = |path| upk.find_object(path).ok_or_else(|| format!("Missing {path}"));
+    let name = |value: &str| upk.names.iter().position(|name| name == value)
+        .map(|index| index as i32).ok_or_else(|| format!("Missing {value}"));
+    let index = usize::try_from(object(BRIDGE)?).ok().and_then(|index| index.checked_sub(1))
+        .ok_or("Missing Shell key lookup export")?;
+    let export = upk.exports.get(index).ok_or("Missing Shell key lookup export")?;
+    let payload = &upk.image[export.serial_offset..export.serial_offset + export.serial_size];
+    let mut body = Script::of_function(payload)?;
+    let present = has_native_bridge(upk);
+    if !present && !enabled {
+        return Ok(false);
+    }
+    let slot = name("LoadFileToString").or_else(|_| name("TransformedLeftX"))?;
+    let result = object("GFxShell_TA.GetKeyForAction.ReturnValue")?;
+    let mut read = Script::new();
+    read.raw(&[0x1b]).name(slot).raw(&[0x1f]).raw(BRIDGE_PATH.as_bytes())
+        .raw(&[0, 0x2b]).object(result).raw(&[0x16]);
+    let mut prefix = Script::new();
+    // Action == 'GetSCT' (native Name equality). Return the file contents.
+    prefix.raw(&[0x07, 0, 0, 0xfe, 0x2b]).object(object("GFxShell_TA.GetKeyForAction.Action")?)
+        .raw(&[0x21]).name(name(super::title_patcher::abc::INSTANT_SUITE_ACTION)?).raw(&[0x16]);
+    prefix.raw(&[0x5e, 0x12, 0, 0x20]).object(object("Core.FileSystem")?)
+        .raw(&(read.mem_size() as u16).to_le_bytes()).object(0).raw(&[0]).append(&read);
+    prefix.raw(&[0x04, 0x2b]).object(result);
+    prefix.set_word(1, prefix.mem_size() as u16);
+    if present {
+        if !body.bytes().starts_with(prefix.bytes()) {
+            return Err("Instant Suite's native bridge changed".into());
+        }
+        if enabled {
+            return Ok(false);
+        }
+        body.cut(0, prefix.len(), prefix.refs());
+        replace_script(upk, BRIDGE, &body)?;
+        return Ok(true);
+    }
+    // GetKeyForAction has a straight-line body with no absolute jump targets.
+    let tail = [&[0x16, 0x04, 0x3a][..], &result.to_le_bytes(), &[0x4c]].concat();
+    if body.len() != 75 || body.refs() != 11 || !body.bytes().starts_with(&[0x04, 0x5e, 0x19, 0x01, 0x2e])
+        || !body.bytes().ends_with(&tail)
+    {
+        return Err("Rocket League changed the Shell key lookup layout".into());
+    }
+    upk.rename_name(slot as usize, "LoadFileToString")?;
+    replace_script(upk, BRIDGE, prefix.append(&body))?;
+    Ok(true)
+}
+
+fn install_bridge(cooked: &Path, enabled: bool) -> Result<bool, String> {
+    let _guard = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
+    let live = game_path::resolve(cooked, "TAGame.upk");
+    if !enabled && !live.is_file() {
+        return Ok(false);
+    }
+    let before = std::fs::read(&live).map_err(|error| error.to_string())?;
+    let mut upk = UpkPackage::from_bytes(before.clone())?;
+    if !edit_bridge(&mut upk, enabled)? {
+        return Ok(false);
+    }
+    let after = upk.repacked_fast()?;
+    if edit_bridge(&mut UpkPackage::from_bytes(after.clone())?, enabled)? {
+        return Err("Staged Instant Suite bridge did not validate".into());
+    }
+    ensure_closed()?;
+    super::upk_history::install_linked_from(cooked, &live, &before, &after, "Instant Suite bridge")?;
+    Ok(true)
 }
 
 /// The byte-patched movie of earlier builds: its state and vanilla payload.
@@ -128,9 +218,10 @@ fn install(cooked: &Path, live: &Path, upk: &UpkPackage) -> Result<(), String> {
         let _ = std::fs::remove_file(&temp);
         return Err(format!("Staged {PACKAGE} failed validation: {check:?}"));
     }
-    let copied = std::fs::copy(&temp, live);
+    let copied = ensure_closed().and_then(|()| std::fs::rename(&temp, live)
+        .map_err(|error| format!("Could not write {PACKAGE}: {error}")));
     let _ = std::fs::remove_file(&temp);
-    copied.map(|_| ()).map_err(|e| format!("Could not write {PACKAGE}: {e}"))
+    copied
 }
 
 fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
@@ -158,37 +249,148 @@ fn restore_legacy(cooked: &Path, backups: &Path) -> Result<(), String> {
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if saved.build != backup_guard::build_id(cooked)? {
+        if MOVIE.movie(&upk).is_ok_and(|movie| super::workshop_menu_ui::digest(&movie) == MOVIE.vanilla) {
+            return std::fs::remove_file(folder(backups).join("state.json")).map_err(|error| error.to_string());
+        }
         return Err("The Instant Suite backup belongs to another game build. Verify the game files.".into());
     }
     let original = std::fs::read(folder(backups).join("original.bin")).map_err(|e| e.to_string())?;
     upk.replace_export_payload(saved.export, &original)?;
     install(cooked, &live, &upk)?;
-    let _ = std::fs::remove_dir_all(folder(backups));
+    std::fs::remove_file(folder(backups).join("state.json")).map_err(|error| error.to_string())?;
+    let _ = std::fs::remove_file(folder(backups).join("original.bin"));
+    let _ = std::fs::remove_dir(folder(backups));
     Ok(())
 }
 
 /// Whether Instant Suite is on, in this build's form or an earlier one's.
-fn status(cooked: &Path, backups: &Path) -> bool {
-    read_saved(backups).is_some() || MOVIE.status(cooked)
+pub(super) fn status(cooked: &Path, backups: &Path) -> bool {
+    read_saved(backups).is_some() || UpkPackage::load(&game_path::resolve(cooked, PACKAGE))
+        .and_then(|upk| MOVIE.movie(&upk))
+        .and_then(|movie| edit_hook(&movie, false))
+        .is_ok_and(|(enabled, _)| enabled == Some(true))
+}
+
+pub(super) fn recorded_enabled(backups: &Path) -> bool {
+    backups.join(ENABLED).is_file() || read_saved(backups).is_some()
+}
+
+fn edit_hook(movie: &[u8], enabled: bool) -> Result<(Option<bool>, Option<Vec<u8>>), String> {
+    let current = std::cell::Cell::new(None);
+    let edited = super::title_patcher::movie::rewrite(movie, &|data| {
+        let Some((offset, was_enabled)) = super::title_patcher::abc::instant_suite_hook(data)? else {
+            return Ok(None);
+        };
+        current.set(Some(was_enabled));
+        if enabled && !super::title_patcher::abc::has_instant_suite_bridge(data) {
+            return super::title_patcher::abc::instant_suite_bridge(data, true);
+        }
+        if was_enabled == enabled {
+            return Ok(None);
+        }
+        let mut bytes = data.to_vec();
+        bytes[offset] = if enabled { 0xd0 } else { 0x47 };
+        Ok(Some((bytes, 1)))
+    })?;
+    Ok((current.get(), edited.map(|(movie, _)| movie)))
+}
+
+fn switch_existing_hook(cooked: &Path, enabled: bool) -> Result<bool, String> {
+    let mut upk = UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?;
+    let (present, edited) = edit_hook(&MOVIE.movie(&upk)?, enabled)?;
+    if let Some(movie) = edited {
+        MOVIE.install_movie(cooked, &mut upk, &movie)?;
+    }
+    Ok(present.is_some())
 }
 
 /// Turn Instant Suite on.
 pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let _guard = super::title_patcher::UI_PATCH_LOCK.lock().map_err(|_| "UI patch lock unavailable")?;
     ensure_closed()?;
     backup_guard::check_install(cooked, backups)?;
     restore_legacy(cooked, backups)?;
-    MOVIE.apply(cooked, backups)
+    let mut live = UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?;
+    let current = MOVIE.movie(&live)?;
+    let (installed, upgrade) = edit_hook(&current, true)?;
+    let is_vanilla = super::workshop_menu_ui::digest(&current) == MOVIE.vanilla;
+    let desired = if installed.is_none() && !is_vanilla {
+        let original = MOVIE.recover_original(cooked, backups, &live)
+            .ok_or("No matching original winner code is available to install the Instant Suite hook.")?;
+        let edited = super::title_patcher::movie::install_instant_suite(&current, &original, MOVIE.patched)?
+            .ok_or("The winner code block could not be located in the installed menu.")?;
+        let (_, upgraded) = edit_hook(&edited, true)?;
+        Some(upgraded.unwrap_or(edited))
+    } else {
+        upgrade
+    };
+    super::upk_history::replace(&command_path(cooked), b"0")?;
+    let bridge_added = install_bridge(cooked, true)?;
+    let result = (|| {
+        if let Some(desired) = desired {
+            MOVIE.install_movie(cooked, &mut live, &desired)?;
+        } else if is_vanilla {
+            MOVIE.apply(cooked, backups)?;
+            switch_existing_hook(cooked, true)?;
+        }
+        super::upk_history::replace(&backups.join(ENABLED), b"on")
+    })();
+    if result.is_err() && bridge_added {
+        if let Err(error) = install_bridge(cooked, false) {
+            tracing::warn!("Instant Suite could not roll back the native bridge: {error}");
+        }
+    }
+    result
 }
 
 /// Turn Instant Suite off.
 pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
-    if !status(cooked, backups) {
-        return Ok(());
-    }
+    let _guard = super::title_patcher::UI_PATCH_LOCK.lock().map_err(|_| "UI patch lock unavailable")?;
     ensure_closed()?;
     backup_guard::check_install(cooked, backups)?;
     restore_legacy(cooked, backups)?;
-    MOVIE.restore(cooked, backups)
+    clear_match_end(cooked);
+    if status(cooked, backups) {
+        if MOVIE.status(cooked) && MOVIE.recover_original(
+            cooked, backups, &UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?,
+        ).is_some() {
+            MOVIE.restore(cooked, backups)?;
+        } else {
+            switch_existing_hook(cooked, false)?;
+        }
+    }
+    install_bridge(cooked, false)?;
+    let _ = std::fs::remove_file(command_path(cooked));
+    match std::fs::remove_file(backups.join(ENABLED)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Item recovery archives the backup folder, but Instant Suite remains active.
+pub(super) fn retain_recovery_backup(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let name = format!("{PACKAGE}.bak");
+    let backups = cooked.join("Backups");
+    let source = archive.join(&name);
+    let destination = backups.join(&name);
+    if !source.is_file() || !status(cooked, &backups)
+        || MOVIE.clean_movie(&destination).is_some() || MOVIE.clean_movie(&source).is_none()
+    {
+        return Ok(());
+    }
+    let bytes = std::fs::read(&source).map_err(|error| error.to_string())?;
+    super::upk_history::replace(&destination, &bytes)?;
+    super::upk_history::replace(&backups.join(MOVIE.marker()), backup_guard::build_id(cooked)?.as_bytes())
+}
+
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path, wanted: bool) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    retain_recovery_backup(cooked, archive)?;
+    if wanted || recorded_enabled(archive) || status(cooked, &backups) {
+        enable(cooked, &backups)?;
+    }
+    Ok(())
 }
 
 /// Page state: whether the patch is in, and the job writing the package.
@@ -197,8 +399,11 @@ pub struct State {
     job: Option<std::sync::mpsc::Receiver<Result<bool, String>>>,
     status: String,
     on: Option<bool>,
-    /// an earlier build's byte patch, replaced once the game is closed
-    legacy: Option<bool>,
+    /// An installed hook to validate once Rocket League is closed.
+    needs_upgrade: bool,
+    install: Option<PathBuf>,
+    winner_stamp: Option<(u64, SystemTime)>,
+    next_check: Option<std::time::Instant>,
     /// the in-game Workshop menu's state and its maps, read when the Workshop action is shown
     maps: Option<(bool, Vec<super::workshop_menu::WorkshopMap>)>,
     flagged: Option<String>,
@@ -234,24 +439,62 @@ impl State {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        if self.on.is_none() && !self.busy() && cooked.is_dir() {
+        if !self.busy() && self.install.as_deref() != Some(cooked) {
+            if let Some(old) = &self.install {
+                clear_match_end(old);
+            }
+            *self = Self { install: Some(cooked.to_path_buf()), ..Default::default() };
+        }
+        let now = std::time::Instant::now();
+        if !self.busy() && self.next_check.is_none_or(|check| now >= check) {
+            self.next_check = Some(now + Duration::from_secs(2));
+            let stamp = std::fs::metadata(game_path::resolve(cooked, PACKAGE)).ok()
+                .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+            if self.winner_stamp != stamp {
+                self.winner_stamp = stamp;
+                self.on = None;
+                self.needs_upgrade = false;
+            }
+        }
+        if self.on.is_none() && !self.busy() && self.winner_stamp.is_some() {
             let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
-            self.legacy = Some(read_saved(&backups).is_some());
+            self.needs_upgrade = true;
             self.spawn(move || Ok(status(&cooked, &backups)));
         }
-        if self.legacy == Some(true) && self.on == Some(true) && !self.busy() && !hebnix_sdk::process::is_rocket_league_running() {
-            self.legacy = Some(false);
+        if self.needs_upgrade && self.on == Some(true) && !self.busy()
+            && !hebnix_sdk::process::is_rocket_league_running()
+        {
+            self.needs_upgrade = false;
             let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
-            self.spawn(move || enable(&cooked, &backups).map(|()| true));
+            self.spawn(move || {
+                if !backups.join(ENABLED).is_file() && super::game_update::Recovery::load(&cooked)?.is_none() {
+                    enable(&cooked, &backups)?;
+                }
+                Ok(true)
+            });
         }
-        let on = self.on == Some(true) && self.legacy != Some(true);
-        CODE.store(if on { code(mode) } else { 0 }, Ordering::Relaxed);
-        let flag = if on && mode == "workshop" { map } else { "" };
+        let on = self.on == Some(true) && self.install.as_deref() == Some(cooked) && !self.busy();
+        let action = if on && (mode != "workshop" || Path::new(map).is_file()) {
+            code(mode)
+        } else {
+            0
+        };
+        if CODE.swap(action, Ordering::Relaxed) != action {
+            clear_match_end(cooked);
+        }
+        let flag = if action == 4 { map } else { "" };
         if self.flagged.as_deref() != Some(flag) {
+            let refresh = !flag.is_empty() || self.flagged.as_deref().is_some_and(|old| !old.is_empty());
             self.flagged = Some(flag.to_string());
             super::workshop_menu::set_next(Path::new(flag));
-            let cooked = cooked.to_path_buf();
-            std::thread::spawn(move || drop(crate::ui::workshop::ingame_menu::refresh(&cooked)));
+            if cooked.is_dir() && refresh {
+                let cooked = cooked.to_path_buf();
+                std::thread::spawn(move || {
+                    if let Err(error) = crate::ui::workshop::ingame_menu::refresh(&cooked) {
+                        tracing::warn!("Instant Suite could not refresh the Workshop list: {error}");
+                    }
+                });
+            }
         }
     }
 
@@ -274,8 +517,8 @@ impl State {
         ui.separator();
         ui.label(t("game-mod-instant-suite-description"));
         ui.horizontal(|ui| {
-            changed |= ui.toggle_value(&mut settings.instant_suite_private, t("game-mod-instant-suite-private")).changed();
-            changed |= ui.toggle_value(&mut settings.instant_suite_tournaments, t("game-mod-instant-suite-tournaments")).changed();
+            changed |= ui.checkbox(&mut settings.instant_suite_private, t("game-mod-instant-suite-private")).changed();
+            changed |= ui.checkbox(&mut settings.instant_suite_tournaments, t("game-mod-instant-suite-tournaments")).changed();
         });
         ui.horizontal(|ui| {
             ui.label(t("game-mod-instant-suite-mode"));
@@ -317,6 +560,7 @@ impl State {
         if want != on {
             let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
             self.status.clear();
+            self.needs_upgrade = false;
             self.spawn(move || if want { enable(&cooked, &backups).map(|()| true) } else { restore(&cooked, &backups).map(|()| false) });
         }
         if self.busy() {
@@ -333,15 +577,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn answers_only_once_after_a_match_end() {
-        CODE.store(2, Ordering::Relaxed);
-        *ENDED.lock().unwrap() = Some(Instant::now());
-        assert_eq!(served_width(), Some(2));
-        // the same match's podium asks again: no second action
-        let asked = Instant::now();
-        assert_eq!(served_width(), None);
-        assert!(asked.elapsed() >= WAIT_FOR_END);
-        CODE.store(0, Ordering::Relaxed);
+    fn command_expires_and_encodes_only_valid_actions() {
+        let now = UNIX_EPOCH + Duration::from_millis(1_800_000_000_000);
+        for action in 1..=4 {
+            let value: u64 = command_value(now, action).unwrap().parse().unwrap();
+            assert_eq!(value / 10, 1_800_000_008_000);
+            assert_eq!(value % 10, u64::from(action));
+            assert_eq!(value as f64 as u64, value);
+        }
+        assert_eq!(command_value(now, 0), None);
     }
 
     #[test]
@@ -354,11 +598,12 @@ mod tests {
             assert!(permits_match(Some(id), false, true));
         }
         assert!(permits_match(Some(13), false, false));
-        assert!(permits_match(Some(0), false, false));
+        assert!(!permits_match(Some(0), false, true));
+        assert!(permits_match(Some(0), true, false));
     }
 
     #[test]
-    fn every_mode_has_its_own_width() {
+    fn every_mode_has_its_own_action_digit() {
         let codes: Vec<u8> = MODES.iter().map(|m| code(m)).collect();
         assert_eq!(codes, [1, 2, 3, 4]);
         assert_eq!(code("nothing"), 0);
@@ -372,7 +617,7 @@ mod tests {
     #[ignore]
     fn apply_and_restore_on_a_copy() {
         let source = std::env::var("HEBNIX_WINNER_UPK").unwrap();
-        let root = std::env::temp_dir().join(format!("hebnix-winner-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("hebnix-winner-{:016x}", rand::random::<u64>()));
         let dir = root.join("TAGame").join("CookedPCConsole");
         let backups = dir.join("Backups");
         std::fs::create_dir_all(&backups).unwrap();
@@ -380,11 +625,26 @@ mod tests {
         std::fs::create_dir_all(root.join("Binaries").join("Win64")).unwrap();
         std::fs::write(root.join("Binaries").join("Win64").join("RocketLeague.exe"), b"build").unwrap();
         std::fs::copy(&source, dir.join(PACKAGE)).unwrap();
-        MOVIE.apply(&dir, &backups).unwrap();
-        assert!(status(&dir, &backups));
-        MOVIE.restore(&dir, &backups).unwrap();
-        assert!(!status(&dir, &backups));
-        assert_eq!(std::fs::read(dir.join(PACKAGE)).unwrap(), std::fs::read(&source).unwrap());
+        if let Some(tagame) = std::env::var_os("HEBNIX_INSTANT_TAGAME_UPK") {
+            std::fs::copy(tagame, dir.join("TAGame.upk")).unwrap();
+            let original = UpkPackage::load(&dir.join("TAGame.upk")).unwrap();
+            let index = original.find_object(BRIDGE).unwrap() as usize - 1;
+            let expected = payload(&original, index);
+            drop(original);
+            enable(&dir, &backups).unwrap();
+            assert!(status(&dir, &backups));
+            assert!(has_native_bridge(&UpkPackage::load(&dir.join("TAGame.upk")).unwrap()));
+            restore(&dir, &backups).unwrap();
+            assert!(!status(&dir, &backups));
+            let restored = UpkPackage::load(&dir.join("TAGame.upk")).unwrap();
+            assert!(payload(&restored, index) == expected);
+        } else {
+            MOVIE.apply(&dir, &backups).unwrap();
+            assert!(status(&dir, &backups));
+            MOVIE.restore(&dir, &backups).unwrap();
+            assert!(!status(&dir, &backups));
+            assert!(MOVIE.clean_movie(&dir.join(PACKAGE)).is_some());
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -392,5 +652,10 @@ mod tests {
     fn embedded_movie_is_not_the_vanilla_one() {
         assert_eq!(&MOVIE.patched[..3], b"FWS");
         assert!(MOVIE.patched.windows(6).any(|w| w == b"hbxAsk"));
+        let (_, upgraded) = edit_hook(MOVIE.patched, true).unwrap();
+        let upgraded = upgraded.unwrap();
+        assert_eq!(edit_hook(&upgraded, true).unwrap(), (Some(true), None));
+        let (_, disabled) = edit_hook(&upgraded, false).unwrap();
+        assert_eq!(edit_hook(&disabled.unwrap(), false).unwrap(), (Some(false), None));
     }
 }

@@ -1238,6 +1238,7 @@ fn install_boost_textures(path: &Path, package: &EncryptedPackage) -> Result<(),
     if package.modified_chunks.is_empty() {
         return Ok(());
     }
+    let _guard = super::title_patcher::UI_PATCH_LOCK.lock().map_err(|_| "UI patch lock unavailable")?;
     let bytes = repack_package(package)?;
     let staged = path.with_extension(format!("boost-textures-{:016x}.tmp", rand::random::<u64>()));
     let result = (|| {

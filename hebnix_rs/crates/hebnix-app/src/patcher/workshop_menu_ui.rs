@@ -44,9 +44,13 @@ pub(super) fn managed_movie(file: &str, upk: &UpkPackage, index: usize) -> Optio
 fn normal(swf: &[u8]) -> Vec<u8> {
     let mut swf = swf.to_vec();
     if swf.len() >= 8 {
-        swf[..3].copy_from_slice(b"FWS");
-        let len = swf.len() as u32;
-        swf[4..8].copy_from_slice(&len.to_le_bytes());
+        if matches!(&swf[..3], b"CFX" | b"CWS") {
+            swf[..3].copy_from_slice(b"CWS");
+        } else {
+            swf[..3].copy_from_slice(b"FWS");
+            let len = swf.len() as u32;
+            swf[4..8].copy_from_slice(&len.to_le_bytes());
+        }
     }
     swf
 }
@@ -159,7 +163,8 @@ impl Movie {
         let old =
             upk.image[export.serial_offset..export.serial_offset + export.serial_size].to_vec();
         let mut swf = normal(swf);
-        swf[..3].copy_from_slice(b"GFX");
+        let signature = if swf.starts_with(b"CWS") { b"CFX" } else { b"GFX" };
+        swf[..3].copy_from_slice(signature);
         let len = swf.len() as u32;
         let mut bytes = old[..value].to_vec();
         bytes[tag + 16..tag + 20].copy_from_slice(&(len + 4).to_le_bytes());
@@ -178,7 +183,7 @@ impl Movie {
     }
 
     /// one marker per movie, so one movie's check can't vouch for the other's backup
-    fn marker(&self) -> String {
+    pub(super) fn marker(&self) -> String {
         format!("{}.build.sha256", self.package)
     }
 
@@ -197,10 +202,21 @@ impl Movie {
         backup
     }
 
-    fn clean_movie(&self, path: &Path) -> Option<Vec<u8>> {
+    pub(super) fn clean_movie(&self, path: &Path) -> Option<Vec<u8>> {
         let package = UpkPackage::load(path).ok()?;
         let movie = self.movie(&package).ok()?;
         (digest(&movie) == self.vanilla).then_some(movie)
+    }
+
+    pub(super) fn recover_original(&self, cooked: &Path, backups: &Path, live: &UpkPackage) -> Option<Vec<u8>> {
+        let name = format!("{}.bak", self.package);
+        self.clean_movie(&backups.join(&name))
+            .or_else(|| self.retained_vanilla(live))
+            .or_else(|| {
+                let recovery = super::game_update::Recovery::load(cooked).ok()??;
+                self.clean_movie(&recovery.archive(cooked).join(&name))
+            })
+            .or_else(|| self.clean_movie(&super::title_patcher::original_movie_package(cooked, self.package)))
     }
 
     /// Recover only the movie, keeping the live package's other exports.
@@ -229,6 +245,13 @@ impl Movie {
             self.clean_movie(&backup)
                 .or_else(|| self.clean_movie(&backups.join(self.package)))
                 .or_else(|| self.retained_vanilla(&upk))
+                .or_else(|| {
+                    let recovery = super::game_update::Recovery::load(cooked).ok()??;
+                    if !self.is_patched(&current_hash) {
+                        return None;
+                    }
+                    self.clean_movie(&recovery.archive(cooked).join(format!("{}.bak", self.package)))
+                })
                 .or_else(|| {
                     let (index, _, offset, _) = self.locate(&upk).ok()?;
                     let movie = super::title_patcher::legacy_workshop_movie(
@@ -270,7 +293,7 @@ impl Movie {
         }
     }
 
-    fn install_movie(
+    pub(super) fn install_movie(
         &self,
         cooked: &Path,
         upk: &mut UpkPackage,
@@ -278,9 +301,13 @@ impl Movie {
     ) -> Result<(), String> {
         let live = game_path::resolve(cooked, self.package);
         let temp = cooked.join(format!("{}.workshop.tmp", self.package));
+        let before = fs::read(&live).map_err(|error| error.to_string())?;
         let result = self.with_movie(upk, desired, &temp).and_then(|()| {
             let saved = UpkPackage::load(&temp)?;
             if digest(&self.movie(&saved)?) == digest(desired) {
+                if fs::read(&live).map_err(|error| error.to_string())? != before {
+                    return Err(format!("{} changed while preparing the menu patch", self.package));
+                }
                 fs::rename(&temp, &live)
                     .map_err(|e| format!("Could not write {}: {e}", self.package))
             } else {
@@ -297,17 +324,9 @@ impl Movie {
         if !self.status(cooked) {
             return Ok(());
         }
-        backup_guard::check(cooked, backups, &self.marker(), |name| self.is_backup(name))?;
-        let original = UpkPackage::load(&backup)
-            .map_err(|_| format!("No backup of {} to restore", self.package))?;
-        let vanilla = self.movie(&original)?;
-        if digest(&vanilla) != self.vanilla {
-            return Err(format!(
-                "The backup of {} is not the vanilla movie",
-                self.package
-            ));
-        }
         let mut live = UpkPackage::load(&game_path::resolve(cooked, self.package))?;
+        let vanilla = self.recover_original(cooked, backups, &live)
+            .ok_or_else(|| format!("No verified original menu for {} to restore", self.package))?;
         self.install_movie(cooked, &mut live, &vanilla)?;
         let _ = fs::remove_file(backup);
         let _ = fs::remove_file(backups.join(self.marker()));

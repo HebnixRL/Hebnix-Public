@@ -999,7 +999,7 @@ impl WorkshopState {
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         let downloader = crate::patcher::workshop_menu::downloader_on(&cooked);
-        if downloader || crate::patcher::instant_suite::wanted() {
+        if downloader {
             crate::preview_server::start(&self.manager.cache_dir);
         }
         if !downloader {
@@ -1225,7 +1225,7 @@ impl WorkshopState {
         }
         std::thread::spawn(move || {
             if let Err(e) = crate::patcher::workshop_menu::upgrade_movie(&cooked) {
-                crate::toast::report("workshop-ui", &format!("[Workshop] {e}"), None, true);
+                tracing::warn!("[Workshop] {e}");
             }
             let _ = ingame_menu::refresh(&cooked);
         });

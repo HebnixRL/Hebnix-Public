@@ -484,7 +484,13 @@ fn skip_debug(r: &mut Reader<'_>) -> Result<()> {
 fn prologue_len(code: &[u8]) -> Result<usize> {
     let mut r = Reader { data: code, at: 0 };
     skip_debug(&mut r)?;
-    if r.take(2)? != [0xd0, 0x30] {
+    match r.byte()? {
+        0xd0 => {}                  // getlocal_0
+        0x62 if r.index()? == 0 => {} // getlocal 0
+        _ => return Err("Unsupported title method prologue".into()),
+    }
+    skip_debug(&mut r)?;
+    if r.byte()? != 0x30 {
         return Err("Unsupported title method prologue".into());
     }
     Ok(r.at)
@@ -521,7 +527,10 @@ fn native_player_value<'a>(
         .find(|body| body.id == method)
         .ok_or("Missing match title getter body")?;
     let code = &data[body.code.clone()];
-    let start = prologue_len(code)?;
+    let owner = &abc.name(class.name)?.full;
+    let start = prologue_len(code).map_err(|error| {
+        format!("{error} in {owner}.{name} (starts with {:02x?})", &code[..code.len().min(8)])
+    })?;
     let mut r = Reader {
         data: code,
         at: start,
@@ -757,6 +766,201 @@ pub(in crate::patcher) fn disable_workshop_downloader(data: &[u8]) -> Result<Opt
     let body = abc.bodies.iter().find(|body| body.id == method && body.exceptions == 0)
         .ok_or("Missing Workshop downloader method body")?;
     Ok(Some((replace_body_code(data, body, &[RETURN_VOID]), 1)))
+}
+
+/// Return the offset of the Instant Suite method's first instruction after
+/// its scope setup. Leaving the method in place preserves all ABC indexes.
+pub(in crate::patcher) fn instant_suite_hook(data: &[u8]) -> Result<Option<(usize, bool)>> {
+    if !data.windows(6).any(|bytes| bytes == b"hbxAsk") {
+        return Ok(None);
+    }
+    let abc = Abc::parse(data)?;
+    let Some(class) = abc.classes.iter().find(|class| {
+        abc.name(class.name).is_ok_and(|name| name.local == "WinnerPrompt")
+    }) else {
+        return Ok(None);
+    };
+    let Some(method) = class.fields.iter().find_map(|field| {
+        (abc.name(field.name).ok()?.local == "hbxAsk").then_some(field.method).flatten()
+    }) else {
+        return Ok(None);
+    };
+    let body = abc.bodies.iter().find(|body| body.id == method)
+        .ok_or("Instant Suite method has no body")?;
+    match data[body.code.clone()].get(..4) {
+        Some([0xd0, 0x30, 0xd0, 0x66]) => Ok(Some((body.code.start + 2, true))),
+        Some([0xd0, 0x30, RETURN_VOID, 0x66]) => Ok(Some((body.code.start + 2, false))),
+        _ => Err("Instant Suite method layout changed".into()),
+    }
+}
+
+pub(in crate::patcher) const INSTANT_SUITE_ACTION: &str = "GetSCT";
+
+pub(in crate::patcher) fn has_instant_suite_bridge(data: &[u8]) -> bool {
+    data.windows(b"HEBNIX_INSTANT_SUITE_BRIDGE".len()).any(|bytes| bytes == b"HEBNIX_INSTANT_SUITE_BRIDGE")
+}
+
+/// Replace the retired image request with a bounded poll of the native Shell bridge.
+pub(in crate::patcher) fn instant_suite_bridge(data: &[u8], enabled: bool) -> Result<Option<(Vec<u8>, usize)>> {
+    if instant_suite_hook(data)?.is_none() {
+        return Ok(None);
+    }
+    let abc = Abc::parse(data)?;
+    let class = abc.classes.iter().find(|class| {
+        abc.name(class.name).is_ok_and(|name| name.full == "prompts:WinnerPrompt")
+    }).ok_or("Winner prompt class is missing")?;
+    let method = |name: &str| {
+        let id = class.fields.iter().find_map(|field| {
+            (abc.name(field.name).ok()?.local == name).then_some(field.method).flatten()
+        }).ok_or_else(|| format!("Missing winner method {name}"))?;
+        abc.bodies.iter().find(|body| body.id == id && body.exceptions == 0)
+            .ok_or_else(|| format!("Missing winner method body {name}"))
+    };
+    let name = |full: &str| {
+        abc.names.iter().position(|name| name.full == full)
+            .ok_or_else(|| format!("Missing winner property {full}"))
+    };
+    let hooks = name("projectx.proxy:UIShellHooks")?;
+    let native = name(":SHELL_CallUnrealFunction")?;
+    let listener = name(":hbxNone")?;
+    let deadline = name(":hbxL")?;
+    let done = name(":hbxDone")?;
+    let date = name(":Date")?;
+    let time = name(":time")?;
+    let add = name(":addEventListener")?;
+    let remove = name(":removeEventListener")?;
+    let got = name(":hbxGot")?;
+    let mut strings = abc.strings.values.clone();
+    let mut uints = Vec::new();
+    let mut constants = Constants { strings: &mut strings, uints: &mut uints };
+    let frame = constants.string("enterFrame");
+    let shell_class = constants.string("GFxShell_TA");
+    let shell = constants.string("Shell");
+    let get_key = constants.string("GetKeyForAction");
+    let action = constants.string(INSTANT_SUITE_ACTION);
+    constants.string("HEBNIX_INSTANT_SUITE_BRIDGE");
+    let clock = |code: &mut Vec<u8>| {
+        op(code, 0x5d, date); // findpropstrict Date
+        op(code, 0x4a, date); // constructprop Date()
+        put(code, 0);
+        op(code, 0x66, time);
+    };
+    let event_listener = |code: &mut Vec<u8>, operation| {
+        code.push(0xd0);
+        op(code, 0x2c, frame);
+        code.push(0xd0);
+        op(code, 0x66, listener);
+        op(code, 0x4f, operation);
+        put(code, 2);
+    };
+    let mut ask = vec![0xd0, 0x30, if enabled { 0xd0 } else { RETURN_VOID }];
+    op(&mut ask, 0x66, done);
+    let start = branch(&mut ask, 0x12); // iffalse
+    ask.push(RETURN_VOID);
+    let at = ask.len();
+    bind(&mut ask, start, at)?;
+    ask.extend([0xd0, 0x26]); // this, true
+    op(&mut ask, 0x61, done);
+    ask.push(0xd0);
+    clock(&mut ask);
+    op(&mut ask, 0x25, 5_000); // pushshort
+    ask.push(0xa0); // add
+    op(&mut ask, 0x61, deadline);
+    event_listener(&mut ask, add);
+    ask.extend([0xd0, 0x20]); // this, null
+    op(&mut ask, 0x4f, listener);
+    ask.extend([1, RETURN_VOID]);
+
+    // The native function returns decimal epoch milliseconds followed by one
+    // action digit. Expired or empty replies keep polling until the deadline.
+    let mut poll = vec![0xd0, 0x30];
+    clock(&mut poll);
+    poll.extend([0x75, 0xd5, 0xd1, 0xd0]); // convert_d; now = local1
+    op(&mut poll, 0x66, deadline);
+    let expired = branch(&mut poll, 0x18); // ifge
+    op(&mut poll, 0x60, hooks);
+    op(&mut poll, 0x66, native);
+    let unavailable = branch(&mut poll, 0x12);
+    op(&mut poll, 0x60, hooks);
+    op(&mut poll, 0x2c, shell_class);
+    op(&mut poll, 0x2c, shell);
+    poll.extend([0x24, 0]);
+    op(&mut poll, 0x2c, get_key);
+    op(&mut poll, 0x2c, action);
+    poll.push(0x27); // false
+    op(&mut poll, 0x46, native);
+    poll.extend([6, 0x75, 0xd6, 0xd2, 0xd1, 0x24, 10, 0xa2]); // reply, now * 10
+    let fresh = branch(&mut poll, 0x17); // ifgt
+    let at = poll.len();
+    bind(&mut poll, unavailable, at)?;
+    poll.push(RETURN_VOID);
+    let at = poll.len();
+    bind(&mut poll, fresh, at)?;
+    event_listener(&mut poll, remove);
+    poll.extend([0xd0, 0xd2, 0x24, 10, 0xa4, 0x73]); // this, int(reply % 10)
+    op(&mut poll, 0x4f, got);
+    poll.extend([1, RETURN_VOID]);
+    let at = poll.len();
+    bind(&mut poll, expired, at)?;
+    event_listener(&mut poll, remove);
+    poll.push(RETURN_VOID);
+
+    let got_body = method("hbxGot")?;
+    let old = &data[got_body.code.clone()];
+    // Retain the original action dispatch, replacing event.target.width
+    // with the command digit passed by the poller.
+    let mut dispatch = vec![0xd0, 0x30, 0xd1, 0x73, 0xd6];
+    let mut reader = Reader { data: old, at: 3 };
+    if reader.byte()? != 0x66 || abc.name(reader.index()?)?.local != "target"
+        || reader.byte()? != 0x66 || abc.name(reader.index()?)?.local != "width"
+        || reader.take(2)? != [0x73, 0xd6]
+    {
+        return Err("Unexpected Instant Suite action dispatch".into());
+    }
+    dispatch.extend_from_slice(&old[reader.at..]);
+
+    let removed = method("handleRemovedFromStage")?;
+    let old = &data[removed.code.clone()];
+    if old.last() != Some(&RETURN_VOID) {
+        return Err("Unexpected winner prompt removal handler".into());
+    }
+    let mut cleanup = old[..old.len() - 1].to_vec();
+    event_listener(&mut cleanup, remove);
+    cleanup.extend([0xd0, 0x27]); // this, false
+    op(&mut cleanup, 0x61, done);
+    cleanup.push(RETURN_VOID);
+    let mut edits = Vec::new();
+    for (body, code, locals) in [
+        (method("hbxAsk")?, ask, 2),
+        (method("hbxNone")?, poll, 3),
+        (got_body, dispatch, 3),
+        (removed, cleanup, removed.locals),
+    ] {
+        let mut replacement = Vec::new();
+        for value in [body.id, body.stack.max(8), locals, body.init_scope, body.max_scope, code.len()] {
+            put(&mut replacement, value);
+        }
+        replacement.extend(code);
+        replacement.extend_from_slice(&data[body.code.end..body.span.end]);
+        edits.push((body.span.clone(), replacement));
+    }
+    let mut pool = Vec::new();
+    put(&mut pool, strings.len());
+    pool.extend_from_slice(&data[abc.strings.entries..abc.strings.span.end]);
+    for value in &strings[abc.strings.count..] {
+        put(&mut pool, value.len());
+        pool.extend(value.as_bytes());
+    }
+    edits.push((abc.strings.span, pool));
+    edits.sort_by_key(|(range, _)| range.start);
+    let mut output = data.to_vec();
+    for (range, bytes) in edits.into_iter().rev() {
+        output.splice(range, bytes);
+    }
+    if instant_suite_hook(&output)?.map(|(_, on)| on) != Some(enabled) {
+        return Err("Instant Suite bridge validation failed".into());
+    }
+    Ok(Some((output, 1)))
 }
 
 fn replace_body_code(data: &[u8], body: &Body, new_code: &[u8]) -> Vec<u8> {
@@ -1046,7 +1250,13 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
             .find(|body| body.id == *id)
             .ok_or("Title getter has no body")?;
         let original = &data[body.code.clone()];
-        let prologue = prologue_len(original)?;
+        let prologue = prologue_len(original).map_err(|error| {
+            let field = row.as_ref().map_or("GetTitleData", |(_, field)| field);
+            format!(
+                "{error} in {field} (method {id}, starts with {:02x?})",
+                &original[..original.len().min(8)]
+            )
+        })?;
         if body.exceptions != 0 || body.max_scope <= body.init_scope {
             return Err(format!(
                 "Unsupported title method framing: method {id}, exceptions {}, scope {}->{}, prefix {:02x?}",
@@ -1280,6 +1490,16 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn title_prologue_accepts_equivalent_scope_setup() {
+        assert_eq!(prologue_len(&[0x62, 0, 0x30, 0x60]).unwrap(), 3);
+        assert_eq!(prologue_len(&[0xd0, 0xf0, 1, 0x30, 0x60]).unwrap(), 4);
+        assert_eq!(prologue_len(&[0x62, 0, 0xf1, 1, 0x30, 0x60]).unwrap(), 5);
+        assert!(prologue_len(&[0x62, 1, 0x30, 0x60]).is_err());
+        assert!(prologue_len(&[0xd0, 0x1c, 0x60]).is_err()); // pushwith
+        assert!(prologue_len(&[0x62, 0x80]).is_err());
+    }
 
     #[test]
     fn native_getter_debug_metadata_after_prologue() {

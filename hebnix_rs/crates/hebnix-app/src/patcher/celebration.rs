@@ -264,12 +264,11 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     backup_guard::check_install(cooked, backups)?;
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
-    if is_patched(&upk) {
-        return Ok(());
-    }
     let build = backup_guard::build_id(cooked)?;
-    apply(&mut upk, backups, &build)?;
-    install(cooked, &live, &upk, true)?;
+    if !is_patched(&upk) {
+        apply(&mut upk, backups, &build)?;
+        install(cooked, &live, &upk, true)?;
+    }
     let path = saved_path(backups);
     std::fs::create_dir_all(path.parent().unwrap_or(backups)).map_err(|e| e.to_string())?;
     std::fs::write(path, serde_json::to_vec(&Saved { build }).map_err(|e| e.to_string())?).map_err(|e| e.to_string())

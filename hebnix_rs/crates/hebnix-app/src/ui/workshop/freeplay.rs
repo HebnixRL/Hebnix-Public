@@ -4,7 +4,7 @@ use crate::patcher::{workshop_host, workshop_menu};
 use eframe::egui;
 use hebnix_sdk::stats::WsStatsClient;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const PRACTICE: &str =
     "?HbxSoloPractice?Playtest?NumPublicConnections=1?NumOpenPublicConnections=0?Lan?Listen";
@@ -17,12 +17,12 @@ pub(crate) struct State {
     picks: Vec<usize>,
     status: String,
     restart: Option<Restart>,
-    session_check: Option<(Instant, bool)>,
+    session_check: Option<(Instant, SessionOrigin)>,
+    patch_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 }
 
 struct Restart {
     cooked: PathBuf,
-    menu: String,
     target: String,
     deadline: Instant,
 }
@@ -54,13 +54,21 @@ fn panel(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
-/// Recognize local Freeplay and the solo Heatseeker session launched from it.
-fn is_freeplay(current: &str) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SessionOrigin {
+    Freeplay,
+    WorkshopOrLan,
+    Other,
+}
+
+/// The marker survives travel into a listen server and identifies who launched it.
+fn session_origin(current: &str) -> SessionOrigin {
+    use SessionOrigin::*;
     let Some((map, query)) = current.split_once('?') else {
-        return false;
+        return Other;
     };
     if map.is_empty() || map.eq_ignore_ascii_case("MENU_Main_p") {
-        return false;
+        return Other;
     }
     let query: Vec<_> = query.split('?').collect();
     let has = |name: &str| query.iter().any(|part| part.eq_ignore_ascii_case(name));
@@ -75,28 +83,40 @@ fn is_freeplay(current: &str) -> bool {
         tags.split(',')
             .any(|tag| tag.eq_ignore_ascii_case("Freeplay"))
     });
-    let practice = option("Game").is_some_and(|game| game.eq_ignore_ascii_case(HEATSEEKER))
-        && has("HbxSoloPractice")
-        && has("Lan")
-        && has("Listen")
-        && option("NumOpenPublicConnections") == Some("0");
     let local_map = map
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
         || (Path::new(map).is_absolute() && Path::new(map).is_file() && has("Workshop"));
-    local_map && (practice || (freeplay && !has("Lan") && !has("Listen")))
+    if local_map && has("HbxSoloPractice") {
+        Freeplay
+    } else if has("Workshop") || has("Lan") || has("Listen") {
+        WorkshopOrLan
+    } else if local_map && freeplay {
+        Freeplay
+    } else {
+        Other
+    }
+}
+
+pub(super) fn current_session_origin() -> SessionOrigin {
+    if !hebnix_sdk::process::is_rocket_league_running() {
+        return SessionOrigin::Other;
+    }
+    hebnix_sdk::log::current_map_url().as_deref().map_or(SessionOrigin::Other, session_origin)
 }
 
 fn active_freeplay() -> Option<String> {
     if !hebnix_sdk::process::is_rocket_league_running() {
         return None;
     }
-    hebnix_sdk::log::current_map_url().filter(|url| is_freeplay(url))
+    hebnix_sdk::log::current_map_url().filter(|url| session_origin(url) == SessionOrigin::Freeplay)
 }
 
 fn restart_target(current: &str, tags: &str, options: &str) -> Option<String> {
     let (map, query) = current.split_once('?')?;
-    if map.contains(['"', '|', '\r', '\n', ';']) {
+    if map.contains(['"', '|', '\r', '\n', ';'])
+        || (!options.is_empty() && query.split('?').any(|part| part.eq_ignore_ascii_case("Workshop")))
+    {
         return None;
     }
     let game = if options.is_empty() {
@@ -111,14 +131,20 @@ fn restart_target(current: &str, tags: &str, options: &str) -> Option<String> {
             target.push_str(flag);
         }
     }
-    Some(if map.contains(char::is_whitespace) {
+    let target = if map.contains(char::is_whitespace) {
         format!("\"{target}\"")
     } else {
         target
-    })
+    };
+    let command = if options.is_empty() { "Open" } else { "Start" };
+    Some(format!("{command} {target}"))
 }
 
 impl State {
+    pub(crate) fn patch_busy(&self) -> bool {
+        self.patch_job.is_some()
+    }
+
     pub(crate) fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, stats: &WsStatsClient) {
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         if self.install != cooked {
@@ -131,6 +157,25 @@ impl State {
             self.session_check = None;
         }
         panel(ui, "Freeplay", |ui| {
+            ui.horizontal(|ui| {
+                let closed = cooked.is_dir() && !hebnix_sdk::process::is_rocket_league_running();
+                for (label, enabled) in [("Install or update Freeplay patch", true), ("Remove Freeplay patch", false)] {
+                    if ui.add_enabled(closed && !self.patch_busy(), egui::Button::new(label))
+                        .on_disabled_hover_text("Close Rocket League before changing the Freeplay patch.")
+                        .clicked()
+                    {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let cooked = cooked.clone();
+                        let ctx = ui.ctx().clone();
+                        self.patch_job = Some(rx);
+                        self.status = "Updating Freeplay patch…".into();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(workshop_host::set_freeplay_patch(&cooked, enabled));
+                            ctx.request_repaint();
+                        });
+                    }
+                }
+            });
             if ui
                 .checkbox(&mut self.enabled, "Enable Freeplay Mutators")
                 .changed()
@@ -150,12 +195,15 @@ impl State {
                 .session_check
                 .is_none_or(|(checked, _)| checked.elapsed() >= interval)
             {
-                self.session_check = Some((Instant::now(), active_freeplay().is_some()));
+                self.session_check = Some((Instant::now(), current_session_origin()));
             }
             ui.ctx().request_repaint_after(interval);
             let can_apply = self.restart.is_none()
                 && cooked.is_dir()
-                && self.session_check.is_some_and(|(_, active)| active);
+                && self.session_check.is_some_and(|(_, origin)| origin == SessionOrigin::Freeplay);
+            if self.session_check.is_some_and(|(_, origin)| origin == SessionOrigin::WorkshopOrLan) {
+                ui.weak("This session uses Maps > In-game menu controls.");
+            }
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(can_apply, egui::Button::new("Apply and restart Freeplay"))
@@ -221,12 +269,9 @@ impl State {
             active_freeplay().ok_or("Open local Freeplay in Rocket League to apply changes.")?;
         if !workshop_host::freeplay_ready(cooked) {
             return Err(
-                "Close Rocket League and use Update Workshop patch to enable Freeplay restart."
+                "Close Rocket League and select Install or update Freeplay patch on this tab."
                     .into(),
             );
-        }
-        if !stats.connected() {
-            return Err("Connect Rocket League's Stats API to restart Freeplay.".into());
         }
         let (tags, options) = launch_settings(&self.picks);
         let (active_tags, active_options) = if self.enabled {
@@ -235,26 +280,26 @@ impl State {
             ("Freeplay", "")
         };
         let target = restart_target(&current, active_tags, active_options)
-            .ok_or("Could not prepare the current Freeplay map for restart.")?;
+            .ok_or("Use a standard Soccar arena for Heatseeker, or choose another Freeplay map.")?;
         workshop_menu::store_solo_preferences(
             cooked,
             self.enabled,
             &format!("{tags}{options}"),
             lan_mutators::heatseeker(&self.picks),
         )?;
-        let request = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let menu = format!("MENU_Main_p?HbxFreeplayRestart={request}");
-        workshop_host::request_freeplay_travel(cooked, stats, &menu)?;
+        let disconnect_sent = stats.connected()
+            && workshop_host::request_freeplay_travel(cooked, stats, "Disconnect").is_ok();
+        let now = Instant::now();
         self.restart = Some(Restart {
             cooked: cooked.to_owned(),
-            menu,
             target,
-            deadline: Instant::now() + Duration::from_secs(30),
+            deadline: now + Duration::from_secs(30),
         });
-        Ok("Restarting Freeplay...".into())
+        Ok(if disconnect_sent {
+            "Restarting Freeplay..."
+        } else {
+            "Settings saved. Leave the practice match through Rocket League’s menu to continue the restart."
+        }.into())
     }
 
     pub(crate) fn poll_restart(
@@ -263,6 +308,19 @@ impl State {
         stats: &WsStatsClient,
         rl_path: &str,
     ) {
+        if let Some(job) = &self.patch_job {
+            match job.try_recv() {
+                Ok(result) => {
+                    self.patch_job = None;
+                    self.status = result.map(|()| "Freeplay patch updated.".into()).unwrap_or_else(|error| error);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.patch_job = None;
+                    self.status = "The Freeplay patch operation stopped.".into();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         let Some(restart) = &self.restart else { return };
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         if Instant::now() >= restart.deadline
@@ -272,7 +330,10 @@ impl State {
             self.restart = None;
             self.status =
                 "Freeplay restart stopped. Reopen Freeplay to use the saved settings.".into();
-        } else if stats.connected() && hebnix_sdk::log::map_load_finished(&restart.menu) {
+            return;
+        }
+        let menu_ready = hebnix_sdk::log::map_load_finished("MENU_Main_p");
+        if menu_ready && stats.connected() {
             let result =
                 workshop_host::request_freeplay_travel(&restart.cooked, stats, &restart.target);
             self.restart = None;
@@ -280,6 +341,13 @@ impl State {
                 .map(|_| "Freeplay reload requested.".into())
                 .unwrap_or_else(|error| error);
         } else {
+            if restart.deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(27) {
+                self.status = if menu_ready {
+                    "Waiting for Rocket League’s Stats API to reconnect.".into()
+                } else {
+                    "If the practice match is still open, leave it through Rocket League’s menu to continue the restart.".into()
+                };
+            }
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
@@ -293,11 +361,28 @@ mod tests {
     fn freeplay_apply_skips_other_sessions() {
         assert!(!State::default().enabled);
         let normal = "stadium_p?Game=TAGame.GameInfo_Soccar_TA?GameTags=Freeplay";
-        assert!(is_freeplay(normal));
+        assert!(session_origin(normal) == SessionOrigin::Freeplay);
         let practice = format!("stadium_p?Game={HEATSEEKER}{PRACTICE}");
-        assert!(is_freeplay(&practice));
-        assert!(!is_freeplay(&practice.replace("?HbxSoloPractice", "")));
-        assert!(!is_freeplay(&format!("{normal}?Lan?Listen")));
-        assert!(!is_freeplay(&format!("1.2.3.4:7777/{normal}")));
+        assert!(session_origin(&practice) == SessionOrigin::Freeplay);
+        assert!(session_origin(&practice.replace("?NumOpenPublicConnections=0", "")) == SessionOrigin::Freeplay);
+        assert!(session_origin(&practice.replace("?HbxSoloPractice", "")) == SessionOrigin::WorkshopOrLan);
+        assert!(session_origin(&format!("{normal}?Workshop")) == SessionOrigin::WorkshopOrLan);
+        assert!(session_origin(&format!("{normal}?Lan?Listen")) == SessionOrigin::WorkshopOrLan);
+        assert!(session_origin(&format!("1.2.3.4:7777/{normal}")) == SessionOrigin::Other);
+    }
+
+    #[test]
+    fn heatseeker_restart_builds_a_local_lan_start() {
+        let (picks, _) = lan_mutators::parse(["Ball_God", "UnlimitedTime"].into_iter());
+        let (tags, options) = launch_settings(&picks);
+        let current = "street_p?Game=TAGame.GameInfo_Soccar_TA?GameTags=Freeplay";
+        let target = restart_target(current, &tags, options).unwrap();
+        assert!(target.starts_with("Start street_p?Game=TAGame.GameInfo_GodBall_TA?GameTags=Ball_God,"));
+        assert!(target.ends_with("?Lan?Listen"));
+        assert!(!target.contains("GameTags=Freeplay"));
+        assert_eq!(restart_target(current, "Freeplay", "").as_deref(), Some("Open street_p?Game=TAGame.GameInfo_Soccar_TA?GameTags=Freeplay"));
+        let practice = target.strip_prefix("Start ").unwrap();
+        assert!(session_origin(practice) == SessionOrigin::Freeplay);
+        assert_eq!(restart_target(practice, "Freeplay", ""), restart_target(current, "Freeplay", ""));
     }
 }

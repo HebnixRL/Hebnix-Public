@@ -69,18 +69,13 @@ fn serve(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
     let mut head = [0u8; 2048];
     let n = stream.read(&mut head)?;
     let request = String::from_utf8_lossy(&head[..n]);
-    // Instant Suite's winner movie asks what to do; the answer is the image's width
-    let bytes = if request.starts_with("GET /is/") {
-        crate::patcher::instant_suite::served_width().and_then(blank_png)
-    } else {
-        request
+    let bytes = request
             .lines()
             .next()
             .and_then(|line| line.strip_prefix("GET /p/"))
             .and_then(|rest| rest.split(".png").next())
             .filter(|id| !id.is_empty() && id.len() < 32 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-            .and_then(|id| thumbnail(dir, id))
-    };
+            .and_then(|id| thumbnail(dir, id));
     match bytes {
         Some(bytes) => {
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len())?;
@@ -88,15 +83,6 @@ fn serve(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
         }
         None => stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
     }
-}
-
-/// a transparent PNG `width` pixels wide and one high
-fn blank_png(width: u32) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    image::DynamicImage::ImageRgba8(image::RgbaImage::new(width, 1))
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .ok()?;
-    Some(out)
 }
 
 fn thumbnail(dir: &Path, id: &str) -> Option<Vec<u8>> {
@@ -141,12 +127,6 @@ fn letterboxed(raw: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn instant_suite_answer_is_as_wide_as_the_mode() {
-        let decoded = image::load_from_memory(&blank_png(3).unwrap()).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (3, 1));
-    }
 
     #[test]
     fn thumbnail_is_16_9_with_transparent_bars() {

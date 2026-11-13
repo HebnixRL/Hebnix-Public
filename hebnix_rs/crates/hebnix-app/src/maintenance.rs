@@ -163,6 +163,10 @@ fn helper(plan: serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+pub fn changelog_pending(base: &Path) -> bool {
+    base.join(".first").is_file() || std::env::var_os("HEBNIX_UPDATE_ACK").is_some()
+}
+
 pub fn launch_update(staged: &Path, base: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {

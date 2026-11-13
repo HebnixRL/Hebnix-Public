@@ -94,6 +94,8 @@ struct Receipt {
     enabled_sha256: Option<String>,
     #[serde(default)]
     disabled_sha256: Option<String>,
+    #[serde(default)]
+    active: Option<bool>,
 }
 
 pub(crate) fn file_digest(path: &Path) -> Result<String, String> {
@@ -192,6 +194,44 @@ pub(crate) fn status(game: &Path) -> Result<(bool, bool), String> {
     Ok((native::installed(&package)?, false))
 }
 
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let source = archive.join("ProfilePictures/receipt.json");
+    let destination = cooked.join("Backups/ProfilePictures/receipt.json");
+    if destination.is_file() || !source.is_file() {
+        return Ok(());
+    }
+    let saved: Receipt = serde_json::from_slice(&fs::read(source).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let live = super::game_path::resolve(cooked, "TAGame.upk");
+    let package = UpkPackage::load(&live)?;
+    let live_enabled = matches(&package, &saved, true);
+    if live_enabled || matches(&package, &saved, false)
+        || restored_workshop_variant(&package, &saved)
+    {
+        let mut saved = saved;
+        saved.build = super::backup_guard::build_id(cooked)?;
+        saved.source = live.to_string_lossy().into_owned();
+        saved.enabled_sha256 = None;
+        saved.disabled_sha256 = None;
+        saved.active = Some(live_enabled);
+        fs::create_dir_all(destination.parent().unwrap()).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(&saved).map_err(|error| error.to_string())?;
+        return super::upk_history::replace(&destination, &bytes);
+    }
+    if native::installed(&package)? {
+        return Err("The installed avatar hooks do not match their archived restore data.".into());
+    }
+    let was_enabled = saved.active.unwrap_or_else(|| {
+        saved.enabled_sha256.is_some() && saved.disabled_sha256.is_none()
+    });
+    drop(package);
+    if was_enabled {
+        let game = cooked.parent().and_then(Path::parent).ok_or("Invalid Rocket League path")?;
+        set_enabled(game, true)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn installed(game: &Path) -> Result<bool, String> {
     status(game).map(|(on, _)| on)
@@ -259,6 +299,7 @@ fn create_receipt(
         names,
         enabled_sha256: None,
         disabled_sha256: None,
+        active: None,
     })
 }
 fn check_closed() -> Result<(), String> {
@@ -330,10 +371,10 @@ fn edit_workshop_checked(
     let workshop_changed = changes
         .iter()
         .any(|(at, value)| package.image.get(*at..*at + value.len()) != Some(value.as_slice()));
-    let freeplay_changed = super::workshop_menu::edit_solo_freeplay(&mut package, on)?;
-    let restart_changed = super::workshop_host::edit_freeplay_restart(&mut package, on)?;
+    let freeplay = super::workshop_host::has_freeplay_restart(&package);
+    let freeplay_changed = super::workshop_menu::edit_solo_freeplay(&mut package, freeplay, on)?;
     let credentials_changed = super::workshop_host::edit_lan_credentials(&mut package, on)?;
-    if !workshop_changed && !freeplay_changed && !restart_changed && !credentials_changed {
+    if !workshop_changed && !freeplay_changed && !credentials_changed {
         return Ok(());
     }
     // Keep the parsed name table in sync before native bytecode is generated.
@@ -386,8 +427,7 @@ fn edit_workshop_checked(
             restore_snapshot(&mut check, saved)?;
         }
     }
-    if super::workshop_menu::edit_solo_freeplay(&mut check, on)?
-        || super::workshop_host::edit_freeplay_restart(&mut check, on)?
+    if super::workshop_menu::edit_solo_freeplay(&mut check, freeplay, on)?
         || super::workshop_host::edit_lan_credentials(&mut check, on)?
         || !values(&check, on)?
         .iter()
@@ -402,6 +442,7 @@ fn edit_workshop_checked(
         return Err("Another operation changed TAGame.upk. Try again.".into());
     }
     if let Some((saved, enabled)) = &mut updated {
+        saved.active = Some(*enabled);
         if *enabled {
             saved.enabled_sha256 = Some(staged_digest);
         } else {
@@ -413,7 +454,7 @@ fn edit_workshop_checked(
         )
         .map_err(|e| e.to_string())?;
     }
-    fs::copy(&temporary, &source).map_err(|e| e.to_string())?;
+    fs::rename(&temporary, &source).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(temporary);
     Ok(())
 }
@@ -591,6 +632,7 @@ fn set_enabled_checked(
     } else {
         saved.disabled_sha256 = Some(staged_digest);
     }
+    saved.active = Some(on);
     ensure_closed()?;
     if file_digest(&source)? != source_digest {
         let _ = fs::remove_file(&temporary);

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::{fs, io::Read};
 
 const INSTALL_MARKER: &str = "hebnix-install-build.sha256";
-const STALE_RESTORE_MESSAGE: &str = "Rocket League files changed. Resolve the game update prompt in Hebnix before patching or restoring game files.";
+const STALE_RESTORE_MESSAGE: &str = "Rocket League files changed. Close Rocket League and run repatch in the Hebnix Console.";
 
 pub(crate) fn build_id(cooked_pc: &Path) -> Result<String, String> {
     let root = cooked_pc
@@ -214,9 +214,11 @@ pub(crate) fn update_required(cooked: &Path) -> Result<bool, String> {
         return Ok(true);
     };
     let current = build_id(cooked)?;
+    if recorded != current {
+        return Ok(true);
+    }
     let (tracked, replaced) = super::upk_history::replaced_packages(cooked, &root, &recorded)?;
-    let different_versions = changed_backup_versions(cooked, &root, &tracked)?;
-    Ok(recorded != current || replaced > 0 || different_versions > 0)
+    Ok(replaced > 0 || changed_backup_versions(cooked, &root, &tracked)? > 0)
 }
 
 pub fn check_install(cooked: &Path, backups_dir: &Path) -> Result<(), String> {

@@ -29,9 +29,11 @@ pub const RUN_FILE: &str = "HbxRun.txt";
 const RUN_PATH: &str = r"..\..\TAGame\HbxRun.txt";
 /// Return, Nothing, EndOfScript: how the function ends.
 const END: usize = 3;
-const FREEPLAY_REQUEST: &str = "{\"Command\":\"HebnixRestartFreeplayV2\"}";
+const FREEPLAY_REQUEST: &str = "{\"Command\":\"HebnixRestartFreeplayV3\"}";
+const V2_FREEPLAY_REQUEST: &str = "{\"Command\":\"HebnixRestartFreeplayV2\"}";
 const OLD_FREEPLAY_REQUEST: &str = "{\"Command\":\"HebnixRestartFreeplay\"}";
 const FREEPLAY_FILE: &str = "HbxFreeplayRun.txt";
+const FREEPLAY_ENABLED: &str = "Freeplay.enabled";
 const LAN_NAME: &str = "HbxLanName.txt";
 const LAN_PASSWORD: &str = "HbxLanPassword.txt";
 
@@ -187,13 +189,18 @@ fn load_text(upk: &UpkPackage, filename: &str, destination: &Script) -> Result<S
     Ok(load)
 }
 
-fn freeplay_block(upk: &UpkPackage, base: usize, legacy: bool) -> Result<Script, String> {
+fn freeplay_block(upk: &UpkPackage, base: usize, version: u8) -> Result<Script, String> {
+    let legacy = version == 1;
     let command = field(upk, 0x2b, &format!("{COMMAND}.CommandJson"))?;
     let load = load_text(upk, FREEPLAY_FILE, &command)?;
-    let open = native(
+    let mut open = native(
         if legacy { 0xf8 } else { 0xa8 },
         &[string(if legacy { "open " } else { "Open" }), command.clone()],
     );
+    if version == 3 {
+        // The file holds Disconnect or a complete Open/Start travel command.
+        open = command.clone();
+    }
     let execute = if legacy {
         // Retained to recognize and remove the first restart hook.
         let console = upk.names.iter().position(|n| n == "ConsoleCommand")
@@ -211,7 +218,11 @@ fn freeplay_block(upk: &UpkPackage, base: usize, legacy: bool) -> Result<Script,
             .raw(&(travel.mem_size() as u16).to_le_bytes()).object(0).raw(&[0]).append(&travel);
         execute
     };
-    let request = native(204, &[command, string(if legacy { OLD_FREEPLAY_REQUEST } else { FREEPLAY_REQUEST })]);
+    let request = native(204, &[command, string(match version {
+        1 => OLD_FREEPLAY_REQUEST,
+        2 => V2_FREEPLAY_REQUEST,
+        _ => FREEPLAY_REQUEST,
+    })]);
     let end = base + 3 + request.mem_size() + load.mem_size() + execute.mem_size();
     let mut block = jump(end, &request)?;
     block.append(&load).append(&execute);
@@ -220,43 +231,69 @@ fn freeplay_block(upk: &UpkPackage, base: usize, legacy: bool) -> Result<Script,
 
 pub(super) fn edit_freeplay_restart(upk: &mut UpkPackage, on: bool) -> Result<bool, String> {
     let (_, mut script) = payload(upk)?;
-    let installed = script.bytes().windows(FREEPLAY_REQUEST.len()).any(|w| w == FREEPLAY_REQUEST.as_bytes());
-    let legacy = script.bytes().windows(OLD_FREEPLAY_REQUEST.len()).any(|w| w == OLD_FREEPLAY_REQUEST.as_bytes());
-    if !legacy && installed == on {
+    let installed = freeplay_version(&script);
+    if installed == on.then_some(3) {
         return Ok(false);
     }
     if !script.bytes().ends_with(&[0x04, 0x0b, 0x4c]) {
         return Err(format!("{COMMAND} changed layout in this Rocket League version"));
     }
-    if installed || legacy {
-        let probe = freeplay_block(upk, 0, legacy)?;
+    if let Some(version) = installed {
+        let probe = freeplay_block(upk, 0, version)?;
         let start = script.len().checked_sub(END + probe.len()).ok_or("Freeplay restart hook is missing")?;
-        let block = freeplay_block(upk, script.mem_size() - END - probe.mem_size(), legacy)?;
+        let block = freeplay_block(upk, script.mem_size() - END - probe.mem_size(), version)?;
         if script.bytes().get(start..start + block.len()) != Some(block.bytes()) {
             return Err("The Freeplay restart hook changed layout".into());
         }
         script.cut(start, block.len(), block.refs());
     }
     if on {
-        let block = freeplay_block(upk, script.mem_size() - END, false)?;
+        let block = freeplay_block(upk, script.mem_size() - END, 3)?;
         script.insert_before_tail(END, &block);
     }
     replace_script(upk, COMMAND, &script)?;
     Ok(true)
 }
 
-pub const FREEPLAY_MESSAGE: &str = "HebnixRestartFreeplayV2";
+/// Temporarily remove the restart hook while another feature changes the
+/// shared dispatcher. Return its variant so it can be put back unchanged.
+fn freeplay_version(script: &Script) -> Option<u8> {
+    [(3, FREEPLAY_REQUEST), (2, V2_FREEPLAY_REQUEST), (1, OLD_FREEPLAY_REQUEST)]
+        .into_iter().find_map(|(version, request)| {
+            script.bytes().windows(request.len()).any(|bytes| bytes == request.as_bytes()).then_some(version)
+        })
+}
+
+pub(crate) fn detach_freeplay_restart(upk: &mut UpkPackage) -> Result<Option<u8>, String> {
+    let (_, script) = payload(upk)?;
+    let version = freeplay_version(&script);
+    edit_freeplay_restart(upk, false)?;
+    Ok(version)
+}
+
+pub(crate) fn attach_freeplay_restart(upk: &mut UpkPackage, version: u8) -> Result<(), String> {
+    let (_, mut script) = payload(upk)?;
+    if !script.bytes().ends_with(&[0x04, 0x0b, 0x4c]) {
+        return Err(format!("{COMMAND} changed layout in this Rocket League version"));
+    }
+    let block = freeplay_block(upk, script.mem_size() - END, version)?;
+    script.insert_before_tail(END, &block);
+    replace_script(upk, COMMAND, &script)
+}
+
+pub const FREEPLAY_MESSAGE: &str = "HebnixRestartFreeplayV3";
 
 pub fn request_freeplay_travel(
     cooked: &Path,
     stats: &hebnix_sdk::stats::WsStatsClient,
-    url: &str,
+    command: &str,
 ) -> Result<(), String> {
     if !stats.connected() {
         return Err("Connect Rocket League's Stats API to restart Freeplay.".into());
     }
     let path = cooked.parent().unwrap_or(cooked).join(FREEPLAY_FILE);
-    std::fs::write(path, url).map_err(|error| format!("Could not prepare Freeplay travel: {error}"))?;
+    super::upk_history::replace(&path, command.as_bytes())
+        .map_err(|error| format!("Could not prepare Freeplay travel: {error}"))?;
     stats.send_command(hebnix_sdk::stats::WsCommand::new(FREEPLAY_MESSAGE))
         .map_err(|_| "Could not queue Freeplay travel.".into())
 }
@@ -266,6 +303,49 @@ pub fn freeplay_ready(cooked: &Path) -> bool {
         payload(&upk).is_ok_and(|(_, script)| script.bytes().windows(FREEPLAY_REQUEST.len())
             .any(|window| window == FREEPLAY_REQUEST.as_bytes()))
     })
+}
+
+pub(super) fn has_freeplay_restart(upk: &UpkPackage) -> bool {
+    payload(upk).is_ok_and(|(_, script)| freeplay_version(&script).is_some())
+}
+
+pub(crate) fn set_freeplay_patch(cooked: &Path, enabled: bool) -> Result<(), String> {
+    let _guard = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
+    ensure_closed()?;
+    let backups = cooked.join("Backups");
+    super::backup_guard::check_install(cooked, &backups)?;
+    let live = game_path::resolve(cooked, PACKAGE);
+    let before = std::fs::read(&live).map_err(|error| error.to_string())?;
+    let mut upk = UpkPackage::from_bytes(before.clone())?;
+    let workshop = super::workshop_menu::status(cooked)?;
+    let restart = edit_freeplay_restart(&mut upk, enabled)?;
+    let solo = super::workshop_menu::edit_solo_freeplay(&mut upk, enabled, workshop)?;
+    if restart || solo {
+        super::workshop_menu::rename_names(&mut upk, workshop)?;
+        let after = upk.repacked_fast()?;
+        let mut staged = UpkPackage::from_bytes(after.clone())?;
+        if edit_freeplay_restart(&mut staged, enabled)?
+            || super::workshop_menu::edit_solo_freeplay(&mut staged, enabled, workshop)?
+        {
+            return Err("Freeplay patch validation failed.".into());
+        }
+        ensure_closed()?;
+        super::upk_history::install_linked_from(cooked, &live, &before, &after, "Freeplay mutators")?;
+    }
+    if enabled {
+        super::workshop_menu::migrate_solo_preferences(cooked)?;
+        super::upk_history::replace(&backups.join(FREEPLAY_ENABLED), b"on")?;
+    } else if backups.join(FREEPLAY_ENABLED).is_file() {
+        std::fs::remove_file(backups.join(FREEPLAY_ENABLED)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub(super) fn recover_freeplay(cooked: &Path, archive: &Path) -> Result<(), String> {
+    if archive.join(FREEPLAY_ENABLED).is_file() {
+        set_freeplay_patch(cooked, true)?;
+    }
+    Ok(())
 }
 
 /// Override the LAN settings returned to both the server browser and the
@@ -452,6 +532,8 @@ mod tests {
         let source = std::env::var("HEBNIX_UPK_TEST_SOURCE").unwrap();
         let mut upk = UpkPackage::load(Path::new(&source)).unwrap();
         super::super::workshop_menu::rename_names(&mut upk, true).unwrap();
+        super::super::workshop_menu::edit_solo_freeplay(&mut upk, true, false).unwrap();
+        assert!(!super::super::workshop_menu::edit_solo_freeplay(&mut upk, true, false).unwrap());
         edit_freeplay_restart(&mut upk, false).unwrap();
         remove(&mut upk).unwrap();
         edit_lan_credentials(&mut upk, false).unwrap();
@@ -463,7 +545,7 @@ mod tests {
         let credentials_before = credentials(&upk);
         add(&mut upk).unwrap();
         let (_, mut old_restart) = payload(&upk).unwrap();
-        let legacy = freeplay_block(&upk, old_restart.mem_size() - END, true).unwrap();
+        let legacy = freeplay_block(&upk, old_restart.mem_size() - END, 1).unwrap();
         old_restart.insert_before_tail(END, &legacy);
         replace_script(&mut upk, COMMAND, &old_restart).unwrap();
         assert!(edit_freeplay_restart(&mut upk, true).unwrap());
@@ -473,6 +555,11 @@ mod tests {
         let mut reloaded = UpkPackage::load(&out).unwrap();
         let _ = std::fs::remove_file(out);
         assert!(has(&reloaded));
+        assert!(!super::super::workshop_menu::edit_solo_freeplay(&mut reloaded, true, false).unwrap());
+        assert!(!super::super::workshop_menu::edit_solo_freeplay(&mut reloaded, true, true).unwrap());
+        super::super::workshop_menu::rename_names(&mut reloaded, false).unwrap();
+        assert!(reloaded.names.iter().any(|name| name == "LoadFileToString"));
+        assert!(has_freeplay_restart(&reloaded));
         assert!(!edit_freeplay_restart(&mut reloaded, true).unwrap());
         assert!(!edit_lan_credentials(&mut reloaded, true).unwrap());
         assert!(edit_freeplay_restart(&mut reloaded, false).unwrap());

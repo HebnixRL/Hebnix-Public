@@ -206,7 +206,8 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if states(&upk)?.iter().all(|state| *state) {
-        return Ok(());
+        return if read_saved(backups).is_some() { Ok(()) }
+            else { Err("Chat Export is installed but its original function snapshots are missing.".into()) };
     }
     let build = backup_guard::build_id(cooked)?;
     // an install from before text chat was exported has AddChatMessage saved already
@@ -227,6 +228,25 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     let path = saved_path(backups);
     std::fs::create_dir_all(path.parent().unwrap_or(backups)).map_err(|e| e.to_string())?;
     std::fs::write(path, serde_json::to_vec(&saved).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let Some(saved) = read_saved(archive) else { return Ok(()) };
+    if enabled(&backups) {
+        return Ok(());
+    }
+    let package = UpkPackage::load(&game_path::resolve(cooked, PACKAGE))?;
+    if !states(&package)?.iter().any(|state| *state) {
+        return enable(cooked, &backups);
+    }
+    if saved.build != backup_guard::build_id(cooked)? {
+        return Err("Chat Export still contains a patch from an older build. Verify the game files and retry repatch.".into());
+    }
+    let path = saved_path(&backups);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+    super::upk_history::replace(&path, &serde_json::to_vec(&saved).map_err(|error| error.to_string())?)?;
+    enable(cooked, &backups)
 }
 
 /// Turn the export off.

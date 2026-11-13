@@ -209,7 +209,7 @@ impl LiteApp {
             tx.clone(),
             cc.egui_ctx.clone(),
         );
-        let show_changelog = base_dir.join(".first").exists();
+        let show_changelog = crate::maintenance::changelog_pending(&base_dir);
         let launch_marker = base_dir.join(".launch");
         if launch_marker.exists() {
             let _ = std::fs::remove_file(&launch_marker);
@@ -737,7 +737,9 @@ impl LiteApp {
                 AppMsg::ChangelogFetched { result } => {
                     if let Ok(Some(entry)) = result {
                         self.changelog_popup = Some(entry);
-                        let _ = std::fs::remove_file(self.base_dir.join(".first"));
+                        if self.hidden {
+                            self.set_hidden(ctx, false);
+                        }
                     }
                 }
                 AppMsg::AppUpdateReady { staged } => {
@@ -1435,6 +1437,7 @@ impl LiteApp {
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
             self.changelog_popup = None;
+            let _ = std::fs::remove_file(self.base_dir.join(".first"));
         }
     }
 

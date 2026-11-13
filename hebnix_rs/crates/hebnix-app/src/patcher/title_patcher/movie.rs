@@ -16,6 +16,40 @@ pub(super) fn patch(raw: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<u
     rewrite(raw, &|abc| abc::patch(abc, rules))
 }
 
+/// Install Instant Suite's winner ABC into an otherwise edited movie. Match
+/// the specific ABC block against its original rather than the entire movie.
+pub(in crate::patcher) fn install_instant_suite(
+    live: &[u8],
+    original: &[u8],
+    patched: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let mut replacement = None;
+    rewrite_blocks(patched, &mut |header, data| {
+        if abc::instant_suite_hook(data)?.is_some() {
+            replacement = Some((header.to_vec(), data.to_vec()));
+        }
+        Ok(None)
+    })?;
+    let (header, patch) = replacement.ok_or("Missing Instant Suite template")?;
+    let mut baseline = None;
+    rewrite_blocks(original, &mut |name, data| {
+        if name == header {
+            baseline = Some(data.to_vec());
+        }
+        Ok(None)
+    })?;
+    let baseline = baseline.ok_or("Missing original winner code")?;
+    rewrite_blocks(live, &mut |name, data| {
+        if name != header {
+            return Ok(None);
+        }
+        if data != baseline {
+            return Err("The winner code itself has other edits. Instant Suite could not safely add its hook.".into());
+        }
+        Ok(Some((patch.clone(), 1)))
+    }).map(|edited| edited.map(|(bytes, _)| bytes))
+}
+
 /// Run `edit` over every DoABC block of a GFx/SWF movie and rebuild the movie
 /// when any block changed. `edit` returns the new ABC and a change count.
 pub(in crate::patcher) fn rewrite(

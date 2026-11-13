@@ -59,6 +59,20 @@ fn read_saved(backups: &Path) -> Option<Saved> {
     serde_json::from_slice(&std::fs::read(saved_path(backups)).ok()?).ok()
 }
 
+pub(super) fn retain_recovery_state(cooked: &Path, archive: &Path, upk: &UpkPackage) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    let path = saved_path(&backups);
+    if path.is_file() || ![1, 2, 3].into_iter().any(|id| has(upk, id)) {
+        return Ok(());
+    }
+    let Some(saved) = read_saved(archive) else { return Ok(()) };
+    if saved.build != super::backup_guard::build_id(cooked)? {
+        return Err("The installed Game Mods dispatcher still uses an older build. Verify the game files and retry repatch.".into());
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+    super::upk_history::replace(&path, &serde_json::to_vec(&saved).map_err(|error| error.to_string())?)
+}
+
 fn export(upk: &UpkPackage) -> Result<usize, String> {
     upk.find_object(DONOR).filter(|index| *index > 0).map(|index| index as usize - 1).ok_or_else(|| format!("{DONOR} was not found"))
 }

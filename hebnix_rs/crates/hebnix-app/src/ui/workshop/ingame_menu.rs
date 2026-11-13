@@ -595,6 +595,9 @@ impl InGameMenuState {
         if !self.lan.loaded {
             self.lan.load(&cooked);
         }
+        if super::freeplay::current_session_origin() == super::freeplay::SessionOrigin::Freeplay {
+            ui.weak("The active practice session uses the Freeplay tab. LAN settings below apply to Workshop and LAN matches.");
+        }
         let mut changed = false;
         ui.columns(2, |columns| {
             let [left, right] = columns else { unreachable!() };

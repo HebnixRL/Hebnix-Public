@@ -165,6 +165,10 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
     if !["off", "labels", "join"].contains(&mode) {
         return Err("mode must be off, labels or join".into());
     }
+    let _guard = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before changing the Workshop LAN patch.".into());
+    }
     let live = cooked.join("TAGame.upk");
     let receipt_path = cooked.join("Backups").join(RECEIPT);
     let mut p = UpkPackage::load(&live)?;
@@ -229,7 +233,7 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
             return Err(format!("saved {path} failed verification"));
         }
     }
-    fs::copy(&temp, &live).map_err(|e| e.to_string())?;
+    fs::rename(&temp, &live).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(temp);
     receipt["mode"] = mode.into();
     if let Err(error) = fs::write(&receipt_path, receipt.to_string()) {
@@ -256,6 +260,26 @@ pub fn reapply(cooked: &Path) -> Result<(), String> {
         Some(mode @ ("labels" | "join")) => set_mode(cooked, mode),
         _ => Ok(()),
     }
+}
+
+pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {
+    let source = archive.join(RECEIPT);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let bytes = fs::read(&source).map_err(|error| error.to_string())?;
+    let saved: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let Some(mode @ ("labels" | "join")) = saved["mode"].as_str() else { return Ok(()) };
+    let live = UpkPackage::load(&cooked.join("TAGame.upk"))?;
+    let installed = [TITLE, JOIN].into_iter().all(|path| {
+        let key = if path == TITLE || mode == "join" { "patched" } else { "original" };
+        serde_json::from_value::<Vec<u8>>(saved["exports"][path][key].clone())
+            .is_ok_and(|expected| payload(&live, path).is_ok_and(|actual| actual == expected))
+    });
+    if installed {
+        super::upk_history::replace(&cooked.join("Backups").join(RECEIPT), &bytes)?;
+    }
+    set_mode(cooked, mode)
 }
 
 pub struct Offer {

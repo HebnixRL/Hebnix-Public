@@ -85,6 +85,10 @@ pub(crate) struct State {
     textures: HashMap<String, egui::TextureHandle>,
 }
 impl State {
+    pub(crate) fn busy(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(crate) fn new(base: &Path) -> Self {
         let root = base.join("profile_pictures");
         let mut settings = fs::read(root.join("settings.json"))

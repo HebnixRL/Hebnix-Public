@@ -162,12 +162,11 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     if let Some(old) = read_saved(backups) {
         undo_legacy(&mut upk, &old)?;
     }
-    if is_patched(&upk) {
-        return Ok(());
-    }
     let build = backup_guard::build_id(cooked)?;
-    apply(&mut upk, backups, &build)?;
-    install(cooked, &live, &upk, true)?;
+    if !is_patched(&upk) {
+        apply(&mut upk, backups, &build)?;
+        install(cooked, &live, &upk, true)?;
+    }
     let saved = Saved { build, original: Vec::new(), name_index: 0, instance: 0 };
     let path = saved_path(backups);
     std::fs::create_dir_all(path.parent().unwrap_or(backups)).map_err(|e| e.to_string())?;
