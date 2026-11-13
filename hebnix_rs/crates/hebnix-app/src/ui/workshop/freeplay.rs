@@ -2,7 +2,6 @@
 use super::lan_mutators;
 use crate::patcher::{workshop_host, workshop_menu};
 use eframe::egui;
-use hebnix_sdk::stats::WsStatsClient;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -16,15 +15,11 @@ pub(crate) struct State {
     enabled: bool,
     picks: Vec<usize>,
     status: String,
-    restart: Option<Restart>,
     session_check: Option<(Instant, SessionOrigin)>,
-    patch_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
-}
-
-struct Restart {
-    cooked: PathBuf,
-    target: String,
-    deadline: Instant,
+    patch_job: Option<std::sync::mpsc::Receiver<Result<bool, String>>>,
+    package_stamp: Option<(u64, std::time::SystemTime)>,
+    patch_probe: Option<std::sync::mpsc::Receiver<bool>>,
+    patch_ready: Option<bool>,
 }
 
 fn launch_settings(picks: &[usize]) -> (String, &'static str) {
@@ -102,42 +97,9 @@ pub(super) fn current_session_origin() -> SessionOrigin {
     if !hebnix_sdk::process::is_rocket_league_running() {
         return SessionOrigin::Other;
     }
-    hebnix_sdk::log::current_map_url().as_deref().map_or(SessionOrigin::Other, session_origin)
-}
-
-fn active_freeplay() -> Option<String> {
-    if !hebnix_sdk::process::is_rocket_league_running() {
-        return None;
-    }
-    hebnix_sdk::log::current_map_url().filter(|url| session_origin(url) == SessionOrigin::Freeplay)
-}
-
-fn restart_target(current: &str, tags: &str, options: &str) -> Option<String> {
-    let (map, query) = current.split_once('?')?;
-    if map.contains(['"', '|', '\r', '\n', ';'])
-        || (!options.is_empty() && query.split('?').any(|part| part.eq_ignore_ascii_case("Workshop")))
-    {
-        return None;
-    }
-    let game = if options.is_empty() {
-        "TAGame.GameInfo_Soccar_TA"
-    } else {
-        HEATSEEKER
-    };
-    let mut target = format!("{map}?Game={game}?GameTags={tags}{options}");
-    for flag in ["easy", "Workshop"] {
-        if query.split('?').any(|part| part.eq_ignore_ascii_case(flag)) {
-            target.push('?');
-            target.push_str(flag);
-        }
-    }
-    let target = if map.contains(char::is_whitespace) {
-        format!("\"{target}\"")
-    } else {
-        target
-    };
-    let command = if options.is_empty() { "Open" } else { "Start" };
-    Some(format!("{command} {target}"))
+    hebnix_sdk::log::current_map_url()
+        .as_deref()
+        .map_or(SessionOrigin::Other, session_origin)
 }
 
 impl State {
@@ -145,42 +107,45 @@ impl State {
         self.patch_job.is_some()
     }
 
-    pub(crate) fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, stats: &WsStatsClient) {
+    pub(crate) fn render(&mut self, ui: &mut egui::Ui, rl_path: &str) {
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        if self.install != cooked {
-            self.install = cooked.clone();
-            let (enabled, stored) = workshop_menu::read_solo_preferences(&cooked);
-            self.enabled = enabled;
-            (self.picks, _) =
-                lan_mutators::parse(stored.split('?').next().unwrap_or_default().split(','));
-            self.status.clear();
-            self.session_check = None;
-        }
+        let previous_picks = self.picks.clone();
         panel(ui, "Freeplay", |ui| {
-            ui.horizontal(|ui| {
-                let closed = cooked.is_dir() && !hebnix_sdk::process::is_rocket_league_running();
-                for (label, enabled) in [("Install or update Freeplay patch", true), ("Remove Freeplay patch", false)] {
-                    if ui.add_enabled(closed && !self.patch_busy(), egui::Button::new(label))
-                        .on_disabled_hover_text("Close Rocket League before changing the Freeplay patch.")
-                        .clicked()
-                    {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let cooked = cooked.clone();
-                        let ctx = ui.ctx().clone();
-                        self.patch_job = Some(rx);
-                        self.status = "Updating Freeplay patch…".into();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(workshop_host::set_freeplay_patch(&cooked, enabled));
-                            ctx.request_repaint();
-                        });
-                    }
-                }
-            });
+            let closed = cooked.is_dir() && !hebnix_sdk::process::is_rocket_league_running();
+            let mut enabled = self.enabled && self.patch_ready != Some(false);
             if ui
-                .checkbox(&mut self.enabled, "Enable Freeplay Mutators")
+                .add_enabled(
+                    closed && !self.patch_busy(),
+                    egui::Checkbox::new(&mut enabled, "Enable Freeplay Mutators"),
+                )
+                .on_disabled_hover_text(
+                    "Close Rocket League before enabling or disabling the Freeplay patch.",
+                )
                 .changed()
             {
-                self.status = "Apply to use this change.".into();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let cooked = cooked.clone();
+                let ctx = ui.ctx().clone();
+                let (tags, options) = launch_settings(&self.picks);
+                self.patch_job = Some(rx);
+                self.status = "Updating Freeplay patch…".into();
+                std::thread::spawn(move || {
+                    let result =
+                        workshop_host::set_freeplay_patch(&cooked, enabled).and_then(|()| {
+                            workshop_menu::store_solo_preferences(
+                                &cooked,
+                                enabled,
+                                &format!("{tags}{options}"),
+                                !options.is_empty(),
+                            )?;
+                            Ok(enabled)
+                        });
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                });
+            }
+            if self.enabled && self.patch_ready == Some(false) {
+                ui.weak("TAGame.upk no longer contains the current Freeplay patch. Close Rocket League and enable Freeplay Mutators again.");
             }
             ui.add_enabled_ui(self.enabled, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -198,29 +163,18 @@ impl State {
                 self.session_check = Some((Instant::now(), current_session_origin()));
             }
             ui.ctx().request_repaint_after(interval);
-            let can_apply = self.restart.is_none()
-                && cooked.is_dir()
-                && self.session_check.is_some_and(|(_, origin)| origin == SessionOrigin::Freeplay);
-            if self.session_check.is_some_and(|(_, origin)| origin == SessionOrigin::WorkshopOrLan) {
+            if self
+                .session_check
+                .is_some_and(|(_, origin)| origin == SessionOrigin::WorkshopOrLan)
+            {
                 ui.weak("This session uses Maps > In-game menu controls.");
             }
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(can_apply, egui::Button::new("Apply and restart Freeplay"))
-                    .on_disabled_hover_text(
-                        "Open local Freeplay in Rocket League to apply changes.",
-                    )
-                    .clicked()
-                {
-                    self.status = self.apply(&cooked, stats).unwrap_or_else(|error| error);
-                    ui.ctx().request_repaint();
-                }
                 if ui
                     .add_enabled(self.enabled, egui::Button::new("Reset to defaults"))
                     .clicked()
                 {
                     self.picks.fill(0);
-                    self.status = "Defaults selected. Apply to use them.".into();
                 }
             });
             if !self.status.is_empty() {
@@ -262,57 +216,42 @@ impl State {
                     });
                 });
         });
-    }
-
-    fn apply(&mut self, cooked: &Path, stats: &WsStatsClient) -> Result<String, String> {
-        let current =
-            active_freeplay().ok_or("Open local Freeplay in Rocket League to apply changes.")?;
-        if !workshop_host::freeplay_ready(cooked) {
-            return Err(
-                "Close Rocket League and select Install or update Freeplay patch on this tab."
-                    .into(),
-            );
+        if self.enabled && self.picks != previous_picks {
+            let (tags, options) = launch_settings(&self.picks);
+            self.status = match workshop_menu::store_solo_preferences(
+                &cooked,
+                true,
+                &format!("{tags}{options}"),
+                !options.is_empty(),
+            ) {
+                Ok(()) => "Changes saved for the next Freeplay launch.".into(),
+                Err(error) => {
+                    self.picks = previous_picks;
+                    error
+                }
+            };
         }
-        let (tags, options) = launch_settings(&self.picks);
-        let (active_tags, active_options) = if self.enabled {
-            (tags.as_str(), options)
-        } else {
-            ("Freeplay", "")
-        };
-        let target = restart_target(&current, active_tags, active_options)
-            .ok_or("Use a standard Soccar arena for Heatseeker, or choose another Freeplay map.")?;
-        workshop_menu::store_solo_preferences(
-            cooked,
-            self.enabled,
-            &format!("{tags}{options}"),
-            lan_mutators::heatseeker(&self.picks),
-        )?;
-        let disconnect_sent = stats.connected()
-            && workshop_host::request_freeplay_travel(cooked, stats, "Disconnect").is_ok();
-        let now = Instant::now();
-        self.restart = Some(Restart {
-            cooked: cooked.to_owned(),
-            target,
-            deadline: now + Duration::from_secs(30),
-        });
-        Ok(if disconnect_sent {
-            "Restarting Freeplay..."
-        } else {
-            "Settings saved. Leave the practice match through Rocket League’s menu to continue the restart."
-        }.into())
     }
 
-    pub(crate) fn poll_restart(
-        &mut self,
-        ctx: &egui::Context,
-        stats: &WsStatsClient,
-        rl_path: &str,
-    ) {
+    pub(crate) fn poll_patch(&mut self, ctx: &egui::Context, rl_path: &str) {
         if let Some(job) = &self.patch_job {
             match job.try_recv() {
                 Ok(result) => {
                     self.patch_job = None;
-                    self.status = result.map(|()| "Freeplay patch updated.".into()).unwrap_or_else(|error| error);
+                    self.package_stamp = None;
+                    self.patch_probe = None;
+                    self.status = match result {
+                        Ok(enabled) => {
+                            self.enabled = enabled;
+                            self.patch_ready = Some(enabled);
+                            if enabled {
+                                "Freeplay mutators enabled.".into()
+                            } else {
+                                "Freeplay mutators disabled.".into()
+                            }
+                        }
+                        Err(error) => error,
+                    };
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.patch_job = None;
@@ -321,34 +260,47 @@ impl State {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
-        let Some(restart) = &self.restart else { return };
-        let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        if Instant::now() >= restart.deadline
-            || cooked != restart.cooked
-            || !hebnix_sdk::process::is_rocket_league_running()
-        {
-            self.restart = None;
-            self.status =
-                "Freeplay restart stopped. Reopen Freeplay to use the saved settings.".into();
-            return;
+        let cooked = Path::new(rl_path).join("TAGame/CookedPCConsole");
+        if self.install != cooked && !self.patch_busy() {
+            self.install = cooked.clone();
+            let (enabled, stored) = workshop_menu::read_solo_preferences(&cooked);
+            self.enabled = enabled;
+            (self.picks, _) =
+                lan_mutators::parse(stored.split('?').next().unwrap_or_default().split(','));
+            self.status.clear();
+            self.session_check = None;
+            self.package_stamp = None;
+            self.patch_probe = None;
+            self.patch_ready = None;
         }
-        let menu_ready = hebnix_sdk::log::map_load_finished("MENU_Main_p");
-        if menu_ready && stats.connected() {
-            let result =
-                workshop_host::request_freeplay_travel(&restart.cooked, stats, &restart.target);
-            self.restart = None;
-            self.status = result
-                .map(|_| "Freeplay reload requested.".into())
-                .unwrap_or_else(|error| error);
-        } else {
-            if restart.deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(27) {
-                self.status = if menu_ready {
-                    "Waiting for Rocket League’s Stats API to reconnect.".into()
-                } else {
-                    "If the practice match is still open, leave it through Rocket League’s menu to continue the restart.".into()
-                };
+        if self.enabled && !self.patch_busy() {
+            let live = crate::patcher::game_path::resolve(&self.install, "TAGame.upk");
+            let stamp = std::fs::metadata(live)
+                .ok()
+                .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+            if stamp != self.package_stamp {
+                self.package_stamp = stamp;
+                self.patch_ready = stamp.is_none().then_some(false);
+                self.patch_probe = stamp.map(|_| {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let cooked = self.install.clone();
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(workshop_host::freeplay_patch_intact(&cooked));
+                        ctx.request_repaint();
+                    });
+                    rx
+                });
             }
-            ctx.request_repaint_after(Duration::from_millis(250));
+            if let Some(ready) = self
+                .patch_probe
+                .as_ref()
+                .and_then(|job| job.try_recv().ok())
+            {
+                self.patch_ready = Some(ready);
+                self.patch_probe = None;
+            }
+            ctx.request_repaint_after(Duration::from_secs(2));
         }
     }
 }
@@ -364,25 +316,26 @@ mod tests {
         assert!(session_origin(normal) == SessionOrigin::Freeplay);
         let practice = format!("stadium_p?Game={HEATSEEKER}{PRACTICE}");
         assert!(session_origin(&practice) == SessionOrigin::Freeplay);
-        assert!(session_origin(&practice.replace("?NumOpenPublicConnections=0", "")) == SessionOrigin::Freeplay);
-        assert!(session_origin(&practice.replace("?HbxSoloPractice", "")) == SessionOrigin::WorkshopOrLan);
+        assert!(
+            session_origin(&practice.replace("?NumOpenPublicConnections=0", ""))
+                == SessionOrigin::Freeplay
+        );
+        assert!(
+            session_origin(&practice.replace("?HbxSoloPractice", ""))
+                == SessionOrigin::WorkshopOrLan
+        );
         assert!(session_origin(&format!("{normal}?Workshop")) == SessionOrigin::WorkshopOrLan);
         assert!(session_origin(&format!("{normal}?Lan?Listen")) == SessionOrigin::WorkshopOrLan);
         assert!(session_origin(&format!("1.2.3.4:7777/{normal}")) == SessionOrigin::Other);
     }
 
     #[test]
-    fn heatseeker_restart_builds_a_local_lan_start() {
-        let (picks, _) = lan_mutators::parse(["Ball_God", "UnlimitedTime"].into_iter());
+    fn selecting_soccar_clears_heatseeker_launch_options() {
+        let (mut picks, _) = lan_mutators::parse(["Ball_God"].into_iter());
+        assert_eq!(launch_settings(&picks).1, PRACTICE);
+        picks.fill(0);
         let (tags, options) = launch_settings(&picks);
-        let current = "street_p?Game=TAGame.GameInfo_Soccar_TA?GameTags=Freeplay";
-        let target = restart_target(current, &tags, options).unwrap();
-        assert!(target.starts_with("Start street_p?Game=TAGame.GameInfo_GodBall_TA?GameTags=Ball_God,"));
-        assert!(target.ends_with("?Lan?Listen"));
-        assert!(!target.contains("GameTags=Freeplay"));
-        assert_eq!(restart_target(current, "Freeplay", "").as_deref(), Some("Open street_p?Game=TAGame.GameInfo_Soccar_TA?GameTags=Freeplay"));
-        let practice = target.strip_prefix("Start ").unwrap();
-        assert!(session_origin(practice) == SessionOrigin::Freeplay);
-        assert_eq!(restart_target(practice, "Freeplay", ""), restart_target(current, "Freeplay", ""));
+        assert_eq!(tags, "Freeplay");
+        assert!(options.is_empty());
     }
 }

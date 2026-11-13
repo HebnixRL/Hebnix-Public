@@ -281,23 +281,6 @@ pub(crate) fn attach_freeplay_restart(upk: &mut UpkPackage, version: u8) -> Resu
     replace_script(upk, COMMAND, &script)
 }
 
-pub const FREEPLAY_MESSAGE: &str = "HebnixRestartFreeplayV3";
-
-pub fn request_freeplay_travel(
-    cooked: &Path,
-    stats: &hebnix_sdk::stats::WsStatsClient,
-    command: &str,
-) -> Result<(), String> {
-    if !stats.connected() {
-        return Err("Connect Rocket League's Stats API to restart Freeplay.".into());
-    }
-    let path = cooked.parent().unwrap_or(cooked).join(FREEPLAY_FILE);
-    super::upk_history::replace(&path, command.as_bytes())
-        .map_err(|error| format!("Could not prepare Freeplay travel: {error}"))?;
-    stats.send_command(hebnix_sdk::stats::WsCommand::new(FREEPLAY_MESSAGE))
-        .map_err(|_| "Could not queue Freeplay travel.".into())
-}
-
 pub fn freeplay_ready(cooked: &Path) -> bool {
     UpkPackage::load(&game_path::resolve(cooked, PACKAGE)).is_ok_and(|upk| {
         payload(&upk).is_ok_and(|(_, script)| script.bytes().windows(FREEPLAY_REQUEST.len())
@@ -307,6 +290,15 @@ pub fn freeplay_ready(cooked: &Path) -> bool {
 
 pub(super) fn has_freeplay_restart(upk: &UpkPackage) -> bool {
     payload(upk).is_ok_and(|(_, script)| freeplay_version(&script).is_some())
+}
+
+pub(crate) fn freeplay_patch_intact(cooked: &Path) -> bool {
+    let Ok(mut package) = UpkPackage::load(&game_path::resolve(cooked, PACKAGE)) else {
+        return false;
+    };
+    package.names.iter().any(|name| name == "LoadFileToString")
+        && edit_freeplay_restart(&mut package, true) == Ok(false)
+        && super::workshop_menu::edit_solo_freeplay(&mut package, true, false) == Ok(false)
 }
 
 pub(crate) fn set_freeplay_patch(cooked: &Path, enabled: bool) -> Result<(), String> {

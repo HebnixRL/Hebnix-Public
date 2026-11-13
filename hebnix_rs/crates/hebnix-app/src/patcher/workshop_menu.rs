@@ -628,7 +628,11 @@ pub fn store_solo(cooked: &Path, tags: Option<&str>, heatseeker: bool) -> Result
         super::upk_history::replace(&options, options_text.as_bytes())?;
         fs::write(&game, HEAT_CLASS).map_err(|e| format!("Could not write {}: {e}", game.display()))?;
     } else {
-        remove_if_present(&game)?;
+        if tags.is_some() {
+            super::upk_history::replace(&game, b"TAGame.GameInfo_Soccar_TA")?;
+        } else {
+            remove_if_present(&game)?;
+        }
         remove_if_present(&options)?;
     }
     match tags {

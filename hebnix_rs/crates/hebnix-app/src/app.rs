@@ -50,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.2.9";
+pub const APP_VERSION: &str = "2.3.0";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -7343,7 +7343,7 @@ impl eframe::App for HebnixApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.freeplay.poll_restart(ctx, &self.ws_stats, &self.config.settings.rl_path);
+        self.freeplay.poll_patch(ctx, &self.config.settings.rl_path);
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
                 crate::watchdog::finish_live_handoff();
@@ -8354,7 +8354,7 @@ impl HebnixApp {
             Tab::Spoofer => self.render_spoofer_tab(ui),
             Tab::Items => self.render_items_tab(ui),
             Tab::Patcher => self.render_upk_studio(ui),
-            Tab::Freeplay => self.freeplay.render(ui, &self.config.settings.rl_path, &self.ws_stats),
+            Tab::Freeplay => self.freeplay.render(ui, &self.config.settings.rl_path),
             Tab::GameMods => self.render_game_mods_tab(ui),
             Tab::Settings => self.render_settings_tab(ui),
             Tab::Plugins => self.render_plugins_tab(ui),
