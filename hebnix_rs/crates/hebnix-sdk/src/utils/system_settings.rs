@@ -14,7 +14,7 @@ pub struct SystemSettings {
 }
 
 pub fn find_system_settings() -> PathBuf {
-    dirs::document_dir()
+    super::paths::documents_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("My Games")
         .join("Rocket League")

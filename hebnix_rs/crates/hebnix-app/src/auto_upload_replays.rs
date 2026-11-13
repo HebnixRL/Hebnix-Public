@@ -867,9 +867,7 @@ pub fn replay_directory(game_path: &Path, launch: &RlLaunchCfg) -> Result<PathBu
         RlPlatform::Epic => false,
         RlPlatform::Unknown => launch.mode == RlLaunchMode::SteamNative,
     };
-    let documents = dirs::document_dir()
-        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
-        .filter(|path| path.is_absolute())
+    let documents = hebnix_sdk::utils::paths::documents_dir()
         .ok_or("Documents folder is unavailable")?;
     Ok(replay_directory_in(&documents, steam))
 }

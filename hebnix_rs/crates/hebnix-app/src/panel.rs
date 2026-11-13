@@ -235,6 +235,31 @@ pub struct Panel {
     slide: Option<(Instant, egui::Pos2, egui::Pos2)>,
 }
 
+/// Put the window at `pos` with `size` (points). On Linux the compositor does the
+/// moving, because Wayland ignores a client's own position requests.
+fn place(ctx: &egui::Context, pos: egui::Pos2, size: Option<egui::Vec2>) {
+    #[cfg(target_os = "linux")]
+    {
+        let ppp = ctx.pixels_per_point();
+        let inner = size.or_else(|| ctx.input(|i| i.viewport().inner_rect.map(|r| r.size())));
+        if let Some(inner) = inner {
+            if hebnix_sdk::process::place_own_window(
+                std::process::id(),
+                (pos.x * ppp).round() as i32,
+                (pos.y * ppp).round() as i32,
+                (inner.x * ppp).round() as i32,
+                (inner.y * ppp).round() as i32,
+            ) {
+                return;
+            }
+        }
+    }
+    if let Some(size) = size {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+    }
+    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+}
+
 impl Panel {
     pub fn new(tx: Sender<AppMsg>, ctx: egui::Context) -> Self {
         Self {
@@ -273,17 +298,25 @@ impl Panel {
         let from = egui::pos2(if look.left { pos.x - width } else { pos.x + width }, pos.y);
         self.slide = (look.animate && !self.active).then(|| (Instant::now(), from, pos));
         if !self.active {
+            // Wayland does not report the window's position: fall back to a centred window
+            let fallback_size = egui::vec2(
+                (area_size.x * 0.6).max(crate::app::MIN_WIDTH),
+                (area_size.y * 0.6).max(crate::app::MIN_HEIGHT),
+            );
             self.saved = ctx.input(|i| {
                 let viewport = i.viewport();
-                Some((viewport.outer_rect?.min, viewport.inner_rect?.size()))
+                let size = viewport.inner_rect.map_or(fallback_size, |r| r.size());
+                let pos = viewport.outer_rect.map_or(area_min + (area_size - size) / 2.0, |r| r.min);
+                Some((pos, size))
             });
         }
         self.active = true;
         self.pad.set_active(true);
+        // Linux draws its own titlebar and always runs without compositor chrome
+        #[cfg(not(target_os = "linux"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(320.0, 240.0)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.slide.map_or(pos, |(_, from, _)| from)));
+        place(ctx, self.slide.map_or(pos, |(_, from, _)| from), Some(size));
     }
 
     /// Move the window one step along the slide-in, if one is under way.
@@ -292,7 +325,7 @@ impl Panel {
         let t = (start.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).min(1.0);
         // ease out: fast at first, settling into place like a drawer
         let eased = 1.0 - (1.0 - t).powi(3);
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(from.lerp(to, eased)));
+        place(ctx, from.lerp(to, eased), None);
         if t >= 1.0 {
             self.slide = None;
         } else {
@@ -356,14 +389,14 @@ impl Panel {
         self.active = false;
         self.slide = None;
         self.pad.set_active(false);
+        #[cfg(not(target_os = "linux"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
             crate::app::MIN_WIDTH,
             crate::app::MIN_HEIGHT,
         )));
         if let Some((pos, size)) = self.saved.take() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            place(ctx, pos, Some(size));
         }
     }
 }
