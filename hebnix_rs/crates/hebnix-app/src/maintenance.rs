@@ -167,6 +167,35 @@ pub fn changelog_pending(base: &Path) -> bool {
     base.join(".first").is_file() || std::env::var_os("HEBNIX_UPDATE_ACK").is_some()
 }
 
+#[cfg(windows)]
+pub fn relocate_on_launch(lite: bool) -> Result<bool, String> {
+    if hebnix_sdk::utils::paths::portable_base_dir().is_some()
+        || std::env::var_os("HEBNIX_RELOCATION_FALLBACK").is_some()
+        || std::env::var_os("HEBNIX_UPDATE_ACK").is_some()
+        || std::env::var_os("HEBNIX_BASE_DIR").is_some_and(|value| !value.is_empty())
+    {
+        return Ok(false);
+    }
+    let source = std::env::current_exe().map_err(|error| error.to_string())?;
+    let roaming = dirs::data_dir().ok_or("AppData folder unavailable")?;
+    let base = roaming.join("Hebnix");
+    let exe = base.join(if lite { "hebnix-lite.exe" } else { "Hebnix.exe" });
+    if source.parent().is_some_and(|parent| {
+        parent.to_string_lossy().eq_ignore_ascii_case(&base.to_string_lossy())
+            || parent.canonicalize().ok().zip(base.canonicalize().ok()).is_some_and(|(a, b)| a == b)
+    }) {
+        return Ok(false);
+    }
+    let name = if lite { "Hebnix Lite.lnk" } else { "Hebnix.lnk" };
+    helper(serde_json::json!({
+        "mode": "relocate", "pid": std::process::id(), "source": source, "exe": exe, "base": base,
+        "desktop": dirs::desktop_dir().ok_or("Desktop folder unavailable")?.join(name),
+        "shortcut_name": name,
+        "args": std::env::args().skip(1).collect::<Vec<_>>(),
+    }))?;
+    Ok(true)
+}
+
 pub fn launch_update(staged: &Path, base: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -325,7 +354,9 @@ pub fn first_launch_shortcut(base: &Path) {
 pub fn acknowledge_update() {
     static ACK: std::sync::Once = std::sync::Once::new();
     ACK.call_once(|| {
-        if let Some(path) = std::env::var_os("HEBNIX_UPDATE_ACK") {
+        if let Some(path) = std::env::var_os("HEBNIX_UPDATE_ACK")
+            .or_else(|| std::env::var_os("HEBNIX_RELOCATION_ACK"))
+        {
             if let Err(error) = std::fs::write(PathBuf::from(path), b"started") {
                 tracing::warn!("Could not acknowledge update startup: {error}");
             }

@@ -321,12 +321,19 @@ fn main() -> eframe::Result {
 
 #[cfg(target_os = "windows")]
 fn main() -> eframe::Result {
-    let base_dir = config::base_dir();
     if let Some(parent_pid) = watchdog::parent_pid() {
         watchdog::run(parent_pid);
         return Ok(());
     }
+    let relocation = maintenance::relocate_on_launch(false);
+    if matches!(&relocation, Ok(true)) {
+        return Ok(());
+    }
+    let base_dir = config::base_dir();
     setup_logging(&base_dir);
+    if let Err(error) = relocation {
+        tracing::warn!("Hebnix installation: {error}");
+    }
     deep_link::register_and_queue_from_args(&base_dir);
     if let Err(error) = runtime_assets::ensure_present(&base_dir) {
         tracing::warn!("failed to prepare Hebnix runtime assets: {error}");
