@@ -134,8 +134,18 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 }
 
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    let relocation = maintenance::relocate_on_launch(true);
+    #[cfg(windows)]
+    if matches!(&relocation, Ok(true)) {
+        return Ok(());
+    }
     let base_dir = config::base_dir();
     setup_logging(&base_dir);
+    #[cfg(windows)]
+    if let Err(error) = relocation {
+        tracing::warn!("Hebnix Lite installation: {error}");
+    }
     tracing::info!(
         safe_rendering = window_state::safe_rendering(),
         "main window rendering mode"

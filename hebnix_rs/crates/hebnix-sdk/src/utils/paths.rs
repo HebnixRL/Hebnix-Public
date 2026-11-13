@@ -54,7 +54,7 @@ pub fn base_dir() -> PathBuf {
 
 /// portable.txt next to the exe keeps Hebnix data in the exe folder, unless
 /// it has a `portable=false` line (then it only holds options).
-fn portable_base_dir() -> Option<PathBuf> {
+pub fn portable_base_dir() -> Option<PathBuf> {
     let path = portable_txt()?;
     if !path.exists() || portable_value("portable").is_some_and(|value| !truthy(&value)) {
         return None;

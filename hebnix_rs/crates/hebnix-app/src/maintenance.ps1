@@ -10,11 +10,84 @@ function Retry([scriptblock]$operation) {
         }
     }
 }
+function Start-RelocatedApp([string]$path) {
+    # Windows argv quoting, including embedded quotes and trailing backslashes.
+    $arguments = @($plan.args | ForEach-Object {
+        '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+    })
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $path
+    $info.WorkingDirectory = [IO.Path]::GetDirectoryName($path)
+    $info.Arguments = $arguments -join ' '
+    $info.UseShellExecute = $false
+    return [Diagnostics.Process]::Start($info)
+}
 try {
     # Wait for this process object, so a reused PID cannot block maintenance.
     $parent = Get-Process -Id $plan.pid -ErrorAction SilentlyContinue
     if ($null -ne $parent) { $parent.WaitForExit() }
-    if ($plan.mode -eq 'update') {
+    if ($plan.mode -eq 'relocate') {
+        $id = [Guid]::NewGuid().ToString('N')
+        $stage = "$($plan.exe).$id.stage"
+        $backup = "$($plan.exe).$id.backup"
+        $installed = $false
+        $app = $null
+        try {
+            [IO.Directory]::CreateDirectory($plan.base) | Out-Null
+            [IO.File]::Copy($plan.source, $stage)
+            Retry {
+                if ([IO.File]::Exists($plan.exe)) {
+                    [IO.File]::Replace($stage, $plan.exe, $backup)
+                } else {
+                    [IO.File]::Move($stage, $plan.exe)
+                }
+            }
+            $installed = $true
+            $env:HEBNIX_RELOCATION_ACK = Join-Path $helperDir 'started'
+            $app = Start-RelocatedApp $plan.exe
+            $deadline = [DateTime]::UtcNow.AddMinutes(3)
+            while (!(Test-Path -LiteralPath $env:HEBNIX_RELOCATION_ACK)) {
+                if ($app.HasExited) { throw 'The relocated application exited during startup.' }
+                if ([DateTime]::UtcNow -gt $deadline) { throw 'The relocated application did not finish starting.' }
+                Start-Sleep -Milliseconds 200
+            }
+            [IO.File]::Delete($env:HEBNIX_RELOCATION_ACK)
+        } catch {
+            try {
+                if ($null -ne $app -and !$app.HasExited) { $app.Kill(); $app.WaitForExit() }
+                if ($installed) {
+                    Retry {
+                        if ([IO.File]::Exists($backup)) {
+                            [IO.File]::Replace($backup, $plan.exe, [NullString]::Value)
+                        } else {
+                            [IO.File]::Delete($plan.exe)
+                        }
+                    }
+                }
+            } finally {
+                Remove-Item Env:\HEBNIX_RELOCATION_ACK -ErrorAction SilentlyContinue
+                $env:HEBNIX_RELOCATION_FALLBACK = '1'
+                Start-RelocatedApp $plan.source | Out-Null
+            }
+            throw
+        } finally {
+            Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue
+        }
+        $shell = New-Object -ComObject WScript.Shell
+        $programs = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs, [Environment+SpecialFolderOption]::DoNotVerify)
+        foreach ($path in @($plan.desktop, (Join-Path $programs $plan.shortcut_name))) {
+            Retry {
+                [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) | Out-Null
+                $shortcut = $shell.CreateShortcut($path)
+                $shortcut.TargetPath = $plan.exe
+                $shortcut.WorkingDirectory = $plan.base
+                $shortcut.IconLocation = $plan.exe + ',0'
+                $shortcut.Save()
+            }
+        }
+        Retry { [IO.File]::Delete($backup) }
+        Retry { [IO.File]::Delete($plan.source) }
+    } elseif ($plan.mode -eq 'update') {
         $movedOld = $false
         $installed = $false
         $createdMarker = $false
@@ -99,6 +172,8 @@ try {
     if (@(Get-ChildItem -LiteralPath $helperDir -Force).Count -eq 0) { [IO.Directory]::Delete($helperDir) }
 } catch {
     $_ | Out-String | Set-Content -LiteralPath (Join-Path $helperDir 'Maintenance failed.txt')
-    Start-Process -FilePath explorer.exe -ArgumentList ('"' + $helperDir + '"') -WindowStyle Normal
+    if ($plan.mode -ne 'relocate') {
+        Start-Process -FilePath explorer.exe -ArgumentList ('"' + $helperDir + '"') -WindowStyle Normal
+    }
     exit 1
 }
