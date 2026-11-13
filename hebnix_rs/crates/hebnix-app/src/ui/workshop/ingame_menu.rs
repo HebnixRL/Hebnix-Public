@@ -133,7 +133,7 @@ pub fn watch_ticks() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         std::thread::spawn(|| {
-            let log = dirs::document_dir()
+            let log = hebnix_sdk::utils::paths::documents_dir()
                 .map(|d| d.join("My Games/Rocket League/TAGame/Logs/Launch.log"));
             // ticks from an earlier game session were already applied
             let mut seen = log

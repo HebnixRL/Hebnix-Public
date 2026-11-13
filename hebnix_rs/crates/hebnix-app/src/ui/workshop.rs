@@ -166,7 +166,7 @@ fn multiplayer_client_token() -> String {
 /// (by an older Hebnix's Epic launch option, or by hand) can't see the
 /// sidecar's loopback proxies.
 fn rocket_league_multihome_address() -> Option<String> {
-    let path = dirs::document_dir()
+    let path = hebnix_sdk::utils::paths::documents_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("My Games")
         .join("Rocket League")
@@ -999,7 +999,7 @@ impl WorkshopState {
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
         let downloader = crate::patcher::workshop_menu::downloader_on(&cooked);
-        if downloader || crate::patcher::instant_suite::wanted() {
+        if downloader {
             crate::preview_server::start(&self.manager.cache_dir);
         }
         if !downloader {

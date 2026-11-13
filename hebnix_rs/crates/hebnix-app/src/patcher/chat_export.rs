@@ -294,7 +294,7 @@ pub fn watch() {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
         std::thread::spawn(|| {
-            let log = dirs::document_dir().map(|d| d.join("My Games/Rocket League/TAGame/Logs/Launch.log"));
+            let log = hebnix_sdk::utils::paths::documents_dir().map(|d| d.join("My Games/Rocket League/TAGame/Logs/Launch.log"));
             // chat from an earlier game session was already exported
             let mut seen = log.as_ref().and_then(|l| std::fs::metadata(l).ok()).map_or(0, |m| m.len());
             loop {

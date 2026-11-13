@@ -740,6 +740,37 @@ fn apply_overlay_font(fonts_dir: &std::path::Path, settings: &crate::config::Set
     );
 }
 
+enum TitlebarIcon {
+    Close,
+    Minimize,
+}
+
+/// Hand-painted instead of a unicode glyph: the bundled font's coverage for those is
+/// inconsistent across systems.
+fn titlebar_icon_button(ui: &mut egui::Ui, icon: TitlebarIcon) -> egui::Response {
+    let size = egui::vec2(22.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 2.0, visuals.bg_fill);
+        }
+        let stroke = egui::Stroke::new(1.3, visuals.fg_stroke.color);
+        let c = rect.center();
+        let h = 4.0;
+        match icon {
+            TitlebarIcon::Minimize => {
+                ui.painter().line_segment([c - egui::vec2(h, 0.0), c + egui::vec2(h, 0.0)], stroke);
+            }
+            TitlebarIcon::Close => {
+                ui.painter().line_segment([c - egui::vec2(h, h), c + egui::vec2(h, h)], stroke);
+                ui.painter().line_segment([c - egui::vec2(h, -h), c + egui::vec2(h, -h)], stroke);
+            }
+        }
+    }
+    response
+}
+
 impl HebnixApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::window_state::init(cc);
@@ -1473,7 +1504,7 @@ impl HebnixApp {
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
+                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.instant_suite_mode) {
                         self.save_config();
                     }
                 });
@@ -2518,6 +2549,36 @@ impl HebnixApp {
         });
     }
 
+    /// Custom titlebar: the window has no compositor chrome (decorations are off), so
+    /// this thin strip is the drag handle and the only close/minimize buttons.
+    fn render_titlebar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
+        let (bar_rect, bar_resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 22.0),
+            egui::Sense::click_and_drag(),
+        );
+        if bar_resp.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        let mut bar_ui = ui.new_child(
+            egui::UiBuilder::new().max_rect(bar_rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        bar_ui.add_space(6.0);
+        bar_ui.label(egui::RichText::new("Hebnix").strong().size(12.0));
+        bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(4.0);
+            if titlebar_icon_button(ui, TitlebarIcon::Close).on_hover_text("Close").clicked() {
+                self.force_quit(ctx);
+            }
+            if titlebar_icon_button(ui, TitlebarIcon::Minimize).on_hover_text("Minimize to tray").clicked() {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("hbx_minimize_request"), true));
+                ctx.request_repaint();
+            }
+        });
+        ui.separator();
+    }
+
     fn force_quit(&mut self, ctx: &egui::Context) {
         self.quitting = true;
         self.config.window.width = self.last_size.0;
@@ -3196,9 +3257,6 @@ impl HebnixApp {
         }
         match event.event_type.as_str() {
             "MatchCreated" | "MatchStarted" => {
-                if !replay_event {
-                    crate::patcher::instant_suite::clear_match_end();
-                }
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "UpdateState" => {
@@ -3230,12 +3288,6 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
-                if !replay_event && !self.match_ended {
-                    crate::patcher::instant_suite::match_ended(
-                        self.config.game_mods.instant_suite_private,
-                        self.config.game_mods.instant_suite_tournaments,
-                    );
-                }
                 self.in_match = false;
                 self.match_ended = true;
                 self.plugin_mgr.shared.borrow_mut().in_match = false;
@@ -7439,6 +7491,7 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
+            egui::Panel::top("linux_titlebar").show(ui, |ui| self.render_titlebar(ui));
             if self.panel.active {
                 self.render_panel(ui);
             } else if let Some(presentation) = theme::presentation(ctx) {
@@ -7447,7 +7500,6 @@ impl eframe::App for HebnixApp {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    Self::render_window_grip(ui);
                     for tab in Tab::ALL {
                         if tab == Tab::Home {
                             if ui.add(egui::Button::image(egui::Image::new(egui::include_image!("../assets/navigation/home.svg"))
@@ -7463,7 +7515,6 @@ impl eframe::App for HebnixApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        Self::render_window_close(ui);
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
                         ui.label(
                             egui::RichText::new(&self.status_text)
@@ -7534,6 +7585,20 @@ impl eframe::App for HebnixApp {
             self.render_install_modal(ctx);
             self.render_rl_launch_setup(ctx);
         }
+        // the tray icon registers and answers over GLib's main loop, which winit does not run
+        #[cfg(target_os = "linux")]
+        {
+            crate::webview::WebviewOverlay::pump();
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        // the title bar's minimize button: hide to the tray, or minimize when there is no tray
+        if ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("hbx_minimize_request"))).unwrap_or(false) {
+            if self.tray.is_some() {
+                self.set_hidden(ctx, true);
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
         let fast_ms = 1000 / u64::from(self.config.settings.overlay_refresh_fps.clamp(20, 60));
         let plugin_tick_interval = if self.last_rl_open {
             Duration::from_millis(fast_ms)
@@ -7543,9 +7608,6 @@ impl eframe::App for HebnixApp {
         // peers' map names and the game's sync button need this on every tab, hidden or not
         let join_rl_path = self.config.settings.rl_path.clone();
         self.workshop.sync_lan_connection(&join_rl_path);
-        // Instant Suite's action can change mid-game: the winner movie asks Hebnix each match
-        let cooked_pc = PathBuf::from(&join_rl_path).join("TAGame").join("CookedPCConsole");
-        self.instant_suite.tick(&cooked_pc, &cooked_pc.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
         self.workshop.poll_downloads(&join_rl_path, &self.tx.clone(), ctx);
         self.workshop.panel_mode = self.panel.active;
         self.workshop.render_join_prompt(ctx, &join_rl_path);
@@ -8400,31 +8462,6 @@ impl HebnixApp {
             .small().color(self.status_color)).wrap());
     }
 
-    /// The window has no OS titlebar: this grip drags it (Super+click not needed).
-    fn render_window_grip(ui: &mut egui::Ui) {
-        let (grip_rect, grip) = ui.allocate_exact_size(egui::vec2(14.0, 24.0), egui::Sense::drag());
-        let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Drag window");
-        if grip.drag_started() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        let dot = ui.visuals().weak_text_color();
-        for row in 0..3 {
-            for col in 0..2 {
-                let offset = egui::vec2(4.0 + col as f32 * 5.0, 5.0 + row as f32 * 7.0);
-                ui.painter().circle_filled(grip_rect.left_top() + offset, 1.4, dot);
-            }
-        }
-    }
-
-    /// Close button; goes through the same close path as the window manager's close.
-    fn render_window_close(ui: &mut egui::Ui) {
-        let close = egui::Button::new(egui::RichText::new("×").size(20.0).strong())
-            .min_size(egui::vec2(28.0, 28.0));
-        if ui.add(close).on_hover_text("Close").clicked() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-    }
-
     fn render_themed_shell(&mut self, ui: &mut egui::Ui, p: &theme::Presentation) {
         theme::show_shell(ui, p, |ui, part| match part {
             theme::ShellPart::Navigation(true) => {
@@ -8441,7 +8478,6 @@ impl HebnixApp {
             }
             theme::ShellPart::Navigation(false) => {
                 theme::toolbar(ui, |ui| {
-                    Self::render_window_grip(ui);
                     self.render_themed_navigation(ui, p, false);
                     ui.add_space(8.0);
                     p.toolbar_actions(ui, |ui| {
@@ -8449,7 +8485,6 @@ impl HebnixApp {
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
                         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                             .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
-                        Self::render_window_close(ui);
                     });
                 });
             }

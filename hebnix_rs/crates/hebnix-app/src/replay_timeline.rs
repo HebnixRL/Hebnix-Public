@@ -924,7 +924,7 @@ impl ReplayTimeline {
     }
     fn refresh_files(&mut self) {
         let mut folders: Vec<_> = self.folder.iter().cloned().collect();
-        if let Some(documents) = dirs::document_dir() {
+        if let Some(documents) = hebnix_sdk::utils::paths::documents_dir() {
             let root = documents.join("My Games/Rocket League/TAGame");
             folders.extend([root.join("DemosEpic"), root.join("Demos")]);
         }
@@ -1585,7 +1585,7 @@ fn current_replay_from_log() -> Option<PathBuf> {
 }
 // Outer None means the log cannot establish a map. Some(None) confirms a non-replay map.
 fn current_replay_map() -> Option<Option<PathBuf>> {
-    let path = dirs::document_dir()?.join("My Games/Rocket League/TAGame/Logs/Launch.log");
+    let path = hebnix_sdk::utils::paths::documents_dir()?.join("My Games/Rocket League/TAGame/Logs/Launch.log");
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let mut window = 256 * 1024;

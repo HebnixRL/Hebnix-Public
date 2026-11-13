@@ -842,6 +842,30 @@ pub fn reassert_own_window_decorations(own_pid: u32) {
     }
 }
 
+/// Move and resize our own window in the compositor's coordinates (the same ones
+/// `get_rocket_league_window_rect` reports). Wayland clients cannot position
+/// themselves, so the side panel needs the compositor to do it. `false` when this
+/// compositor has no implementation, so the caller can fall back to asking the toolkit.
+pub fn place_own_window(own_pid: u32, x: i32, y: i32, w: i32, h: i32) -> bool {
+    match compositor() {
+        Compositor::Hyprland => {
+            let selector = format!("pid:{own_pid}");
+            hyprctl_raw(&format!("dispatch setfloating {selector}"));
+            hyprctl_raw(&format!("dispatch resizewindowpixel exact {w} {h},{selector}"));
+            hyprctl_raw(&format!("dispatch movewindowpixel exact {x} {y},{selector}"));
+            true
+        }
+        Compositor::Kwin => {
+            let size = format!("{w}");
+            let height = format!("{h}");
+            let (px, py) = (format!("{x}"), format!("{y}"));
+            kdotool_lines(&["search", "--name", "^Hebnix$", "windowsize", &size, &height, "windowmove", &px, &py])
+                .is_some()
+        }
+        _ => false,
+    }
+}
+
 /// bring our own window to the front, on top of a fullscreened RL, the way
 /// BakkesMod's overlay pops up on Windows. No-op (returns false) on any
 /// compositor we don't have a real implementation for.
