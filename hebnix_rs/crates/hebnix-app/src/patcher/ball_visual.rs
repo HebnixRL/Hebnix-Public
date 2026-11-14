@@ -554,6 +554,9 @@ pub fn apply_with_colours(
         let mut files = Vec::new();
         for entry in entries {
             let file = entry.file_name().to_string_lossy().to_string();
+            if super::menu_map::owns(cooked, &file) {
+                continue;
+            }
             let package_before = hash(&std::fs::read(entry.path()).map_err(|e| e.to_string())?);
             let p = UpkPackage::load(&entry.path()).map_err(|e| format!("{file}: {e}"))?;
             let Ok(original) = payload(&p, BALLS[source].1) else {
@@ -647,6 +650,11 @@ pub fn restore(cooked: &Path, backups: &Path, source: usize) -> Result<(), Strin
         .ok_or("This ball has no saved visual swap")?
         .clone();
     // Check every affected mesh before modifying any package.
+    // An active menu swap only restores its exact bytes, and skipping the menu
+    // here would drop its mesh backup while the menu still has the swap.
+    if swap.files.iter().any(|f| super::menu_map::owns(cooked, &f.file)) {
+        return Err("Restore the menu map first, then restore this ball.".into());
+    }
     for f in &swap.files {
         let old =
             std::fs::read(mesh_backup(backups, source, &f.file)).map_err(|e| e.to_string())?;

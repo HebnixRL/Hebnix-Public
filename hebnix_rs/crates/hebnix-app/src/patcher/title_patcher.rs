@@ -394,6 +394,16 @@ pub(super) fn legacy_workshop_movie(
     movie_bytes(&original, movie_offset).ok().map(<[u8]>::to_vec)
 }
 
+/// Titles or ranks have edits in `file`. Replacing it whole would drop them
+/// while their manifest still lists them. An unreadable manifest counts as owned.
+pub(super) fn owns(cooked: &Path, file: &str) -> bool {
+    let base = crate::config::base_dir();
+    ["title_upk", "rank_upk"].iter().any(|feature| {
+        load_manifest(&folder(&base, cooked, feature)).map_or(true, |manifest| {
+            manifest.entries.iter().any(|entry| entry.file.eq_ignore_ascii_case(file))
+        })
+    })
+}
 fn load_manifest(root: &Path) -> Result<Manifest, String> {
     match fs::read(root.join("manifest.json")) {
         Ok(bytes) => {
