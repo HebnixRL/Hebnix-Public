@@ -365,13 +365,53 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
     }
     let (current, old, new) = (Abc::parse(live)?, Abc::parse(before)?, Abc::parse(after)?);
     let header_end = |abc: &Abc, len| abc.bodies.first().map_or(len, |body| body.span.start);
-    let mut output = select_original(
-        &live[..header_end(&current, live.len())],
-        &before[..header_end(&old, before.len())],
-        &after[..header_end(&new, after.len())],
+    let live_header = &live[..header_end(&current, live.len())];
+    let old_header = &before[..header_end(&old, before.len())];
+    let new_header = &after[..header_end(&new, after.len())];
+    let mut output = match select_original(
+        live_header,
+        old_header,
+        new_header,
         "ABC header (including constant pools)",
-    )?
-    .to_vec();
+    ) {
+        Ok(header) => header.to_vec(),
+        Err(error) => {
+            let outside_pools = |header: &[u8], abc: &Abc| {
+                [
+                    &header[..abc.uints.span.start],
+                    &header[abc.uints.span.end..abc.strings.span.start],
+                    &header[abc.strings.span.end..],
+                ]
+                .concat()
+            };
+            let unchanged = outside_pools(old_header, &old);
+            if !new.strings.values.starts_with(&old.strings.values)
+                || !current.strings.values.starts_with(&new.strings.values)
+                || !new.uints.values.starts_with(&old.uints.values)
+                || !current.uints.values.starts_with(&new.uints.values)
+                || outside_pools(new_header, &new) != unchanged
+                || outside_pools(live_header, &current) != unchanged
+                || old.strings.values.iter().any(|value| value == MARKER)
+                || current.strings.values.iter().filter(|value| *value == MARKER).count() != 1
+            {
+                return Err(error);
+            }
+            let marker = new.strings.values.iter().position(|value| value == MARKER).ok_or(error)?;
+            // Keep all indexes stable. Retire the patch's bookkeeping string
+            // so the restored getters can be patched again.
+            let mut reader = Reader { data: live_header, at: current.strings.entries };
+            for _ in 1..marker {
+                let len = reader.index()?;
+                reader.take(len)?;
+            }
+            let len = reader.index()?;
+            let end = reader.at;
+            reader.take(len)?;
+            let mut header = live_header.to_vec();
+            header[end..reader.at].fill(b'_');
+            header
+        }
+    };
 
     if current.bodies.len() != old.bodies.len() || current.bodies.len() != new.bodies.len() {
         return Err("Method count changed in shared UI bytecode".into());
@@ -1536,6 +1576,30 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn title_restore_preserves_appended_hud_constants() {
+        fn movie(strings: &[&str]) -> Vec<u8> {
+            let mut abc = vec![16, 0, 46, 0, 0, 0, 0];
+            put(&mut abc, strings.len() + 1);
+            for value in strings {
+                put(&mut abc, value.len());
+                abc.extend(value.as_bytes());
+            }
+            abc.extend([0; 8]);
+            abc
+        }
+
+        let before = movie(&["original"]);
+        let after = movie(&["original", MARKER, "title"]);
+        let live = movie(&["original", MARKER, "title", "HUD edit"]);
+        let restored = revert(&live, &before, &after).unwrap().unwrap();
+        let abc = Abc::parse(&restored).unwrap();
+        assert_eq!(&abc.strings.values[3..], &["title", "HUD edit"]);
+        assert!(!abc.strings.values.iter().any(|value| value == MARKER));
+        let conflict = movie(&["changed", MARKER, "title", "HUD edit"]);
+        assert!(revert(&conflict, &before, &after).is_err());
+    }
 
     #[test]
     fn recognizes_modified_xp_title_branch_prefix() {
