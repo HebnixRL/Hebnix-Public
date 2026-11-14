@@ -1693,6 +1693,23 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    // hebnix.chat.history(limit?) -> the last `limit` exported messages (default 100),
+    // oldest first, each { time, player, message }. Needs the chat export mod on.
+    #[cfg(not(feature = "lite"))]
+    chat.set(
+        "history",
+        lua.create_function(|lua, limit: Option<usize>| {
+            let text = std::fs::read_to_string(crate::patcher::chat_export::output_path()).unwrap_or_default();
+            let mut messages: Vec<serde_json::Value> = text
+                .lines()
+                .rev()
+                .take(limit.unwrap_or(100))
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            messages.reverse();
+            to_lua(lua, &messages)
+        })?,
+    )?;
     hebnix.set("chat", chat)?;
     #[cfg(not(feature = "lite"))]
     install_screen_api(lua, &hebnix)?;

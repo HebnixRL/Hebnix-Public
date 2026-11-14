@@ -20,6 +20,7 @@ function Start-RelocatedApp([string]$path) {
     $info.WorkingDirectory = [IO.Path]::GetDirectoryName($path)
     $info.Arguments = $arguments -join ' '
     $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
     return [Diagnostics.Process]::Start($info)
 }
 try {

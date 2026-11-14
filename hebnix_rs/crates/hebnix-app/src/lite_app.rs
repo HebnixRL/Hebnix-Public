@@ -19,7 +19,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.3.0";
+pub const APP_VERSION: &str = "2.3.2";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -1433,6 +1433,7 @@ impl LiteApp {
             .collapsible(false)
             .resizable(false)
             .default_width(520.0)
+            .max_height(ctx.content_rect().height() * 0.85)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {

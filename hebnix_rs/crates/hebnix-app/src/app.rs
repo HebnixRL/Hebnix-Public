@@ -50,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.3.0";
+pub const APP_VERSION: &str = "2.3.2";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -696,6 +696,7 @@ pub struct HebnixApp {
     spoofer_friends: HashMap<String, FriendSpoofState>,
     friends_search: String,
     item_clear_error: Option<String>,
+    item_clear_prompt_dismissed: bool,
     items_mode: ItemsMode,
 
     patcher_ball: crate::ball::PatcherState,
@@ -1282,6 +1283,7 @@ impl HebnixApp {
             spoofer_friends,
             friends_search: String::new(),
             item_clear_error: None,
+            item_clear_prompt_dismissed: false,
             items_mode: default_items_mode,
             patcher_ball,
             patcher_boost,
@@ -6099,14 +6101,14 @@ impl HebnixApp {
                 self.item_clear_error = None;
             }
             Err(error) => {
-                self.item_clear_error =
-                    Some(format!("Clear incomplete: {error}. Check Again or Cancel."));
+                self.item_clear_error = Some(format!("Clear incomplete: {error}"));
             }
         }
     }
 
     fn render_item_clear_prompt(&mut self, ctx: &egui::Context) {
-        if !self.spoofer_mgr.item_status().clearing {
+        let status = self.spoofer_mgr.item_status();
+        if !status.clearing || self.item_clear_prompt_dismissed {
             return;
         }
         let mut check = false;
@@ -6115,11 +6117,18 @@ impl HebnixApp {
             ui.heading("Clear Items");
             ui.label("Removes tracked instances from the most recently saved RL account's inventory and equipped loadouts, including rotating save copies. Original saves are backed up before editing.");
             ui.label("Close Rocket League and Item Spawner to remove tracked items. Your normal inventory will not be removed.");
-            ui.weak(self.spoofer_mgr.item_status().text);
+            ui.weak(status.text);
             if let Some(error) = &self.item_clear_error { ui.label(error); }
+            if !status.can_cancel {
+                ui.label("Cleanup will retry the next time you open Hebnix.");
+            }
             ui.horizontal(|ui| {
                 check = ui.button("Check Again").clicked();
-                cancel = ui.add_enabled(self.spoofer_mgr.item_status().can_cancel, egui::Button::new("Cancel")).clicked();
+                if status.can_cancel {
+                    cancel = ui.button("Cancel").clicked();
+                } else if ui.button("Dismiss").clicked() {
+                    self.item_clear_prompt_dismissed = true;
+                }
             });
         });
         if check {
@@ -6402,6 +6411,7 @@ impl HebnixApp {
             .collapsible(false)
             .resizable(false)
             .default_width(520.0)
+            .max_height(ctx.content_rect().height() * 0.85)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
