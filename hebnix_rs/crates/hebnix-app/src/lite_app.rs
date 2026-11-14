@@ -728,7 +728,14 @@ impl LiteApp {
                     if let Ok(Some(info)) = result {
                         self.console
                             .write(format!("[Core] Update available: v{}", info.version));
-                        if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
+                        if !cfg!(windows) {
+                            #[cfg(target_os = "linux")]
+                            self.console.write(crate::update::linux_update_hint(false));
+                            #[cfg(not(target_os = "linux"))]
+                            self.console.write(
+                                "[Core] To update: download the new version from https://hebnix.com/download.",
+                            );
+                        } else if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
                             self.console.write(
                                 "[Core] skip_update_lock is set in portable.txt, not locking for the update.",
                             );

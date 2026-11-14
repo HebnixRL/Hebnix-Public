@@ -176,6 +176,8 @@ pub enum AppMsg {
     AppUpdateFailed {
         error: String,
     },
+    #[cfg(target_os = "linux")]
+    AppImageUpdateDone { result: Result<(), String> },
     PluginUpdatesFound {
         updates: Result<Vec<Value>, String>,
     },

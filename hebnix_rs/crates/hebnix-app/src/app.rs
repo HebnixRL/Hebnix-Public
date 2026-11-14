@@ -650,6 +650,8 @@ pub struct HebnixApp {
     plugin_monitor_checked: Option<std::time::Instant>,
     update_info: Option<crate::update::UpdateInfo>,
     update_downloading: bool,
+    #[cfg(target_os = "linux")]
+    appimage_update: Option<crate::update::AppImageBanner>,
     update_error: Option<String>,
     update_progress: crate::update::SharedProgress,
     maintenance: crate::maintenance::UninstallUi,
@@ -1239,6 +1241,8 @@ impl HebnixApp {
             plugin_monitor_checked: None,
             update_info: None,
             update_downloading: false,
+            #[cfg(target_os = "linux")]
+            appimage_update: None,
             update_error: None,
             update_progress: Default::default(),
             maintenance: Default::default(),
@@ -2743,7 +2747,25 @@ impl HebnixApp {
                     Ok(Some(info)) => {
                         self.console
                             .write(format!("[Core] Update available: v{}", info.version));
-                        if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
+                        if !cfg!(windows) {
+                            #[cfg(target_os = "linux")]
+                            {
+                                let in_app = crate::update::appimage_path().is_some();
+                                self.console.write(crate::update::linux_update_hint(in_app));
+                                if in_app {
+                                    self.appimage_update = Some(crate::update::AppImageBanner {
+                                        version: info.version,
+                                        downloading: false,
+                                        done: false,
+                                        error: None,
+                                    });
+                                }
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            self.console.write(
+                                "[Core] To update: download the new version from https://hebnix.com/download.",
+                            );
+                        } else if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
                             self.console.write(
                                 "[Core] skip_update_lock is set in portable.txt, not locking for the update.",
                             );
@@ -2843,6 +2865,16 @@ impl HebnixApp {
                             self.force_quit(ctx);
                         }
                         Err(error) => { self.maintenance.error = Some(error); }
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                AppMsg::AppImageUpdateDone { result } => {
+                    if let Some(banner) = self.appimage_update.as_mut() {
+                        banner.downloading = false;
+                        match result {
+                            Ok(()) => banner.done = true,
+                            Err(error) => banner.error = Some(error),
+                        }
                     }
                 }
                 AppMsg::AppUpdateFailed { error } => {
@@ -6409,6 +6441,65 @@ impl HebnixApp {
             });
     }
 
+    #[cfg(target_os = "linux")]
+    fn render_appimage_banner(&mut self, ctx: &egui::Context) {
+        let Some(banner) = self.appimage_update.as_mut() else {
+            return;
+        };
+        let mut dismiss = false;
+        let mut start = false;
+        egui::Window::new(t("appimage-update-title"))
+            .id(egui::Id::new("appimage_update_window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+            .show(ctx, |ui| {
+                if banner.done {
+                    ui.label(t("appimage-update-done"));
+                    dismiss = ui.button(t("tray-close")).clicked();
+                    return;
+                }
+                ui.label(t_args(
+                    "appimage-update-text",
+                    &[("version", banner.version.as_str().into())],
+                ));
+                if let Some(err) = &banner.error {
+                    ui.colored_label(egui::Color32::from_rgb(0xe7, 0x4c, 0x3c), err);
+                }
+                if banner.downloading {
+                    ui.add_enabled(false, egui::Button::new(t("update-downloading")));
+                    crate::update::render_progress(ui, &self.update_progress);
+                } else {
+                    ui.horizontal(|ui| {
+                        start = ui
+                            .add(
+                                egui::Button::new(t("update-button"))
+                                    .fill(egui::Color32::from_rgb(0x2e, 0xcc, 0x71)),
+                            )
+                            .clicked();
+                        dismiss = ui.button(t("appimage-update-later")).clicked();
+                    });
+                }
+            });
+        if start {
+            banner.downloading = true;
+            banner.error = None;
+            let version = banner.version.clone();
+            let progress = self.update_progress.clone();
+            *progress.lock().unwrap() = Default::default();
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = crate::update::download_appimage(&version, &progress);
+                let _ = tx.send(AppMsg::AppImageUpdateDone { result });
+                ctx.request_repaint();
+            });
+        }
+        if dismiss {
+            self.appimage_update = None;
+        }
+    }
+
     fn render_changelog_popup(&mut self, ctx: &egui::Context) {
         let Some(entry) = self.changelog_popup.clone() else {
             return;
@@ -7635,6 +7726,8 @@ impl eframe::App for HebnixApp {
             self.render_fullscreen_notice(ctx);
             self.render_launch_path_notice(ctx);
             self.render_changelog_popup(ctx);
+            #[cfg(target_os = "linux")]
+            self.render_appimage_banner(ctx);
             let repair_was_running = self.epic_repair.running;
             self.epic_repair.show(ctx);
             if !repair_was_running && self.epic_repair.running {
