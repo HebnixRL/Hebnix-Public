@@ -411,6 +411,124 @@ fn validate_executable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+const RELEASES_URL: &str = "https://github.com/HebnixRL/Hebnix-Public/releases";
+
+/// State of the non-blocking AppImage update banner.
+#[cfg(target_os = "linux")]
+pub struct AppImageBanner {
+    pub version: String,
+    pub downloading: bool,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+/// Path of the running AppImage, set by the AppImage runtime.
+#[cfg(target_os = "linux")]
+pub fn appimage_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPIMAGE")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+}
+
+/// Console line telling a Linux user how to update. `in_app` means the AppImage banner handles it.
+#[cfg(target_os = "linux")]
+pub fn linux_update_hint(in_app: bool) -> String {
+    let how = if appimage_path().is_some() {
+        if in_app {
+            "use the update banner to replace this AppImage".to_string()
+        } else {
+            format!("download the new AppImage from {RELEASES_URL}/latest")
+        }
+    } else if std::env::current_exe().is_ok_and(|p| p.starts_with("/usr")) {
+        "update with your package manager (Arch: `sudo pacman -Syu`, or your AUR helper for hebnix-linux-bin)".to_string()
+    } else {
+        format!("download the new tarball from {RELEASES_URL}/latest")
+    };
+    format!("[Core] To update: {how}.")
+}
+
+/// Download the release AppImage and rename it over the running one. Linux lets a
+/// running file be replaced by rename, so the new version takes effect on restart.
+#[cfg(target_os = "linux")]
+pub fn download_appimage(version: &str, progress: &SharedProgress) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    let target = appimage_path().ok_or("Not running from an AppImage.")?;
+    if version.is_empty()
+        || !version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err("Invalid version string.".into());
+    }
+    let url = format!("{RELEASES_URL}/download/v{version}/Hebnix-{version}-x86_64.AppImage");
+    let mut tmp_name = target.file_name().ok_or("AppImage has no file name")?.to_owned();
+    tmp_name.push(".new");
+    let tmp = target.with_file_name(tmp_name);
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| format!("Cannot stage the update in {}: {e}", tmp.display()))?;
+        let response = ureq::AgentBuilder::new()
+            .try_proxy_from_env(false)
+            .build()
+            .get(&url)
+            .set("Accept-Encoding", "identity")
+            .timeout(Duration::from_secs(600))
+            .call()
+            .map_err(|e| format!("Failed to download update: {e}"))?;
+        let total = response
+            .header("Content-Length")
+            .and_then(|s| s.parse::<u64>().ok());
+        *progress.lock().unwrap() = DownloadProgress {
+            total,
+            ..Default::default()
+        };
+        let mut reader = response.into_reader();
+        let mut buffer = [0u8; 65536];
+        let mut downloaded = 0u64;
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .map_err(|e| format!("Download interrupted: {e}"))?;
+            if count == 0 {
+                break;
+            }
+            file.write_all(&buffer[..count]).map_err(|e| e.to_string())?;
+            downloaded += count as u64;
+            progress.lock().unwrap().downloaded = downloaded;
+        }
+        if total.is_some_and(|n| n != downloaded) {
+            return Err("Incomplete update download.".into());
+        }
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        let mut magic = [0u8; 4];
+        std::fs::File::open(&tmp)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .map_err(|e| e.to_string())?;
+        if &magic != b"\x7fELF" {
+            return Err("The downloaded update is not an AppImage.".into());
+        }
+        let mode = std::fs::metadata(&target)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode | 0o111))
+            .map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &target)
+            .map_err(|e| format!("Cannot replace {}: {e}", target.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
