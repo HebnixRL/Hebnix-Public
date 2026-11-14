@@ -369,6 +369,7 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
         &live[..header_end(&current, live.len())],
         &before[..header_end(&old, before.len())],
         &after[..header_end(&new, after.len())],
+        "ABC header (including constant pools)",
     )?
     .to_vec();
 
@@ -383,6 +384,7 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
             &live[current.span.clone()],
             &before[old.span.clone()],
             &after[new.span.clone()],
+            &format!("ABC method {}", current.id),
         )?);
     }
     if output == live {
@@ -392,13 +394,18 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
     Ok(Some(output))
 }
 
-fn select_original<'a>(live: &'a [u8], before: &'a [u8], after: &[u8]) -> Result<&'a [u8]> {
+fn select_original<'a>(
+    live: &'a [u8],
+    before: &'a [u8],
+    after: &[u8],
+    section: &str,
+) -> Result<&'a [u8]> {
     if before == after || live == before {
         Ok(live)
     } else if live == after {
         Ok(before)
     } else {
-        Err("Another edit changed the same UI bytecode".into())
+        Err(format!("Another edit changed the same UI bytecode in the {section}"))
     }
 }
 
@@ -494,6 +501,27 @@ fn prologue_len(code: &[u8]) -> Result<usize> {
         return Err("Unsupported title method prologue".into());
     }
     Ok(r.at)
+}
+
+fn modified_xp_title(code: &[u8]) -> bool {
+    let mut r = Reader { data: code, at: 0 };
+    r.byte().ok() == Some(0xd0)
+        && r.byte().ok() == Some(0x66) // getproperty
+        && r.index().is_ok()
+        && r.byte().ok() == Some(0x2e) // pushuint
+        && r.index().is_ok()
+        && r.byte().ok() == Some(0x15) // iflt
+        && r.take(3).is_ok()
+}
+
+fn has_modified_row_xp_title(abc: &Abc, data: &[u8], class: &Class) -> bool {
+    class.fields.iter().any(|entry| {
+        entry.kind == 2
+            && abc.name(entry.name).is_ok_and(|name| name.local == "XPTitle")
+            && abc.bodies.iter().any(|body| {
+                Some(body.id) == entry.method && modified_xp_title(&data[body.code.clone()])
+            })
+    })
 }
 
 /// Extract only the known straight-line native DataAPI getter expression.
@@ -1250,14 +1278,19 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
             .find(|body| body.id == *id)
             .ok_or("Title getter has no body")?;
         let original = &data[body.code.clone()];
-        let prologue = prologue_len(original).map_err(|error| {
+        let added_scope = row.as_ref().is_some_and(|(source, field)| {
+            matches!(source, TitleIdSource::Property(name) if abc.name(*name).is_ok_and(|name| name.local == "PrimaryTitle"))
+                && field == "XPTitle"
+                && modified_xp_title(original)
+        });
+        let prologue = if added_scope { Ok(0) } else { prologue_len(original) }.map_err(|error| {
             let field = row.as_ref().map_or("GetTitleData", |(_, field)| field);
             format!(
                 "{error} in {field} (method {id}, starts with {:02x?})",
                 &original[..original.len().min(8)]
             )
         })?;
-        if body.exceptions != 0 || body.max_scope <= body.init_scope {
+        if body.exceptions != 0 || (!added_scope && body.max_scope <= body.init_scope) {
             return Err(format!(
                 "Unsupported title method framing: method {id}, exceptions {}, scope {}->{}, prefix {:02x?}",
                 body.exceptions,
@@ -1290,6 +1323,9 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
             }
         }
         let mut code = original[..prologue].to_vec();
+        if added_scope {
+            code.extend([0xd0, 0x30]); // getlocal_0, pushscope
+        }
         let source = |code: &mut Vec<u8>| {
             if let Some((source, _)) = row {
                 match source {
@@ -1386,56 +1422,66 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
                     lower,
                     &mut constants,
                 )?;
-                let text = native_player_value(&abc, data, class, "XPTitle", source)?;
-                let color = native_player_value(&abc, data, class, "TitleColor", source)?;
-                let glow = native_player_value(&abc, data, class, "TitleGlowColor", source)?;
-                for rule in rules.iter().filter(|rule| rule.target_id.is_some()) {
-                    let Some(appearance) = &rule.original else {
-                        continue;
-                    };
-                    if appearance.text.is_empty() {
-                        continue;
-                    }
-                    code.extend_from_slice(text);
-                    code.push(0x20);
-                    let null = branch(&mut code, 0x13);
-                    code.extend_from_slice(text);
-                    op(&mut code, 0x46, lower);
-                    put(&mut code, 0);
-                    op(
-                        &mut code,
-                        0x2c,
-                        constants.string(&appearance.text.to_ascii_lowercase()),
-                    );
-                    let mismatch = branch(&mut code, 0x14);
-                    let color_mismatch = appearance.color.map(|value| {
-                        code.extend_from_slice(color);
+                // A modified getter can have branches and cannot be inlined as
+                // a native expression. ID and local-player matching still apply.
+                if !matches!(source, TitleIdSource::Property(_))
+                    || !has_modified_row_xp_title(&abc, data, class)
+                {
+                    let text = native_player_value(&abc, data, class, "XPTitle", source)?;
+                    let color = native_player_value(&abc, data, class, "TitleColor", source)?;
+                    let glow = native_player_value(&abc, data, class, "TitleGlowColor", source)?;
+                    for rule in rules.iter().filter(|rule| rule.target_id.is_some()) {
+                        let Some(appearance) = &rule.original else {
+                            continue;
+                        };
+                        if appearance.text.is_empty() {
+                            continue;
+                        }
+                        code.extend_from_slice(text);
+                        code.push(0x20);
+                        let null = branch(&mut code, 0x13);
+                        code.extend_from_slice(text);
+                        op(&mut code, 0x46, lower);
+                        put(&mut code, 0);
+                        op(
+                            &mut code,
+                            0x2c,
+                            constants.string(&appearance.text.to_ascii_lowercase()),
+                        );
+                        let mismatch = branch(&mut code, 0x14);
+                        let color_mismatch = appearance.color.map(|value| {
+                            code.extend_from_slice(color);
+                            op(&mut code, 0x2e, constants.uint(0xffffff));
+                            code.push(0xa8); // bitand: ignore native ARGB alpha
+                            op(&mut code, 0x2e, constants.uint(value));
+                            branch(&mut code, 0x14)
+                        });
+                        code.extend_from_slice(glow);
                         op(&mut code, 0x2e, constants.uint(0xffffff));
-                        code.push(0xa8); // bitand: ignore native ARGB alpha
-                        op(&mut code, 0x2e, constants.uint(value));
-                        branch(&mut code, 0x14)
-                    });
-                    code.extend_from_slice(glow);
-                    op(&mut code, 0x2e, constants.uint(0xffffff));
-                    code.push(0xa8);
-                    op(&mut code, 0x2e, constants.uint(appearance.glow_color));
-                    let glow_mismatch = branch(&mut code, 0x14);
-                    literal(&mut code, field, rule, &mut constants);
-                    code.push(0x48);
-                    let end = code.len();
-                    for at in [
-                        Some(null),
-                        Some(mismatch),
-                        color_mismatch,
-                        Some(glow_mismatch),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        bind(&mut code, at, end)?;
+                        code.push(0xa8);
+                        op(&mut code, 0x2e, constants.uint(appearance.glow_color));
+                        let glow_mismatch = branch(&mut code, 0x14);
+                        literal(&mut code, field, rule, &mut constants);
+                        code.push(0x48);
+                        let end = code.len();
+                        for at in [
+                            Some(null),
+                            Some(mismatch),
+                            color_mismatch,
+                            Some(glow_mismatch),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            bind(&mut code, at, end)?;
+                        }
                     }
                 }
             }
+        }
+        if added_scope {
+            // Restore the original scope depth before entering the intact body.
+            code.push(0x1d); // popscope
         }
         code.extend_from_slice(&original[prologue..]);
         let mut replacement = Vec::new();
@@ -1444,7 +1490,7 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
             body.stack.max(6),
             body.locals,
             body.init_scope,
-            body.max_scope,
+            body.max_scope.max(body.init_scope + usize::from(added_scope)),
             code.len(),
         ] {
             put(&mut replacement, n);
@@ -1490,6 +1536,14 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn recognizes_modified_xp_title_branch_prefix() {
+        let code = [0xd0, 0x66, 0xec, 1, 0x2e, 1, 0x15, 0x78, 0, 0];
+        assert!(modified_xp_title(&code));
+        assert!(!modified_xp_title(&code[..8]));
+        assert!(!modified_xp_title(&[0xd0, 0x30, 0x48]));
+    }
 
     #[test]
     fn title_prologue_accepts_equivalent_scope_setup() {

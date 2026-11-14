@@ -782,7 +782,8 @@ fn run(
             let backup = root.join(format!("{file}.original"));
             let package = UpkPackage::load(&live)?;
             let (package, restored) = if let Some(old) = groups.get(&file) {
-                baseline(package, &root, &backup, old)?
+                baseline(package, &root, &backup, old)
+                    .map_err(|error| format!("{file}: {error}"))?
             } else {
                 (package, false)
             };
