@@ -110,6 +110,10 @@ impl PluginManager {
                 is_gui_open: true,
                 rl_connected: false,
                 in_match: false,
+                #[cfg(not(feature = "lite"))]
+                local_chat_enabled: false,
+                #[cfg(not(feature = "lite"))]
+                local_chat_socket: None,
                 app_version: app_version.to_string(),
                 platform: String::new(),
                 suppress_plugin_logs: false,

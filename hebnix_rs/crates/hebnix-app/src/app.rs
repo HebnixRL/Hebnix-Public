@@ -639,6 +639,7 @@ pub struct HebnixApp {
     last_size: (u32, u32),
     overlay: crate::overlay::Overlay,
     native_overlay: crate::overlay::native::NativeOverlay,
+    network: network::Network,
     toasts: crate::toast::ToastCenter,
     toast_view: crate::ui::toasts::ToastView,
     webview: Option<crate::webview::host::WebviewHost>,
@@ -713,6 +714,7 @@ pub struct HebnixApp {
     bots_freeplay: crate::patcher::bots_freeplay::State,
     delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
+    chat_test: crate::patcher::chat_test::State,
     lan_commands: crate::patcher::lan_commands::State,
     chat_paste: crate::patcher::chat_paste::State,
     instant_suite: crate::patcher::instant_suite::State,
@@ -926,6 +928,7 @@ impl HebnixApp {
 
         crate::screen::init(tx.clone());
         let mut plugin_mgr = PluginManager::new(plugin_dir.clone(), tx.clone(), APP_VERSION);
+        plugin_mgr.shared.borrow_mut().local_chat_socket = Some(Arc::clone(&ws_stats));
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
 
@@ -1227,6 +1230,7 @@ impl HebnixApp {
             last_size,
             overlay: crate::overlay::Overlay::new(),
             native_overlay: crate::overlay::native::NativeOverlay::new(),
+            network: Default::default(),
             toasts: Default::default(),
             toast_view: Default::default(),
             webview: None,
@@ -1299,6 +1303,7 @@ impl HebnixApp {
             bots_freeplay: Default::default(),
             delete_backups: Default::default(),
             chat_export: Default::default(),
+            chat_test: Default::default(),
             lan_commands: Default::default(),
             chat_paste: Default::default(),
             instant_suite: Default::default(),
@@ -1497,6 +1502,10 @@ impl HebnixApp {
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
                     self.chat_export.render(ui, &cooked_pc, &backups_dir);
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    self.chat_test.render(ui, &cooked_pc, &backups_dir, &self.ws_stats);
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
@@ -5889,7 +5898,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
                     || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
                     || self.scoreboard.busy()
                     || self.workshop.maintenance_busy()
@@ -7417,6 +7426,7 @@ impl eframe::App for HebnixApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.network.tick(ctx, &mut self.toasts, self.last_rl_open);
         self.freeplay.poll_patch(ctx, &self.config.settings.rl_path);
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
@@ -7435,11 +7445,16 @@ impl eframe::App for HebnixApp {
         }
         self.check_game_update(ctx);
         let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
+        self.chat_test.tick();
+        self.plugin_mgr.shared.borrow_mut().local_chat_enabled =
+            !self.recovery_running() && !self.chat_test.busy()
+                && crate::patcher::chat_test::enabled(&cooked.join("Backups"));
         if !self.recovery_running() {
             self.instant_suite.tick(&cooked, &cooked.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
             if self.instant_suite.busy() {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+
             self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
             self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
             self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
@@ -7566,6 +7581,7 @@ impl eframe::App for HebnixApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                        self.render_network_button(ui);
                         ui.label(
                             egui::RichText::new(&self.status_text)
                                 .strong()
@@ -8502,11 +8518,16 @@ impl HebnixApp {
         }
     }
 
+    fn render_network_button(&mut self, ui: &mut egui::Ui) {
+        self.network.render_button(ui);
+    }
+
     fn render_themed_sidebar_footer(&mut self, ui: &mut egui::Ui) {
         self.render_action_button(ui);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+            self.render_network_button(ui);
             ui.add(egui::Label::new(egui::RichText::new(t("tab-notifications")).small()).wrap());
         });
         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
@@ -8534,6 +8555,7 @@ impl HebnixApp {
                     p.toolbar_actions(ui, |ui| {
                         self.render_action_button(ui);
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                        self.render_network_button(ui);
                         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                             .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
                     });
@@ -8546,3 +8568,5 @@ impl HebnixApp {
         });
     }
 }
+
+mod network;

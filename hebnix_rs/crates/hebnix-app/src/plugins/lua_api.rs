@@ -27,11 +27,15 @@ use crate::plugins::window_capture::WindowCaptureRegistry;
 use rodio::{Decoder, OutputStream, Sink};
 
 /// app-wide state visible to plugins (set each frame)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostShared {
     pub is_gui_open: bool,
     pub rl_connected: bool,
     pub in_match: bool,
+    #[cfg(not(feature = "lite"))]
+    pub local_chat_enabled: bool,
+    #[cfg(not(feature = "lite"))]
+    pub local_chat_socket: Option<std::sync::Arc<hebnix_sdk::stats::websocket::WsStatsClient>>,
     pub app_version: String,
     /// Detected game platform ("steam", "epic", or "" if unknown).
     pub platform: String,
@@ -1710,6 +1714,22 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
             to_lua(lua, &messages)
         })?,
     )?;
+    #[cfg(not(feature = "lite"))]
+    {
+        let host = Rc::clone(&host);
+        // hebnix.chat.msg(text) -> true once queued on the local StatsAPI socket.
+        chat.set("msg", lua.create_function(move |_, text: String| {
+            let shared = host.shared.borrow();
+            if !shared.local_chat_enabled {
+                return Err(mlua::Error::RuntimeError("Enable Chat Test in Game Mods first.".into()));
+            }
+            let socket = shared.local_chat_socket.as_ref().ok_or_else(|| {
+                mlua::Error::RuntimeError("Rocket League StatsAPI is disconnected.".into())
+            })?;
+            crate::patcher::chat_test::send(socket, &text).map_err(mlua::Error::RuntimeError)?;
+            Ok(true)
+        })?)?;
+    }
     hebnix.set("chat", chat)?;
     #[cfg(not(feature = "lite"))]
     install_screen_api(lua, &hebnix)?;

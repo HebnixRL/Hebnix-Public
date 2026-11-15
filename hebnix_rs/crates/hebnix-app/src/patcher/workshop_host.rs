@@ -20,7 +20,7 @@ use super::game_path;
 use std::path::Path;
 
 const PACKAGE: &str = "TAGame.upk";
-const COMMAND: &str = "MatchStatsExporter_TA.ProcessSocketCommand";
+pub(super) const COMMAND: &str = "MatchStatsExporter_TA.ProcessSocketCommand";
 const WORKSHOP: &str = "GFxData_Workshop_TA";
 /// The stats socket message Hebnix sends, and the file with the path to load.
 pub const MESSAGE: &str = "HebnixHost";
@@ -37,18 +37,18 @@ const FREEPLAY_ENABLED: &str = "Freeplay.enabled";
 const LAN_NAME: &str = "HbxLanName.txt";
 const LAN_PASSWORD: &str = "HbxLanPassword.txt";
 
-fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
+pub(super) fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
     upk.find_object(path).ok_or_else(|| format!("{path} was not found in {PACKAGE}"))
 }
 
-fn field(upk: &UpkPackage, op: u8, path: &str) -> Result<Script, String> {
+pub(super) fn field(upk: &UpkPackage, op: u8, path: &str) -> Result<Script, String> {
     let mut s = Script::new();
     s.raw(&[op]).object(object(upk, path)?);
     Ok(s)
 }
 
 /// A final-function call: the function, its arguments, end.
-fn call(upk: &UpkPackage, path: &str, args: &[Script]) -> Result<Script, String> {
+pub(super) fn call(upk: &UpkPackage, path: &str, args: &[Script]) -> Result<Script, String> {
     let mut s = field(upk, 0x1c, path)?;
     for arg in args {
         s.append(arg);
@@ -58,7 +58,7 @@ fn call(upk: &UpkPackage, path: &str, args: &[Script]) -> Result<Script, String>
 }
 
 /// Context: `target.body`, the size of the body in memory, the return property.
-fn context(upk: &UpkPackage, target: Script, body: Script, property: Option<&str>) -> Result<Script, String> {
+pub(super) fn context(upk: &UpkPackage, target: Script, body: Script, property: Option<&str>) -> Result<Script, String> {
     let size = u16::try_from(body.mem_size()).map_err(|_| "The host block's context is too long".to_string())?;
     let mut s = Script::new();
     s.raw(&[0x19, 0]).append(&target).raw(&size.to_le_bytes());
@@ -67,7 +67,7 @@ fn context(upk: &UpkPackage, target: Script, body: Script, property: Option<&str
     Ok(s)
 }
 
-fn native(opcode: u8, args: &[Script]) -> Script {
+pub(super) fn native(opcode: u8, args: &[Script]) -> Script {
     let mut s = Script::new();
     s.raw(&[opcode]);
     for arg in args {
@@ -77,14 +77,14 @@ fn native(opcode: u8, args: &[Script]) -> Script {
     s
 }
 
-fn string(text: &str) -> Script {
+pub(super) fn string(text: &str) -> Script {
     let mut s = Script::new();
     s.raw(&[0x1f]).raw(text.as_bytes()).raw(&[0x00]);
     s
 }
 
 /// The player's data store: PrimaryPC.GetLocalPlayer() then GFxShell_TA.GetShell(..).DataStore.
-fn store(upk: &UpkPackage) -> Result<Script, String> {
+pub(super) fn store(upk: &UpkPackage) -> Result<Script, String> {
     let player = context(
         upk,
         field(upk, 0x01, "MatchStatsExporter_TA.PrimaryPC")?,
@@ -119,7 +119,7 @@ fn native_nothing() -> Script {
     s
 }
 
-fn jump(target: usize, condition: &Script) -> Result<Script, String> {
+pub(super) fn jump(target: usize, condition: &Script) -> Result<Script, String> {
     let target = u16::try_from(target).map_err(|_| "The host block's jump is past the script limit".to_string())?;
     let mut s = Script::new();
     s.raw(&[0x07]).raw(&target.to_le_bytes()).append(condition);
@@ -170,7 +170,7 @@ fn block(upk: &UpkPackage, base: usize) -> Result<Script, String> {
     Ok(out)
 }
 
-fn payload(upk: &UpkPackage) -> Result<(usize, Script), String> {
+pub(super) fn payload(upk: &UpkPackage) -> Result<(usize, Script), String> {
     let index = object(upk, COMMAND).ok().filter(|i| *i > 0).ok_or("ProcessSocketCommand was not found")? as usize - 1;
     let export = &upk.exports[index];
     let bytes = &upk.image[export.serial_offset..export.serial_offset + export.serial_size];

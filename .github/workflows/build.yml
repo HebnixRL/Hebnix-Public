@@ -37,10 +37,10 @@ jobs:
 
           # portable variants drop a portable.txt so the app keeps data in the exe folder
           Copy-Item "$release\hebnix.exe"      stage\hebnix\
-          Copy-Item "$release\hebnix-lite.exe" stage\hebnix-lite\
+          Copy-Item "$release\hebnix-lite.exe" 'stage\hebnix-lite\Hebnix Lite.exe'
 
           Copy-Item "$release\hebnix.exe"      stage\hebnix-portable\
-          Copy-Item "$release\hebnix-lite.exe" stage\hebnix-lite-portable\
+          Copy-Item "$release\hebnix-lite.exe" 'stage\hebnix-lite-portable\Hebnix Lite.exe'
 
           $marker = 'keep hebnix data in this folder instead of %AppData%\Hebnix'
           Set-Content stage\hebnix-portable\portable.txt      $marker

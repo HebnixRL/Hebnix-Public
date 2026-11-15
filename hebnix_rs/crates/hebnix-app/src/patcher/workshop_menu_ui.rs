@@ -178,8 +178,26 @@ impl Movie {
     /// whether the live package holds the patched movie
     pub(super) fn status(&self, cooked: &Path) -> bool {
         UpkPackage::load(&game_path::resolve(cooked, self.package))
-            .and_then(|upk| self.movie(&upk))
-            .is_ok_and(|swf| self.is_patched(&digest(&swf)))
+            .and_then(|upk| {
+                let swf = self.movie(&upk)?;
+                if self.is_patched(&digest(&swf)) {
+                    return Ok(true);
+                }
+                Ok(self.clean_movie(&self.backup_path(&cooked.join("Backups")))
+                    .is_some_and(|vanilla| self.remove_from_movie(&swf, &vanilla).is_ok_and(|edit| edit.is_some())))
+            })
+            .unwrap_or(false)
+    }
+
+    fn remove_from_movie(&self, current: &[u8], vanilla: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let remove = |template| super::title_patcher::movie::apply_template(current, template, vanilla);
+        match remove(self.patched) {
+            Err(error) => match self.menu_only()? {
+                Some(template) => remove(template),
+                None => Err(error),
+            },
+            result => result,
+        }
     }
 
     /// one marker per movie, so one movie's check can't vouch for the other's backup
@@ -240,7 +258,7 @@ impl Movie {
             return Ok(());
         }
         let vanilla = if current_hash == self.vanilla {
-            Some(current)
+            Some(current.clone())
         } else {
             self.clean_movie(&backup)
                 .or_else(|| self.clean_movie(&backups.join(self.package)))
@@ -266,6 +284,16 @@ impl Movie {
             self.package, current_hash
         ))?;
 
+        let merged = if already_current {
+            None
+        } else if current_hash == self.vanilla || self.is_patched(&current_hash) {
+            Some(desired.to_vec())
+        } else {
+            let baseline = self.remove_from_movie(&current, &vanilla).ok().flatten();
+            super::title_patcher::movie::apply_template(
+                baseline.as_deref().unwrap_or(&current), &vanilla, desired,
+            ).map_err(|error| format!("{}: {error}", self.package))?
+        };
         backup_guard::prepare(cooked, backups, &self.marker(), |name| self.is_backup(name))?;
         if self.clean_movie(&backup).is_none() {
             let temp = backup.with_extension("recovery.tmp");
@@ -286,11 +314,10 @@ impl Movie {
             let _ = fs::remove_file(&temp);
             result?;
         }
-        if already_current {
-            Ok(())
-        } else {
-            self.install_movie(cooked, &mut upk, desired)
+        if let Some(merged) = merged {
+            self.install_movie(cooked, &mut upk, &merged)?;
         }
+        Ok(())
     }
 
     pub(super) fn install_movie(
@@ -321,13 +348,24 @@ impl Movie {
     /// Restore only the backed-up movie and keep other package exports.
     pub(super) fn restore(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
         let backup = self.backup_path(backups);
-        if !self.status(cooked) {
-            return Ok(());
-        }
         let mut live = UpkPackage::load(&game_path::resolve(cooked, self.package))?;
-        let vanilla = self.recover_original(cooked, backups, &live)
-            .ok_or_else(|| format!("No verified original menu for {} to restore", self.package))?;
-        self.install_movie(cooked, &mut live, &vanilla)?;
+        let current = self.movie(&live)?;
+        let current_hash = digest(&current);
+        if current_hash != self.vanilla {
+            let Some(vanilla) = self.recover_original(cooked, backups, &live) else {
+                if backup.is_file() || self.is_patched(&current_hash) {
+                    return Err(format!("No verified original menu for {} to restore", self.package));
+                }
+                return Ok(());
+            };
+            if self.is_patched(&current_hash) {
+                self.install_movie(cooked, &mut live, &vanilla)?;
+            } else if backup.is_file() {
+                if let Some(merged) = self.remove_from_movie(&current, &vanilla)? {
+                    self.install_movie(cooked, &mut live, &merged)?;
+                }
+            }
+        }
         let _ = fs::remove_file(backup);
         let _ = fs::remove_file(backups.join(self.marker()));
         Ok(())

@@ -216,6 +216,7 @@ fn recover_game_mods(cooked: &Path, archive: &Path) -> Result<(), String> {
         }
     }
     super::chat_export::recover_after_update(cooked, archive)?;
+    super::chat_test::recover_after_update(cooked, archive)?;
     if let Some(scale) = super::goal_explosion::current(archive)
         && super::goal_explosion::current(&backups).is_none()
     {
