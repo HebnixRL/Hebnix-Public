@@ -24,6 +24,9 @@ Requires: repo-add (pacman-contrib), boto3, and R2 credentials via env vars:
   R2_ACCESS_KEY_ID       R2 API token access key
   R2_SECRET_ACCESS_KEY   R2 API token secret key
   R2_BUCKET              bucket name (default: hebnix-linux)
+  GPG_KEY_ID             optional: sign packages, db and files with this key (it
+                         must be in the running gpg keyring). Signed repos also
+                         get the public key at hebnix-linux.gpg in the bucket root.
 
 Usage:
   R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \\
@@ -118,13 +121,27 @@ def download_existing_db(client, bucket: str, staging: Path) -> None:
             print(f"no existing {key} in bucket yet ({e.__class__.__name__}), starting fresh")
 
 
-def run_repo_add(staging: Path, package_files: list[Path]) -> None:
+def sign_file(path: Path, key_id: str) -> Path:
+    """Detached binary signature next to `path`, as pacman expects (<file>.sig)."""
+    sig = path.with_name(path.name + ".sig")
+    sig.unlink(missing_ok=True)
+    subprocess.run(
+        ["gpg", "--batch", "--yes", "--detach-sign", "--no-armor", "--local-user", key_id, "--output", str(sig), str(path)],
+        check=True,
+    )
+    return sig
+
+
+def run_repo_add(staging: Path, package_files: list[Path], key_id: str | None) -> None:
     if not package_files:
         eprint("error: no .pkg.tar.zst files found to add")
         sys.exit(1)
 
     db_path = staging / f"{REPO_NAME}.db.tar.gz"
-    cmd = ["repo-add", "--remove", str(db_path)] + [str(p) for p in package_files]
+    cmd = ["repo-add", "--remove"]
+    if key_id:
+        cmd += ["--sign", "--key", key_id]
+    cmd += [str(db_path)] + [str(p) for p in package_files]
     print(f"$ {' '.join(cmd)}")
     subprocess.run(cmd, cwd=staging, check=True)
 
@@ -144,6 +161,11 @@ def resolve_db_outputs(staging: Path) -> dict[str, Path]:
         # bare name: same bytes, resolve the symlink repo-add makes (or
         # just reuse `real` directly if for some reason it isn't a symlink)
         outputs[bare.name] = real if not bare.is_symlink() else real
+        # repo-add --sign writes <real>.sig; pacman fetches <bare>.sig
+        sig = staging / f"{real.name}.sig"
+        if sig.exists():
+            outputs[sig.name] = sig
+            outputs[f"{bare.name}.sig"] = sig
     return outputs
 
 
@@ -235,6 +257,7 @@ def main() -> None:
 
     client = get_r2_client()
     bucket = args.bucket
+    key_id = os.environ.get("GPG_KEY_ID") or None
 
     staging = Path.cwd() / f".{REPO_NAME}-repo-staging"
     if staging.exists():
@@ -250,13 +273,17 @@ def main() -> None:
             shutil.copy2(pkg, dest)
             staged_packages.append(dest)
 
-        run_repo_add(staging, staged_packages)
+        sig_files: list[Path] = []
+        if key_id:
+            sig_files = [sign_file(pkg, key_id) for pkg in staged_packages]
+
+        run_repo_add(staging, staged_packages, key_id)
 
         db_outputs = resolve_db_outputs(staging)
 
         uploaded = 0
         skipped = 0
-        for pkg in staged_packages:
+        for pkg in staged_packages + sig_files:
             key = f"{ARCH}/{pkg.name}"
             if upload_file(client, bucket, key, pkg, force=args.force):
                 uploaded += 1
@@ -271,6 +298,13 @@ def main() -> None:
         for name, real_path in db_outputs.items():
             key = f"{ARCH}/{name}"
             if upload_file(client, bucket, key, real_path, force=args.force):
+                uploaded += 1
+            else:
+                skipped += 1
+
+        if key_id:
+            pubkey = Path(__file__).with_name("hebnix-linux.gpg")
+            if upload_file(client, bucket, "hebnix-linux.gpg", pubkey, force=args.force):
                 uploaded += 1
             else:
                 skipped += 1

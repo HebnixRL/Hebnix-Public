@@ -269,6 +269,7 @@ jobs:
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
     steps:
       - name: Check R2 credentials
         id: creds
@@ -308,6 +309,14 @@ jobs:
           chown -R builder /home/builder/pkg
           sudo -u builder bash -c 'cd ~/pkg && makepkg --noconfirm --nodeps'
           mkdir -p out && cp /home/builder/pkg/*.pkg.tar.zst out/
+
+      - name: Import signing key
+        if: steps.creds.outputs.run == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          [ -n "$GPG_PRIVATE_KEY" ] && [ -n "$GPG_KEY_ID" ] || { echo "::error::GPG_PRIVATE_KEY/GPG_KEY_ID not set"; exit 1; }
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
 
       - name: Publish to R2
         if: steps.creds.outputs.run == 'true'
