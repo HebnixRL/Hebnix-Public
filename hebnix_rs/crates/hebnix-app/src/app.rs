@@ -50,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.3.3";
+pub const APP_VERSION: &str = "2.3.4";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -639,6 +639,7 @@ pub struct HebnixApp {
     last_size: (u32, u32),
     overlay: crate::overlay::Overlay,
     native_overlay: crate::overlay::native::NativeOverlay,
+    network: network::Network,
     toasts: crate::toast::ToastCenter,
     toast_view: crate::ui::toasts::ToastView,
     webview: Option<crate::webview::host::WebviewHost>,
@@ -1227,6 +1228,7 @@ impl HebnixApp {
             last_size,
             overlay: crate::overlay::Overlay::new(),
             native_overlay: crate::overlay::native::NativeOverlay::new(),
+            network: Default::default(),
             toasts: Default::default(),
             toast_view: Default::default(),
             webview: None,
@@ -3290,6 +3292,7 @@ impl HebnixApp {
                     let log = (!replay_event && entered_match)
                         .then(|| hebnix_sdk::log::parse_launch_log(None, true, "INT"));
                     if entered_match {
+                        self.network.set_match_kind(log.as_ref().and_then(|log| log.game.as_ref()));
                         self.discord_match = Some(crate::discord_presence::MatchInfo::from_state(
                             state,
                             log.as_ref().and_then(|log| log.game.as_ref()),
@@ -3299,11 +3302,15 @@ impl HebnixApp {
                     }
                     if let Some(info) = self.discord_match.as_ref() {
                         self.discord_presence.set_match(&self.config.settings, info);
+                        if !replay_event && !self.match_ended {
+                            self.network.update_match_presence(&state.game, Some(&info.gamemode));
+                        }
                     }
                 }
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
+                if !replay_event { self.network.clear_match_presence(); }
                 if !replay_event && !self.match_ended {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_ended(
@@ -3320,6 +3327,7 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchDestroyed" => {
+                if !replay_event { self.network.clear_match_presence(); }
                 if !replay_event {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_destroyed(&cooked);
@@ -7417,6 +7425,7 @@ impl eframe::App for HebnixApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.network.tick(ctx, &mut self.toasts, self.last_rl_open);
         self.freeplay.poll_patch(ctx, &self.config.settings.rl_path);
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
@@ -7566,6 +7575,7 @@ impl eframe::App for HebnixApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                        self.render_network_button(ui);
                         ui.label(
                             egui::RichText::new(&self.status_text)
                                 .strong()
@@ -8502,11 +8512,16 @@ impl HebnixApp {
         }
     }
 
+    fn render_network_button(&mut self, ui: &mut egui::Ui) {
+        self.network.render_button(ui);
+    }
+
     fn render_themed_sidebar_footer(&mut self, ui: &mut egui::Ui) {
         self.render_action_button(ui);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+            self.render_network_button(ui);
             ui.add(egui::Label::new(egui::RichText::new(t("tab-notifications")).small()).wrap());
         });
         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
@@ -8534,6 +8549,7 @@ impl HebnixApp {
                     p.toolbar_actions(ui, |ui| {
                         self.render_action_button(ui);
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                        self.render_network_button(ui);
                         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                             .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
                     });
@@ -8546,3 +8562,5 @@ impl HebnixApp {
         });
     }
 }
+
+mod network;

@@ -1,3 +1,6 @@
+#[path = "app/network.rs"]
+mod network;
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -19,7 +22,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.3.3";
+pub const APP_VERSION: &str = "2.3.4";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -113,6 +116,8 @@ pub struct LiteApp {
     web_port_edit: String,
     current_api_port: u16,
     last_rl_open: bool,
+    network: network::Network,
+    network_toasts: crate::toast::ToastCenter,
     last_api_open: bool,
     currently_connected: bool,
     /// true once MatchEnded fires, until MatchDestroyed/disconnect. see the
@@ -326,6 +331,8 @@ impl LiteApp {
             web_port_edit: String::new(),
             current_api_port: 49123,
             last_rl_open: false,
+            network: Default::default(),
+            network_toasts: Default::default(),
             last_api_open: false,
             currently_connected: false,
             match_ended: false,
@@ -813,6 +820,7 @@ impl LiteApp {
                 if let Some(state) = event.update_state() {
                     if entered_match {
                         let log = hebnix_sdk::log::parse_launch_log(None, true, "INT");
+                        self.network.set_match_kind(log.game.as_ref());
                         self.discord_match = Some(crate::discord_presence::MatchInfo::from_state(
                             state,
                             log.game.as_ref(),
@@ -822,11 +830,15 @@ impl LiteApp {
                     }
                     if let Some(info) = self.discord_match.as_ref() {
                         self.discord_presence.set_match(&self.config.settings, info);
+                        if !self.match_ended {
+                            self.network.update_match_presence(&state.game, Some(&info.gamemode));
+                        }
                     }
                 }
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
+                self.network.clear_match_presence();
                 self.in_match = false;
                 self.match_ended = true;
                 self.plugin_mgr.shared.borrow_mut().in_match = false;
@@ -834,6 +846,7 @@ impl LiteApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchDestroyed" => {
+                self.network.clear_match_presence();
                 self.in_match = false;
                 self.match_ended = false;
                 self.plugin_mgr.shared.borrow_mut().in_match = false;
@@ -2833,6 +2846,7 @@ impl LiteApp {
 
     fn render_game_overlay(&mut self) {
         if !self.last_rl_open {
+            self.network_toasts.update(false);
             crate::overlay::set_webview_clickable(false);
             self.overlay.hide();
             self.native_overlay.hide();
@@ -2875,7 +2889,8 @@ impl LiteApp {
         );
         let focused = crate::overlay::has_render_focus();
         crate::overlay::set_webview_clickable(focused && webview_accepts_input);
-        if (slugs.is_empty() && !webview_wants) || !focused {
+        let show_toasts = self.network_toasts.update(focused);
+        if (slugs.is_empty() && !webview_wants && !show_toasts) || !focused {
             self.overlay.hide();
             self.native_overlay.hide();
             self.overlay_rect = None;
@@ -2926,11 +2941,14 @@ impl LiteApp {
         }
 
         let mut errors = Vec::new();
-        if slugs.is_empty() {
+        if slugs.is_empty() && !show_toasts {
             self.native_overlay.hide();
         } else {
             let plugin_manager = &mut self.plugin_mgr;
             self.native_overlay.frame(rect, |width, height| {
+                if show_toasts {
+                    self.network_toasts.draw(width, height, Default::default());
+                }
                 for slug in &slugs {
                     if let Err(error) = plugin_manager.render_overlay_gdi(slug, width, height) {
                         errors.push(format!("[Core] Overlay error in '{slug}': {error}"));
@@ -3122,6 +3140,7 @@ impl eframe::App for LiteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         crate::visibility::note_ui_frame(&ctx);
+        self.network.tick(&ctx, &mut self.network_toasts, self.last_rl_open);
         if let Some((plugins, themes)) = self.pending_installs.take() {
             for plugin_id in plugins {
                 self.download_plugin(&plugin_id);
@@ -3171,6 +3190,7 @@ impl eframe::App for LiteApp {
                             theme::sidebar(ui, |ui, part| match part {
                                 theme::SidebarPart::Footer => {
                                     self.render_action_button(ui);
+                                    self.network.render_button(ui);
                                     ui.add_space(6.0);
                                     ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                                         .small().color(self.status_color)).wrap());
@@ -3188,6 +3208,7 @@ impl eframe::App for LiteApp {
                                 ui.add_space(8.0);
                                 p.toolbar_actions(ui, |ui| {
                                     self.render_action_button(ui);
+                                    self.network.render_button(ui);
                                     ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                                         .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
                                 });
@@ -3216,6 +3237,7 @@ impl eframe::App for LiteApp {
                             .color(self.status_color),
                     );
                     self.render_action_button(ui);
+                    self.network.render_button(ui);
                 });
             });
             ui.separator();

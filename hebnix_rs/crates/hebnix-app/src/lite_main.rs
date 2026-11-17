@@ -34,6 +34,7 @@ mod update;
 mod maintenance;
 mod ui_work;
 mod ui {
+    pub mod toasts;
     pub mod console;
 }
 mod webview {

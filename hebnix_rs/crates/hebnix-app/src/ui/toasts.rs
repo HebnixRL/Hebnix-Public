@@ -94,7 +94,7 @@ impl ToastView {
 
         egui::ScrollArea::vertical()
             .id_salt("toast_view")
-            .max_height((ui.ctx().content_rect().height() - 230.0).clamp(100.0, 460.0))
+            .max_height(ui.available_height())
             .auto_shrink([false, false])
             .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 if center.history().next().is_none() {
@@ -147,6 +147,10 @@ impl ToastView {
                 }
             }));
     }
+}
+
+pub(crate) fn toolbar_popup_body_height(ui: &egui::Ui) -> f32 {
+    (ui.ctx().content_rect().height() - 150.0).clamp(150.0, 520.0)
 }
 
 /// Bell button and a portrait popup anchored below its right edge.
@@ -206,7 +210,11 @@ pub fn render_bell(ui: &mut egui::Ui, view: &mut ToastView, center: &mut ToastCe
                 });
             });
             ui.separator();
-            view.render(ui, center);
+            let size = egui::vec2(width, toolbar_popup_body_height(ui));
+            ui.allocate_ui_with_layout(size, *ui.layout(), |ui| {
+                ui.set_height(size.y);
+                view.render(ui, center);
+            });
         });
     view.bell_open = bell_open;
 }
