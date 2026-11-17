@@ -20,6 +20,7 @@ function Start-RelocatedApp([string]$path) {
     $info.WorkingDirectory = [IO.Path]::GetDirectoryName($path)
     $info.Arguments = $arguments -join ' '
     $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
     return [Diagnostics.Process]::Start($info)
 }
 try {
@@ -47,7 +48,10 @@ try {
             $app = Start-RelocatedApp $plan.exe
             $deadline = [DateTime]::UtcNow.AddMinutes(3)
             while (!(Test-Path -LiteralPath $env:HEBNIX_RELOCATION_ACK)) {
-                if ($app.HasExited) { throw 'The relocated application exited during startup.' }
+                if ($app.HasExited) {
+                    if (Test-Path -LiteralPath $env:HEBNIX_RELOCATION_ACK) { break }
+                    throw 'The relocated application exited during startup.'
+                }
                 if ([DateTime]::UtcNow -gt $deadline) { throw 'The relocated application did not finish starting.' }
                 Start-Sleep -Milliseconds 200
             }

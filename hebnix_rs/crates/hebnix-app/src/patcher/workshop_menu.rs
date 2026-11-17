@@ -11,6 +11,7 @@ use super::{
     upk_package::{UpkPackage, strip},
 };
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 const PACKAGE: &str = "TAGame.upk";
@@ -1155,13 +1156,33 @@ pub fn write_list(cooked: &Path, maps: &[WorkshopMap]) -> Result<(), String> {
     let downloads = if downloader_on(cooked) { DOWNLOADABLE.lock().map(|l| l.clone()).unwrap_or_default() } else { Vec::new() };
     let json = list_json(maps, &lan, &downloads);
     super::upk_history::replace(&list_path(cooked), json.as_bytes())?;
-    let path = ini_path()?;
-    let old = fs::read_to_string(&path).unwrap_or_default();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    write_workshop_ini(&ini_path()?, maps, &lan)
+}
+
+fn write_workshop_ini(path: &Path, maps: &[WorkshopMap], lan: &[LanFields]) -> Result<(), String> {
+    let config_error = |error| format!("Workshop config {}: {error}", path.display());
+    for _ in 0..2 {
+        match fs::read_to_string(path) {
+            Ok(old) => {
+                let updated = with_section(&old, maps, lan);
+                return super::upk_history::replace(path, updated.as_bytes());
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound && maps.is_empty() => return Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(config_error(error)),
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(config_error)?;
+        }
+        match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(mut file) => {
+                return file.write_all(with_section("", maps, lan).as_bytes()).map_err(config_error);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(config_error(error)),
+        }
     }
-    let updated = with_section(&old, maps, &lan);
-    super::upk_history::replace(&path, updated.as_bytes())
+    Err(format!("Workshop config {} could not be opened after creation was attempted", path.display()))
 }
 
 pub fn apply(

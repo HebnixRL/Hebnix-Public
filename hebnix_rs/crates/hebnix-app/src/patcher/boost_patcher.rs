@@ -1253,6 +1253,17 @@ fn install_boost_textures(path: &Path, package: &EncryptedPackage) -> Result<(),
     result
 }
 
+pub(super) fn restore_for_uninstall(cooked: &Path, backups: &Path) -> Result<(), String> {
+    let backup = backups.join(format!("{GFX_UPK}.bak"));
+    if !backup.is_file() || !backups.join("boost-build.sha256").is_file() {
+        return Ok(());
+    }
+    crate::patcher::backup_guard::check(cooked, backups, "boost-build.sha256",
+        |name| name == format!("{GFX_UPK}.bak"))?;
+    restore_boost_textures(&cooked.join(GFX_UPK), &backup)?;
+    crate::patcher::chat_paste::reapply(cooked, backups)
+}
+
 fn restore_boost_textures(path: &Path, backup: &Path) -> Result<(), String> {
     let original =
         fs::read(backup).map_err(|error| format!("Could not read boost backup: {error}"))?;

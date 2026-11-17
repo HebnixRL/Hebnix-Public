@@ -17,3 +17,9 @@ maintenance-close-game = Close Rocket League before uninstalling or restoring co
 maintenance-working = Preparing removal and restoring selected components…
 update-restarting = Download complete. Restarting Hebnix…
 maintenance-finish-patches = Finish pending patch operations in their tabs before uninstalling.
+
+maintenance-swaps = Remove swaps
+maintenance-game-mods = Remove game mod patches
+maintenance-workshop = Remove Workshop patches
+maintenance-custom-patches = Remove custom patches
+maintenance-patches-removed = Selected patches removed.

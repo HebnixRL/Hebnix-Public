@@ -31,6 +31,7 @@ pub mod patch_core;
 pub mod rl_font;
 pub mod script_patch;
 pub mod chat_export;
+pub mod chat_test;
 pub mod lan_commands;
 pub mod chat_paste;
 pub mod actions;

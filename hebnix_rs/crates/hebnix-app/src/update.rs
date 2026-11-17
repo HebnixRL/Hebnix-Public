@@ -63,11 +63,14 @@ fn parse_info(json: &Value, current_version: &str, lite: bool) -> Result<ApiInfo
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let setup_url = json
-        .get(if lite { "lite_setup_url" } else { "setup_url" })
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let setup_url = if lite {
+        "/download-hebnix-lite".to_string()
+    } else {
+        json.get("setup_url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
 
     if latest_version.is_empty() {
         return Err("API response missing latest_version".to_string());
@@ -129,42 +132,47 @@ pub fn render_changelog(ui: &mut eframe::egui::Ui, entry: &ChangelogEntry) {
     }
     ui.add_space(8.0);
 
-    for line in entry
-        .changelog
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        let trimmed = line.trim();
-        // the [Added]/[Fixed]/[Removed] tags come from the server and stay as
-        // they are, only the label shown for them is translated
-        let (prefix, body, colour) = if let Some(body) = trimmed.strip_prefix("[Added]") {
-            (
-                crate::i18n::t("changelog-added"),
-                body.trim().trim_start_matches(':').trim(),
-                eframe::egui::Color32::from_rgb(46, 204, 113),
-            )
-        } else if let Some(body) = trimmed.strip_prefix("[Fixed]") {
-            (
-                crate::i18n::t("changelog-fixed"),
-                body.trim().trim_start_matches(':').trim(),
-                eframe::egui::Color32::from_rgb(52, 152, 219),
-            )
-        } else if let Some(body) = trimmed.strip_prefix("[Removed]") {
-            (
-                crate::i18n::t("changelog-removed"),
-                body.trim().trim_start_matches(':').trim(),
-                eframe::egui::Color32::from_rgb(231, 76, 60),
-            )
-        } else {
-            (String::new(), trimmed, ui.visuals().text_color())
-        };
-        ui.horizontal_wrapped(|ui| {
-            if !prefix.is_empty() {
-                ui.label(eframe::egui::RichText::new(&prefix).strong().color(colour));
+    // the window is capped in height, so the list scrolls instead of pushing the title bar and X off-screen
+    eframe::egui::ScrollArea::vertical()
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for line in entry
+                .changelog
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+            {
+                let trimmed = line.trim();
+                // the [Added]/[Fixed]/[Removed] tags come from the server and stay as
+                // they are, only the label shown for them is translated
+                let (prefix, body, colour) = if let Some(body) = trimmed.strip_prefix("[Added]") {
+                    (
+                        crate::i18n::t("changelog-added"),
+                        body.trim().trim_start_matches(':').trim(),
+                        eframe::egui::Color32::from_rgb(46, 204, 113),
+                    )
+                } else if let Some(body) = trimmed.strip_prefix("[Fixed]") {
+                    (
+                        crate::i18n::t("changelog-fixed"),
+                        body.trim().trim_start_matches(':').trim(),
+                        eframe::egui::Color32::from_rgb(52, 152, 219),
+                    )
+                } else if let Some(body) = trimmed.strip_prefix("[Removed]") {
+                    (
+                        crate::i18n::t("changelog-removed"),
+                        body.trim().trim_start_matches(':').trim(),
+                        eframe::egui::Color32::from_rgb(231, 76, 60),
+                    )
+                } else {
+                    (String::new(), trimmed, ui.visuals().text_color())
+                };
+                ui.horizontal_wrapped(|ui| {
+                    if !prefix.is_empty() {
+                        ui.label(eframe::egui::RichText::new(&prefix).strong().color(colour));
+                    }
+                    ui.label(body);
+                });
             }
-            ui.label(body);
         });
-    }
 }
 
 /// Shared with the popup; the worker never blocks the UI thread.
@@ -292,17 +300,16 @@ fn stage_update_payload(downloaded: &Path, staged: &Path, lite: bool) -> Result<
     let count = file.read(&mut signature).map_err(|e| e.to_string())?;
     drop(file);
     if count < 4 || !signature.starts_with(b"PK") {
+        if lite {
+            return Err("Hebnix Lite requires a ZIP update.".into());
+        }
         validate_executable(downloaded)?;
         return std::fs::rename(downloaded, staged).map_err(|e| e.to_string());
     }
 
     let file = std::fs::File::open(downloaded).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid update ZIP: {e}"))?;
-    let expected = if lite {
-        "hebnix-lite.exe"
-    } else {
-        "hebnix.exe"
-    };
+    let expected = if lite { "Hebnix Lite.exe" } else { "hebnix.exe" };
     let mut selected = None;
     for index in 0..archive.len() {
         let entry = archive
@@ -316,7 +323,11 @@ fn stage_update_payload(downloaded: &Path, staged: &Path, lite: bool) -> Result<
         };
         if path
             .file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(expected))
+            .is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.eq_ignore_ascii_case(expected)
+                    || (lite && name.eq_ignore_ascii_case("hebnix-lite.exe"))
+            })
         {
             if selected.replace(index).is_some() {
                 return Err(format!(
@@ -427,16 +438,16 @@ mod tests {
                 .update
                 .unwrap()
                 .setup_url,
-            "https://example.com/hebnix-lite.exe"
+            "https://api.hebnix.com/download-hebnix-lite"
         );
         let json = serde_json::json!({"latest_version": "9.0", "setup_url": "https://example.com/hebnix.exe"});
-        assert!(
+        assert_eq!(
             parse_info(&json, "1.0", true)
                 .unwrap()
                 .update
                 .unwrap()
-                .setup_url
-                .is_empty()
+                .setup_url,
+            "https://api.hebnix.com/download-hebnix-lite"
         );
     }
 
@@ -517,6 +528,8 @@ mod tests {
         let staged = fixture.0.join("staged.exe");
         let bytes = fake_executable(7);
         std::fs::write(&downloaded, &bytes).unwrap();
+        assert!(stage_update_payload(&downloaded, &staged, true).is_err());
+        assert!(!staged.exists());
         stage_update_payload(&downloaded, &staged, false).unwrap();
         assert_eq!(std::fs::read(staged).unwrap(), bytes);
         assert!(!downloaded.exists());
@@ -530,7 +543,8 @@ mod tests {
             let fixture = PayloadFixture::new();
             let downloaded = fixture.zip(&[
                 ("release/HEBNIX.EXE", &full),
-                ("release/hebnix-lite.exe", &lite),
+                ("release/setup.exe", &full),
+                ("release/Hebnix Lite.exe", &lite),
                 ("release/config.toml", b"do not overwrite my settings"),
             ]);
             let staged = fixture.0.join("staged.exe");
@@ -579,7 +593,7 @@ mod tests {
         }
     }
     #[test]
-    fn resolves_relative_api_download_urls_for_both_editions() {
+    fn resolves_relative_full_download_url_and_uses_fixed_lite_endpoint() {
         let json = serde_json::json!({
             "latest_version": "2.3.1",
             "setup_url": "/download-hebnix",
@@ -599,7 +613,7 @@ mod tests {
                 .update
                 .unwrap()
                 .setup_url,
-            "https://api.hebnix.com/downloads/hebnix-lite.zip"
+            "https://api.hebnix.com/download-hebnix-lite"
         );
     }
 }

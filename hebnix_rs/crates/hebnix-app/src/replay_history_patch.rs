@@ -153,6 +153,7 @@ fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool
     // The Workshop restart handler uses absolute branch destinations. Remove
     // it before editing the dispatcher prefix, then rebuild its destinations.
     let restart = detach_freeplay_restart(package)?;
+    let chat_test = crate::patcher::chat_test::detach(package)?;
     let builder = Builder(package);
     let hooks = [
         (INIT, builder.logger()?, true, INIT_HASH),
@@ -172,6 +173,9 @@ fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool
         };
         package.replace_export_payload(index, &desired)?;
         changed = true;
+    }
+    if chat_test {
+        crate::patcher::chat_test::attach(package)?;
     }
     if let Some(legacy) = restart {
         attach_freeplay_restart(package, legacy)?;

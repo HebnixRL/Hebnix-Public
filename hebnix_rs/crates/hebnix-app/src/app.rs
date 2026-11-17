@@ -50,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.3.0";
+pub const APP_VERSION: &str = "2.3.3";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -639,6 +639,7 @@ pub struct HebnixApp {
     last_size: (u32, u32),
     overlay: crate::overlay::Overlay,
     native_overlay: crate::overlay::native::NativeOverlay,
+    network: network::Network,
     toasts: crate::toast::ToastCenter,
     toast_view: crate::ui::toasts::ToastView,
     webview: Option<crate::webview::host::WebviewHost>,
@@ -696,6 +697,7 @@ pub struct HebnixApp {
     spoofer_friends: HashMap<String, FriendSpoofState>,
     friends_search: String,
     item_clear_error: Option<String>,
+    item_clear_prompt_dismissed: bool,
     items_mode: ItemsMode,
 
     patcher_ball: crate::ball::PatcherState,
@@ -712,6 +714,7 @@ pub struct HebnixApp {
     bots_freeplay: crate::patcher::bots_freeplay::State,
     delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
+    chat_test: crate::patcher::chat_test::State,
     lan_commands: crate::patcher::lan_commands::State,
     chat_paste: crate::patcher::chat_paste::State,
     instant_suite: crate::patcher::instant_suite::State,
@@ -925,6 +928,7 @@ impl HebnixApp {
 
         crate::screen::init(tx.clone());
         let mut plugin_mgr = PluginManager::new(plugin_dir.clone(), tx.clone(), APP_VERSION);
+        plugin_mgr.shared.borrow_mut().local_chat_socket = Some(Arc::clone(&ws_stats));
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
 
@@ -1226,6 +1230,7 @@ impl HebnixApp {
             last_size,
             overlay: crate::overlay::Overlay::new(),
             native_overlay: crate::overlay::native::NativeOverlay::new(),
+            network: Default::default(),
             toasts: Default::default(),
             toast_view: Default::default(),
             webview: None,
@@ -1282,6 +1287,7 @@ impl HebnixApp {
             spoofer_friends,
             friends_search: String::new(),
             item_clear_error: None,
+            item_clear_prompt_dismissed: false,
             items_mode: default_items_mode,
             patcher_ball,
             patcher_boost,
@@ -1297,6 +1303,7 @@ impl HebnixApp {
             bots_freeplay: Default::default(),
             delete_backups: Default::default(),
             chat_export: Default::default(),
+            chat_test: Default::default(),
             lan_commands: Default::default(),
             chat_paste: Default::default(),
             instant_suite: Default::default(),
@@ -1495,6 +1502,10 @@ impl HebnixApp {
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
                     self.chat_export.render(ui, &cooked_pc, &backups_dir);
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    self.chat_test.render(ui, &cooked_pc, &backups_dir, &self.ws_stats);
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
@@ -2823,20 +2834,36 @@ impl HebnixApp {
                         }
                     }
                 }
-                AppMsg::MaintenanceFinished { result } => {
+                AppMsg::MaintenanceFinished { result, restored, quit } => {
                     self.maintenance_running = false;
+                    if restored.contains(&crate::maintenance::PatchGroup::GameMods) {
+                        self.config.game_mods.instant_suite_mode = "nothing".into();
+                        self.save_config();
+                    }
+                    if restored.contains(&crate::maintenance::PatchGroup::Custom) {
+                        self.config.patcher.active_ball = None;
+                        self.config.patcher.active_boost = None;
+                        self.config.patcher.active_decals.clear();
+                        self.config.patcher.active_cars.clear();
+                        self.config.patcher.active_anthems.clear();
+                        self.patcher_ball.active_ball = None;
+                        self.patcher_boost.active_boost = None;
+                        self.patcher_decal.active_decals.clear();
+                        self.patcher_car.active_cars.clear();
+                        self.patcher_anthem.active_anthems.clear();
+                        self.save_config();
+                    }
                     match result {
-                        Ok(()) => {
-                            if self.maintenance.restore_game {
-                                self.config.patcher.active_ball = None;
-                                self.config.patcher.active_boost = None;
-                                self.config.patcher.active_decals.clear();
-                                self.config.patcher.active_cars.clear();
-                                self.config.patcher.active_anthems.clear();
-                            }
+                        Ok(()) if quit => {
                             if self.maintenance.certificate { self.disable_certificate_features(); }
                             self.spoofer_mgr.shutdown();
                             self.force_quit(ctx);
+                        }
+                        Ok(()) => {
+                            self.maintenance.confirm = false;
+                            self.maintenance.patch_groups = [false; 4];
+                            self.maintenance.error = None;
+                            self.console.write(t("maintenance-patches-removed"));
                         }
                         Err(error) => { self.maintenance.error = Some(error); }
                     }
@@ -3288,6 +3315,7 @@ impl HebnixApp {
                     let log = (!replay_event && entered_match)
                         .then(|| hebnix_sdk::log::parse_launch_log(None, true, "INT"));
                     if entered_match {
+                        self.network.set_match_kind(log.as_ref().and_then(|log| log.game.as_ref()));
                         self.discord_match = Some(crate::discord_presence::MatchInfo::from_state(
                             state,
                             log.as_ref().and_then(|log| log.game.as_ref()),
@@ -3297,11 +3325,15 @@ impl HebnixApp {
                     }
                     if let Some(info) = self.discord_match.as_ref() {
                         self.discord_presence.set_match(&self.config.settings, info);
+                        if !replay_event && !self.match_ended {
+                            self.network.update_match_presence(&state.game, Some(&info.gamemode));
+                        }
                     }
                 }
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
+                if !replay_event { self.network.clear_match_presence(); }
                 if !replay_event && !self.match_ended {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_ended(
@@ -3318,6 +3350,7 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchDestroyed" => {
+                if !replay_event { self.network.clear_match_presence(); }
                 if !replay_event {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_destroyed(&cooked);
@@ -5887,7 +5920,7 @@ impl HebnixApp {
                     || self.patcher_boost.processing_target.is_some()
                     || self.patcher_decal.processing_target.is_some()
                     || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
                     || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
                     || self.scoreboard.busy()
                     || self.workshop.maintenance_busy()
@@ -5901,23 +5934,41 @@ impl HebnixApp {
                     self.maintenance.error = Some(t("maintenance-close-game"));
                     return;
                 }
+                let decals = if self.maintenance.selected_patches().any(|group| group == crate::maintenance::PatchGroup::Custom) {
+                    match self.patcher_decal.uninstall_targets() {
+                        Ok(targets) => targets,
+                        Err(error) => {
+                            self.maintenance.error = Some(error);
+                            return;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 self.save_config();
                 self.spoofer_mgr.shutdown();
                 let options = self.maintenance.clone();
+                let patcher = self.config.patcher.clone();
                 let base = self.base_dir.clone();
                 let game = std::path::PathBuf::from(&self.config.settings.rl_path);
                 let tx = self.tx.clone();
                 let ctx = ui.ctx().clone();
                 self.maintenance_running = true;
                 std::thread::spawn(move || {
+                    let mut restored = Vec::new();
+                    let quit = options.removes_app_data();
                     let result = (|| -> Result<(), String> {
-                        if options.restore_game { crate::patcher::uninstall::restore(&base, &game)?; }
+                        for group in options.selected_patches() {
+                            crate::patcher::uninstall::restore_group(&base, &game, group, &decals, &patcher, options.patch_groups[3])?;
+                            restored.push(group);
+                        }
                         if options.certificate { crate::maintenance::remove_certificate()?; }
                         #[cfg(windows)]
                         if options.application || options.certificate { crate::recovery_tasks::uninstall_legacy()?; }
-                        crate::maintenance::launch_uninstall(&base, &options)
+                        if quit { crate::maintenance::launch_uninstall(&base, &options)?; }
+                        Ok(())
                     })();
-                    let _ = tx.send(AppMsg::MaintenanceFinished { result });
+                    let _ = tx.send(AppMsg::MaintenanceFinished { result, restored, quit });
                     ctx.request_repaint();
                 });
             }
@@ -6099,14 +6150,14 @@ impl HebnixApp {
                 self.item_clear_error = None;
             }
             Err(error) => {
-                self.item_clear_error =
-                    Some(format!("Clear incomplete: {error}. Check Again or Cancel."));
+                self.item_clear_error = Some(format!("Clear incomplete: {error}"));
             }
         }
     }
 
     fn render_item_clear_prompt(&mut self, ctx: &egui::Context) {
-        if !self.spoofer_mgr.item_status().clearing {
+        let status = self.spoofer_mgr.item_status();
+        if !status.clearing || self.item_clear_prompt_dismissed {
             return;
         }
         let mut check = false;
@@ -6115,11 +6166,18 @@ impl HebnixApp {
             ui.heading("Clear Items");
             ui.label("Removes tracked instances from the most recently saved RL account's inventory and equipped loadouts, including rotating save copies. Original saves are backed up before editing.");
             ui.label("Close Rocket League and Item Spawner to remove tracked items. Your normal inventory will not be removed.");
-            ui.weak(self.spoofer_mgr.item_status().text);
+            ui.weak(status.text);
             if let Some(error) = &self.item_clear_error { ui.label(error); }
+            if !status.can_cancel {
+                ui.label("Cleanup will retry the next time you open Hebnix.");
+            }
             ui.horizontal(|ui| {
                 check = ui.button("Check Again").clicked();
-                cancel = ui.add_enabled(self.spoofer_mgr.item_status().can_cancel, egui::Button::new("Cancel")).clicked();
+                if status.can_cancel {
+                    cancel = ui.button("Cancel").clicked();
+                } else if ui.button("Dismiss").clicked() {
+                    self.item_clear_prompt_dismissed = true;
+                }
             });
         });
         if check {
@@ -6402,6 +6460,7 @@ impl HebnixApp {
             .collapsible(false)
             .resizable(false)
             .default_width(520.0)
+            .max_height(ctx.content_rect().height() * 0.85)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| crate::update::render_changelog(ui, &entry));
         if !open {
@@ -7407,6 +7466,7 @@ impl eframe::App for HebnixApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.network.tick(ctx, &mut self.toasts, self.last_rl_open);
         self.freeplay.poll_patch(ctx, &self.config.settings.rl_path);
         if self.quitting && crate::watchdog::has_live_handoff() {
             if !hebnix_sdk::process::is_rocket_league_running() {
@@ -7425,11 +7485,16 @@ impl eframe::App for HebnixApp {
         }
         self.check_game_update(ctx);
         let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
-        if !self.recovery_running() {
+        self.chat_test.tick();
+        self.plugin_mgr.shared.borrow_mut().local_chat_enabled =
+            !self.recovery_running() && !self.chat_test.busy()
+                && crate::patcher::chat_test::enabled(&cooked.join("Backups"));
+        if !self.recovery_running() && !self.maintenance_running {
             self.instant_suite.tick(&cooked, &cooked.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
             if self.instant_suite.busy() {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+
             self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
             self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
             self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
@@ -7556,6 +7621,7 @@ impl eframe::App for HebnixApp {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                        self.render_network_button(ui);
                         ui.label(
                             egui::RichText::new(&self.status_text)
                                 .strong()
@@ -8492,11 +8558,16 @@ impl HebnixApp {
         }
     }
 
+    fn render_network_button(&mut self, ui: &mut egui::Ui) {
+        self.network.render_button(ui);
+    }
+
     fn render_themed_sidebar_footer(&mut self, ui: &mut egui::Ui) {
         self.render_action_button(ui);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+            self.render_network_button(ui);
             ui.add(egui::Label::new(egui::RichText::new(t("tab-notifications")).small()).wrap());
         });
         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
@@ -8524,6 +8595,7 @@ impl HebnixApp {
                     p.toolbar_actions(ui, |ui| {
                         self.render_action_button(ui);
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                        self.render_network_button(ui);
                         ui.add(egui::Label::new(egui::RichText::new(&self.status_text)
                             .small().color(self.status_color)).wrap_mode(egui::TextWrapMode::Extend));
                     });
@@ -8536,3 +8608,5 @@ impl HebnixApp {
         });
     }
 }
+
+mod network;

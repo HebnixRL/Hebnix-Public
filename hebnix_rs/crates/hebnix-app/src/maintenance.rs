@@ -1,6 +1,18 @@
 //! Windows maintenance runs outside Hebnix so the executable is no longer locked.
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchGroup {
+    Swaps,
+    GameMods,
+    Workshop,
+    Custom,
+}
+
+impl PatchGroup {
+    const ALL: [Self; 4] = [Self::Swaps, Self::GameMods, Self::Workshop, Self::Custom];
+}
+
 #[derive(Default, Clone)]
 pub struct UninstallUi {
     pub tab: bool,
@@ -8,13 +20,24 @@ pub struct UninstallUi {
     pub settings: bool,
     pub extensions: bool,
     pub assets: bool,
-    pub restore_game: bool,
+    pub patch_groups: [bool; 4],
     pub certificate: bool,
     pub confirm: bool,
     pub error: Option<String>,
 }
 
 impl UninstallUi {
+    pub fn selected_patches(&self) -> impl Iterator<Item = PatchGroup> + '_ {
+        PatchGroup::ALL
+            .into_iter()
+            .zip(self.patch_groups)
+            .filter_map(|(group, selected)| selected.then_some(group))
+    }
+
+    pub fn removes_app_data(&self) -> bool {
+        self.application || self.settings || self.extensions || self.assets || self.certificate
+    }
+
     /// Returns true only after the user confirms the selected removal scope.
     pub fn render(
         &mut self,
@@ -34,7 +57,15 @@ impl UninstallUi {
             ui.checkbox(&mut self.extensions, t("maintenance-extensions"));
             ui.checkbox(&mut self.assets, t("maintenance-assets"));
             if can_restore_game {
-                ui.checkbox(&mut self.restore_game, t("maintenance-restore"));
+                ui.label(t("maintenance-restore"));
+                for (selected, label) in self.patch_groups.iter_mut().zip([
+                    "maintenance-swaps",
+                    "maintenance-game-mods",
+                    "maintenance-workshop",
+                    "maintenance-custom-patches",
+                ]) {
+                    ui.checkbox(selected, t(label));
+                }
             }
             ui.checkbox(&mut self.certificate, t("maintenance-certificate"));
         });
@@ -63,7 +94,7 @@ impl UninstallUi {
                 || self.settings
                 || self.extensions
                 || self.assets
-                || self.restore_game
+                || (can_restore_game && self.selected_patches().next().is_some())
                 || self.certificate;
             if ui
                 .add_enabled(selected, eframe::egui::Button::new(t("maintenance-remove")))
@@ -114,7 +145,7 @@ mod tests {
         };
         assert!(!removal_paths(base, &options).contains(&base.join("state")));
         assert!(!removal_paths(base, &options).contains(&base.join("spoofer")));
-        options.restore_game = true;
+        options.patch_groups = [true; 4];
         options.certificate = true;
         assert!(removal_paths(base, &options).contains(&base.join("state")));
         assert!(removal_paths(base, &options).contains(&base.join("spoofer")));
@@ -168,6 +199,28 @@ pub fn changelog_pending(base: &Path) -> bool {
 }
 
 #[cfg(windows)]
+fn is_in_install_dir(exe: &Path, base: &Path) -> bool {
+    exe.parent().is_some_and(|parent| {
+        parent == base
+            || parent.canonicalize().ok().zip(base.canonicalize().ok())
+                .is_some_and(|(a, b)| a == b)
+    })
+}
+
+#[cfg(windows)]
+pub fn elevation_location_ready(exe: &Path) -> bool {
+    if std::env::var_os("HEBNIX_RELOCATION_FALLBACK").is_some() {
+        return false;
+    }
+    if hebnix_sdk::utils::paths::portable_base_dir().is_some()
+        || std::env::var_os("HEBNIX_BASE_DIR").is_some_and(|value| !value.is_empty())
+    {
+        return true;
+    }
+    dirs::data_dir().is_some_and(|roaming| is_in_install_dir(exe, &roaming.join("Hebnix")))
+}
+
+#[cfg(windows)]
 pub fn relocate_on_launch(lite: bool) -> Result<bool, String> {
     if hebnix_sdk::utils::paths::portable_base_dir().is_some()
         || std::env::var_os("HEBNIX_RELOCATION_FALLBACK").is_some()
@@ -179,14 +232,19 @@ pub fn relocate_on_launch(lite: bool) -> Result<bool, String> {
     let source = std::env::current_exe().map_err(|error| error.to_string())?;
     let roaming = dirs::data_dir().ok_or("AppData folder unavailable")?;
     let base = roaming.join("Hebnix");
-    let exe = base.join(if lite { "hebnix-lite.exe" } else { "Hebnix.exe" });
-    if source.parent().is_some_and(|parent| {
-        parent.to_string_lossy().eq_ignore_ascii_case(&base.to_string_lossy())
-            || parent.canonicalize().ok().zip(base.canonicalize().ok()).is_some_and(|(a, b)| a == b)
-    }) {
+    let exe = base.join(if lite {
+        "hebnix-lite.exe"
+    } else {
+        "Hebnix.exe"
+    });
+    if is_in_install_dir(&source, &base) {
         return Ok(false);
     }
-    let name = if lite { "Hebnix Lite.lnk" } else { "Hebnix.lnk" };
+    let name = if lite {
+        "Hebnix Lite.lnk"
+    } else {
+        "Hebnix.lnk"
+    };
     helper(serde_json::json!({
         "mode": "relocate", "pid": std::process::id(), "source": source, "exe": exe, "base": base,
         "desktop": dirs::desktop_dir().ok_or("Desktop folder unavailable")?.join(name),
@@ -270,7 +328,7 @@ pub fn removal_paths(base: &Path, options: &UninstallUi) -> Vec<PathBuf> {
             "rank_spoofer_frames.log",
         ]);
     }
-    if options.restore_game && options.settings {
+    if options.patch_groups.iter().all(|selected| *selected) && options.settings {
         names.extend(["state", "title_upk", "rank_upk"]);
     }
     if options.certificate && options.settings {

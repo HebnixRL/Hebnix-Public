@@ -19,7 +19,6 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
 const AVATAR_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const IDENTITY_INTERVAL: Duration = Duration::from_secs(15);
 const HISTORY_DAYS: usize = 10;
-const PROFILE_RETENTION_DAYS: i64 = 15;
 const CASUAL_PLAYLIST_ID: i64 = 0;
 
 const TIERS: [egui::ImageSource<'static>; 23] = [
@@ -137,26 +136,19 @@ impl Profile {
 
 type Profiles = BTreeMap<String, Profile>;
 
-fn prune(profiles: &mut Profiles, now: OffsetDateTime) -> bool {
-    let cutoff = (now - time::Duration::days(PROFILE_RETENTION_DAYS)).unix_timestamp();
-    let before = profiles.len();
+fn trim_history(profiles: &mut Profiles) -> bool {
     let mut changed = false;
-    profiles.retain(|_, profile| {
-        let count = profile.playlists.len();
-        profile
-            .playlists
-            .retain(|_, playlist| playlist.seen > cutoff);
-        changed |= profile.playlists.len() != count;
+    for profile in profiles.values_mut() {
         for playlist in profile.playlists.values_mut() {
             changed |= playlist.trim_history();
         }
-        profile.checked > cutoff
-    });
-    changed || before != profiles.len()
+    }
+    changed
 }
 
 type FetchedProfile = (PlayerStats, Result<Option<egui::ColorImage>, String>);
 type PendingFetch = (String, CheckKind, Receiver<Result<FetchedProfile, String>>);
+type AccountDiscovery = (bool, Option<accounts::Account>, Vec<accounts::Account>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CheckKind {
@@ -215,7 +207,9 @@ pub(super) struct Tracker {
     next_save: Instant,
     running: Option<bool>,
     account: Option<accounts::Account>,
-    identity: Option<Receiver<(bool, Option<accounts::Account>)>>,
+    launched: Option<accounts::Account>,
+    saved_accounts: Vec<accounts::Account>,
+    identity: Option<Receiver<AccountDiscovery>>,
     next_identity: Instant,
     fetch: Option<PendingFetch>,
     requested: BTreeMap<String, CheckSchedule>,
@@ -238,12 +232,48 @@ impl Tracker {
             next_save: Instant::now(),
             running: None,
             account: None,
+            launched: None,
+            saved_accounts: Vec::new(),
             identity: None,
             next_identity: Instant::now(),
             fetch: None,
             requested: BTreeMap::new(),
             error: false,
             selected: None,
+        }
+    }
+
+    fn select_account(&mut self, account: accounts::Account) {
+        if self.account.as_ref().is_none_or(|old| old.key != account.key) {
+            self.selected = None;
+            self.error = false;
+        }
+        self.account = Some(account);
+    }
+
+    fn update_accounts(
+        &mut self,
+        launched: Option<accounts::Account>,
+        saved: Vec<accounts::Account>,
+    ) {
+        self.saved_accounts = saved;
+        if let Some(launched) = launched {
+            let changed = self.launched.as_ref().is_none_or(|old| old.key != launched.key);
+            if changed || self.account.as_ref().is_some_and(|account| account.key == launched.key) {
+                self.select_account(launched.clone());
+            }
+            self.launched = Some(launched);
+        }
+        if self.account.is_none()
+            && let Some(account) = self.saved_accounts.first().cloned()
+                .or_else(|| self.profiles.iter()
+                    .filter_map(|(key, profile)| {
+                        accounts::Account::from_key(key).map(|account| (profile.checked, account))
+                    })
+                    .max_by_key(|(checked, _)| *checked)
+                    .map(|(_, account)| account))
+        {
+            self.select_account(account);
         }
     }
 
@@ -258,7 +288,7 @@ impl Tracker {
         let now = Instant::now();
         if now >= self.next_cleanup {
             self.next_cleanup = now + Duration::from_secs(60);
-            self.dirty |= prune(&mut self.profiles, local_now());
+            self.dirty |= trim_history(&mut self.profiles);
         }
         let Some(running) = self.running else {
             return;
@@ -266,15 +296,10 @@ impl Tracker {
 
         if let Some(rx) = &self.identity {
             match rx.try_recv() {
-                Ok((was_running, account)) => {
+                Ok((was_running, launched, saved)) => {
                     self.identity = None;
                     if was_running == running {
-                        if self.account.as_ref().map(|a| &a.key) != account.as_ref().map(|a| &a.key)
-                        {
-                            self.selected = None;
-                            self.error = false;
-                        }
-                        self.account = account;
+                        self.update_accounts(launched, saved);
                     } else {
                         self.next_identity = now;
                     }
@@ -293,13 +318,14 @@ impl Tracker {
             let (tx, rx) = bounded(1);
             self.identity = Some(rx);
             let ctx = ctx.clone();
+            let previous = self.saved_accounts.clone();
+            let has_launched = self.launched.is_some();
             std::thread::spawn(move || {
-                let account = if running {
-                    accounts::current()
-                } else {
-                    accounts::latest_saved()
-                };
-                let _ = tx.send((running, account));
+                let launched = accounts::last_launched().or_else(|| {
+                    (!running && !has_launched).then(accounts::latest_saved).flatten()
+                });
+                let saved = accounts::discover(&previous);
+                let _ = tx.send((running, launched, saved));
                 ctx.request_repaint();
             });
         }
@@ -363,10 +389,14 @@ impl Tracker {
         self.requested.retain(|_, check| check.ratings_at > now);
         if self.fetch.is_none()
             && self.identity.is_none()
-            && let Some(account) = &self.account
-            && let Some(kind) = CheckSchedule::take_due(&mut self.requested, &account.key, now)
+            && let Some((account, kind)) = self.launched.iter().chain(&self.account).find_map(|account| {
+                CheckSchedule::take_due(&mut self.requested, &account.key, now)
+                    .map(|kind| (account, kind))
+            })
         {
-            if kind == CheckKind::Ratings {
+            if kind == CheckKind::Ratings
+                && self.account.as_ref().is_some_and(|selected| selected.key == account.key)
+            {
                 self.error = false;
             }
             let (tx, rx) = bounded(1);
@@ -401,11 +431,11 @@ impl Tracker {
                 tracing::warn!(%error, "Could not save Home tracker history");
             }
         }
-        let due = self
-            .account
-            .as_ref()
-            .and_then(|account| self.requested.get(&account.key))
-            .map(CheckSchedule::next);
+        let due = self.launched.iter().chain(&self.account)
+            .filter_map(|account| self.requested.get(&account.key))
+            .map(CheckSchedule::next)
+            .filter(|due| *due > now)
+            .min();
         let next = due
             .unwrap_or(self.next_identity)
             .min(self.next_identity)
@@ -415,7 +445,53 @@ impl Tracker {
         }
     }
 
+    fn show_account_picker(&mut self, ui: &mut egui::Ui) {
+        let Some(selected) = &self.account else {
+            return;
+        };
+        let mut choices = BTreeMap::new();
+        for account in self.profiles.keys().filter_map(|key| accounts::Account::from_key(key))
+            .chain(self.launched.clone())
+            .chain(self.saved_accounts.iter().cloned())
+        {
+            choices.insert(account.key.clone(), account);
+        }
+        choices.entry(selected.key.clone()).or_insert_with(|| selected.clone());
+        if choices.len() < 2 {
+            return;
+        }
+        let label = |account: &accounts::Account| {
+            let name = self.profiles.get(&account.key)
+                .map(|profile| profile.name.as_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&account.name);
+            if name == "Current account" || name.starts_with("Account (") {
+                account.key.clone()
+            } else {
+                format!("{name} · {}", account.platform)
+            }
+        };
+        let mut next = None;
+        egui::ComboBox::from_id_salt("home_tracker_account")
+            .selected_text(label(&choices[&selected.key]))
+            .show_ui(ui, |ui| {
+                for account in choices.values() {
+                    if ui.selectable_label(account.key == selected.key, label(account))
+                        .on_hover_text(&account.key)
+                        .clicked()
+                    {
+                        next = Some(account.clone());
+                    }
+                }
+            });
+        if let Some(account) = next {
+            self.select_account(account);
+            ui.ctx().request_repaint();
+        }
+    }
+
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
+        self.show_account_picker(ui);
         let account = self.account.as_ref();
         let profile = account.and_then(|account| self.profiles.get(&account.key));
         let checking = self.fetch.as_ref().and_then(|(key, kind, _)| {
@@ -829,6 +905,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn account_selection_follows_a_new_launch_and_preserves_each_history() {
+        let first = accounts::Account::from_key("steam:76561198000000000").unwrap();
+        let second = accounts::Account::from_key("steam:76561198000000001").unwrap();
+        let saved = vec![first.clone(), second.clone()];
+        let mut tracker = Tracker::new(Path::new(""));
+        tracker.profiles = [
+            (first.key.clone(), Profile { checked: 1, ..Default::default() }),
+            (second.key.clone(), Profile { checked: 2, ..Default::default() }),
+        ].into();
+
+        tracker.update_accounts(Some(second.clone()), saved.clone());
+        assert_eq!(tracker.account.as_ref(), Some(&second));
+        tracker.selected = Some(11);
+        tracker.select_account(first.clone());
+        assert_eq!(tracker.selected, None);
+        tracker.update_accounts(Some(second.clone()), saved.clone());
+        assert_eq!(tracker.account.as_ref(), Some(&first));
+        tracker.update_accounts(Some(first.clone()), saved.clone());
+        tracker.update_accounts(Some(second.clone()), saved);
+        assert_eq!(tracker.account.as_ref(), Some(&second));
+        assert!(!trim_history(&mut tracker.profiles));
+        assert_eq!(tracker.profiles[&first.key].checked, 1);
+        assert_eq!(tracker.profiles[&second.key].checked, 2);
+    }
+
+    #[test]
     fn history_keeps_the_last_change_per_day_and_skips_flat_checks() {
         let first = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
         let stats = |mmr| PlayerStats {
@@ -858,17 +960,10 @@ mod tests {
 
         profile.update(stats(820), second);
         assert_eq!(profile.playlists[&11].changes.len(), 2);
-        let later = second + time::Duration::days(PROFILE_RETENTION_DAYS);
-        profile.update(stats(820), later - time::Duration::hours(3));
-        assert!(!prune(&mut profiles, later));
+        assert!(!trim_history(&mut profiles));
         let playlist = &profiles[&key].playlists[&11];
         assert_eq!(playlist.changes.len(), 2);
         assert_eq!(playlist.mmr_change(), Some(20));
-        assert!(prune(
-            &mut profiles,
-            later + time::Duration::days(PROFILE_RETENTION_DAYS)
-        ));
-        assert!(profiles.is_empty());
     }
 
     #[test]
