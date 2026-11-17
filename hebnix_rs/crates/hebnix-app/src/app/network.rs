@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    sync::mpsc,
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -16,6 +16,8 @@ const HEARTBEAT: Duration = Duration::from_secs(60);
 struct Session {
     device: String,
     token: String,
+    #[serde(default)]
+    player_id: Option<String>,
 }
 
 #[cfg(windows)]
@@ -77,7 +79,7 @@ fn secret() -> String {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Player {
-    discord_id: String,
+    player_id: String,
     username: String,
     #[serde(default)]
     status: String,
@@ -119,6 +121,7 @@ struct Snapshot {
 
 enum Update {
     GuestPresence,
+    Linked(Value),
     SignedIn(Session),
     Snapshot(Snapshot),
     Modified,
@@ -150,13 +153,13 @@ fn response(response: reqwest::blocking::Response) -> Result<Value, Failure> {
         .and_then(|header| header.parse().ok())
         .map_or(HEARTBEAT, Duration::from_secs);
     if !status.is_success() {
-        if status.as_u16() == 498 {
-            if let Ok(body) = response.json() {
-                hebnix_sdk::req_auth::observe_response(498, &body);
-            }
-        }
+        let body = response.json::<Value>().unwrap_or_default();
+        hebnix_sdk::req_auth::observe_response(status.as_u16(), &body);
         return Err(Failure {
-            message: format!("Hebnix Network returned HTTP {status}"),
+            message: body["error"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Hebnix Network returned HTTP {status}")),
             status: status.as_u16(),
             retry_after,
         });
@@ -207,7 +210,9 @@ fn sign_in(client: reqwest::blocking::Client, mut session: Session) -> Result<Up
         if redeem.status().as_u16() == 202 {
             continue;
         }
-        session.token = response(redeem)?["token"]
+        let redeemed = response(redeem)?;
+        session.player_id = redeemed["playerId"].as_str().map(str::to_owned);
+        session.token = redeemed["token"]
             .as_str()
             .filter(|token| !token.is_empty())
             .ok_or_else(|| "Missing Network session token".to_owned())?
@@ -230,8 +235,10 @@ fn request(
         .request(method.clone(), format!("{REQUEST}/{path}"))
         .bearer_auth(&session.token)
         .header("X-Hebnix-Device", &session.device)
-        .header("X-App-Token", hebnix_sdk::req_auth::app_token()?)
         .header("Content-Type", "application/json");
+    if path != "presence" {
+        request = request.header("X-App-Token", hebnix_sdk::req_auth::app_token()?);
+    }
     if let Some(cursor) = query {
         request = request.query(&[("after", cursor)]);
     }
@@ -250,9 +257,8 @@ fn request(
 }
 
 fn local_player_link() -> Option<Value> {
-    let log = hebnix_sdk::log::parse_launch_log(None, false, "INT");
     let (platform, id, _) =
-        hebnix_sdk::utils::parse_primary_id(log.session.primary_id.as_deref()?)?;
+        hebnix_sdk::utils::parse_primary_id(&hebnix_sdk::log::local_player_id()?)?;
     let platform = match platform.as_str() {
         "steam" => "steam",
         "epic" | "epicgames" => "epic",
@@ -271,28 +277,22 @@ fn local_player_link() -> Option<Value> {
 fn refresh(
     client: reqwest::blocking::Client,
     session: Session,
-    heartbeat: bool,
+    presence: Option<Value>,
 ) -> Result<Update, Failure> {
     let mut unavailable_updates = Vec::new();
-    if heartbeat {
-        let mut updates = vec![("presence", json!({"state": "main_menu"}))];
-        if let Some(link) = local_player_link() {
-            updates.push(("links", link));
-        }
-        for (path, payload) in updates {
-            if let Err(failure) = request(
-                &client,
-                &session,
-                reqwest::Method::PUT,
-                path,
-                None,
-                Some(payload),
-            ) {
-                if failure.status != 404 {
-                    return Err(failure);
-                }
-                unavailable_updates.push(failure.message);
+    if let Some(presence) = presence {
+        if let Err(failure) = request(
+            &client,
+            &session,
+            reqwest::Method::PUT,
+            "presence",
+            None,
+            Some(presence),
+        ) {
+            if failure.status != 404 {
+                return Err(failure);
             }
+            unavailable_updates.push(failure.message);
         }
     }
     let me = request(&client, &session, reqwest::Method::GET, "me", None, None)?;
@@ -306,7 +306,7 @@ fn refresh(
     )?;
     let friends = serde_json::from_value(friends["friends"].clone())
         .map_err(|_| "Invalid friends list".to_owned())?;
-    let players = directory(&client, Some(&session), me["discordId"].as_str())?;
+    let players = directory(&client, Some(&session), me["playerId"].as_str())?;
     Ok(Update::Snapshot(Snapshot {
         friends,
         players,
@@ -333,9 +333,7 @@ fn directory(
                 None,
             )?
         } else {
-            let mut request = client
-                .get(format!("{REQUEST}/members"))
-                .header("X-App-Token", hebnix_sdk::req_auth::app_token()?);
+            let mut request = client.get(format!("{REQUEST}/members"));
             if let Some(cursor) = &cursor {
                 request = request.query(&[("after", cursor)]);
             }
@@ -349,7 +347,7 @@ fn directory(
             .map_err(|_| "Invalid player directory".to_owned())?;
         players.extend(
             rows.into_iter()
-                .filter(|player| Some(player.discord_id.as_str()) != own_id),
+                .filter(|player| Some(player.player_id.as_str()) != own_id),
         );
         let Some(next) = page["nextCursor"].as_str() else {
             break;
@@ -373,6 +371,18 @@ enum View {
 #[derive(Default)]
 pub(super) struct Network {
     loaded: bool,
+    live: Option<mpsc::Receiver<LiveEvent>>,
+    live_presence: Arc<Mutex<Value>>,
+    live_token: Option<String>,
+    live_cancel: Option<mpsc::Sender<()>>,
+    live_healthy: bool,
+    live_retry: Option<Instant>,
+    live_failures: u32,
+    live_me: Option<String>,
+    linked: Option<Value>,
+    next_link_check: Option<Instant>,
+    match_presence: Option<Value>,
+    match_state: Option<&'static str>,
     open: bool,
     public_players: Option<Vec<Player>>,
     public_retry: Option<Instant>,
@@ -427,11 +437,34 @@ impl Network {
         if !self.loaded {
             self.loaded = true;
             match credential(None) {
-                Ok(session) => self.session = session,
+                Ok(Some(session)) => self.session = Some(session),
+                Ok(None) => {
+                    let session = Session {
+                        device: secret(),
+                        token: String::new(),
+                        player_id: None,
+                    };
+                    if let Err(error) = credential(Some(&session)) {
+                        self.error = error;
+                    }
+                    self.session = Some(session);
+                }
                 Err(error) => self.error = error,
             }
         }
         let now = Instant::now();
+        let presence = if !rocket_league_running {
+            self.clear_match_presence();
+            json!({"state": "offline"})
+        } else {
+            self.match_presence
+                .clone()
+                .unwrap_or_else(|| json!({"state": "main_menu"}))
+        };
+        if let Ok(mut current) = self.live_presence.lock() {
+            *current = presence.clone();
+        }
+        self.poll_live(ctx, toasts, now);
         if let Some(job) = &self.job {
             let result = match job.try_recv() {
                 Ok(result) => result,
@@ -446,41 +479,20 @@ impl Network {
                     self.session = Some(session);
                     self.next_poll = None;
                     self.next_heartbeat = None;
+                    self.linked = None;
+                    self.next_link_check = None;
                 }
-                Ok(Update::Directory(players)) => self.public_players = Some(players),
+                Ok(Update::Directory(players)) if !self.live_healthy => {
+                    self.public_players = Some(players)
+                }
+                Ok(Update::Directory(_)) => {}
                 Ok(Update::GuestPresence) => {}
                 Ok(Update::Modified) => self.next_poll = None,
-                Ok(Update::Snapshot(mut snapshot)) => {
-                    if !self.rocket_league_running {
-                        snapshot.unavailable_updates.clear();
-                    }
-
-                    self.offline.retain(|id, _| {
-                        snapshot
-                            .friends
-                            .iter()
-                            .any(|p| p.status == "accepted" && p.discord_id == *id)
-                    });
-                    for friend in snapshot.friends.iter().filter(|p| p.status == "accepted") {
-                        if !friend.online() {
-                            self.offline.entry(friend.discord_id.clone()).or_insert(now);
-                        } else if self
-                            .offline
-                            .remove(&friend.discord_id)
-                            .is_some_and(|offline| {
-                                now.duration_since(offline) > Duration::from_secs(600)
-                            })
-                        {
-                            toasts.push(
-                                "hebnix-network",
-                                "Network",
-                                &format!("{} came online", friend.username),
-                                Default::default(),
-                            );
-                        }
-                    }
-                    self.snapshot = Some(snapshot);
+                Ok(Update::Linked(link)) => self.linked = Some(link),
+                Ok(Update::Snapshot(snapshot)) if !self.live_healthy => {
+                    self.apply_snapshot(snapshot, toasts, now)
                 }
+                Ok(Update::Snapshot(_)) => {}
                 Err(error) => {
                     self.error = error.message;
                     if error.status == 429 {
@@ -510,6 +522,40 @@ impl Network {
         if let Some(until) = self.rate_limited_until.filter(|until| *until > now) {
             ctx.request_repaint_after(until - now);
         }
+        if rocket_league_running
+            && self.actions_enabled()
+            && self.next_link_check.is_none_or(|next| next <= now)
+        {
+            if let Some(session) = self
+                .session
+                .clone()
+                .filter(|session| !session.token.is_empty())
+            {
+                self.next_link_check = Some(now + Duration::from_secs(5));
+                let last_link = self.linked.clone();
+                self.start(ctx, move |client| {
+                    let Some(link) = local_player_link() else {
+                        return Ok(Update::GuestPresence);
+                    };
+                    if last_link.as_ref() == Some(&link) {
+                        return Ok(Update::GuestPresence);
+                    }
+                    request(
+                        &client,
+                        &session,
+                        reqwest::Method::PUT,
+                        "links",
+                        None,
+                        Some(link.clone()),
+                    )?;
+                    Ok(Update::Linked(link))
+                });
+                return;
+            }
+        }
+        if self.live_healthy {
+            return;
+        }
         let session = self
             .session
             .clone()
@@ -528,11 +574,14 @@ impl Network {
                 return;
             }
             self.next_heartbeat = Some(now + HEARTBEAT);
-            self.start(ctx, |client| {
+            let Some(device) = self.session.as_ref().map(|session| session.device.clone()) else {
+                return;
+            };
+            self.start(ctx, move |client| {
                 let reply = client
                     .put(format!("{REQUEST}/presence"))
-                    .header("X-App-Token", hebnix_sdk::req_auth::app_token()?)
-                    .json(&json!({"state": "main_menu"}))
+                    .header("X-Hebnix-Device", device)
+                    .json(&presence)
                     .send()
                     .map_err(|_| "Could not reach Hebnix Network".to_owned())?;
                 response(reply).map_err(|mut error| {
@@ -552,7 +601,43 @@ impl Network {
             self.next_heartbeat = Some(now + HEARTBEAT);
         }
         self.next_poll = self.next_heartbeat.or(Some(now + HEARTBEAT));
-        self.start(ctx, move |client| refresh(client, session, heartbeat));
+        self.start(ctx, move |client| {
+            refresh(client, session, heartbeat.then_some(presence))
+        });
+    }
+
+    fn apply_snapshot(
+        &mut self,
+        mut snapshot: Snapshot,
+        toasts: &mut crate::toast::ToastCenter,
+        now: Instant,
+    ) {
+        if !self.rocket_league_running {
+            snapshot.unavailable_updates.clear();
+        }
+        self.offline.retain(|id, _| {
+            snapshot
+                .friends
+                .iter()
+                .any(|p| p.status == "accepted" && p.player_id == *id)
+        });
+        for friend in snapshot.friends.iter().filter(|p| p.status == "accepted") {
+            if !friend.online() {
+                self.offline.entry(friend.player_id.clone()).or_insert(now);
+            } else if self
+                .offline
+                .remove(&friend.player_id)
+                .is_some_and(|offline| now.duration_since(offline) > Duration::from_secs(600))
+            {
+                toasts.push(
+                    "hebnix-network",
+                    "Network",
+                    &format!("{} came online", friend.username),
+                    Default::default(),
+                );
+            }
+        }
+        self.snapshot = Some(snapshot);
     }
 
     fn actions_enabled(&self) -> bool {
@@ -565,9 +650,13 @@ impl Network {
     pub(super) fn render_button(&mut self, ui: &mut egui::Ui) {
         let button = ui
             .add(
-                egui::Button::new(egui::RichText::new("🌐").size(20.0))
-                    .selected(self.open)
-                    .min_size(egui::vec2(30.0, 26.0)),
+                egui::Button::image(
+                    egui::Image::new(egui::include_image!("../../assets/network-globe.svg"))
+                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                        .tint(ui.visuals().text_color()),
+                )
+                .selected(self.open)
+                .min_size(egui::vec2(28.0, 24.0)),
             )
             .on_hover_text("Network");
         let mut open = self.open ^ button.clicked();
@@ -612,14 +701,19 @@ impl Network {
             .filter(|session| !session.token.is_empty())
         else {
             if self.view == View::AllPlayers {
-                if self.public_retry.is_none_or(|at| at <= Instant::now()) && self.actions_enabled()
+                if !self.live_healthy
+                    && self.public_retry.is_none_or(|at| at <= Instant::now())
+                    && self.actions_enabled()
                 {
                     self.public_retry = Some(Instant::now() + HEARTBEAT);
                     self.start(ui.ctx(), |client| {
                         directory(&client, None, None).map(Update::Directory)
                     });
                 }
-                if let Some(at) = self.public_retry {
+                if let Some(at) = self
+                    .public_retry
+                    .filter(|at| !self.live_healthy && *at > Instant::now())
+                {
                     ui.ctx()
                         .request_repaint_after(at.saturating_duration_since(Instant::now()));
                 }
@@ -650,6 +744,7 @@ impl Network {
                     let session = self.session.clone().unwrap_or_else(|| Session {
                         device: secret(),
                         token: String::new(),
+                        player_id: None,
                     });
                     self.start(ui.ctx(), move |client| {
                         credential(Some(&session))?;
@@ -690,16 +785,16 @@ impl Network {
                             let title =
                                 format!("{} - {}", player.username, player.presence_label());
                             egui::CollapsingHeader::new(egui::RichText::new(title).color(color))
-                                .id_salt(&player.discord_id)
+                                .id_salt(&player.player_id)
                                 .show(ui, |ui| {
                                     if self.confirm_block.as_deref()
-                                        == Some(player.discord_id.as_str())
+                                        == Some(player.player_id.as_str())
                                     {
                                         ui.horizontal(|ui| {
                                             ui.label("Are you sure?");
                                             if ui.button("Yes").clicked() {
                                                 operation =
-                                                    Some((player.discord_id.clone(), "block"));
+                                                    Some((player.player_id.clone(), "block"));
                                                 self.confirm_block = None;
                                             }
                                             if ui.button("No").clicked() {
@@ -707,7 +802,7 @@ impl Network {
                                             }
                                         });
                                     } else if ui.button("Block").clicked() {
-                                        self.confirm_block = Some(player.discord_id.clone());
+                                        self.confirm_block = Some(player.player_id.clone());
                                     }
                                 });
                         }
@@ -719,7 +814,7 @@ impl Network {
                                 ui.horizontal(|ui| {
                                     ui.label(&player.username);
                                     if ui.button("Unblock").clicked() {
-                                        operation = Some((player.discord_id.clone(), "unblock"));
+                                        operation = Some((player.player_id.clone(), "unblock"));
                                     }
                                 });
                             }
@@ -729,16 +824,16 @@ impl Network {
                                 ui.label(&player.username);
                                 if player.direction == "incoming" {
                                     if ui.button("Accept").clicked() {
-                                        operation = Some((player.discord_id.clone(), "accept"));
+                                        operation = Some((player.player_id.clone(), "accept"));
                                     }
                                     if ui.button("Deny").clicked() {
-                                        operation = Some((player.discord_id.clone(), "deny"));
+                                        operation = Some((player.player_id.clone(), "deny"));
                                     }
                                 } else {
                                     ui.label("Request sent");
                                 }
                                 if ui.button("Block").clicked() {
-                                    operation = Some((player.discord_id.clone(), "block"));
+                                    operation = Some((player.player_id.clone(), "block"));
                                 }
                             });
                         }
@@ -748,7 +843,7 @@ impl Network {
                             let relationship = snapshot
                                 .friends
                                 .iter()
-                                .find(|p| p.discord_id == player.discord_id);
+                                .find(|p| p.player_id == player.player_id);
                             ui.horizontal(|ui| {
                                 ui.label(&player.username);
                                 if let Some(status) = relationship
@@ -760,10 +855,10 @@ impl Network {
                                 if relationship.is_none_or(|p| p.status == "denied")
                                     && ui.button("Add friend").clicked()
                                 {
-                                    operation = Some((player.discord_id.clone(), "send"));
+                                    operation = Some((player.player_id.clone(), "send"));
                                 }
                                 if ui.button("Block").clicked() {
-                                    operation = Some((player.discord_id.clone(), "block"));
+                                    operation = Some((player.player_id.clone(), "block"));
                                 }
                             });
                         }
@@ -785,5 +880,318 @@ impl Network {
                 Ok(Update::Modified)
             });
         }
+    }
+}
+#[derive(Deserialize)]
+struct LiveFrame {
+    #[serde(rename = "type")]
+    kind: String,
+    members: Option<Vec<Player>>,
+    friends: Option<Vec<Player>>,
+    me: Option<LiveIdentity>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveIdentity {
+    player_id: String,
+}
+
+enum LiveEvent {
+    Frame(LiveFrame),
+    End {
+        planned: bool,
+        session_rejected: bool,
+    },
+}
+
+fn live_connection(
+    session: Session,
+    presence: Arc<Mutex<Value>>,
+    tx: &mpsc::Sender<LiveEvent>,
+    cancel: mpsc::Receiver<()>,
+    ctx: &egui::Context,
+) -> Result<bool, tungstenite::Error> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
+    let mut request = "wss://req.hebnix.com/network/v1/live".into_client_request()?;
+    let headers = request.headers_mut();
+    let header = |value: &str| {
+        HeaderValue::from_str(value).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid Network credential",
+            )
+        })
+    };
+    headers.insert("X-Hebnix-Device", header(&session.device)?);
+    if !session.token.is_empty() {
+        headers.insert(
+            "Authorization",
+            header(&format!("Bearer {}", session.token))?,
+        );
+        let token = hebnix_sdk::req_auth::app_token().map_err(std::io::Error::other)?;
+        headers.insert("X-App-Token", header(&token)?);
+    }
+    let address = ("req.hebnix.com", 443)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::other("Network host unavailable"))?;
+    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let (mut socket, _) =
+        tungstenite::client_tls(request, stream).map_err(|error| match error {
+            tungstenite::HandshakeError::Failure(error) => error,
+            tungstenite::HandshakeError::Interrupted(_) => {
+                std::io::Error::other("Network handshake interrupted").into()
+            }
+        })?;
+    match socket.get_mut() {
+        tungstenite::stream::MaybeTlsStream::NativeTls(stream) => stream.get_ref(),
+        tungstenite::stream::MaybeTlsStream::Plain(stream) => stream,
+        _ => return Ok(false),
+    }
+    .set_read_timeout(Some(Duration::from_millis(250)))?;
+    let started = Instant::now();
+    let mut sent = Value::Null;
+    let mut last_ping = started;
+    let mut snapshot = false;
+    while started.elapsed() < HEARTBEAT
+        && matches!(cancel.try_recv(), Err(mpsc::TryRecvError::Empty))
+    {
+        let current = presence
+            .lock()
+            .map_err(|_| std::io::Error::other("Network presence unavailable"))?
+            .clone();
+        if current != sent {
+            socket.send(Message::Text(
+                json!({"type": "presence", "presence": current}).to_string(),
+            ))?;
+            sent = current;
+        }
+        if last_ping.elapsed() >= Duration::from_secs(20) {
+            socket.send(Message::Ping(Vec::new()))?;
+            last_ping = Instant::now();
+        }
+        match socket.read() {
+            Ok(Message::Text(text)) => {
+                if let Ok(frame) = serde_json::from_str::<LiveFrame>(&text) {
+                    if frame.kind == "snapshot" || (snapshot && frame.kind == "update") {
+                        snapshot = true;
+                        if tx.send(LiveEvent::Frame(frame)).is_err() {
+                            return Ok(false);
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+            }
+            Ok(Message::Ping(_)) => socket.flush()?,
+            Ok(Message::Close(_)) => {
+                let _ = socket.flush();
+                return Ok(snapshot && started.elapsed() >= Duration::from_secs(58));
+            }
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if !snapshot && started.elapsed() >= Duration::from_secs(5) {
+                    return Ok(false);
+                }
+            }
+            Err(error) => return Err(error),
+            _ => {}
+        }
+    }
+    let _ = socket.close(None);
+    Ok(snapshot)
+}
+
+impl Network {
+    fn poll_live(
+        &mut self,
+        ctx: &egui::Context,
+        toasts: &mut crate::toast::ToastCenter,
+        now: Instant,
+    ) {
+        if self.live.is_some()
+            && self.live_token.as_ref() != self.session.as_ref().map(|session| &session.token)
+        {
+            self.live_healthy = false;
+            self.live_cancel.take();
+        }
+        while let Some(event) = self.live.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(event) => Some(event),
+            Err(mpsc::TryRecvError::Disconnected) => Some(LiveEvent::End {
+                planned: false,
+                session_rejected: false,
+            }),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }) {
+            match event {
+                LiveEvent::Frame(frame) => {
+                    let active_token = self.session.as_ref().map(|session| &session.token);
+                    if self.live_token.as_ref() != active_token {
+                        continue;
+                    }
+                    let signed_in = active_token.is_some_and(|token| !token.is_empty());
+                    let replace = frame.kind == "snapshot";
+                    if signed_in && replace && (frame.me.is_none() || frame.friends.is_none()) {
+                        continue;
+                    }
+                    self.live_healthy = true;
+                    self.live_failures = 0;
+                    if !signed_in {
+                        if replace || frame.members.is_some() {
+                            self.public_players = frame.members;
+                        }
+                        continue;
+                    }
+                    if let Some(me) = frame.me {
+                        self.live_me = Some(me.player_id);
+                    }
+                    let previous = if replace { None } else { self.snapshot.take() };
+                    let (old_friends, old_players) = previous
+                        .map(|snapshot| (snapshot.friends, snapshot.players))
+                        .unwrap_or_default();
+                    let friends = frame.friends.unwrap_or(old_friends);
+                    let mut players = frame.members.unwrap_or(old_players);
+                    players.retain(|player| Some(&player.player_id) != self.live_me.as_ref());
+                    self.apply_snapshot(
+                        Snapshot {
+                            friends,
+                            players,
+                            unavailable_updates: Vec::new(),
+                        },
+                        toasts,
+                        now,
+                    );
+                }
+                LiveEvent::End {
+                    planned,
+                    session_rejected,
+                } => {
+                    self.live = None;
+                    self.live_cancel.take();
+                    self.live_healthy = false;
+                    if session_rejected {
+                        if let Some(session) = &mut self.session {
+                            if self.live_token.as_ref() == Some(&session.token)
+                                && !session.token.is_empty()
+                            {
+                                session.token.clear();
+                                session.player_id = None;
+                                let _ = credential(Some(session));
+                                self.snapshot = None;
+                                self.offline.clear();
+                                self.linked = None;
+                                self.error = "Invalid or expired network session".into();
+                            }
+                        }
+                    }
+                    self.live_retry = if planned {
+                        None
+                    } else {
+                        self.live_failures = self.live_failures.saturating_add(1);
+                        let millis = 1000u64 << self.live_failures.min(5);
+                        Some(
+                            now + Duration::from_millis(
+                                millis / 2 + rand::random::<u64>() % (millis / 2),
+                            ),
+                        )
+                    };
+                }
+            }
+        }
+        if let Some(next) = self.live_retry.filter(|next| *next > now) {
+            ctx.request_repaint_after(next - now);
+            return;
+        }
+        if self.live.is_some() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.live_token = Some(session.token.clone());
+        self.live_me = session.player_id.clone();
+        let (tx, rx) = mpsc::channel();
+        self.live = Some(rx);
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        self.live_cancel = Some(cancel_tx);
+        let ctx = ctx.clone();
+        let presence = Arc::clone(&self.live_presence);
+        std::thread::spawn(move || {
+            let result = live_connection(session, presence, &tx, cancel_rx, &ctx);
+            let session_rejected = matches!(&result, Err(tungstenite::Error::Http(response)) if response.status().as_u16() == 401);
+            let _ = tx.send(LiveEvent::End {
+                planned: matches!(result, Ok(true)),
+                session_rejected,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    pub(super) fn set_match_kind(&mut self, game: Option<&hebnix_sdk::log::LogGameInfo>) {
+        self.match_state = game.and_then(|game| {
+            let tags = game
+                .game_tags
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let class = game
+                .game_class
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if class.contains("training") || tags.contains("training") || tags.contains("freeplay")
+            {
+                Some("in_training")
+            } else if tags
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|tag| tag == "lan")
+                || game
+                    .server_ip
+                    .as_deref()
+                    .is_some_and(|ip| ip.starts_with("127.10."))
+            {
+                Some("in_lan_match")
+            } else {
+                None
+            }
+        });
+    }
+
+    pub(super) fn update_match_presence(
+        &mut self,
+        game: &hebnix_sdk::stats::models::GameState,
+        mode: Option<&str>,
+    ) {
+        if let Some(state) = self.match_state {
+            self.match_presence = Some(json!({"state": state}));
+            return;
+        }
+        let team = |index| game.teams.iter().find(|team| team.team_num == index);
+        let (Some(blue), Some(orange)) = (team(0), team(1)) else {
+            return;
+        };
+        let mut presence = json!({
+            "state": "in_game",
+            "map": crate::discord_presence::display_map_name(&game.arena),
+            "timeSeconds": game.time_seconds.max(0),
+            "score": {"blue": blue.score.clamp(0, 999), "orange": orange.score.clamp(0, 999)},
+            "teamNames": {"blue": blue.name, "orange": orange.name}
+        });
+        if let Some(mode) = mode.filter(|mode| !mode.is_empty()) {
+            presence["gameMode"] = json!(mode);
+        }
+        self.match_presence = Some(presence);
+    }
+
+    pub(super) fn clear_match_presence(&mut self) {
+        self.match_presence = None;
+        self.match_state = None;
     }
 }

@@ -173,7 +173,7 @@ impl Rule for NameRule {
         // single-entry account response can make the roster appear empty.
         if !body
             .request_path
-            .is_some_and(|path| path.contains("/epic/id/v2/sdk/accounts"))
+            .is_some_and(|path| path.split_once('?').map_or(path, |(path, _)| path) == "/epic/id/v2/sdk/accounts")
         {
             return false;
         }

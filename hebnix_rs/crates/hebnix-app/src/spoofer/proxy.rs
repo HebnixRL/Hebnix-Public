@@ -24,6 +24,15 @@ pub fn serve_one<S: Read + Write>(
     host: &str,
 ) -> Result<(), String> {
     let req = read_http_request(&mut tls)?;
+    if req.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("upgrade")
+            || (name.eq_ignore_ascii_case("connection")
+                && value.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade")))
+    }) {
+        tls.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
     let matching: Vec<&Box<dyn Rule>> = rules.iter().filter(|r| r.matches_host(host)).collect();
     let path_and_query = absolute_uri_path(&req.path);
     // Config's PsyNet URL is intercepted locally, but its RPC paths belong to the API backend.
