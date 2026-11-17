@@ -1945,6 +1945,47 @@ pub fn install_api(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<()> {
                 list.set(i, pad)?;
                 i += 1;
             }
+            // the gamepads crate never sees a DualSense on windows, so read it
+            // through winmm like the bind detection does
+            #[cfg(target_os = "windows")]
+            if i == 1
+                && let Some(ds5) = hebnix_sdk::input::dinput::winmm_ds5_pad()
+            {
+                let held = |name: &str| ds5.pressed.contains(name);
+                let [lx, ly, rx, ry, lt, rt] = ds5.axes;
+                let pad = lua.create_table()?;
+                pad.set("id", "winmm-ds5")?;
+                pad.set("name", "DualSense")?;
+                pad.set("kind", "dualsense")?;
+                pad.set("lx", lx)?;
+                pad.set("ly", ly)?;
+                pad.set("rx", rx)?;
+                pad.set("ry", ry)?;
+                pad.set("lt", lt)?;
+                pad.set("rt", rt)?;
+                pad.set("btn_south", held("south"))?;
+                pad.set("btn_east", held("east"))?;
+                pad.set("btn_west", held("west"))?;
+                pad.set("btn_north", held("north"))?;
+                pad.set("dpad_up", held("dpad_up"))?;
+                pad.set("dpad_down", held("dpad_down"))?;
+                pad.set("dpad_left", held("dpad_left"))?;
+                pad.set("dpad_right", held("dpad_right"))?;
+                pad.set("bumper_l", held("l1"))?;
+                pad.set("bumper_r", held("r1"))?;
+                pad.set("trigger_l", held("l2"))?;
+                pad.set("trigger_r", held("r2"))?;
+                pad.set("stick_l", held("l3"))?;
+                pad.set("stick_r", held("r3"))?;
+                pad.set("select", held("select"))?;
+                pad.set("start", held("start"))?;
+                pad.set(
+                    "touchpad",
+                    ds5.raw.contains(&hebnix_sdk::input::bindings::DS5_TOUCHPAD_CODE),
+                )?;
+                pad.set("meta", held("mode"))?;
+                list.set(1, pad)?;
+            }
             Ok(list)
         })?,
     )?;

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use gilrs::{Gamepad, GamepadId, GilrsBuilder};
 use super::bindings::{DS5_MUTE_CODE, DS5_TOUCHPAD_CODE};
 use windows::Win32::Media::Multimedia::{
-    JOY_RETURNBUTTONS, JOY_RETURNPOV, JOYCAPSW, JOYINFOEX, joyGetDevCapsW, joyGetNumDevs,
+    JOY_RETURNBUTTONS, JOY_RETURNPOV, JOY_RETURNR, JOY_RETURNU, JOY_RETURNV, JOY_RETURNX,
+    JOY_RETURNY, JOY_RETURNZ, JOYCAPSW, JOYINFOEX, joyGetDevCapsW, joyGetNumDevs,
     joyGetPosEx,
 };
 
@@ -306,8 +307,31 @@ fn find_winmm_ds5() -> Option<u32> {
     })
 }
 
-// (named buttons, raw codes) held, None once the pad is unplugged
-fn read_winmm_ds5(id: u32) -> Option<(HashSet<&'static str>, HashSet<u32>)> {
+/// a dualsense read through winmm
+pub struct Ds5Pad {
+    pub pressed: HashSet<&'static str>,
+    pub raw: HashSet<u32>,
+    /// lx, ly, rx, ry in -1..1 (y up, like xinput), l2, r2 in 0..1
+    pub axes: [f32; 6],
+}
+
+/// the first connected dualsense via winmm, for plugins (hebnix.controllers)
+pub fn winmm_ds5_pad() -> Option<Ds5Pad> {
+    // (cached winmm id, last scan) - rescanning walks every slot, so once a second
+    static CACHE: Mutex<(Option<u32>, Option<Instant>)> = Mutex::new((None, None));
+    let mut cache = CACHE.lock().unwrap();
+    if cache.0.is_none() && cache.1.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+        *cache = (find_winmm_ds5(), Some(Instant::now()));
+    }
+    let pad = cache.0.and_then(read_winmm_ds5);
+    if pad.is_none() {
+        cache.0 = None;
+    }
+    pad
+}
+
+// held buttons and axes, None once the pad is unplugged
+fn read_winmm_ds5(id: u32) -> Option<Ds5Pad> {
     // dinput button order of the dualsense, same as the SDL db's windows PS5 entry
     const BUTTONS: [&str; 13] = [
         "west", "south", "east", "north", "l1", "r1", "l2", "r2", "select", "start", "l3", "r3",
@@ -315,7 +339,14 @@ fn read_winmm_ds5(id: u32) -> Option<(HashSet<&'static str>, HashSet<u32>)> {
     ];
     let mut info = JOYINFOEX {
         dwSize: size_of::<JOYINFOEX>() as u32,
-        dwFlags: (JOY_RETURNBUTTONS | JOY_RETURNPOV) as u32,
+        dwFlags: (JOY_RETURNBUTTONS
+            | JOY_RETURNPOV
+            | JOY_RETURNX
+            | JOY_RETURNY
+            | JOY_RETURNZ
+            | JOY_RETURNR
+            | JOY_RETURNU
+            | JOY_RETURNV) as u32,
         ..Default::default()
     };
     if unsafe { joyGetPosEx(id, &mut info) } != 0 {
@@ -346,7 +377,19 @@ fn read_winmm_ds5(id: u32) -> Option<(HashSet<&'static str>, HashSet<u32>)> {
         .filter(|(bit, _)| info.dwButtons & (1 << bit) != 0)
         .map(|(_, code)| code)
         .collect();
-    Some((pressed, raw))
+    // winmm axes are 0..65535; the dualsense maps X/Y left stick, Z/R right
+    // stick, U/V L2/R2
+    let unit = |v: u32| v as f32 / 65535.0;
+    let stick = |v: u32| unit(v) * 2.0 - 1.0;
+    let axes = [
+        stick(info.dwXpos),
+        -stick(info.dwYpos),
+        stick(info.dwZpos),
+        -stick(info.dwRpos),
+        unit(info.dwUpos),
+        unit(info.dwVpos),
+    ];
+    Some(Ds5Pad { pressed, raw, axes })
 }
 
 /// spawn the bg thread that reads controller state and reconnects on drop.
@@ -425,7 +468,7 @@ fn monitor_loop() {
                     last_ds5_scan = Some(Instant::now());
                 }
                 match ds5.and_then(read_winmm_ds5) {
-                    Some((pressed, raw)) => {
+                    Some(Ds5Pad { pressed, raw, .. }) => {
                         set_layout(Some(Layout::PlayStation), Some(PsGen::Ds5));
                         *pressed_set().lock().unwrap() = pressed;
                         *raw_pressed_set().lock().unwrap() = raw;
