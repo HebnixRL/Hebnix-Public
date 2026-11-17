@@ -360,6 +360,10 @@ impl PatcherState {
                         if !crate::patch_core::gameinfo::is_ball_upk(&live_file_name) {
                             continue;
                         }
+                        // Copying the backup over a menu or arena swap would erase it.
+                        if crate::patch_core::gameinfo::owned_elsewhere(&cooked_pc_clone, &live_file_name) {
+                            continue;
+                        }
                         let live_path = cooked_pc_clone.join(&live_file_name);
                         match fs::read(&backup).map_err(|error| error.to_string()).and_then(|bytes| super::upk_history::install_linked(&cooked_pc_clone, &live_path, &bytes, "Restore ball textures")) {
                             Ok(_) => restored += 1,

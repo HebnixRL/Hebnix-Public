@@ -1366,6 +1366,15 @@ pub mod gameinfo {
                 .any(|candidate| name.eq_ignore_ascii_case(candidate))
     }
 
+    /// Another feature owns this package: an active menu swap, or an arena
+    /// background/map swap (they leave `.hbnx_mapbak` beside the arena).
+    /// Rebuilding it from the ball's vanilla `.bak` would erase that feature,
+    /// and a first `.bak` taken now would save its edit as vanilla.
+    pub fn owned_elsewhere(cooked: &Path, name: &str) -> bool {
+        crate::patcher::menu_map::owns(cooked, name)
+            || cooked.join(format!("{name}.hbnx_mapbak")).exists()
+    }
+
     struct PreparedBallTextures {
         dxt64: Vec<u8>,
         ph4d_dxt: HashMap<usize, Vec<u8>>,
@@ -1549,7 +1558,8 @@ pub mod gameinfo {
         target_name: &str,
     ) -> Result<bool, String> {
         let target_path = Path::new(game_dir).join(target_name);
-        if !target_path.is_file() {
+        // shortcut: arenas owned elsewhere keep their current distance mips until that feature is restored
+        if !target_path.is_file() || owned_elsewhere(Path::new(game_dir), target_name) {
             return Ok(false);
         }
         let bak_path = Path::new(backup_dir).join(format!("{target_name}.bak"));

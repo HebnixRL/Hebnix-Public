@@ -276,7 +276,8 @@ pub(crate) fn restore_repatched_items(base: &Path, cooked: &Path) -> Result<(), 
     let item_packages = super::upk_history::tracked_items(cooked)?;
     restore_packages_matching(&backups, cooked, |file| {
         item_packages.contains(&file.to_ascii_lowercase())
-            || super::patch_core::gameinfo::is_ball_upk(file)
+            || (super::patch_core::gameinfo::is_ball_upk(file)
+                && !super::patch_core::gameinfo::owned_elsewhere(cooked, file))
     })?;
     restore_packages(&backups.join("Anthems"), cooked)?;
     restore_packages(&backups.join("CarPatcher"), cooked)

@@ -2327,7 +2327,9 @@ fn restore_decal_candidates(
     let mut restored_package = false;
     for target_upk in target_candidates {
         let backup_upk = backups_dir.join(format!("{target_upk}.bak"));
-        if backup_upk.is_file() {
+        // Legacy whole-file Startup.upk backups predate Titles; keep the backup
+        // for a later restore rather than erase active title edits.
+        if backup_upk.is_file() && !super::title_patcher::owns(cooked_pc, target_upk) {
             super::upk_history::install_linked(cooked_pc, &cooked_pc.join(target_upk), &fs::read(&backup_upk).map_err(|e| e.to_string())?, "Restore decal")
                 .map_err(|error| format!("Failed to restore {target_upk}: {error}"))?;
             restored_package = true;

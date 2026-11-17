@@ -479,6 +479,12 @@ fn owned_alias(name: &str) -> bool {
         .is_some_and(|tail| tail.len() >= 3 && tail.bytes().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// The menu swap owns `file` while active: restore only accepts the exact bytes
+/// it installed, so any other edit to the menu leaves it unrestorable.
+pub fn owns(cooked: &Path, file: &str) -> bool {
+    file.eq_ignore_ascii_case(MENU) && !matches!(active(cooked), Ok(None))
+}
+
 pub fn active(cooked: &Path) -> Result<Option<ActiveSwap>, String> {
     let path = state_dir(cooked).join(MANIFEST);
     let data = match fs::read(&path) {
@@ -980,6 +986,21 @@ mod tests {
         let camera = &export.cameras[0];
         assert_eq!(camera.camera, "CameraActor_2");
         assert_eq!(camera.fov, None);
+    }
+
+    #[test]
+    fn active_swap_owns_only_the_menu() {
+        let cooked = std::env::temp_dir().join(format!("hebnix_menu_owns_{}", std::process::id()));
+        fs::create_dir_all(state_dir(&cooked)).unwrap();
+        assert!(!owns(&cooked, MENU));
+        fs::write(
+            state_dir(&cooked).join(MANIFEST),
+            r#"{"arena":"Stadium_P","build":"b","original_sha256":"o","patched_sha256":"p","files":[]}"#,
+        )
+        .unwrap();
+        assert!(owns(&cooked, "menu_main_p.upk"));
+        assert!(!owns(&cooked, "Stadium_P.upk"));
+        fs::remove_dir_all(&cooked).unwrap();
     }
 
     #[test]
