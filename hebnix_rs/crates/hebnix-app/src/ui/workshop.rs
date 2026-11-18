@@ -43,7 +43,8 @@ use menu_map::MenuMapState;
 use steam_download::SteamDownloader;
 
 /// common Workshop multiplayer problems (VPNs/proxies, firewalls) and fixes
-const MULTIPLAYER_HELP_URL: &str = "https://github.com/xplodingeggo/hebnix-linux/blob/feature/tsnet-multiplayer/docs/workshop-multiplayer-help.md"; // TEST ONLY: point at HebnixRL/Hebnix-Public main once merged
+const MULTIPLAYER_HELP_URL: &str =
+    "https://github.com/HebnixRL/Hebnix-Public/blob/main/docs/workshop-multiplayer-help.md";
 use local_import::{
     ImportWizard, LocalMap, is_local_entry, load_local_maps, record_received_map, remove_local_map,
 };
@@ -165,6 +166,36 @@ fn multiplayer_client_token() -> String {
 /// Workshop multiplayer no longer uses it, and a game still started with it
 /// (by an older Hebnix's Epic launch option, or by hand) can't see the
 /// sidecar's loopback proxies.
+#[cfg(target_os = "linux")]
+fn rocket_league_multihome_address() -> Option<String> {
+    // Launch.log can belong to an older run or another Wine prefix, so ask the
+    // running game's own command line instead (as 2.2.6 did)
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        if !entry.file_name().to_string_lossy().bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let cmdline = String::from_utf8_lossy(&raw).replace('\0', " ").to_ascii_lowercase();
+        if !cmdline.contains("rocketleague.exe") {
+            continue;
+        }
+        let Some(start) = cmdline.find("-multihome=") else {
+            continue;
+        };
+        let address: String = cmdline[start + "-multihome=".len()..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit() || *character == '.')
+            .collect();
+        if !address.is_empty() {
+            return Some(address);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
 fn rocket_league_multihome_address() -> Option<String> {
     let path = hebnix_sdk::utils::paths::documents_dir()
         .unwrap_or_else(|| PathBuf::from("."))
