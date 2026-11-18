@@ -97,6 +97,24 @@ pub fn disable_saved_http_features(base_dir: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+/// Whether the HTTP features (Name, Friends) and certificate controls need
+/// Hebnix itself to run as Administrator first.
+pub fn http_needs_elevated_relaunch() -> bool {
+    !is_admin()
+}
+
+/// Trust the proxy certificate. The caller has checked
+/// `http_needs_elevated_relaunch`.
+pub fn install_certificate(base_dir: &std::path::Path) -> Result<(), String> {
+    ca::install(base_dir)
+}
+
+/// Remove the proxy certificate. The caller has checked
+/// `http_needs_elevated_relaunch`.
+pub fn uninstall_certificate(_base_dir: &std::path::Path) -> Result<(), String> {
+    ca::uninstall()
+}
+
 pub fn spawn_elevated_relaunch() -> bool {
     use std::os::windows::process::CommandExt;
 

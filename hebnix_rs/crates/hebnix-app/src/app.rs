@@ -1113,7 +1113,7 @@ impl HebnixApp {
 
         // HTTP consumers now request elevation themselves, independently of the
         // retired master switch. A declined UAC relaunch must not loop.
-        if (spoofer_username_enabled || spoofer_friends_enabled) && !spoofer::is_admin() {
+        if (spoofer_username_enabled || spoofer_friends_enabled) && spoofer::http_needs_elevated_relaunch() {
             let skip_elevate = std::env::args().any(|arg| arg == spoofer::SKIP_ELEVATE_ARG);
             if !skip_elevate && spoofer::spawn_elevated_relaunch() {
                 std::process::exit(0);
@@ -2632,7 +2632,7 @@ impl HebnixApp {
                 AppMsg::SpooferCertificateLost => {
                     self.disable_certificate_features();
                     self.spoofer_cert_installed = false;
-                    self.spoofer_certificate_prompt_open = spoofer::is_admin();
+                    self.spoofer_certificate_prompt_open = !spoofer::http_needs_elevated_relaunch();
                     if self.spoofer_certificate_prompt_open {
                         self.set_hidden(ctx, false);
                     }

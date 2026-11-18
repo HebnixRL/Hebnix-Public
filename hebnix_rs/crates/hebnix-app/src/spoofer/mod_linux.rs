@@ -881,6 +881,29 @@ pub fn spawn_elevated_relaunch() -> bool {
     false
 }
 
+/// Linux never needs a restart for the HTTP features: the proxy is set in the
+/// Wine prefix as the normal user, and the certificate is trusted through a
+/// one-shot pkexec call (`install_certificate`).
+pub fn http_needs_elevated_relaunch() -> bool {
+    false
+}
+
+/// Trust the proxy certificate system-wide. The certificate files are made as
+/// the normal user first so they stay owned by them; only the p11-kit trust
+/// step runs through pkexec.
+pub fn install_certificate(base_dir: &Path) -> Result<(), String> {
+    if ca::is_current_installed(base_dir) {
+        return Ok(());
+    }
+    ca::ensure(base_dir)?;
+    run_privileged(PrivilegedAction::InstallCa, base_dir)
+}
+
+/// Remove the proxy certificate's system-wide trust through pkexec.
+pub fn uninstall_certificate(base_dir: &Path) -> Result<(), String> {
+    run_privileged(PrivilegedAction::UninstallCa, base_dir)
+}
+
 impl SpooferManager {
     /// the hosts redirect is applied per action on Linux, never left active
     pub fn account_redirect_active(&self) -> bool {
