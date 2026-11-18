@@ -304,7 +304,7 @@ fn stage_update_payload(downloaded: &Path, staged: &Path, lite: bool) -> Result<
     let file = std::fs::File::open(downloaded).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid update ZIP: {e}"))?;
     let expected = if lite {
-        "hebnix-lite.exe"
+        "Hebnix Lite.exe"
     } else {
         "hebnix.exe"
     };
@@ -321,7 +321,7 @@ fn stage_update_payload(downloaded: &Path, staged: &Path, lite: bool) -> Result<
         };
         if path
             .file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case(expected))
+            .is_some_and(|name| { let name = name.to_string_lossy(); name.eq_ignore_ascii_case(expected) || (lite && name.eq_ignore_ascii_case("hebnix-lite.exe")) })
         {
             if selected.replace(index).is_some() {
                 return Err(format!(

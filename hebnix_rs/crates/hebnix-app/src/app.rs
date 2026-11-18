@@ -50,7 +50,7 @@ use crate::ui::console::ConsoleState;
 use crate::ui::workshop::{ImageState, WorkshopState};
 use crate::winutil;
 
-pub const APP_VERSION: &str = "2.3.4";
+pub const APP_VERSION: &str = "2.3.5";
 
 pub const DEFAULT_WIDTH: f32 = 1250.0;
 pub const DEFAULT_HEIGHT: f32 = 700.0;
@@ -3304,6 +3304,7 @@ impl HebnixApp {
                         self.discord_presence.set_match(&self.config.settings, info);
                         if !replay_event && !self.match_ended {
                             self.network.update_match_presence(&state.game, Some(&info.gamemode));
+                            self.network.update_match_players(&state.players);
                         }
                     }
                 }

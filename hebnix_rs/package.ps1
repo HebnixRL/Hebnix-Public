@@ -65,7 +65,8 @@ foreach ($v in $variants) {
 
     foreach ($f in $files) {
         if (-not (Test-Path $f)) { throw "build output missing: $f" }
-        Copy-Item $f -Destination $outDir
+        $destination = if ($v.Exe -eq 'hebnix-lite.exe') { Join-Path $outDir 'Hebnix Lite.exe' } else { $outDir }
+        Copy-Item -LiteralPath $f -Destination $destination
     }
     if ($v.Portable) {
         Set-Content -Path (Join-Path $outDir 'portable.txt') -Value 'keep hebnix data in this folder instead of %AppData%\Hebnix' -Encoding utf8

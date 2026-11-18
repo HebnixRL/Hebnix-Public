@@ -19,8 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
 const API: &str = "https://req.hebnix.com/player";
 const UPLOAD_LOOKUP: &str = "https://pubapi.hebnix.com/rocket-profiles/images";
+#[cfg(test)]
 const PROFILE_USER_AGENT: &str = concat!("Hebnix/", env!("CARGO_PKG_VERSION"));
 // Match the plugin HTTP client: the public image host rejects requests with
 // no User-Agent before they reach the upload/file endpoints.
@@ -128,6 +130,7 @@ fn normalize_size(bytes: &[u8], size: u32) -> Result<Vec<u8>, String> {
 }
 
 struct Resolver {
+    #[cfg(test)]
     profile: Client,
     image: Client,
     cache: Mutex<HashMap<String, Cached>>,
@@ -137,6 +140,7 @@ impl Resolver {
     fn new() -> Result<Self, String> {
         // Only the profile request receives the SDK token. CDN image requests
         // and public avatar uploads use separate requests without that header.
+        #[cfg(test)]
         let profile = Client::builder()
             .redirect(Policy::none())
             // the profile service rejects requests without a registered app User-Agent (HTTP 427)
@@ -145,6 +149,7 @@ impl Resolver {
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            #[cfg(test)]
             profile,
             image: avatar_client()?,
             cache: Mutex::new(HashMap::new()),
@@ -224,9 +229,15 @@ impl Resolver {
                 }
             }
         }
-        let token = hebnix_sdk::req_auth::app_token()?;
-        self.fetch_remote_size(id, API, &token, size)
+        let profile = hebnix_sdk::tracker::player_profile_json(
+            &id.platform,
+            &id.account,
+            Duration::from_secs(10),
+        )?;
+        let avatar = avatar_url(&profile).ok_or("No avatar available")?;
+        download_avatar(&self.image, avatar, size)
     }
+    #[cfg(test)]
     fn profile_request(
         &self,
         id: &Identity,
@@ -239,6 +250,7 @@ impl Resolver {
             .header("Accept", "application/json")
             .header("X-App-Token", token)
     }
+    #[cfg(test)]
     fn fetch_remote_size(
         &self,
         id: &Identity,
@@ -274,7 +286,11 @@ fn upload_image_url(url: &str) -> String {
     url.replace("/rocket-profiles/files/", "/files/rocket-profiles/")
 }
 
-fn lookup_uploaded_avatar(client: &Client, endpoint: &str, account: &str) -> Result<Option<String>, String> {
+fn lookup_uploaded_avatar(
+    client: &Client,
+    endpoint: &str,
+    account: &str,
+) -> Result<Option<String>, String> {
     let response = client
         .post(endpoint)
         .header("Content-Type", "application/json")
@@ -283,7 +299,9 @@ fn lookup_uploaded_avatar(client: &Client, endpoint: &str, account: &str) -> Res
         .map_err(|_| "Shared avatar lookup unavailable")?;
     let body: Value = serde_json::from_slice(&limited(response, MAX_PROFILE)?)
         .map_err(|_| "Invalid shared avatar lookup response")?;
-    let images = body.get("images").and_then(Value::as_array)
+    let images = body
+        .get("images")
+        .and_then(Value::as_array)
         .ok_or("Invalid shared avatar lookup response")?;
     Ok(images.iter().find_map(|entry| {
         let id = entry.get("platform_id")?.as_str()?;
@@ -594,10 +612,15 @@ mod tests {
 
         let account = "abcdef0123456789abcdef0123456789";
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}/rocket-profiles/images", listener.local_addr().unwrap());
+        let endpoint = format!(
+            "http://{}/rocket-profiles/images",
+            listener.local_addr().unwrap()
+        );
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
             let mut request = BufReader::new(&mut stream);
             let mut line = String::new();
             request.read_line(&mut line).unwrap();
@@ -616,17 +639,33 @@ mod tests {
             }
             let mut body = vec![0; length];
             request.read_exact(&mut body).unwrap();
-            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), serde_json::json!({
-                "platform_ids": [account]
-            }));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                serde_json::json!({
+                    "platform_ids": [account]
+                })
+            );
             let body = serde_json::json!({ "images": [
                 { "platform_id": "unrelated", "image": "https://pubapi.hebnix.com/other.jpg" },
                 { "platform_id": account, "image": "https://pubapi.hebnix.com/rocket-profiles/files/avatar.jpg" },
             ]});
-            reply(&mut stream, "200 OK", "application/json", body.to_string().as_bytes());
+            reply(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                body.to_string().as_bytes(),
+            );
         });
-        let url = lookup_uploaded_avatar(&avatar_client().unwrap(), &endpoint, &account.to_ascii_uppercase()).unwrap();
-        assert_eq!(url.as_deref(), Some("https://pubapi.hebnix.com/files/rocket-profiles/avatar.jpg"));
+        let url = lookup_uploaded_avatar(
+            &avatar_client().unwrap(),
+            &endpoint,
+            &account.to_ascii_uppercase(),
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_deref(),
+            Some("https://pubapi.hebnix.com/files/rocket-profiles/avatar.jpg")
+        );
         server.join().unwrap();
     }
     #[test]

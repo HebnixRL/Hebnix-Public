@@ -86,6 +86,17 @@ struct Player {
     #[serde(default)]
     direction: String,
     presence: Option<Presence>,
+    #[serde(default)]
+    links: Vec<FriendLink>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FriendLink {
+    platform: String,
+    platform_id: String,
+    #[serde(default)]
+    display_name: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -116,16 +127,25 @@ impl Player {
 struct Snapshot {
     unavailable_updates: Vec<String>,
     friends: Vec<Player>,
-    players: Vec<Player>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountSettings {
+    presence_visibility: String,
+    friend_code: String,
 }
 
 enum Update {
     GuestPresence,
+    AccountSettings(AccountSettings),
+    FriendRequestSent,
+    FriendRanks(String, hebnix_sdk::tracker::PlayerStats),
     Linked(Value),
     SignedIn(Session),
     Snapshot(Snapshot),
     Modified,
-    Directory(Vec<Player>),
+    FriendRemoved(String),
 }
 
 struct Failure {
@@ -295,7 +315,6 @@ fn refresh(
             unavailable_updates.push(failure.message);
         }
     }
-    let me = request(&client, &session, reqwest::Method::GET, "me", None, None)?;
     let friends = request(
         &client,
         &session,
@@ -306,58 +325,10 @@ fn refresh(
     )?;
     let friends = serde_json::from_value(friends["friends"].clone())
         .map_err(|_| "Invalid friends list".to_owned())?;
-    let players = directory(&client, Some(&session), me["playerId"].as_str())?;
     Ok(Update::Snapshot(Snapshot {
         friends,
-        players,
         unavailable_updates,
     }))
-}
-
-fn directory(
-    client: &reqwest::blocking::Client,
-    session: Option<&Session>,
-    own_id: Option<&str>,
-) -> Result<Vec<Player>, Failure> {
-    let mut cursor: Option<String> = None;
-    let mut seen = std::collections::HashSet::new();
-    let mut players = Vec::new();
-    loop {
-        let page = if let Some(session) = session {
-            request(
-                client,
-                session,
-                reqwest::Method::GET,
-                "members",
-                cursor.as_deref(),
-                None,
-            )?
-        } else {
-            let mut request = client.get(format!("{REQUEST}/members"));
-            if let Some(cursor) = &cursor {
-                request = request.query(&[("after", cursor)]);
-            }
-            response(
-                request
-                    .send()
-                    .map_err(|_| "Could not reach Hebnix Network".to_owned())?,
-            )?
-        };
-        let rows: Vec<Player> = serde_json::from_value(page["members"].clone())
-            .map_err(|_| "Invalid player directory".to_owned())?;
-        players.extend(
-            rows.into_iter()
-                .filter(|player| Some(player.player_id.as_str()) != own_id),
-        );
-        let Some(next) = page["nextCursor"].as_str() else {
-            break;
-        };
-        if !seen.insert(next.to_owned()) {
-            return Err("Invalid player directory cursor".to_owned().into());
-        }
-        cursor = Some(next.to_owned());
-    }
-    Ok(players)
 }
 
 #[derive(Default, PartialEq)]
@@ -365,14 +336,14 @@ enum View {
     #[default]
     Friends,
     Pending,
-    AllPlayers,
+    AddFriend,
     Settings,
 }
 
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 struct PresenceNotificationSettings {
-    friends_only: bool,
+    hide_match_users: bool,
     hide: bool,
     #[serde(skip)]
     loaded: bool,
@@ -418,7 +389,6 @@ pub(super) struct Network {
     live_healthy: bool,
     live_retry: Option<Instant>,
     live_failures: u32,
-    live_me: Option<String>,
     linked: Option<Value>,
     next_link_check: Option<Instant>,
     match_presence: Option<Value>,
@@ -426,8 +396,6 @@ pub(super) struct Network {
     next_presence_account_check: Option<Instant>,
     match_state: Option<&'static str>,
     open: bool,
-    public_players: Option<Vec<Player>>,
-    public_retry: Option<Instant>,
     session: Option<Session>,
     error: String,
     job: Option<mpsc::Receiver<Result<Update, Failure>>>,
@@ -438,9 +406,19 @@ pub(super) struct Network {
     snapshot: Option<Snapshot>,
     last_online: HashMap<String, Instant>,
     first_directory: Option<Instant>,
+    friend_ranks: HashMap<String, hebnix_sdk::tracker::PlayerStats>,
+    match_players: Vec<(String, String, String)>,
+    match_notified: std::collections::HashSet<(String, String)>,
+    match_lookup: Option<mpsc::Receiver<Vec<(String, String, String)>>>,
+    next_match_lookup: Option<Instant>,
     notification_settings: PresenceNotificationSettings,
+    account_settings: Option<AccountSettings>,
+    account_settings_session: Option<String>,
+    account_settings_requested: bool,
+    friend_code_input: String,
     view: View,
     confirm_block: Option<String>,
+    confirm_remove: Option<String>,
 }
 
 impl Network {
@@ -524,6 +502,7 @@ impl Network {
             *current = presence.clone();
         }
         self.notification_settings.load();
+        self.poll_match_users(ctx, toasts, now);
         self.poll_live(ctx, toasts, now);
         if let Some(job) = &self.job {
             let result = match job.try_recv() {
@@ -542,13 +521,29 @@ impl Network {
                     self.linked = None;
                     self.next_link_check = None;
                 }
-                Ok(Update::Directory(players)) if !self.live_healthy => {
-                    self.notify_online(&players, &[], toasts, now);
-                    self.public_players = Some(players);
-                }
-                Ok(Update::Directory(_)) => {}
                 Ok(Update::GuestPresence) => {}
+                Ok(Update::AccountSettings(settings)) => self.account_settings = Some(settings),
+                Ok(Update::FriendRanks(key, ranks)) => {
+                    self.friend_ranks.insert(key, ranks);
+                }
+                Ok(Update::FriendRequestSent) => {
+                    self.friend_code_input.clear();
+                    self.error.clear();
+                    self.next_poll = None;
+                    toasts.push(
+                        "hebnix-network",
+                        "Network",
+                        "Friend request sent",
+                        Default::default(),
+                    );
+                }
                 Ok(Update::Modified) => self.next_poll = None,
+                Ok(Update::FriendRemoved(peer)) => {
+                    if let Some(snapshot) = &mut self.snapshot {
+                        snapshot.friends.retain(|friend| friend.player_id != peer);
+                    }
+                    self.next_poll = None;
+                }
                 Ok(Update::Linked(link)) => self.linked = Some(link),
                 Ok(Update::Snapshot(snapshot)) if !self.live_healthy => {
                     self.apply_snapshot(snapshot, toasts, now)
@@ -566,7 +561,6 @@ impl Network {
                             HEARTBEAT
                         },
                     );
-                    self.public_retry = self.next_poll;
                     if error.status == 401 {
                         if let Some(session) = &mut self.session {
                             session.token.clear();
@@ -677,37 +671,27 @@ impl Network {
         if !self.rocket_league_running {
             snapshot.unavailable_updates.clear();
         }
-        self.notify_online(&snapshot.players, &snapshot.friends, toasts, now);
+        self.notify_online(&snapshot.friends, toasts, now);
         self.snapshot = Some(snapshot);
     }
 
     fn notify_online(
         &mut self,
-        players: &[Player],
         friends: &[Player],
         toasts: &mut crate::toast::ToastCenter,
         now: Instant,
     ) {
         let first = *self.first_directory.get_or_insert(now);
-        let mut online = std::collections::HashSet::new();
         for player in friends
             .iter()
             .filter(|p| p.status == "accepted" && p.online())
-            .chain(players.iter())
         {
-            if !online.insert(player.player_id.as_str()) {
-                continue;
-            }
             let last = self
                 .last_online
                 .insert(player.player_id.clone(), now)
                 .unwrap_or(first);
-            let is_friend = friends
-                .iter()
-                .any(|friend| friend.status == "accepted" && friend.player_id == player.player_id);
             if now.duration_since(last) > Duration::from_secs(600)
                 && !self.notification_settings.hide
-                && (!self.notification_settings.friends_only || is_friend)
             {
                 toasts.push(
                     "hebnix-network",
@@ -742,14 +726,15 @@ impl Network {
             .on_hover_text("Network");
         let mut open = self.open ^ button.clicked();
         let width = (ui.ctx().content_rect().width() - 32.0).clamp(180.0, 400.0);
-        egui::Popup::from_response(&button)
+        let child_popup_open = egui::Popup::is_any_open(ui.ctx());
+        let popup = egui::Popup::from_response(&button)
             .open_bool(&mut open)
             .align(egui::RectAlign::BOTTOM_END)
             .align_alternatives(&[])
             .gap(4.0)
             .width(width)
             .layout(egui::Layout::top_down(egui::Align::Min))
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
             .show(|ui| {
                 ui.set_width(width);
                 ui.horizontal(|ui| {
@@ -771,25 +756,153 @@ impl Network {
                         .show(ui, |ui| self.render(ui));
                 });
             });
+        if self.open
+            && !button.clicked()
+            && !child_popup_open
+            && !egui::Popup::is_any_open(ui.ctx())
+            && popup.is_some_and(|popup| popup.response.clicked_elsewhere())
+        {
+            open = false;
+        }
         self.open = open;
     }
 
+    fn account_settings_request(
+        &mut self,
+        ctx: &egui::Context,
+        session: Session,
+        visibility: Option<String>,
+    ) {
+        self.start(ctx, move |client| {
+            let method = if visibility.is_some() {
+                reqwest::Method::PUT
+            } else {
+                reqwest::Method::GET
+            };
+            let body = visibility.map(|value| json!({"presenceVisibility": value}));
+            let settings = request(&client, &session, method, "settings", None, body)?;
+            serde_json::from_value(settings)
+                .map(Update::AccountSettings)
+                .map_err(|_| "Invalid Network settings".to_owned().into())
+        });
+    }
+
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
+        let signed_in = self
+            .session
+            .clone()
+            .filter(|session| !session.token.is_empty());
+        let account_session = signed_in.as_ref().map(|session| &session.token);
+        if self.account_settings_session.as_ref() != account_session {
+            self.account_settings_session = account_session.cloned();
+            self.account_settings = None;
+            self.account_settings_requested = false;
+            self.friend_code_input.clear();
+        }
+        if signed_in.is_none() && self.view == View::AddFriend {
+            self.view = View::Friends;
+        }
+
         if !self.error.is_empty() {
             ui.label(&self.error);
         }
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.view, View::Friends, "Friends");
             ui.selectable_value(&mut self.view, View::Pending, "Pending");
-            ui.selectable_value(&mut self.view, View::AllPlayers, "All Players");
+            if signed_in.is_some() {
+                ui.selectable_value(&mut self.view, View::AddFriend, "Add Friend");
+            }
             ui.selectable_value(&mut self.view, View::Settings, "Settings");
         });
         ui.separator();
+        if self.view == View::AddFriend || self.view == View::Settings {
+            if let Some(session) = signed_in.as_ref() {
+                if self.account_settings.is_none()
+                    && self.actions_enabled()
+                    && (!self.account_settings_requested
+                        || ui.button("Retry loading Network settings").clicked())
+                {
+                    self.account_settings_requested = true;
+                    self.account_settings_request(ui.ctx(), session.clone(), None);
+                }
+            }
+        }
+        if self.view == View::AddFriend {
+            let Some(session) = signed_in else {
+                return;
+            };
+            ui.label("Enter Friend Code:");
+            let edited =
+                ui.add(egui::TextEdit::singleline(&mut self.friend_code_input).char_limit(8));
+            if edited.changed() {
+                self.friend_code_input
+                    .retain(|ch| ch.is_ascii_alphanumeric());
+                self.friend_code_input.make_ascii_uppercase();
+            }
+            let enabled = self.friend_code_input.len() == 8 && self.actions_enabled();
+            if ui
+                .add_enabled(enabled, egui::Button::new("Send friend request"))
+                .clicked()
+            {
+                let code = self.friend_code_input.clone();
+                self.start(ui.ctx(), move |client| {
+                    request(
+                        &client,
+                        &session,
+                        reqwest::Method::POST,
+                        "friends",
+                        None,
+                        Some(json!({"operation": "send", "friendCode": code})),
+                    )?;
+                    Ok(Update::FriendRequestSent)
+                });
+            }
+            ui.label("Your Friend Code");
+            if let Some(settings) = &self.account_settings {
+                ui.add(egui::TextEdit::singleline(
+                    &mut settings.friend_code.as_str(),
+                ));
+            }
+            return;
+        }
         if self.view == View::Settings {
+            if let (Some(session), Some(settings)) =
+                (signed_in.as_ref(), self.account_settings.as_ref())
+            {
+                let mut selected = if settings.presence_visibility == "offline" {
+                    "offline"
+                } else {
+                    "friends"
+                };
+                let label = match selected {
+                    "offline" => "Offline",
+                    _ => "Online for Friends",
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Presence");
+                    ui.add_enabled_ui(self.actions_enabled(), |ui| {
+                        egui::ComboBox::from_id_salt("network_presence_visibility")
+                            .selected_text(label)
+                            .show_ui(ui, |ui| {
+                                for (value, label) in
+                                    [("friends", "Online for Friends"), ("offline", "Offline")]
+                                {
+                                    ui.selectable_value(&mut selected, value, label);
+                                }
+                            });
+                    });
+                });
+                if selected != settings.presence_visibility
+                    && settings.presence_visibility != "online"
+                {
+                    let value = selected.to_owned();
+                    self.account_settings_request(ui.ctx(), session.clone(), Some(value));
+                }
+            }
             let changed = ui
                 .checkbox(
-                    &mut self.notification_settings.friends_only,
-                    "Limit Notifications to Friends",
+                    &mut self.notification_settings.hide_match_users,
+                    "Don’t Notify About Hebnix Users In Game",
                 )
                 .changed();
             let hidden = ui
@@ -810,39 +923,6 @@ impl Network {
             .clone()
             .filter(|session| !session.token.is_empty())
         else {
-            if self.view == View::AllPlayers {
-                if !self.live_healthy
-                    && self.public_retry.is_none_or(|at| at <= Instant::now())
-                    && self.actions_enabled()
-                {
-                    self.public_retry = Some(Instant::now() + HEARTBEAT);
-                    self.start(ui.ctx(), |client| {
-                        directory(&client, None, None).map(Update::Directory)
-                    });
-                }
-                if let Some(at) = self
-                    .public_retry
-                    .filter(|at| !self.live_healthy && *at > Instant::now())
-                {
-                    ui.ctx()
-                        .request_repaint_after(at.saturating_duration_since(Instant::now()));
-                }
-                if let Some(players) = &self.public_players {
-                    ui.scope(|ui| {
-                        for player in players {
-                            ui.horizontal(|ui| {
-                                ui.label(&player.username);
-                                if player.presence.is_some() {
-                                    ui.label(if player.online() { "Online" } else { "Offline" });
-                                }
-                            });
-                        }
-                    });
-                } else if self.job.is_some() {
-                    ui.spinner();
-                }
-                return;
-            }
             ui.add_enabled_ui(self.actions_enabled(), |ui| {
                 if ui.button("Sign in with Discord").clicked() {
                     let session = self.session.clone().unwrap_or_else(|| Session {
@@ -873,6 +953,7 @@ impl Network {
             }
         }
         let mut operation = None;
+        let mut rank_lookup = None;
         let enabled = self.actions_enabled();
         ui.scope(|ui| {
             ui.add_enabled_ui(enabled, |ui| match self.view {
@@ -887,6 +968,79 @@ impl Network {
                         egui::CollapsingHeader::new(egui::RichText::new(title).color(color))
                             .id_salt(&player.player_id)
                             .show(ui, |ui| {
+                                for link in &player.links {
+                                    let key = format!("{}:{}", link.platform, link.platform_id);
+                                    if link.display_name.is_empty() {
+                                        ui.label(&link.platform);
+                                    } else {
+                                        ui.label(format!(
+                                            "{} ({})",
+                                            link.display_name, link.platform
+                                        ));
+                                    }
+                                    if let Some(stats) = self.friend_ranks.get(&key) {
+                                        if let Some(error) = &stats.error {
+                                            ui.label(error);
+                                        } else if stats.ranks.is_empty() {
+                                            ui.label("No ranked playlists");
+                                        } else {
+                                            let mut entries: Vec<_> =
+                                                stats.ranks.values().collect();
+                                            entries.sort_by_key(|rank| rank.playlist_id);
+                                            let selector = ui.id().with((&key, "rank_playlist"));
+                                            let mut selected = ui
+                                                .data_mut(|data| data.get_temp::<i64>(selector))
+                                                .unwrap_or(entries[0].playlist_id);
+                                            selected = entries
+                                                .iter()
+                                                .find(|rank| rank.playlist_id == selected)
+                                                .unwrap_or(&entries[0])
+                                                .playlist_id;
+                                            egui::ComboBox::from_id_salt(&key)
+                                                .selected_text(
+                                                    &stats.ranks[&selected].playlist_name,
+                                                )
+                                                .show_ui(ui, |ui| {
+                                                    for rank in entries {
+                                                        ui.selectable_value(
+                                                            &mut selected,
+                                                            rank.playlist_id,
+                                                            &rank.playlist_name,
+                                                        );
+                                                    }
+                                                });
+                                            ui.data_mut(|data| {
+                                                data.insert_temp(selector, selected)
+                                            });
+                                            let rank = &stats.ranks[&selected];
+                                            ui.label(format!(
+                                                "{} {}",
+                                                rank.tier_name, rank.division_name
+                                            ));
+                                        }
+                                    } else {
+                                        ui.label("Loading ranks...");
+                                        if enabled && rank_lookup.is_none() {
+                                            rank_lookup = Some((key, link.clone()));
+                                        }
+                                    }
+                                }
+                                if self.confirm_remove.as_deref() == Some(player.player_id.as_str())
+                                {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Remove this friend?");
+                                        if ui.button("Remove").clicked() {
+                                            operation = Some((player.player_id.clone(), "remove"));
+                                            self.confirm_remove = None;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            self.confirm_remove = None;
+                                        }
+                                    });
+                                } else if ui.button("Remove Friend").clicked() {
+                                    self.confirm_remove = Some(player.player_id.clone());
+                                    self.confirm_block = None;
+                                }
                                 if self.confirm_block.as_deref() == Some(player.player_id.as_str())
                                 {
                                     ui.horizontal(|ui| {
@@ -901,6 +1055,7 @@ impl Network {
                                     });
                                 } else if ui.button("Block").clicked() {
                                     self.confirm_block = Some(player.player_id.clone());
+                                    self.confirm_remove = None;
                                 }
                             });
                     }
@@ -935,46 +1090,20 @@ impl Network {
                         });
                     }
                 }
-                View::AllPlayers => {
-                    for player in &snapshot.players {
-                        let relationship = snapshot
-                            .friends
-                            .iter()
-                            .find(|p| p.player_id == player.player_id);
-                        egui::CollapsingHeader::new(player.username.as_str())
-                            .id_salt(&player.player_id)
-                            .show(ui, |ui| {
-                                if player.player_id.starts_with("unlinked-") {
-                                    ui.label("Unlinked");
-                                    return;
-                                }
-                                if relationship.is_none_or(|p| p.status == "denied")
-                                    && ui.button("Add friend").clicked()
-                                {
-                                    operation = Some((player.player_id.clone(), "send"));
-                                }
-                                if self.confirm_block.as_deref() == Some(player.player_id.as_str())
-                                {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Are you sure?");
-                                        if ui.button("Yes").clicked() {
-                                            operation = Some((player.player_id.clone(), "block"));
-                                            self.confirm_block = None;
-                                        }
-                                        if ui.button("No").clicked() {
-                                            self.confirm_block = None;
-                                        }
-                                    });
-                                } else if ui.button("Block").clicked() {
-                                    self.confirm_block = Some(player.player_id.clone());
-                                }
-                            });
-                    }
-                }
-                View::Settings => {}
+                View::Settings | View::AddFriend => {}
             });
         });
-        if let Some((peer, operation)) = operation {
+        if let Some((key, link)) = rank_lookup {
+            self.start(ui.ctx(), move |_| {
+                let stats = hebnix_sdk::tracker::TrackerClient::default()
+                    .fetch_profile(&link.platform, &link.platform_id)
+                    .unwrap_or_else(|error| hebnix_sdk::tracker::PlayerStats {
+                        error: Some(error),
+                        ..Default::default()
+                    });
+                Ok(Update::FriendRanks(key, stats))
+            });
+        } else if let Some((peer, operation)) = operation {
             self.start(ui.ctx(), move |client| {
                 request(
                     &client,
@@ -986,7 +1115,11 @@ impl Network {
                         "peer": peer, "operation": operation,
                     })),
                 )?;
-                Ok(Update::Modified)
+                if operation == "remove" {
+                    Ok(Update::FriendRemoved(peer))
+                } else {
+                    Ok(Update::Modified)
+                }
             });
         }
     }
@@ -995,15 +1128,7 @@ impl Network {
 struct LiveFrame {
     #[serde(rename = "type")]
     kind: String,
-    members: Option<Vec<Player>>,
     friends: Option<Vec<Player>>,
-    me: Option<LiveIdentity>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LiveIdentity {
-    player_id: String,
 }
 
 enum LiveEvent {
@@ -1147,34 +1272,21 @@ impl Network {
                     }
                     let signed_in = active_token.is_some_and(|token| !token.is_empty());
                     let replace = frame.kind == "snapshot";
-                    if signed_in && replace && (frame.me.is_none() || frame.friends.is_none()) {
+                    if signed_in && replace && frame.friends.is_none() {
                         continue;
                     }
                     self.live_healthy = true;
                     self.live_failures = 0;
                     if !signed_in {
-                        if replace || frame.members.is_some() {
-                            if let Some(players) = frame.members.as_ref() {
-                                self.notify_online(players, &[], toasts, now);
-                            }
-                            self.public_players = frame.members;
-                        }
                         continue;
                     }
-                    if let Some(me) = frame.me {
-                        self.live_me = Some(me.player_id);
-                    }
-                    let previous = if replace { None } else { self.snapshot.take() };
-                    let (old_friends, old_players) = previous
-                        .map(|snapshot| (snapshot.friends, snapshot.players))
+                    let friends = frame
+                        .friends
+                        .or_else(|| self.snapshot.take().map(|snapshot| snapshot.friends))
                         .unwrap_or_default();
-                    let friends = frame.friends.unwrap_or(old_friends);
-                    let mut players = frame.members.unwrap_or(old_players);
-                    players.retain(|player| Some(&player.player_id) != self.live_me.as_ref());
                     self.apply_snapshot(
                         Snapshot {
                             friends,
-                            players,
                             unavailable_updates: Vec::new(),
                         },
                         toasts,
@@ -1229,7 +1341,6 @@ impl Network {
             return;
         };
         self.live_token = Some(session.token.clone());
-        self.live_me = session.player_id.clone();
         let (tx, rx) = mpsc::channel();
         self.live = Some(rx);
         let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -1277,6 +1388,133 @@ impl Network {
         });
     }
 
+    pub(super) fn update_match_players(
+        &mut self,
+        players: &[hebnix_sdk::stats::models::PlayerState],
+    ) {
+        self.match_players = players
+            .iter()
+            .filter_map(|player| {
+                let (platform, id, _) = hebnix_sdk::utils::parse_primary_id(&player.primary_id)?;
+                let platform = match platform.as_str() {
+                    "steam" => "Steam",
+                    "epic" | "epicgames" => "Epic",
+                    "psn" | "ps4" | "ps5" => "PS4",
+                    "xbl" | "xbox" | "xboxone" => "XboxOne",
+                    "switch" => "Switch",
+                    _ => return None,
+                };
+                (!player.name.trim().is_empty() && !id.is_empty() && id != "0")
+                    .then(|| (platform.to_owned(), id, player.name.clone()))
+            })
+            .take(20)
+            .collect();
+    }
+
+    fn poll_match_users(
+        &mut self,
+        ctx: &egui::Context,
+        toasts: &mut crate::toast::ToastCenter,
+        now: Instant,
+    ) {
+        if self.notification_settings.hide_match_users || self.match_players.is_empty() {
+            self.match_lookup = None;
+            return;
+        }
+        if let Some(receiver) = &self.match_lookup {
+            match receiver.try_recv() {
+                Ok(players) => {
+                    self.match_lookup = None;
+                    for (platform, id, name) in players {
+                        if self
+                            .match_players
+                            .iter()
+                            .any(|(p, i, _)| p == &platform && i == &id)
+                            && self.match_notified.insert((platform, id))
+                        {
+                            toasts.push(
+                                "hebnix-network",
+                                "Network",
+                                &format!("{name} is using Hebnix"),
+                                Default::default(),
+                            );
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => self.match_lookup = None,
+            }
+        }
+        if self.next_match_lookup.is_some_and(|next| next > now) {
+            return;
+        }
+        let local = self
+            .presence_account
+            .as_ref()
+            .and_then(|account| account["platformId"].as_str());
+        let players: Vec<_> = self
+            .match_players
+            .iter()
+            .filter(|(platform, id, _)| {
+                local.is_some_and(|local| local != id)
+                    && !self
+                        .match_notified
+                        .contains(&(platform.clone(), id.clone()))
+            })
+            .cloned()
+            .collect();
+        if players.is_empty() {
+            return;
+        }
+        self.next_match_lookup = Some(now + Duration::from_secs(6));
+        let session = self
+            .session
+            .clone()
+            .filter(|session| !session.token.is_empty());
+        let (tx, rx) = mpsc::channel();
+        self.match_lookup = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let payload: Vec<_> = players
+                .iter()
+                .map(|(platform, id, _)| json!({"platform": platform, "platformId": id}))
+                .collect();
+            let Ok(client) = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+            else {
+                return;
+            };
+            let mut request = client
+                .post(format!("{REQUEST}/match-players"))
+                .json(&json!({"players": payload}));
+            if let Some(session) = session {
+                request = request
+                    .bearer_auth(session.token)
+                    .header("X-Hebnix-Device", session.device);
+            }
+            let matched = request
+                .send()
+                .ok()
+                .and_then(|resp| resp.error_for_status().ok())
+                .and_then(|resp| resp.json::<Value>().ok());
+            if let Some(rows) = matched.as_ref().and_then(|data| data["players"].as_array()) {
+                let _ = tx.send(
+                    players
+                        .into_iter()
+                        .filter(|(platform, id, _)| {
+                            rows.iter().any(|row| {
+                                row["platform"].as_str() == Some(platform)
+                                    && row["platformId"].as_str() == Some(id)
+                            })
+                        })
+                        .collect(),
+                );
+            }
+            ctx.request_repaint();
+        });
+    }
+
     pub(super) fn update_match_presence(
         &mut self,
         game: &hebnix_sdk::stats::models::GameState,
@@ -1306,5 +1544,9 @@ impl Network {
     pub(super) fn clear_match_presence(&mut self) {
         self.match_presence = None;
         self.match_state = None;
+        self.match_players.clear();
+        self.match_notified.clear();
+        self.match_lookup = None;
+        self.next_match_lookup = None;
     }
 }

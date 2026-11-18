@@ -1,10 +1,5 @@
-//! glyph fallbacks for languages egui's built-in fonts can't draw (CJK, Thai,
-//! Arabic/Hebrew glyphs, Devanagari). windows uses fonts that ship with
-//! windows; linux asks fontconfig for an installed font covering the language.
-//! if none is found the text just shows boxes like before.
-//!
-//! note: egui has no RTL shaping, so Arabic/Hebrew would draw unjoined and
-//! left-to-right even with a font. not shipped for that reason.
+//! System font fallbacks for UI text and multilingual player names.
+//! Complex-script shaping and bidirectional layout depend on egui.
 
 use std::path::PathBuf;
 
@@ -21,11 +16,16 @@ fn needs_fallback(code: &str) -> bool {
     )
 }
 
-/// the font file fontconfig picks for `code` (`fc-match :lang=<code>`)
+/// Ask fontconfig for a font matching the language or representative glyph.
 #[cfg(target_os = "linux")]
 fn fontconfig_match(code: &str) -> Option<PathBuf> {
+    let pattern = match code {
+        "symbols" => ":charset=2605".to_owned(),
+        "emoji" => ":charset=1f600".to_owned(),
+        _ => format!(":lang={code}"),
+    };
     let output = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}", &format!(":lang={code}")])
+        .args(["-f", "%{file}", &pattern])
         .output()
         .ok()?;
     let file = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -34,7 +34,7 @@ fn fontconfig_match(code: &str) -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn fallback_bytes(code: &str) -> Option<Vec<u8>> {
-    if !needs_fallback(code) {
+    if !needs_fallback(code) && !matches!(code, "symbols" | "emoji") {
         return None;
     }
     let bytes = fontconfig_match(code).and_then(|path| std::fs::read(path).ok());
@@ -58,6 +58,8 @@ fn candidates(code: &str) -> &'static [&'static str] {
         "ar" | "fa" | "ur" | "he" => &["segoeui.ttf", "arial.ttf"],
         "th" => &["leelawui.ttf", "tahoma.ttf"],
         "hi" | "mr" | "ne" => &["Nirmala.ttc", "mangal.ttf"],
+        "symbols" => &["seguisym.ttf"],
+        "emoji" => &["seguiemj.ttf"],
         _ => &[],
     }
 }
@@ -79,19 +81,34 @@ fn fallback_bytes(code: &str) -> Option<Vec<u8>> {
         .find_map(|file| std::fs::read(dir.join(file)).ok())
 }
 
-/// appends a fallback font for the active language behind whatever fonts are
-/// already set, so a theme font stays first.
+/// Keep theme fonts first and prefer the active language for shared glyphs.
 pub fn add_fallbacks(fonts: &mut egui::FontDefinitions) {
     let code = super::current();
-    let Some(bytes) = fallback_bytes(&code) else {
-        return;
-    };
-
-    let name = format!("i18n-fallback-{code}");
-    fonts
-        .font_data
-        .insert(name.clone(), egui::FontData::from_owned(bytes).into());
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push(name.clone());
+    for language in std::iter::once(code.as_str()).chain([
+        "zh", "zh-Hant", "ja", "ko", "th", "hi", "ar", "symbols", "emoji",
+    ]) {
+        if fonts
+            .font_data
+            .contains_key(&format!("i18n-fallback-{language}"))
+        {
+            continue;
+        }
+        let Some(bytes) = fallback_bytes(language) else {
+            continue;
+        };
+        if fonts
+            .font_data
+            .values()
+            .any(|font| font.font.as_ref() == bytes.as_slice())
+        {
+            continue;
+        }
+        let name = format!("i18n-fallback-{language}");
+        fonts
+            .font_data
+            .insert(name.clone(), egui::FontData::from_owned(bytes).into());
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push(name.clone());
+        }
     }
 }

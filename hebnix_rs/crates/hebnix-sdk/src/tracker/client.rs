@@ -1,8 +1,9 @@
 //! rocket league profile client.
 
+use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -48,7 +49,7 @@ impl TrackerClient {
         Ok(stats)
     }
 
-    /// Fetch a fresh PrimaryId profile, bypassing the SDK cache.
+    /// Fetch a fresh PrimaryId profile, bypassing the tracker cache while respecting the shared request cache.
     pub fn refresh(&self, primary_id: &str, display_name: &str) -> Result<PlayerStats, String> {
         self.cache.invalidate(primary_id);
         self.fetch(primary_id, display_name)
@@ -73,7 +74,7 @@ impl TrackerClient {
         Ok(stats)
     }
 
-    /// Fetch a fresh platform profile, bypassing the SDK cache.
+    /// Fetch a fresh platform profile, bypassing the tracker cache while respecting the shared request cache.
     pub fn refresh_profile(&self, platform: &str, identifier: &str) -> Result<PlayerStats, String> {
         let platform = normalize_platform(platform)?;
         let platform_user_id = strip_platform_id(identifier);
@@ -104,7 +105,7 @@ impl TrackerClient {
         platform: &str,
         platform_user_id: &str,
     ) -> PlayerStats {
-        match self.request(platform, platform_user_id) {
+        match player_profile_json(platform, platform_user_id, self.timeout) {
             Ok(data) => parse_response(&data, primary_id, display_name, platform, platform_user_id),
             Err(message) => failed_stats(
                 primary_id,
@@ -115,57 +116,131 @@ impl TrackerClient {
             ),
         }
     }
+}
 
-    fn request(&self, platform: &str, platform_user_id: &str) -> Result<Value, String> {
-        let url = format!(
-            "{PROFILE_API}/{}/{}",
-            urlencode(platform),
-            urlencode(platform_user_id)
-        );
-        let token = crate::req_auth::app_token()?;
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
-        let response = match agent.get(&url)
-            .set("X-App-Token", &token)
-            .set("Accept", "application/json")
-            .set("User-Agent", concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
-            .timeout(self.timeout)
-            .call()
-        {
-            Ok(response) => response,
-            Err(ureq::Error::Status(404, _)) => {
-                return Err("NOT_FOUND_404: profile service returned 404".to_string());
-            }
-            Err(ureq::Error::Status(status, response)) => {
-                if status == 498 {
-                    let reader = response.into_reader().take(RESPONSE_MAX_BYTES);
-                    if let Ok(body) = serde_json::from_reader::<_, serde_json::Value>(reader) {
-                        tracing::warn!("profile service 498 body: {body}");
-                        crate::req_auth::observe_response(status, &body);
-                    }
-                }
-                return Err(format!("profile service returned HTTP {status}"));
-            }
-            Err(ureq::Error::Transport(error)) => {
-                return Err(format!("profile service request failed: {error}"));
-            }
-        };
-
-        let mut body = String::new();
-        response
-            .into_reader()
-            .take(RESPONSE_MAX_BYTES)
-            .read_to_string(&mut body)
-            .map_err(|error| format!("failed to read profile response: {error}"))?;
-        let data: Value = serde_json::from_str(&body)
-            .map_err(|error| format!("invalid profile response: {error}"))?;
-        if !data.is_object() {
-            return Err("profile service returned an unexpected response".to_string());
-        }
-        if let Some(error) = data.get("error").and_then(Value::as_str) {
-            return Err(error.to_string());
-        }
-        Ok(data)
+/// Fetch the shared full player response used by ranks and avatars.
+pub fn player_profile_json(
+    platform: &str,
+    identifier: &str,
+    timeout: Duration,
+) -> Result<Arc<Value>, String> {
+    let platform = normalize_platform(platform)?;
+    let mut id = strip_platform_id(identifier);
+    if id.is_empty() {
+        return Err("platform id must not be empty".to_string());
     }
+    if platform == "epic" && id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        id.make_ascii_lowercase();
+    }
+    static CACHE: OnceLock<ProfileRequestCache> = OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .get_or_fetch((platform.clone(), id.clone()), || {
+            request_profile(&platform, &id, timeout)
+        })
+}
+
+const PROFILE_REQUEST_TTL: Duration = Duration::from_secs(30);
+type ProfileResult = Result<Arc<Value>, String>;
+type ProfileEntry = Arc<Mutex<Option<(Instant, ProfileResult)>>>;
+
+#[derive(Default)]
+struct ProfileRequestCache {
+    entries: Mutex<HashMap<(String, String), ProfileEntry>>,
+}
+
+impl ProfileRequestCache {
+    fn get_or_fetch(
+        &self,
+        key: (String, String),
+        fetch: impl FnOnce() -> Result<Value, String>,
+    ) -> ProfileResult {
+        let entry = {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| "Profile cache unavailable")?;
+            entries.retain(|_, entry| {
+                Arc::strong_count(entry) > 1
+                    || entry
+                        .try_lock()
+                        .ok()
+                        .and_then(|value| value.as_ref().map(|(at, _)| Instant::now() < *at))
+                        .unwrap_or(false)
+            });
+            Arc::clone(entries.entry(key).or_default())
+        };
+        let mut current = entry.lock().map_err(|_| "Profile cache unavailable")?;
+        if let Some((at, result)) = current.as_ref() {
+            if Instant::now() < *at {
+                return result.clone();
+            }
+        }
+        let result = fetch().map(Arc::new);
+        let ttl = match &result {
+            Ok(_) => PROFILE_REQUEST_TTL,
+            Err(error) if error.starts_with("NOT_FOUND_404:") => PROFILE_REQUEST_TTL,
+            Err(_) => Duration::from_secs(2),
+        };
+        *current = Some((Instant::now() + ttl, result.clone()));
+        result
+    }
+}
+
+fn request_profile(
+    platform: &str,
+    platform_user_id: &str,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let url = format!(
+        "{PROFILE_API}/{}/{}",
+        urlencode(platform),
+        urlencode(platform_user_id)
+    );
+    let token = crate::req_auth::app_token()?;
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let response = match agent
+        .get(&url)
+        .set("X-App-Token", &token)
+        .set("Accept", "application/json")
+        .set("User-Agent", concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
+        .timeout(timeout)
+        .call()
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err("NOT_FOUND_404: profile service returned 404".to_string());
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            if status == 498 {
+                let reader = response.into_reader().take(RESPONSE_MAX_BYTES);
+                if let Ok(body) = serde_json::from_reader::<_, serde_json::Value>(reader) {
+                    tracing::warn!("profile service 498 body: {body}");
+                    crate::req_auth::observe_response(status, &body);
+                }
+            }
+            return Err(format!("profile service returned HTTP {status}"));
+        }
+        Err(ureq::Error::Transport(error)) => {
+            return Err(format!("profile service request failed: {error}"));
+        }
+    };
+
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(RESPONSE_MAX_BYTES)
+        .read_to_string(&mut body)
+        .map_err(|error| format!("failed to read profile response: {error}"))?;
+    let data: Value = serde_json::from_str(&body)
+        .map_err(|error| format!("invalid profile response: {error}"))?;
+    if !data.is_object() {
+        return Err("profile service returned an unexpected response".to_string());
+    }
+    if let Some(error) = data.get("error").and_then(Value::as_str) {
+        return Err(error.to_string());
+    }
+    Ok(data)
 }
 
 fn failed_stats(
@@ -357,4 +432,36 @@ fn now_unix() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod profile_request_cache_tests {
+    use super::*;
+
+    #[test]
+    fn coalesces_concurrent_requests_and_refreshes_after_expiration() {
+        let cache = ProfileRequestCache::default();
+        let key = ("steam".to_owned(), "123".to_owned());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    let data = cache
+                        .get_or_fetch(key.clone(), || {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Ok(serde_json::json!({"display_name": "player"}))
+                        })
+                        .unwrap();
+                    assert_eq!(data["display_name"], "player");
+                });
+            }
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let entry = Arc::clone(cache.entries.lock().unwrap().get(&key).unwrap());
+        entry.lock().unwrap().as_mut().unwrap().0 = Instant::now();
+        let data = cache
+            .get_or_fetch(key, || Ok(serde_json::json!({"display_name": "updated"})))
+            .unwrap();
+        assert_eq!(data["display_name"], "updated");
+    }
 }

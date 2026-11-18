@@ -179,8 +179,8 @@ pub fn relocate_on_launch(lite: bool) -> Result<bool, String> {
     let source = std::env::current_exe().map_err(|error| error.to_string())?;
     let roaming = dirs::data_dir().ok_or("AppData folder unavailable")?;
     let base = roaming.join("Hebnix");
-    let exe = base.join(if lite { "hebnix-lite.exe" } else { "Hebnix.exe" });
-    if source.parent().is_some_and(|parent| {
+    let exe = base.join(if lite { "Hebnix Lite.exe" } else { "Hebnix.exe" });
+    if (!lite || !source.file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("hebnix-lite.exe"))) && source.parent().is_some_and(|parent| {
         parent.to_string_lossy().eq_ignore_ascii_case(&base.to_string_lossy())
             || parent.canonicalize().ok().zip(base.canonicalize().ok()).is_some_and(|(a, b)| a == b)
     }) {
