@@ -5795,6 +5795,26 @@ impl HebnixApp {
                                             self.save_config();
                                         }
                                     });
+                                    #[cfg(target_os = "linux")]
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, "Software overlay rendering:");
+                                        let mut forced = crate::webview::render_mode::forced_software();
+                                        let response = ui.checkbox(&mut forced, "").on_hover_text(
+                                            "Draw plugin HTML overlays on the CPU instead of the GPU. Turned on \
+                                             automatically if the GPU overlay crashed Hebnix. Uses more CPU. \
+                                             Takes effect after restarting Hebnix.",
+                                        );
+                                        if response.changed() {
+                                            if let Err(error) = crate::webview::render_mode::set_forced_software(forced) {
+                                                self.console.write(format!("[Core] Could not save the overlay rendering setting: {error}"));
+                                            } else {
+                                                self.console.write("[Core] Overlay rendering changes after restarting Hebnix.");
+                                            }
+                                        }
+                                        if forced != crate::webview::render_mode::software() {
+                                            ui.weak("(restart Hebnix)");
+                                        }
+                                    });
                                     ui.add_space(8.0);
                                     ui.separator();
                                     self.render_spoofer_certificate_settings(ui);

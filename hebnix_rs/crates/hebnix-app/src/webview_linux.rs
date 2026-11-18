@@ -38,6 +38,9 @@ pub struct WebviewOverlay {
     active: Vec<PageLayer>,
     visible: bool,
     last_error: Option<String>,
+    /// GPU mode: when the overlay was first shown, until it survived 5 s
+    gpu_shown_since: Option<std::time::Instant>,
+    gpu_confirmed: bool,
 }
 
 /// layer-shell only exists on Wayland; on X11 (i3, Cinnamon, XFCE, ...) the
@@ -108,6 +111,8 @@ impl WebviewOverlay {
             active: Vec::new(),
             visible: false,
             last_error: None,
+            gpu_shown_since: None,
+            gpu_confirmed: false,
         }
     }
 
@@ -199,6 +204,10 @@ impl WebviewOverlay {
         // safely be set here (this runs long after startup, other threads
         // already running).
         let webview = webkit2gtk::WebView::new();
+        tracing::info!(
+            software = render_mode::software(),
+            "html overlay: rendering mode (software when forced in Settings or after a GPU crash)"
+        );
         // WebKit's GPU-accelerated compositing path (DMA-BUF + explicit
         // sync, wp_linux_drm_syncobj_surface_v1) hits a driver bug on at
         // least this system's NVIDIA/Wayland combo -- confirmed live: it
@@ -210,7 +219,11 @@ impl WebviewOverlay {
         if let Some(settings) = webkit2gtk::WebViewExt::settings(&webview) {
             webkit2gtk::SettingsExt::set_hardware_acceleration_policy(
                 &settings,
-                webkit2gtk::HardwareAccelerationPolicy::Never,
+                if render_mode::software() {
+                    webkit2gtk::HardwareAccelerationPolicy::Never
+                } else {
+                    webkit2gtk::HardwareAccelerationPolicy::Always
+                },
             );
             // the host shell is loaded via load_html with a synthetic base
             // URI, and its iframes point at real file:// paths -- without
@@ -369,12 +382,23 @@ impl WebviewOverlay {
                  }}\
                }}\
              }});\
+             {repaint}\
              window.__hebnixDeliver = function(slug, data) {{\
                var el = document.getElementById('frame-' + slug);\
                if (el && el.contentWindow) el.contentWindow.postMessage(data, '*');\
                else console.error('hebnix overlay: no iframe for ' + slug);\
              }};\
-             </script></body></html>"
+             </script></body></html>",
+            repaint = if render_mode::software() {
+                // webkit2gtk 2.54.2's software path only repaints the changed
+                // area into an otherwise blank buffer, so everything but the
+                // moving part vanished (Controller Overlay). Nudging the root's
+                // opacity every frame makes it repaint the whole page.
+                "(function f(t){document.body.style.opacity=(t&1)?'0.999':'1';\
+                 requestAnimationFrame(function(){f(t+1);});})(0);"
+            } else {
+                ""
+            },
         );
         tracing::debug!(html, "html overlay: host page");
         // real file:// base (not a synthetic scheme) so the file:// iframe
@@ -408,6 +432,10 @@ impl WebviewOverlay {
         }
         if let Some(window) = &self.window {
             tracing::info!("html overlay: show (Rocket League focused)");
+            if !render_mode::software() && !self.gpu_confirmed && self.gpu_shown_since.is_none() {
+                render_mode::gpu_starting();
+                self.gpu_shown_since = Some(std::time::Instant::now());
+            }
             if is_wayland_session() {
                 // restore full click-through input region
                 let empty_region = cairo::Region::create();
@@ -425,17 +453,16 @@ impl WebviewOverlay {
         }
     }
 
-    /// Damage the whole overlay so GTK repaints all of it, not just the parts
-    /// that changed. Since Hyprland 0.57 / NVIDIA 620 (2026-11-18 update) a
-    /// partial repaint of this transparent layer surface leaves everything
-    /// outside the changed area blank (Controller Overlay: only the pressed
-    /// button or moved stick stayed visible). Call once a frame while shown.
-    pub fn repaint(&self) {
-        if !self.visible {
-            return;
-        }
-        if let Some(window) = &self.window {
-            window.queue_draw();
+    /// Call once a frame while shown: once the GPU-rendered overlay has been on
+    /// screen for a few seconds without taking the process down, clear the
+    /// crash marker so the next start keeps GPU rendering.
+    pub fn tick_visible(&mut self) {
+        if let Some(since) = self.gpu_shown_since {
+            if self.visible && since.elapsed() >= std::time::Duration::from_secs(5) {
+                render_mode::gpu_ok();
+                self.gpu_shown_since = None;
+                self.gpu_confirmed = true;
+            }
         }
     }
 
@@ -484,6 +511,90 @@ mod page_url_tests {
     #[test]
     fn plain_page_is_unchanged() {
         assert_eq!(page_url(Path::new("/a"), "x.html"), "file:///a/x.html");
+    }
+}
+
+/// How the HTML overlay is rendered. GPU by default; software when forced
+/// (Settings, `HEBNIX_WEBVIEW_SOFTWARE`) or when the last GPU start died while
+/// the overlay was coming up (older NVIDIA drivers abort the whole process
+/// with a "Missing acquire timeline" Wayland protocol error).
+pub mod render_mode {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SOFTWARE: AtomicBool = AtomicBool::new(false);
+
+    fn state_dir() -> PathBuf {
+        crate::config::base_dir().join("state")
+    }
+
+    fn forced_marker() -> PathBuf {
+        state_dir().join("webview-software")
+    }
+
+    fn pending_marker() -> PathBuf {
+        state_dir().join("webview-gpu-pending")
+    }
+
+    /// Decide once, from `main()` before any other thread exists (it may set
+    /// `WEBKIT_DISABLE_COMPOSITING_MODE`).
+    ///
+    /// # Safety
+    /// Must run while the process is still single-threaded.
+    pub unsafe fn init() {
+        let software = if std::env::var_os("HEBNIX_WEBVIEW_SOFTWARE").is_some() {
+            tracing::info!("html overlay: software rendering (HEBNIX_WEBVIEW_SOFTWARE)");
+            true
+        } else if forced_marker().exists() {
+            tracing::info!("html overlay: software rendering (Settings or an earlier GPU crash)");
+            true
+        } else if pending_marker().exists() {
+            tracing::warn!(
+                "html overlay: the last start died while the GPU-rendered overlay was coming up, \
+                 switching to software rendering (turn it back off in Settings to retry)"
+            );
+            let _ = std::fs::create_dir_all(state_dir());
+            let _ = std::fs::write(forced_marker(), "set automatically: GPU overlay crashed\n");
+            let _ = std::fs::remove_file(pending_marker());
+            true
+        } else {
+            false
+        };
+        SOFTWARE.store(software, Ordering::Relaxed);
+        if software {
+            unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1") };
+        }
+    }
+
+    pub fn software() -> bool {
+        SOFTWARE.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn gpu_starting() {
+        let _ = std::fs::create_dir_all(state_dir());
+        let _ = std::fs::write(pending_marker(), b"");
+    }
+
+    pub(super) fn gpu_ok() {
+        let _ = std::fs::remove_file(pending_marker());
+    }
+
+    /// the Settings checkbox; takes effect at the next start
+    pub fn forced_software() -> bool {
+        forced_marker().exists()
+    }
+
+    pub fn set_forced_software(on: bool) -> std::io::Result<()> {
+        if on {
+            std::fs::create_dir_all(state_dir())?;
+            std::fs::write(forced_marker(), "set in Settings\n")
+        } else {
+            let _ = std::fs::remove_file(pending_marker());
+            match std::fs::remove_file(forced_marker()) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            }
+        }
     }
 }
 
@@ -561,7 +672,7 @@ pub mod host {
         pub fn tick(&mut self, _target: (), _size: (u32, u32), visible: bool) {
             if visible {
                 self.overlay.show();
-                self.overlay.repaint();
+                self.overlay.tick_visible();
             } else {
                 self.overlay.hide();
             }
