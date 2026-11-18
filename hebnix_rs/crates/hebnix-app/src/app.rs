@@ -207,7 +207,34 @@ fn titles_from_catalog(root: &Value) -> Result<Vec<TitleCatalogEntry>, String> {
     }
 }
 
+fn valid_catalog(name: &str, root: &Value) -> bool {
+    if name == "skins" {
+        root.get("cars").is_some_and(Value::is_object)
+    } else {
+        root.get(name).is_some_and(Value::is_array)
+    }
+}
+
+/// Linux keeps the last downloaded catalogs in the data folder (`<name>.json`,
+/// the same files 2.2.x wrote), so the patcher tabs still work when
+/// api.hebnix.com can't be reached.
+#[cfg(target_os = "linux")]
+fn cached_catalogs(base_dir: &std::path::Path) -> Option<HashMap<String, Value>> {
+    let mut catalogs = HashMap::new();
+    for name in CATALOG_NAMES {
+        let bytes = std::fs::read(base_dir.join(format!("{name}.json"))).ok()?;
+        let root: Value = serde_json::from_slice(&bytes).ok()?;
+        if !valid_catalog(name, &root) {
+            return None;
+        }
+        catalogs.insert(name.to_string(), root);
+    }
+    Some(catalogs)
+}
+
 fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
+    #[cfg(target_os = "linux")]
+    let base_dir = crate::config::base_dir();
     std::thread::Builder::new()
         .name("catalog-fetcher".into())
         .spawn(move || {
@@ -220,18 +247,31 @@ fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
                     let root: Value = response
                         .into_json()
                         .map_err(|error| format!("Failed to parse {name}.json: {error}"))?;
-                    let valid = if name == "skins" {
-                        root.get("cars").is_some_and(Value::is_object)
-                    } else {
-                        root.get(name).is_some_and(Value::is_array)
-                    };
-                    if !valid {
+                    if !valid_catalog(name, &root) {
                         return Err(format!("{name}.json has an invalid catalog structure"));
                     }
                     catalogs.insert(name.to_string(), root);
                 }
                 Ok(catalogs)
             })();
+            #[cfg(target_os = "linux")]
+            let result = match result {
+                Ok(catalogs) => {
+                    for (name, root) in &catalogs {
+                        if let Ok(bytes) = serde_json::to_vec(root) {
+                            let _ = std::fs::write(base_dir.join(format!("{name}.json")), bytes);
+                        }
+                    }
+                    Ok(catalogs)
+                }
+                Err(error) => match cached_catalogs(&base_dir) {
+                    Some(cached) => {
+                        tracing::warn!(%error, "catalog download failed, using the cached copies");
+                        Ok(cached)
+                    }
+                    None => Err(error),
+                },
+            };
             let _ = tx.send(AppMsg::CatalogsFetched { result });
             ctx.request_repaint();
         })
