@@ -994,17 +994,23 @@ fn set_live(cooked: &Path, file: &str, values: Values, on: bool) -> Result<(), S
 }
 
 fn set_all(cooked: &Path, on: bool) -> Result<(), String> {
-    set_live(cooked, PACKAGE, tagame_values, on)?;
+    set_all_with_lan(cooked, on, None).map(|_| ())
+}
+
+/// `set_all`, also setting the Workshop LAN mode in the same TAGame.upk
+/// write. Returns the LAN error, if that part could not be applied.
+fn set_all_with_lan(cooked: &Path, on: bool, lan_mode: Option<&str>) -> Result<Option<String>, String> {
+    let lan = super::profile_pictures::edit_workshop_with_lan(cooked, tagame_values, on, lan_mode)?;
     // loading Engine.upk is slow and the old patch only needs undoing once
     let marker = cooked.join("Backups").join("workshop-engine-clean");
     if marker.is_file() {
-        return Ok(());
+        return Ok(lan);
     }
     set_live(cooked, ENGINE, engine_values, false)?;
     if fs::create_dir_all(marker.parent().unwrap_or(cooked)).is_ok() {
         let _ = fs::write(marker, b"");
     }
-    Ok(())
+    Ok(lan)
 }
 
 fn ini_path() -> Result<PathBuf, String> {
@@ -1060,7 +1066,9 @@ fn with_section(ini: &str, maps: &[WorkshopMap], lan: &[LanFields]) -> String {
 
 /// The list file LoadAllWorkshopMapData reads, under the install's TAGame.
 fn list_path(cooked: &Path) -> PathBuf {
-    cooked.parent().unwrap_or(cooked).join(Path::new(LIST).file_name().unwrap_or_default())
+    // LIST is a game-side Windows path; split on backslashes so this also
+    // works where `\` is not a path separator.
+    cooked.parent().unwrap_or(cooked).join(LIST.rsplit('\\').next().unwrap_or(LIST))
 }
 
 /// What the menu's code reads from the fields the list does not otherwise
@@ -1175,11 +1183,14 @@ pub fn apply(
     }
     super::backup_guard::check_install(cooked, backups)?;
     write_list(cooked, maps)?;
-    set_all(cooked, true)?;
+    // peers' map names and joining their custom maps come with the menu, in
+    // the same TAGame.upk write
+    let lan = match set_all_with_lan(cooked, true, Some("join"))? {
+        Some(error) => Err(error),
+        None => Ok(()),
+    };
     // the menu works without the LAN controls, so a movie that can't be patched only costs those
     let ui = super::workshop_menu_ui::apply(cooked, backups);
-    // peers' map names and joining their custom maps come with the menu
-    let lan = super::workshop_lan_trial::set_mode(cooked, "join");
     super::item_name::workshop_description(cooked, backups, true)?;
     let _ = fs::remove_dir_all(cooked.join(OLD_PREVIEWS));
     fs::create_dir_all(backups).map_err(|e| e.to_string())?;
@@ -1254,9 +1265,13 @@ pub(super) fn migrate_solo_preferences(cooked: &Path) -> Result<(), String> {
 /// Put the patch back after another feature rewrote TAGame.upk from a backup.
 pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
     if backups.join(ENABLED).is_file() {
-        set_live(cooked, PACKAGE, tagame_values, true)?;
+        let lan = super::workshop_lan_trial::enabled_mode(cooked);
+        let lan_error =
+            super::profile_pictures::edit_workshop_with_lan(cooked, tagame_values, true, lan.as_deref())?;
         let _ = super::workshop_menu_ui::apply(cooked, backups);
-        super::workshop_lan_trial::reapply(cooked)?;
+        if let Some(error) = lan_error {
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -1282,6 +1297,12 @@ pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_path_is_hbxws_json_beside_cooked() {
+        let cooked = std::path::Path::new("/game/TAGame/CookedPCConsole");
+        assert_eq!(super::list_path(cooked), std::path::Path::new("/game/TAGame/HbxWS.json"));
+    }
+
     #[test]
     fn legacy_maps_move_into_mods_without_replacing() {
         let game = std::env::temp_dir().join(format!("hebnix-legacy-{}", std::process::id()));
@@ -1361,6 +1382,25 @@ mod tests {
         set_all(&cooked, false).unwrap();
         assert!(!status(&cooked).unwrap());
         assert!([PACKAGE, ENGINE].map(snapshot) == vanilla);
+
+        // One combined write must give the same package as the menu edit
+        // followed by a separate LAN set_mode.
+        set_all(&cooked, true).unwrap();
+        super::super::workshop_lan_trial::set_mode(&cooked, "join").unwrap();
+        let sequential = snapshot(PACKAGE);
+        super::super::workshop_lan_trial::set_mode(&cooked, "off").unwrap();
+        set_all(&cooked, false).unwrap();
+        assert!(snapshot(PACKAGE) == vanilla[0]);
+        assert_eq!(set_all_with_lan(&cooked, true, Some("join")).unwrap(), None);
+        assert!(snapshot(PACKAGE) == sequential);
+        assert!(super::super::workshop_lan_trial::enabled(&cooked));
+        // Nothing left to do: a second combined call must not rewrite the package.
+        let before = fs::metadata(cooked.join(PACKAGE)).unwrap().modified().unwrap();
+        assert_eq!(set_all_with_lan(&cooked, true, Some("join")).unwrap(), None);
+        assert_eq!(fs::metadata(cooked.join(PACKAGE)).unwrap().modified().unwrap(), before);
+        super::super::workshop_lan_trial::set_mode(&cooked, "off").unwrap();
+        set_all(&cooked, false).unwrap();
+        assert!(snapshot(PACKAGE) == vanilla[0]);
         let _ = fs::remove_dir_all(&cooked);
     }
 }

@@ -348,16 +348,30 @@ pub(super) fn edit_workshop(
     values: WorkshopValues,
     on: bool,
 ) -> Result<(), String> {
+    edit_workshop_with_lan(directory, values, on, None).map(|_| ())
+}
+
+/// Like `edit_workshop`, and also sets the Workshop LAN mode in the same
+/// TAGame.upk write, so the package is loaded and saved once. A LAN mode that
+/// cannot be applied does not stop the Workshop edit; its error is returned
+/// as `Ok(Some(error))`.
+pub(super) fn edit_workshop_with_lan(
+    directory: &Path,
+    values: WorkshopValues,
+    on: bool,
+    lan_mode: Option<&str>,
+) -> Result<Option<String>, String> {
     let _lock = PACKAGE_EDIT.lock().map_err(|e| e.to_string())?;
-    edit_workshop_checked(directory, values, on, check_closed)
+    edit_workshop_checked(directory, values, on, lan_mode, check_closed)
 }
 
 fn edit_workshop_checked(
     directory: &Path,
     values: WorkshopValues,
     on: bool,
+    lan_mode: Option<&str>,
     ensure_closed: impl Fn() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     ensure_closed()?;
     let source = super::game_path::resolve(directory, "TAGame.upk");
     let source_digest = file_digest(&source)?;
@@ -374,13 +388,27 @@ fn edit_workshop_checked(
     let freeplay = super::workshop_host::has_freeplay_restart(&package);
     let freeplay_changed = super::workshop_menu::edit_solo_freeplay(&mut package, freeplay, on)?;
     let credentials_changed = super::workshop_host::edit_lan_credentials(&mut package, on)?;
-    if !workshop_changed && !freeplay_changed && !credentials_changed {
-        return Ok(());
+    let menu_changed = workshop_changed || freeplay_changed || credentials_changed;
+    if menu_changed {
+        // Keep the parsed name table in sync before native bytecode is generated.
+        super::workshop_menu::rename_names(&mut package, on)?;
+        for (at, value) in changes {
+            package.patch(at, &value)?;
+        }
     }
-    // Keep the parsed name table in sync before native bytecode is generated.
-    super::workshop_menu::rename_names(&mut package, on)?;
-    for (at, value) in changes {
-        package.patch(at, &value)?;
+    // The LAN functions are edited after the menu, as a separate set_mode
+    // call would see them. stage_mode leaves the package alone on error.
+    let mut lan_error = None;
+    let lan = match lan_mode {
+        Some(mode) => super::workshop_lan_trial::stage_mode(&mut package, directory, mode)
+            .unwrap_or_else(|error| {
+                lan_error = Some(error);
+                None
+            }),
+        None => None,
+    };
+    if !menu_changed && lan.is_none() {
+        return Ok(lan_error);
     }
     let mut updated = if let Some((saved, enabled)) = previous {
         let receipt = create_receipt(&mut package, saved.build, saved.source)?;
@@ -436,6 +464,10 @@ fn edit_workshop_checked(
         return Err("Workshop settings failed avatar staging validation.".into());
     }
     drop(check);
+    if let Some(lan) = &lan {
+        // persist the LAN originals before writing the game package
+        lan.persist_originals()?;
+    }
     let staged_digest = file_digest(&temporary)?;
     ensure_closed()?;
     if file_digest(&source)? != source_digest {
@@ -456,7 +488,10 @@ fn edit_workshop_checked(
     }
     fs::rename(&temporary, &source).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(temporary);
-    Ok(())
+    if let Some(lan) = lan {
+        lan.commit()?;
+    }
+    Ok(lan_error)
 }
 pub fn set_enabled(game: &Path, on: bool) -> Result<String, String> {
     let _lock = PACKAGE_EDIT.lock().map_err(|e| e.to_string())?;
@@ -991,7 +1026,7 @@ mod tests {
             assert!(values(&raw, true).unwrap_err().contains("TargetFind"));
         }
         for on in [!initial, initial] {
-            edit_workshop_checked(&directory, values, on, || Ok(())).unwrap();
+            edit_workshop_checked(&directory, values, on, None, || Ok(())).unwrap();
             assert!(installed(&root).unwrap());
             assert_eq!(workshop_status(&directory, values).unwrap(), on);
             let updated = read_receipt(&root).unwrap();
