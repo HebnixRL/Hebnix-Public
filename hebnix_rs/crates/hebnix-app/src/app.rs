@@ -951,6 +951,10 @@ impl HebnixApp {
             let tx = control_tx.clone();
             let ctx = cc.egui_ctx.clone();
             hotkey.listen(move || {
+                // a window minimized on Wayland gets no redraws, so the toggle
+                // below would never be handled until it is back
+                #[cfg(target_os = "linux")]
+                winutil::wake_minimized_main_window();
                 crate::ui_work::send_toggle_control(&tx, &ctx, AppMsg::ToggleVisibility);
             });
         }
@@ -2315,6 +2319,60 @@ impl HebnixApp {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
+        if !crate::visibility::begin_change(ctx, hidden) { return; }
+        tracing::info!(hidden, "toggling main window visibility");
+        if hidden {
+            self.panel.leave(ctx);
+        } else {
+            winutil::note_foreground();
+        }
+        self.hidden = hidden;
+
+        if let Some(tray) = &self.tray {
+            tray.set_hidden(hidden);
+        }
+        winutil::set_main_window_invisible(hidden);
+        // Windows hides the window by dropping its layered-window alpha. On
+        // Wayland/X11 a transparent window stays mapped (a blank, click-through
+        // window left on screen, and showing it again never re-maps it above
+        // the game), so the viewport is really unmapped here.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(!hidden));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(hidden));
+        if winutil::minimize_to_tray() {
+            // Un-minimizing only works from here on X11; on Wayland
+            // wake_minimized_main_window() (hotkey/tray threads) already did it.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(hidden));
+            if !hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+
+        if hidden {
+            self.topmost = false;
+            winutil::set_main_window_topmost(false);
+            winutil::restore_foreground();
+        } else {
+            if self.topmost || hebnix_sdk::process::is_rocket_league_focused() {
+                self.topmost = true;
+                winutil::set_main_window_topmost(true);
+            }
+            // Wayland has no exclusive fullscreen, so the window can always be
+            // raised over the game. focus_main_window() also moves it onto the
+            // game's workspace, so only do that when popping over the game;
+            // otherwise F2 from another workspace would drag the user back.
+            if self.topmost {
+                winutil::focus_main_window();
+            }
+        }
+
+        ctx.request_repaint();
+        self.plugin_mgr.dispatch_gui_visibility(!hidden);
+        crate::visibility::applied(ctx);
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
         if !crate::visibility::begin_change(ctx, hidden) { return; }
         tracing::info!(hidden, "toggling main window visibility");
@@ -2350,15 +2408,6 @@ impl HebnixApp {
             // The tray's hidden menu window is also ours. A process-level
             // focus check must not mistake that helper for the main window.
             winutil::focus_main_window();
-            // The viewport is unmapped until the compositor processes Visible(true),
-            // so the focus request above can miss it; retry shortly after it maps.
-            #[cfg(target_os = "linux")]
-            std::thread::spawn(|| {
-                for ms in [60u64, 140, 300, 600] {
-                    std::thread::sleep(Duration::from_millis(ms));
-                    winutil::focus_main_window();
-                }
-            });
         }
 
         ctx.request_repaint();
@@ -2367,7 +2416,7 @@ impl HebnixApp {
     }
 
     fn handle_toggle_visibility(&mut self, ctx: &egui::Context) {
-        let hebnix_focused = winutil::foreground_window_is_ours();
+        let hebnix_focused = own_window_focused();
         let rocket_league_focused = hebnix_sdk::process::is_rocket_league_focused();
         if self
             .config
@@ -2396,7 +2445,7 @@ impl HebnixApp {
             .config
             .settings
             .restrict_hotkey_to_hebnix_or_rocket_league
-            && !winutil::foreground_window_is_ours()
+            && !own_window_focused()
             && !hebnix_sdk::process::is_rocket_league_focused()
         {
             return;
@@ -7242,7 +7291,11 @@ impl HebnixApp {
         if webview_wants {
             if let Some(webview) = &mut self.webview {
                 if let Some((hwnd, _)) = self.overlay.webview_target() {
-                    webview.tick(hwnd, size, true);
+                    // Linux: the pages live in a full-monitor layer-shell
+                    // surface above every normal window, so they are only
+                    // shown while the game itself is focused (as in 2.2.6);
+                    // otherwise they sit on top of Hebnix and the desktop.
+                    webview.tick(hwnd, size, cfg!(not(target_os = "linux")) || focused);
                 }
             }
             self.report_webview_error();
@@ -8658,3 +8711,19 @@ impl HebnixApp {
 }
 
 mod network;
+
+/// Is Hebnix's own window focused? On Linux `foreground_window_is_ours` is a
+/// constant false on Hyprland/KDE/niri, which made the "only from Hebnix or
+/// Rocket League" hotkey restriction swallow every press made from Hebnix, so
+/// the compositor is asked directly. Only called on a hotkey press.
+fn own_window_focused() -> bool {
+    // a compositor that can't be asked (GNOME) can't enforce the restriction
+    #[cfg(target_os = "linux")]
+    {
+        !hebnix_sdk::process::can_query_focus() || winutil::hebnix_window_focused()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        winutil::foreground_window_is_ours()
+    }
+}

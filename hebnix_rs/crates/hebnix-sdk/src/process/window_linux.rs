@@ -1070,6 +1070,13 @@ pub fn rocket_league_monitor_rect() -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// true when the window manager can say which window is focused at all
+/// (everything except an unknown Wayland compositor, e.g. GNOME). Slower than
+/// `can_track_own_window` on Hyprland/KWin/niri (one compositor query per call).
+pub fn can_query_focus() -> bool {
+    compositor() != Compositor::Other
+}
+
 /// true when our own window's focus can be asked of the window manager
 /// (Sway, i3, X11), which is when `is_pid_focused(own pid)` is trustworthy
 pub fn can_track_own_window() -> bool {
