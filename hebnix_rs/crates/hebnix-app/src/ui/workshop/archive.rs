@@ -1,8 +1,8 @@
 //! the RL Workshop Archive (xplodingeggo.github.io/RLWorkshopCollection): a
-//! public list of workshop maps with direct downloads, for players without a
-//! Hubcap API key. Anyone can request a Steam Workshop map on the site and it
-//! is added within minutes. This lists the archive's maps.json and downloads
-//! and imports a map the same way a hand-picked file or zip is imported.
+//! public list of workshop maps with direct downloads. Anyone can request a
+//! Steam Workshop map on the site and it is added within minutes. This lists
+//! the archive's maps.json and downloads and imports a map the same way a
+//! hand-picked file or zip is imported.
 
 use crate::i18n::{t, t_args};
 use std::io::Read;
@@ -296,9 +296,9 @@ impl ArchiveBrowser {
         let loading = self.loading.load(Ordering::Relaxed);
         let downloading = self.downloading.load(Ordering::Relaxed);
 
-        ui.heading(t("render-no-api-key-use-the-rl"));
+        ui.heading(t("archive-heading"));
         ui.separator();
-        ui.label(t("render-if-you-can-t-get-a"));
+        ui.label(t("archive-intro"));
         ui.hyperlink_to(
             t("render-open-the-rl-workshop-archive-request"),
             ARCHIVE_SITE,

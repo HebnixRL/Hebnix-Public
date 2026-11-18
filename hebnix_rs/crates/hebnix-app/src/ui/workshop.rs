@@ -30,10 +30,7 @@ pub(crate) mod ingame_menu;
 mod lan_mutators;
 mod menu_map;
 mod local_import;
-#[cfg(target_os = "windows")]
-mod steam_download;
-#[cfg(target_os = "linux")]
-#[path = "workshop/steam_download_linux.rs"]
+mod steam_cdn;
 mod steam_download;
 use archive::ArchiveBrowser;
 use background_changer::BackgroundChangerState;
@@ -1360,7 +1357,7 @@ impl WorkshopState {
             ui.menu_button("?", |ui| {
                 ui.set_max_width(280.0);
                 ui.label(t("render-can-t-find-the-map-you"));
-                ui.label(t("render-no-hubcap-api-key-the-import"));
+                ui.label(t("workshop-help-archive"));
             })
             .response
             .on_hover_text(t("render-can-t-find-a-map"));
