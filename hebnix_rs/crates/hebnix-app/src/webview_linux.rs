@@ -425,6 +425,20 @@ impl WebviewOverlay {
         }
     }
 
+    /// Damage the whole overlay so GTK repaints all of it, not just the parts
+    /// that changed. Since Hyprland 0.57 / NVIDIA 620 (2026-11-18 update) a
+    /// partial repaint of this transparent layer surface leaves everything
+    /// outside the changed area blank (Controller Overlay: only the pressed
+    /// button or moved stick stayed visible). Call once a frame while shown.
+    pub fn repaint(&self) {
+        if !self.visible {
+            return;
+        }
+        if let Some(window) = &self.window {
+            window.queue_draw();
+        }
+    }
+
     pub fn hide(&mut self) {
         if !self.visible {
             return;
@@ -547,6 +561,7 @@ pub mod host {
         pub fn tick(&mut self, _target: (), _size: (u32, u32), visible: bool) {
             if visible {
                 self.overlay.show();
+                self.overlay.repaint();
             } else {
                 self.overlay.hide();
             }
