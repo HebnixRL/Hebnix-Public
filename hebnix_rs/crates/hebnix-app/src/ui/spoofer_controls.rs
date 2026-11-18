@@ -79,8 +79,16 @@ impl HebnixApp {
     }
 
     pub(super) fn render_spoofer_certificate_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Account HTTPS proxy certificate");
-        ui.weak("Name and Friends use the account HTTPS proxy while Rocket League is running. It routes only api.epicgames.dev and leaves Windows proxy settings unchanged. Administrator access and this certificate are required.");
+        #[cfg(not(target_os = "linux"))]
+        {
+            ui.heading("Account HTTPS proxy certificate");
+            ui.weak("Name and Friends use the account HTTPS proxy while Rocket League is running. It routes only api.epicgames.dev and leaves Windows proxy settings unchanged. Administrator access and this certificate are required.");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            ui.heading("HTTP proxy certificate");
+            ui.weak("Name and Friends point Rocket League's Wine prefix at Hebnix's HTTP proxy before the game starts (and put it back after). No administrator restart is needed; installing or removing this certificate asks for your password once.");
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(t("spoofer-certificate-status"));
             ui.label(if self.spoofer_cert_installed {

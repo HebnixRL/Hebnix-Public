@@ -1916,7 +1916,11 @@ impl HebnixApp {
                 if !spoofer::is_admin()
                     && crate::patcher::colours::needs_admin(cooked_pc)
                 {
-                    messages.push("Car colours need administrator rights; apply them from the Colours tab".into());
+                    messages.push(if cfg!(target_os = "linux") {
+                        "Car colours can't be written: make the game folder writable by your user".into()
+                    } else {
+                        "Car colours need administrator rights; apply them from the Colours tab".into()
+                    });
                 } else {
                     self.presets.pending_cars = Some(cars);
                     queued += 1;
@@ -6389,6 +6393,27 @@ impl HebnixApp {
         if !self.colour_admin_prompt_open {
             return;
         }
+        // Linux never relaunches as root: the game files just need to be
+        // writable by the user, so say that instead of offering a restart
+        #[cfg(target_os = "linux")]
+        {
+            let mut close = false;
+            egui::Window::new("Game files not writable")
+                .id(egui::Id::new("colour-files-not-writable"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Your user can't write to Rocket League's TAGame.upk. Make the game folder writable by your user (for example `chown -R $USER` on it), then apply again.");
+                    ui.add_space(8.0);
+                    close = ui.button("OK").clicked();
+                });
+            if close {
+                self.colour_admin_prompt_open = false;
+            }
+            return;
+        }
+        #[allow(unreachable_code)]
         let mut relaunch = false;
         let mut cancel = false;
         egui::Window::new(t("admin-prompt-administrator-required"))
