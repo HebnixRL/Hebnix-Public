@@ -154,6 +154,33 @@ fn hyprctl_json(cmd: &str) -> Option<Value> {
     serde_json::from_slice(&raw).ok()
 }
 
+/// Hyprland 0.57+ running a Lua config (`hyprland.lua`) parses `dispatch`
+/// arguments as Lua and no longer accepts `keyword`/`setprop`, so every
+/// legacy command below fails there ("')' expected near 'pid'"). Asked once:
+/// a Lua dispatcher only answers "ok" in that mode.
+fn hyprland_lua() -> bool {
+    static LUA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LUA.get_or_init(|| {
+        let lua = hyprctl_raw("dispatch hl.dsp.no_op()").is_some_and(|reply| reply.starts_with(b"ok"));
+        tracing::info!(lua, "hyprland: config API detected");
+        lua
+    })
+}
+
+/// run Lua in Hyprland's config VM (Lua-config Hyprland only)
+fn hyprctl_lua(code: &str) {
+    if let Some(reply) = hyprctl_raw(&format!("eval {code}")) {
+        if !reply.starts_with(b"ok") {
+            tracing::warn!(code, reply = %String::from_utf8_lossy(&reply), "hyprland: lua call failed");
+        }
+    }
+}
+
+/// `hl.dispatch(<dispatcher>)` for our own window, selected by pid
+fn hyprland_lua_dispatch(dispatcher: &str) {
+    hyprctl_lua(&format!("hl.dispatch({dispatcher})"));
+}
+
 /// is the given layer-shell surface (matched by its `namespace`, e.g.
 /// "waybar") currently visible (alpha > 0)? `None` if it isn't found at
 /// all (compositor other than Hyprland, or the surface isn't mapped).
@@ -765,6 +792,13 @@ pub fn exempt_own_window_decorations() {
     if !hyprland_active() {
         return;
     }
+    if hyprland_lua() {
+        hyprctl_lua(
+            "hl.window_rule({ name = 'hebnix-main-window', match = { class = '^(Hebnix)$' }, \
+             float = true, no_blur = true, no_shadow = true, no_dim = true, rounding = 0, border_size = 0 })",
+        );
+        return;
+    }
     // Hyprland >= 0.53 renamed the old `windowrulev2`/`noblur,class:...`
     // syntax to `windowrule` + `match:class ...`, and boolean decoration
     // toggles now take an explicit value with an underscore
@@ -813,6 +847,16 @@ pub fn reassert_own_window_decorations(own_pid: u32) {
     if !hyprland_active() {
         return;
     }
+    if hyprland_lua() {
+        let window = format!("window = 'pid:{own_pid}'");
+        hyprland_lua_dispatch(&format!("hl.dsp.window.float({{ action = 'enable', {window} }})"));
+        for (prop, val) in [("no_blur", 1), ("no_shadow", 1), ("no_dim", 1), ("rounding", 0), ("border_size", 0)] {
+            hyprland_lua_dispatch(&format!(
+                "hl.dsp.window.set_prop({{ {window}, prop = '{prop}', value = {val} }})"
+            ));
+        }
+        return;
+    }
     let Some(json) = hyprctl_json("clients") else {
         return;
     };
@@ -848,6 +892,13 @@ pub fn reassert_own_window_decorations(own_pid: u32) {
 /// compositor has no implementation, so the caller can fall back to asking the toolkit.
 pub fn place_own_window(own_pid: u32, x: i32, y: i32, w: i32, h: i32) -> bool {
     match compositor() {
+        Compositor::Hyprland if hyprland_lua() => {
+            let window = format!("window = 'pid:{own_pid}'");
+            hyprland_lua_dispatch(&format!("hl.dsp.window.float({{ action = 'enable', {window} }})"));
+            hyprland_lua_dispatch(&format!("hl.dsp.window.resize({{ x = {w}, y = {h}, {window} }})"));
+            hyprland_lua_dispatch(&format!("hl.dsp.window.move({{ x = {x}, y = {y}, {window} }})"));
+            true
+        }
         Compositor::Hyprland => {
             let selector = format!("pid:{own_pid}");
             hyprctl_raw(&format!("dispatch setfloating {selector}"));
@@ -871,6 +922,18 @@ pub fn place_own_window(own_pid: u32, x: i32, y: i32, w: i32, h: i32) -> bool {
 /// compositor we don't have a real implementation for.
 pub fn focus_own_window_over_game(own_pid: u32) -> bool {
     match compositor() {
+        Compositor::Hyprland if hyprland_lua() => {
+            let window = format!("window = 'pid:{own_pid}'");
+            if let Some(ws) = cached_rl_pid().and_then(hyprland_rl_workspace) {
+                hyprland_lua_dispatch(&format!(
+                    "hl.dsp.window.move({{ workspace = {ws}, {window}, follow = false }})"
+                ));
+            }
+            hyprland_lua_dispatch(&format!("hl.dsp.window.float({{ action = 'enable', {window} }})"));
+            hyprland_lua_dispatch(&format!("hl.dsp.focus({{ {window} }})"));
+            hyprland_lua_dispatch("hl.dsp.window.bring_to_top()");
+            true
+        }
         Compositor::Hyprland => {
             let selector = format!("pid:{own_pid}");
             if let Some(ws) = cached_rl_pid().and_then(hyprland_rl_workspace) {

@@ -7581,6 +7581,16 @@ impl eframe::App for HebnixApp {
             ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
+        // exempt_own_window_decorations() (main.rs) is a map-time window rule
+        // set before our window exists; re-apply float/no-blur/no-border to
+        // the live window once, in case the rule didn't take (2.2.6 did this)
+        #[cfg(target_os = "linux")]
+        {
+            static REASSERTED: std::sync::Once = std::sync::Once::new();
+            REASSERTED.call_once(|| {
+                hebnix_sdk::process::reassert_own_window_decorations(std::process::id());
+            });
+        }
         crate::maintenance::acknowledge_update();
         ctx.request_repaint_after(Duration::from_secs(30));
         self.title_patcher.poll();
