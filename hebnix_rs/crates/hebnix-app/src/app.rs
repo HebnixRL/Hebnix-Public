@@ -188,6 +188,15 @@ impl TitleCatalogEntry {
 
 }
 
+/// Settings > Directories override for Rocket League's Documents folder
+#[cfg(target_os = "linux")]
+fn apply_rl_documents_path(settings: &crate::config::SettingsCfg) {
+    let path = settings.rl_documents_path.trim();
+    hebnix_sdk::process::set_documents_override(
+        (!path.is_empty()).then(|| std::path::PathBuf::from(path)),
+    );
+}
+
 const CATALOG_NAMES: [&str; 14] = [
     "antennas", "anthems", "banners", "bodies", "boosts", "borders", "engines", "finishes",
     "goals", "skins", "titles", "toppers", "trails", "wheels",
@@ -972,6 +981,11 @@ impl HebnixApp {
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
 
+        #[cfg(target_os = "linux")]
+        {
+            apply_rl_documents_path(&config.settings);
+            winutil::set_minimize_to_tray(config.settings.minimize_to_tray);
+        }
         let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering();
         tracing::info!(
             hidden,
@@ -5277,6 +5291,7 @@ impl HebnixApp {
                                         ui,
                                         &[
                                             t("settings-rl-folder-label"),
+                                            "Rocket League Documents:".to_string(),
                                             t("settings-statsapi-ini-label"),
                                             "PacketSendRate:".to_string(),
                                             "Port:".to_string(),
@@ -5308,6 +5323,65 @@ impl HebnixApp {
                                             }
                                         }
                                     });
+
+                                    // saves and logs live in the game's Wine prefix, not the
+                                    // game folder; found automatically unless picked here
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let rl_docs = hebnix_sdk::process::rocket_league_documents_dir()
+                                            .map(|docs| docs.join("My Games").join("Rocket League"));
+                                        let picked = !self.config.settings.rl_documents_path.trim().is_empty();
+                                        ui.horizontal(|ui| {
+                                            crate::i18n::layout::settings_label(ui, label_w, "Rocket League Documents:");
+                                            let mut display = match (&rl_docs, picked) {
+                                                (Some(path), true) => path.display().to_string(),
+                                                (Some(path), false) => format!("{} (found automatically)", path.display()),
+                                                (None, _) => "Not found, start Rocket League once or pick it".to_string(),
+                                            };
+                                            ui.add_enabled(
+                                                false,
+                                                egui::TextEdit::singleline(&mut display).desired_width(480.0),
+                                            );
+                                            if ui.button(t("btn-browse")).clicked() {
+                                                let mut dialog = rfd::FileDialog::new();
+                                                if let Some(path) = &rl_docs {
+                                                    dialog = dialog.set_directory(path);
+                                                }
+                                                if let Some(dir) = dialog.pick_folder() {
+                                                    self.config.settings.rl_documents_path =
+                                                        dir.to_string_lossy().to_string();
+                                                    apply_rl_documents_path(&self.config.settings);
+                                                    self.save_config();
+                                                }
+                                            }
+                                            if picked && ui.button("Reset").clicked() {
+                                                self.config.settings.rl_documents_path.clear();
+                                                apply_rl_documents_path(&self.config.settings);
+                                                self.save_config();
+                                            }
+                                        });
+                                        let docs_root = rl_docs
+                                            .as_ref()
+                                            .and_then(|path| path.parent())
+                                            .and_then(|path| path.parent());
+                                        if picked
+                                            && docs_root.is_none_or(|docs| {
+                                                hebnix_sdk::process::wine_prefix::rocket_league_activity(docs).is_none()
+                                            })
+                                        {
+                                            ui.colored_label(
+                                                egui::Color32::YELLOW,
+                                                "No Rocket League saves or logs in this folder. Pick its My Games/Rocket League folder inside the Wine prefix.",
+                                            );
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Where Rocket League keeps saves and logs: My Games/Rocket League in its Wine prefix's Documents, e.g. ~/Games/Heroic/Prefixes/rocketleague/pfx/drive_c/users/steamuser/Documents/My Games/Rocket League.",
+                                            )
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                        );
+                                    }
 
                                     ui.horizontal(|ui| {
                                         crate::i18n::layout::settings_label(ui, label_w, t("settings-statsapi-ini-label"));
@@ -5707,6 +5781,22 @@ impl HebnixApp {
                                             .checkbox(&mut self.config.settings.start_in_tray, "")
                                             .changed()
                                         {
+                                            self.save_config();
+                                        }
+                                    });
+                                    #[cfg(target_os = "linux")]
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, "Minimize to Tray:");
+                                        let response = ui
+                                            .checkbox(&mut self.config.settings.minimize_to_tray, "")
+                                            .on_hover_text(
+                                                "The toggle hotkey minimizes Hebnix instead of only hiding it. \
+                                                 Turn this on if the hidden window still shows in your taskbar \
+                                                 or blocks your desktop (GNOME, KDE and other desktops). \
+                                                 Bring it back with the hotkey, the tray icon or your taskbar.",
+                                            );
+                                        if response.changed() {
+                                            winutil::set_minimize_to_tray(self.config.settings.minimize_to_tray);
                                             self.save_config();
                                         }
                                     });

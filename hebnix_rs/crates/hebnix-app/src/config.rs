@@ -73,6 +73,12 @@ pub struct SettingsCfg {
     /// main window bg opacity (0.5-1.0)
     pub window_opacity: f32,
     pub start_in_tray: bool,
+    /// Linux: the hotkey minimizes the window instead of only hiding it
+    /// (for desktops where a hidden window still shows or blocks input)
+    pub minimize_to_tray: bool,
+    /// Linux: Rocket League's `My Games/Rocket League` folder inside its Wine
+    /// prefix, when automatic detection picks the wrong install (empty = auto)
+    pub rl_documents_path: String,
     pub close_to_tray: bool,
     pub rl_path: String,
     pub rl_path_confirmed: bool,
@@ -127,6 +133,8 @@ impl Default for SettingsCfg {
             home_default_migrated: true,
             window_opacity: 0.96,
             start_in_tray: false,
+            minimize_to_tray: false,
+            rl_documents_path: String::new(),
             close_to_tray: false,
             rl_path: default_rl_path(),
             rl_path_confirmed: false,
