@@ -474,50 +474,86 @@ mod page_url_tests {
 }
 
 pub mod runtime {
-    // no WebView2 on Linux
+    /// The Linux HTML overlay is a webkit2gtk window (`WebviewOverlay`), so
+    /// there is no WebView2 runtime to install or wait for.
     pub fn is_available() -> bool {
-        false
+        true
     }
 
     pub fn ensure_present() {}
 }
 
-/// Windows composes the plugin pages into the overlay window; here the pages
-/// go through `WebviewOverlay` instead, so this is never constructed.
+/// Same surface the Windows `WebviewHost` has, backed by `WebviewOverlay` so
+/// `app.rs` drives both platforms through one code path.
 pub mod host {
-    pub struct WebviewHost;
+    use super::{PageLayer, WebviewOverlay};
+    use std::path::PathBuf;
+
+    pub struct WebviewHost {
+        overlay: WebviewOverlay,
+    }
 
     impl WebviewHost {
         pub fn new(_visual: ()) -> Self {
-            Self
+            Self {
+                overlay: WebviewOverlay::new(),
+            }
         }
 
-        pub fn sync_pages<T>(&mut self, _pages: &[T]) {}
+        pub fn sync_pages(&mut self, pages: &[(String, Option<String>, PathBuf, bool)]) {
+            let layers: Vec<PageLayer> = pages
+                .iter()
+                .filter_map(|(slug, page, assets_dir, _)| {
+                    page.as_ref()
+                        .map(|page| (slug.clone(), page.clone(), assets_dir.clone()))
+                })
+                .collect();
+            self.overlay.sync_pages(&layers);
+        }
 
-        pub fn deliver<T>(&self, _slug: &str, _data: T) -> Result<(), String> {
+        pub fn deliver(&self, slug: &str, data: serde_json::Value) -> Result<(), String> {
+            if !self.overlay.is_active() {
+                return Err("html overlay is not running".to_string());
+            }
+            self.overlay.deliver(slug, &data);
             Ok(())
         }
 
         pub fn status(&self) -> String {
-            "unsupported".into()
+            if self.overlay.is_active() {
+                format!(
+                    "webkit2gtk overlay, {} plugin page(s), {}",
+                    self.overlay.active.len(),
+                    if self.overlay.visible { "shown" } else { "hidden" }
+                )
+            } else {
+                "webkit2gtk overlay not created".to_string()
+            }
         }
 
+        /// plugin pages are click-through HUDs
         pub fn wants_input(&self) -> bool {
             false
         }
 
         pub fn wants_overlay(&self) -> bool {
-            false
+            self.overlay.is_active() && !self.overlay.active.is_empty()
         }
 
         pub fn is_ready(&self) -> bool {
-            false
+            self.overlay.is_active()
         }
 
-        pub fn tick(&mut self, _target: (), _size: (u32, u32), _visible: bool) {}
+        pub fn tick(&mut self, _target: (), _size: (u32, u32), visible: bool) {
+            if visible {
+                self.overlay.show();
+            } else {
+                self.overlay.hide();
+            }
+        }
 
         pub fn take_error(&mut self) -> Option<String> {
-            None
+            self.overlay.take_error()
         }
     }
 }

@@ -802,8 +802,8 @@ pub mod native {
 }
 
 /// Windows hosts the HTML plugin overlays in a DirectComposition window. The
-/// Linux HTML overlay is `WebviewOverlay` (webview_linux.rs), which doesn't
-/// plug into this, so this reports no target and plugin pages stay off.
+/// Linux HTML overlay is `WebviewOverlay` (webview_linux.rs), which owns its
+/// own layer-shell window, so this only reports a placeholder target.
 pub struct Overlay;
 
 impl Overlay {
@@ -812,7 +812,7 @@ impl Overlay {
     }
 
     pub fn webview_target(&self) -> Option<((), ())> {
-        None
+        Some(((), ()))
     }
 
     pub fn commit(&self) {}
