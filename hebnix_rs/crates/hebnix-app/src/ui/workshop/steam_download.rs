@@ -418,7 +418,7 @@ fn encode(value: &str) -> String {
 }
 
 fn search(query: &str, sort: SearchSort, cursor: Option<&str>) -> Result<SearchPage, String> {
-    let mut path = format!("/v1/search?q={}&sort={}", encode(query.trim()), sort.api_value());
+    let mut path = format!("/search?q={}&sort={}", encode(query.trim()), sort.api_value());
     if let Some(cursor) = cursor {
         path.push_str(&format!("&cursor={}", encode(cursor)));
     }
@@ -591,7 +591,8 @@ impl SteamDownloader {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .hint_text(t("steam-search-hint"))
-                    .desired_width(260.0),
+                    .desired_width(260.0)
+                    .char_limit(100),
             );
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 run_search = true;

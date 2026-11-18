@@ -21,7 +21,7 @@ use steamroom_client::download::{CdnChunkFetcher, DepotJob};
 use steamroom_client::event::DownloadEvent;
 use steamroom_client::manifest::parse_cdn_manifest;
 
-const WORKSHOP_API_URL: &str = "https://api.hebnix.com/workshop";
+const WORKSHOP_API_URL: &str = "https://req.hebnix.com/workshop/v1";
 const CDN_SERVERS_URL: &str = "https://api.steampowered.com/IContentServerDirectoryService/GetServersForSteamPipe/v1/?cell_id=0&max_servers=20";
 const RL_APPID: u32 = 252950;
 const MAX_REPLY_BYTES: u64 = 16 * 1024 * 1024;
@@ -40,27 +40,52 @@ pub fn api_url() -> String {
         .unwrap_or_else(|| WORKSHOP_API_URL.to_string())
 }
 
-/// a GET to the workshop api, with the shared hebnix key when the build has one
+/// a GET to the workshop api on req.hebnix.com, signed with the app token like
+/// every other req.hebnix.com call
 pub(super) fn api_get(path: &str) -> Result<Value, String> {
-    let mut request = ureq::get(&format!("{}{path}", api_url())).timeout(Duration::from_secs(30));
-    if let Ok(key) = crate::multiplayer_lan::directory_key() {
-        request = request.set("X-Hebnix-Key", key);
-    }
-    let response = request.call().map_err(|e| match e {
-        ureq::Error::Status(404, _) => "The Hebnix workshop service doesn't know that item.".to_string(),
-        ureq::Error::Status(429, _) => {
-            "The Hebnix workshop service is busy. Wait a minute and try again.".to_string()
+    let token = hebnix_sdk::req_auth::app_token()?;
+    let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
+    let result = agent
+        .get(&format!("{}{path}", api_url()))
+        .set("X-App-Token", &token)
+        .set("Accept", "application/json")
+        .set("User-Agent", concat!("Hebnix/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
+        .call();
+    let response = match result {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let body = read_json(response).unwrap_or_default();
+            hebnix_sdk::req_auth::observe_response(status, &body);
+            return Err(status_message(status, &body));
         }
-        ureq::Error::Status(code, _) => format!("The Hebnix workshop service failed (HTTP {code})."),
-        other => format!("Couldn't reach the Hebnix workshop service: {other}"),
-    })?;
+        Err(other) => return Err(format!("Couldn't reach the Hebnix workshop service: {other}")),
+    };
+    read_json(response).map_err(|e| format!("The workshop service sent back bad data: {e}"))
+}
+
+fn read_json(response: ureq::Response) -> Result<Value, String> {
     let mut body = String::new();
     response
         .into_reader()
         .take(MAX_REPLY_BYTES)
         .read_to_string(&mut body)
         .map_err(|e| e.to_string())?;
-    serde_json::from_str(&body).map_err(|e| format!("The workshop service sent back bad data: {e}"))
+    serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+/// what to tell the player when the workshop api says no. the server's own
+/// `error` text wins when it sends one.
+fn status_message(status: u16, body: &Value) -> String {
+    if let Some(error) = body["error"].as_str().filter(|e| !e.trim().is_empty()) {
+        return format!("The Hebnix workshop service said: {}", error.trim());
+    }
+    match status {
+        404 => "The Hebnix workshop service doesn't know that item.".to_string(),
+        429 => "The Hebnix workshop service is busy. Wait a minute and try again.".to_string(),
+        498 => "Hebnix's app token was refused. Check that your PC's clock is right.".to_string(),
+        code => format!("The Hebnix workshop service failed (HTTP {code})."),
+    }
 }
 
 #[derive(Deserialize)]
@@ -154,7 +179,7 @@ fn check_files(manifest: &DepotManifest) -> Result<u64, String> {
 }
 
 pub fn fetch_manifest(wid: &str) -> Result<ItemManifest, String> {
-    parse_manifest_reply(&api_get(&format!("/v1/manifest/{wid}"))?)
+    parse_manifest_reply(&api_get(&format!("/manifest/{wid}"))?)
 }
 
 /// steam's CDN servers, from its public web api (no login)
@@ -289,6 +314,16 @@ mod tests {
             parse_manifest_reply(&reply).err().as_deref(),
             Some("The manifest reply had no valid depot key.")
         );
+    }
+
+    #[test]
+    fn the_servers_error_text_is_shown_when_it_sends_one() {
+        assert_eq!(
+            status_message(403, &json!({"error": "Item isn't a Rocket League map"})),
+            "The Hebnix workshop service said: Item isn't a Rocket League map"
+        );
+        assert!(status_message(429, &Value::Null).contains("busy"));
+        assert!(status_message(498, &json!({})).contains("clock"));
     }
 
     #[test]
