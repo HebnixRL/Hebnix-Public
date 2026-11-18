@@ -384,7 +384,7 @@ pub(super) fn transaction(
     // Migrate every car before opening one: any other legacy baseline.upk in the same
     // CookedPCConsole tree can still collide with this package's imports.
     migrate_legacy_package_files(cooked)?;
-    let live = cooked.join(file);
+    let live = crate::patcher::game_path::resolve(&cooked, file);
     let current = read(&live)?;
     let current_hash = hash(&current);
     let dir = record_dir(cooked, file);
@@ -675,7 +675,7 @@ impl WheelAlignmentState {
                 };
                 let dir = record_dir(cooked, file);
                 if self.loaded.as_ref() != Some(&dir) {
-                    self.settings = super::upk_history::current_recipe(cooked, &cooked.join(file))
+                    self.settings = super::upk_history::current_recipe(cooked, &crate::patcher::game_path::resolve(&cooked, file))
                         .ok().flatten().and_then(|recipe| recipe.alignment)
                         .or_else(|| read(&dir.join("alignment.json"))
                             .ok()
@@ -806,7 +806,7 @@ mod tests {
         fs::write(root.join("Binaries/Win64/RocketLeague.exe"), b"test build").unwrap();
         super::super::backup_guard::check_install(&cooked, &cooked.join("Backups")).unwrap();
         let file = "Body_Octane_SF.upk";
-        let live = cooked.join(file);
+        let live = crate::patcher::game_path::resolve(&cooked, file);
         let dir = record_dir(&cooked, file);
         // Once replaced by other bytes, once put back to the baseline by a file verify.
         for current in [&b"replaced elsewhere"[..], b"stock"] {

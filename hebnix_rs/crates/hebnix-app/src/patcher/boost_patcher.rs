@@ -1528,7 +1528,7 @@ impl BoostPatcherState {
                 return;
             }
             let backup_gfx = backups_dir_clone.join(format!("{}.bak", GFX_UPK));
-            let op = match restore_boost_textures(&cooked_pc_clone.join(GFX_UPK), &backup_gfx)
+            let op = match restore_boost_textures(&crate::patcher::game_path::resolve(&cooked_pc_clone, GFX_UPK), &backup_gfx)
                 .and_then(|()| crate::patcher::chat_paste::reapply(&cooked_pc_clone, &backups_dir_clone))
             {
                 Ok(()) => BoostOp::Restored,

@@ -523,7 +523,7 @@ pub fn apply_with_colours(
     let result = (|| {
         // Build a pristine donor package even if this mesh was swapped earlier.
         let donor_path = work.join("donor.upk");
-        let mut dp = UpkPackage::load(&cooked.join("Mutators_Balls_SF.upk"))?;
+        let mut dp = UpkPackage::load(&crate::patcher::game_path::resolve(&cooked, "Mutators_Balls_SF.upk"))?;
         if let Some(s) = swaps.iter().find(|s| s.source == donor) {
             if let Some(f) = s
                 .files
@@ -601,7 +601,7 @@ pub fn apply_with_colours(
         });
         save_state(backups, &swaps)?;
         for f in &files {
-            let live = cooked.join(&f.file);
+            let live = crate::patcher::game_path::resolve(&cooked, &f.file);
             if hash(&std::fs::read(&live).map_err(|e| e.to_string())?) != f.package_before {
                 return Err(format!(
                     "{} changed during staging; Restore to recover",
@@ -661,7 +661,7 @@ pub fn restore(cooked: &Path, backups: &Path, source: usize) -> Result<(), Strin
         if hash(&old) != f.before {
             return Err("Ball backup checksum failed".into());
         }
-        let p = UpkPackage::load(&cooked.join(&f.file))?;
+        let p = UpkPackage::load(&crate::patcher::game_path::resolve(&cooked, &f.file))?;
         validate_textures(&p, backups, source, f)?;
         let current = hash(&payload(&p, BALLS[source].1)?);
         if current != f.before && current != f.after {
@@ -672,7 +672,7 @@ pub fn restore(cooked: &Path, backups: &Path, source: usize) -> Result<(), Strin
         }
     }
     for f in &swap.files {
-        let live = cooked.join(&f.file);
+        let live = crate::patcher::game_path::resolve(&cooked, &f.file);
         let mut p = UpkPackage::load(&live)?;
         if hash(&payload(&p, BALLS[source].1)?) == f.before && f.textures.is_empty() {
             continue;
@@ -744,7 +744,7 @@ pub fn colour_texture(source: usize, donor: usize) -> Option<&'static str> {
 fn donor_colours(cooked: &Path, source: usize, donor: usize) -> Result<image::RgbaImage, String> {
     let name = colour_texture(source, donor)
         .ok_or("Colour merge is unavailable for this pair; use shape only")?;
-    let p = UpkPackage::load(&cooked.join("Mutators_Balls_SF.upk"))?;
+    let p = UpkPackage::load(&crate::patcher::game_path::resolve(&cooked, "Mutators_Balls_SF.upk"))?;
     let e = p
         .exports
         .iter()

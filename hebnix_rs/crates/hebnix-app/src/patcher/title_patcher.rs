@@ -726,10 +726,10 @@ fn run(
             if !valid_file(&entry.file) {
                 return Err("Invalid UI backup filename".into());
             }
-            if !inspected.insert(entry.file.clone()) || !cooked.join(&entry.file).is_file() {
+            if !inspected.insert(entry.file.clone()) || !crate::patcher::game_path::resolve(&cooked, &entry.file).is_file() {
                 continue;
             }
-            let current = UpkPackage::load(&cooked.join(&entry.file))?;
+            let current = UpkPackage::load(&crate::patcher::game_path::resolve(&cooked, &entry.file))?;
             if previous
                 .entries
                 .iter()
@@ -786,7 +786,7 @@ fn run(
         let mut entries = Vec::new();
         let mut methods = 0;
         for file in files {
-            let live = cooked.join(&file);
+            let live = crate::patcher::game_path::resolve(&cooked, &file);
             let live_hash = hash(&fs::read(&live).map_err(|e| e.to_string())?);
             let file_stage = stage.join(&file);
             let backup = root.join(format!("{file}.original"));

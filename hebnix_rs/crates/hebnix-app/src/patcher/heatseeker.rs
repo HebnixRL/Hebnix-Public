@@ -25,7 +25,7 @@ fn rgb(colour: [u8; 3], intensity: f32) -> [u8; 12] {
 /// a pristine backup, so it cannot alter the team-coloured normal glow.
 pub fn apply(cooked_pc: &Path, backups_dir: &Path, max_speed: [u8; 3]) -> Result<(), String> {
     super::backup_guard::check_install(cooked_pc, backups_dir)?;
-    let live = cooked_pc.join(PACKAGE_NAME);
+    let live = crate::patcher::game_path::resolve(&cooked_pc, PACKAGE_NAME);
     if !live.is_file() {
         return Err(format!(
             "{PACKAGE_NAME} was not found in {}",
@@ -131,7 +131,7 @@ pub fn restore(cooked_pc: &Path, backups_dir: &Path) -> Result<(), String> {
     }
     UpkPackage::load(&backup)
         .map_err(|error| format!("Heatseeker glow backup is invalid: {error}"))?;
-    super::upk_history::install_copy(cooked_pc, &backup, &cooked_pc.join(PACKAGE_NAME), "Restore Heatseeker ball glow")
+    super::upk_history::install_copy(cooked_pc, &backup, &crate::patcher::game_path::resolve(&cooked_pc, PACKAGE_NAME), "Restore Heatseeker ball glow")
         .map_err(|error| format!("Could not restore Heatseeker glow: {error}"))?;
     fs::remove_file(backup)
         .map_err(|error| format!("Could not remove Heatseeker glow backup: {error}"))
