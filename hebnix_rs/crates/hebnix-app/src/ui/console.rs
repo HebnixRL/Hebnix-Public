@@ -6,8 +6,32 @@ use eframe::egui::{self, Key, Modifiers};
 
 const MAX_LINES: usize = 2000;
 
+pub struct ConsoleLine {
+    /// local wall-clock time the line was written, "HH:MM:SS"
+    pub time: String,
+    pub text: String,
+}
+
+impl ConsoleLine {
+    fn display(&self, timestamps: bool) -> String {
+        if timestamps {
+            format!("[{}] {}", self.time, self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+/// local time as "HH:MM:SS". `fallback` is the offset captured at startup,
+/// used when the local offset can't be read (e.g. multi-threaded on unix).
+fn timestamp_now(fallback: time::UtcOffset) -> String {
+    let now = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc().to_offset(fallback));
+    format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second())
+}
+
 pub struct ConsoleState {
-    pub lines: Vec<String>,
+    pub lines: Vec<ConsoleLine>,
     pub input: String,
     pub history: Vec<String>,
     pub history_index: usize,
@@ -15,6 +39,7 @@ pub struct ConsoleState {
     pub suggestion_index: Option<usize>,
     last_input: String,
     stick_to_bottom: bool,
+    utc_offset: time::UtcOffset,
 }
 
 const BASE_COMMANDS: [&str; 11] = [
@@ -55,12 +80,21 @@ fn common_prefix(items: &[String]) -> String {
 
 impl Default for ConsoleState {
     fn default() -> Self {
+        let utc_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        let time = timestamp_now(utc_offset);
+        let lines = [
+            "[Console] Hebnix Developer Console Initialized.",
+            "[Console] Type 'info' for diagnostic details.",
+            "[Console] Type 'help' for a list of commands.",
+        ]
+        .into_iter()
+        .map(|text| ConsoleLine {
+            time: time.clone(),
+            text: text.to_string(),
+        })
+        .collect();
         Self {
-            lines: vec![
-                "[Console] Hebnix Developer Console Initialized.".to_string(),
-                "[Console] Type 'info' for diagnostic details.".to_string(),
-                "[Console] Type 'help' for a list of commands.".to_string(),
-            ],
+            lines,
             input: String::new(),
             history: Vec::new(),
             history_index: 0,
@@ -68,16 +102,21 @@ impl Default for ConsoleState {
             suggestion_index: None,
             last_input: String::new(),
             stick_to_bottom: true,
+            utc_offset,
         }
     }
 }
 
 impl ConsoleState {
     pub fn write(&mut self, message: impl Into<String>) {
+        let time = timestamp_now(self.utc_offset);
         for line in message.into().lines() {
             // Mirror every console line into hebnix.log for post-mortems.
             tracing::info!(target: "console", "{line}");
-            self.lines.push(line.to_string());
+            self.lines.push(ConsoleLine {
+                time: time.clone(),
+                text: line.to_string(),
+            });
         }
         if self.lines.len() > MAX_LINES {
             let excess = self.lines.len() - MAX_LINES;
@@ -88,6 +127,15 @@ impl ConsoleState {
 
     pub fn clear(&mut self) {
         self.lines.clear();
+    }
+
+    /// whole scrollback as plain text, one line per entry
+    pub fn text(&self, timestamps: bool) -> String {
+        self.lines
+            .iter()
+            .map(|line| line.display(timestamps))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn update_suggestions(&mut self, plugin_names: &[String]) {
@@ -117,8 +165,28 @@ impl ConsoleState {
     }
 
     /// render the console. returns a command line when the user submits one.
-    pub fn render(&mut self, ui: &mut egui::Ui, plugin_names: &[String]) -> Option<String> {
+    /// `timestamps` is the System setting that prefixes each line with its time.
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin_names: &[String],
+        timestamps: bool,
+    ) -> Option<String> {
         let mut submitted: Option<String> = None;
+
+        // Toolbar: copy-to-clipboard. The horizontal row keeps it one line tall;
+        // a bare right_to_left layout would claim all remaining height.
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button(t("console-copy"))
+                    .on_hover_text(t("console-copy-tooltip"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(self.text(timestamps));
+                }
+            });
+        });
 
         // Reserve space for the input row at the bottom.
         let input_height = 32.0;
@@ -136,10 +204,32 @@ impl ConsoleState {
                     .show(ui, |ui| crate::panel::followed(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         for line in &self.lines {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(line).monospace().size(12.0))
+                            if timestamps {
+                                // dim timestamp, normal text, in one wrapping label
+                                let mut job = egui::text::LayoutJob::default();
+                                let font = egui::FontId::monospace(12.0);
+                                job.append(
+                                    &format!("[{}] ", line.time),
+                                    0.0,
+                                    egui::TextFormat::simple(
+                                        font.clone(),
+                                        ui.visuals().weak_text_color(),
+                                    ),
+                                );
+                                job.append(
+                                    &line.text,
+                                    0.0,
+                                    egui::TextFormat::simple(font, ui.visuals().text_color()),
+                                );
+                                ui.add(egui::Label::new(job).wrap());
+                            } else {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&line.text).monospace().size(12.0),
+                                    )
                                     .wrap(),
-                            );
+                                );
+                            }
                         }
                     }));
             });

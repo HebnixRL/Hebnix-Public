@@ -115,6 +115,8 @@ pub struct SettingsCfg {
     /// how often the overlay and plugins update while a plugin is reading the
     /// screen (fps). lower saves CPU on slower PCs
     pub overlay_refresh_fps: u32,
+    /// prefix console lines with the local time they were written
+    pub console_timestamps: bool,
 }
 
 impl Default for SettingsCfg {
@@ -155,6 +157,7 @@ impl Default for SettingsCfg {
             discord_custom_message: "Playing Rocket League".to_string(),
             p2p_file_sharing: true,
             overlay_refresh_fps: 30,
+            console_timestamps: true,
         }
     }
 }
