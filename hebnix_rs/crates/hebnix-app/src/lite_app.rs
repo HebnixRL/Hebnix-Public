@@ -1141,7 +1141,8 @@ impl LiteApp {
             .iter()
             .map(|plugin| plugin.display_name().to_string())
             .collect::<Vec<_>>();
-        if let Some(command) = self.console.render(ui, &names) {
+        let timestamps = self.config.settings.console_timestamps;
+        if let Some(command) = self.console.render(ui, &names, timestamps) {
             self.execute_command(command);
         }
     }
@@ -2627,6 +2628,7 @@ impl LiteApp {
                 t("system-start-with-windows"),
                 t("lite-system-start-hidden"),
                 t("system-suppress-left"),
+                t("system-console-timestamps"),
                 t("system-fullscreen-warning"),
                 t("system-allow-draw-focus"),
                 t("system-limit-hotkey"),
@@ -2660,6 +2662,15 @@ impl LiteApp {
             ui.add_sized([label_w, 20.0], egui::Label::new(t("system-suppress-left")));
             if ui
                 .checkbox(&mut self.config.settings.suppress_left_alerts, "")
+                .changed()
+            {
+                self.save_config();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add_sized([label_w, 20.0], egui::Label::new(t("system-console-timestamps")));
+            if ui
+                .checkbox(&mut self.config.settings.console_timestamps, "")
                 .changed()
             {
                 self.save_config();
