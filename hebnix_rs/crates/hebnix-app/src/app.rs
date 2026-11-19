@@ -3333,7 +3333,10 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
-                if !replay_event { self.network.clear_match_presence(); }
+                if !replay_event {
+                    self.network.clear_match_presence();
+                    self.auto_upload_replays.match_over();
+                }
                 if !replay_event && !self.match_ended {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_ended(
@@ -3350,7 +3353,11 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchDestroyed" => {
-                if !replay_event { self.network.clear_match_presence(); }
+                if !replay_event {
+                    self.network.clear_match_presence();
+                    // left early: no MatchEnded, but the replay can still be looked for
+                    self.auto_upload_replays.match_over();
+                }
                 if !replay_event {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_destroyed(&cooked);
@@ -3376,6 +3383,8 @@ impl HebnixApp {
         if !rl_open || !api_open {
             self.home.clear_match();
             self.scoreboard.end_match();
+            // game closed or Stats API lost mid-match: no MatchEnded is coming
+            self.auto_upload_replays.match_over();
         }
         self.home_tracker.set_running(rl_open);
         self.last_rl_open = rl_open;
