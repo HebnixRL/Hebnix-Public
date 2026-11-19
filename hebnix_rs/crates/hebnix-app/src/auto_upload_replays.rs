@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HISTORY_FILE: &str = "replay_upload_history.json";
 const MAX_REPLAY_BYTES: u64 = 100 * 1024 * 1024;
 const RETRY_INTERVAL: Duration = Duration::from_secs(15);
+/// How long to keep checking for a match's replay once the match is over.
 const MATCH_TIMEOUT: Duration = Duration::from_secs(180);
 const HISTORY_JOB: &str = "__replay_history_check__";
 
@@ -54,7 +55,21 @@ struct TrackedMatch {
 #[derive(Clone)]
 struct QueuedMatch {
     guid: String,
-    deadline: Instant,
+    /// None while the match is still being played. Its replay can't exist
+    /// yet, and each HebnixMatchHistory request makes the game stall for
+    /// 50-100+ ms, so a live match is never checked. The timeout starts
+    /// when the match ends (see `match_over`).
+    deadline: Option<Instant>,
+}
+
+impl QueuedMatch {
+    fn ready(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    fn expired(&self) -> bool {
+        self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
 }
 
 pub struct AutoUploadReplays {
@@ -133,8 +148,21 @@ impl AutoUploadReplays {
             }
             self.queued.push_back(QueuedMatch {
                 guid,
-                deadline: Instant::now() + MATCH_TIMEOUT,
+                deadline: None,
             });
+        }
+    }
+
+    /// The match ended or was left (or the game closed): its replay can now
+    /// be looked for, for up to MATCH_TIMEOUT.
+    pub fn match_over(&mut self) {
+        let mut started = false;
+        for queued in self.queued.iter_mut().filter(|queued| !queued.ready()) {
+            queued.deadline = Some(Instant::now() + MATCH_TIMEOUT);
+            started = true;
+        }
+        if started {
+            self.retry_at = None;
         }
     }
 
@@ -152,14 +180,21 @@ impl AutoUploadReplays {
         }
         let now = Instant::now();
         let before = self.queued.len();
-        self.queued.retain(|queued| queued.deadline > now);
+        self.queued
+            .retain(|queued| queued.deadline.is_none_or(|deadline| deadline > now));
         if self.queued.is_empty() && !force {
             if before != 0 {
                 self.status = "Replay check timed out".into();
             }
             return;
         }
-        if let Some(deadline) = self.queued.iter().map(|queued| queued.deadline).min() {
+        // Matches still being played wait for match_over(); asking the game
+        // for its match history mid-match stalls it and can't find the replay.
+        if !force && !self.queued.iter().any(QueuedMatch::ready) {
+            self.status = "Waiting for the match to end".into();
+            return;
+        }
+        if let Some(deadline) = self.queued.iter().filter_map(|queued| queued.deadline).min() {
             ctx.request_repaint_after(deadline.saturating_duration_since(now));
         }
         if !force
@@ -205,7 +240,7 @@ impl AutoUploadReplays {
             }
             return;
         }
-        let target = self.queued.front().cloned();
+        let target = self.queued.iter().find(|queued| queued.ready()).cloned();
         let job_id = format!("{HISTORY_JOB}{}", self.generation.load(Ordering::Acquire));
         self.pending.insert(job_id.clone());
         self.checking_match = target.is_some();
@@ -296,8 +331,13 @@ impl AutoUploadReplays {
         }
         // Rotate after the worker finishes so matches that arrived during the
         // check also get a turn before this GUID is retried.
-        if std::mem::take(&mut self.checking_match) && !self.queued.is_empty() {
-            self.queued.rotate_left(1);
+        // The checked match is the first one whose match is over (live ones are
+        // skipped), so that is the one moved to the back.
+        if std::mem::take(&mut self.checking_match)
+            && let Some(at) = self.queued.iter().position(QueuedMatch::ready)
+            && let Some(checked) = self.queued.remove(at)
+        {
+            self.queued.push_back(checked);
         }
         self.retry_at = Some(Instant::now() + RETRY_INTERVAL);
         match result.result {
@@ -486,7 +526,7 @@ fn recover_next(
     if generation.load(Ordering::Acquire) != expected_generation {
         return Err("Stopped".into());
     }
-    if target.is_some_and(|queued| Instant::now() >= queued.deadline) {
+    if target.is_some_and(QueuedMatch::expired) {
         return Ok(None);
     }
     let response = crate::replay_source::match_history(game_path, None)?;
@@ -500,7 +540,7 @@ fn recover_next(
     ) else {
         return Ok(None);
     };
-    if target.is_some_and(|queued| Instant::now() >= queued.deadline) {
+    if target.is_some_and(QueuedMatch::expired) {
         return Ok(None);
     }
     let guid = entry["Match"]["MatchGUID"]
@@ -1121,6 +1161,7 @@ mod tests {
         let mut replays = AutoUploadReplays::new(Path::new(""));
         replays.sync(true, true, true);
         replays.track_match(Some(FIRST));
+        replays.match_over();
         replays.pending.insert(HISTORY_JOB.into());
         replays.checking_match = true;
 
@@ -1144,10 +1185,10 @@ mod tests {
         replays.sync(true, true, true);
         replays.track_match(Some(FIRST));
         let deadline = Instant::now();
-        replays.queued[0].deadline = deadline;
+        replays.queued[0].deadline = Some(deadline);
         replays.track_match(Some(FIRST));
         assert_eq!(replays.queued.len(), 1);
-        assert_eq!(replays.queued[0].deadline, deadline);
+        assert_eq!(replays.queued[0].deadline, Some(deadline));
 
         let (tx, _) = crossbeam_channel::unbounded();
         replays.check(
@@ -1162,6 +1203,52 @@ mod tests {
         assert!(replays.queued.is_empty());
         assert!(replays.pending.is_empty());
         assert_eq!(replays.status, "Replay check timed out");
+    }
+
+    fn automatic_check(replays: &mut AutoUploadReplays) {
+        let (tx, _) = crossbeam_channel::unbounded();
+        replays.check(
+            &ReplayUploadCfg::default(),
+            Path::new(""),
+            &RlLaunchCfg::default(),
+            tx,
+            egui::Context::default(),
+            false,
+        );
+    }
+
+    #[test]
+    fn a_live_match_is_not_checked_until_it_is_over() {
+        let mut replays = AutoUploadReplays::new(Path::new(""));
+        replays.sync(true, true, true);
+        replays.track_match(Some(FIRST));
+        assert!(!replays.queued[0].ready());
+
+        // mid-match: no HebnixMatchHistory request, no retry armed
+        automatic_check(&mut replays);
+        assert!(replays.pending.is_empty());
+        assert!(replays.retry_at.is_none());
+        assert_eq!(replays.status, "Waiting for the match to end");
+        assert_eq!(replays.queued.len(), 1, "a live match must not time out");
+
+        // once it's over, the timeout starts and checking begins right away
+        replays.match_over();
+        assert!(replays.queued[0].deadline.is_some_and(|d| d > Instant::now()));
+        automatic_check(&mut replays);
+        assert!(replays.retry_at.is_some(), "the check should have run and armed a retry");
+    }
+
+    #[test]
+    fn match_over_only_starts_the_timeout_of_matches_still_waiting() {
+        let mut replays = AutoUploadReplays::new(Path::new(""));
+        replays.sync(true, true, true);
+        replays.track_match(Some(FIRST));
+        replays.match_over();
+        let first_deadline = replays.queued[0].deadline;
+        replays.track_match(Some(SECOND));
+        replays.match_over();
+        assert_eq!(replays.queued[0].deadline, first_deadline);
+        assert!(replays.queued[1].ready());
     }
 
     #[test]
