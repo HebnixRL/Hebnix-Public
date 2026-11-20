@@ -91,6 +91,20 @@ fn trigger_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * u8::MAX as f32) as u8
 }
 
+/// Trigger travel in 0.0..=1.0. Pads gilrs maps from the kernel driver (the
+/// 8BitDo Ultimate 2, for one) report a trigger as a `LeftZ`/`RightZ` axis
+/// from -1.0 (released) to 1.0 (fully pulled); clamping that to 0..1 dropped
+/// the first half of the pull. Pads from the SDL database report it as an
+/// analog `LeftTrigger2`/`RightTrigger2` button instead. An axis that hasn't
+/// moved yet has no data and counts as released.
+fn trigger_travel(gamepad: &gilrs::Gamepad, axis: Axis, button: Button) -> f32 {
+    let from_axis = gamepad
+        .axis_data(axis)
+        .map_or(0.0, |data| (data.value() + 1.0) / 2.0);
+    let from_button = gamepad.button_data(button).map_or(0.0, |data| data.value());
+    from_axis.max(from_button)
+}
+
 /// xinput-shaped state for controller user_index (0-3, by connection order),
 /// None if not connected.
 pub fn get_xinput_state(user_index: u32) -> Option<XInputState> {
@@ -113,8 +127,8 @@ pub fn get_xinput_state(user_index: u32) -> Option<XInputState> {
     Some(XInputState {
         packet_number: 0,
         buttons,
-        left_trigger: trigger_u8(gamepad.value(Axis::LeftZ)),
-        right_trigger: trigger_u8(gamepad.value(Axis::RightZ)),
+        left_trigger: trigger_u8(trigger_travel(&gamepad, Axis::LeftZ, Button::LeftTrigger2)),
+        right_trigger: trigger_u8(trigger_travel(&gamepad, Axis::RightZ, Button::RightTrigger2)),
         thumb_lx: axis_i16(gamepad.value(Axis::LeftStickX)),
         thumb_ly: axis_i16(gamepad.value(Axis::LeftStickY)),
         thumb_rx: axis_i16(gamepad.value(Axis::RightStickX)),
