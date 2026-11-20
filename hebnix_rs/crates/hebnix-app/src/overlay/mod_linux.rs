@@ -649,15 +649,13 @@ impl NativeOverlay {
     /// design (see module docs) rather than being positioned/sized to match
     /// a specific window like the old DirectComposition/GDI backends did.
     pub fn frame(&mut self, _rect: (i32, i32, i32, i32), draw_fn: impl FnOnce(f32, f32)) {
-        // the wayland connection can die mid-session -- confirmed live to be
-        // Hyprland occasionally sending our layer surface a fresh configure
-        // (plausibly triggered by another layer client's exclusive zone
-        // changing, e.g. waybar's own hide/show) that this backend doesn't
-        // yet handle cleanly, reported by Hyprland as "layerSurface was not
-        // configured, but a buffer was attached". Rather than chase that
-        // compositor interaction further, rebuild the connection when it
-        // happens so the overlay self-heals within about a second instead
-        // of staying dark for the rest of the session. Rate-limited so a
+        // the wayland connection can die mid-session. The known cause was
+        // attaching a buffer right after hide() unmapped the layer surface,
+        // before a fresh configure ("layerSurface was not configured, but a
+        // buffer was attached" on Hyprland, a fatal protocol error on KWin);
+        // hide() now waits for that configure. Should it still happen,
+        // rebuild the connection so the overlay self-heals within about a
+        // second instead of staying dark for the rest of the session. Rate-limited so a
         // connection that dies immediately on every reconnect (should the
         // trigger ever fire on every tick) can't turn into a tight loop.
         if self.backend.as_ref().is_some_and(|b| b.is_closed()) {

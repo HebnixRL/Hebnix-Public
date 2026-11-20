@@ -363,6 +363,10 @@ impl WaylandOverlay {
         surface.attach(None, 0, 0);
         surface.commit();
         self.visible = false;
+        // a null buffer unmaps the layer surface; attaching a buffer again
+        // before the compositor's next configure is a protocol error (KWin
+        // enforces it, Hyprland lets it slide), so poll_size() must re-map first
+        self.state.configured = false;
         let _ = self.conn.flush();
     }
 }
