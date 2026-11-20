@@ -675,8 +675,23 @@ pub fn rocket_league_hwnd() -> Option<u32> {
     cached_rl_pid()
 }
 
-/// does the RL window have focus.
+/// does the RL window have focus. Cached for 100 ms: the app asks several
+/// times per frame, and on KWin every answer is a kdotool process, which
+/// starved the UI thread (and with it the plugin overlays).
 pub fn is_rocket_league_focused() -> bool {
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, focused)) = *cache {
+        if at.elapsed() < Duration::from_millis(100) {
+            return focused;
+        }
+    }
+    let focused = rocket_league_focused_now();
+    *cache = Some((Instant::now(), focused));
+    focused
+}
+
+fn rocket_league_focused_now() -> bool {
     let Some(pid) = cached_rl_pid() else {
         return false;
     };
@@ -1035,7 +1050,22 @@ pub fn unminimize_own_window() -> bool {
 /// pixel size of the monitor RL is on, falls back to the first monitor
 /// reported by the compositor, or a 1920x1080 guess if nothing is
 /// available.
+/// Cached for a second: asked every frame, and each answer is a compositor
+/// query (a kdotool process on KWin). Monitor changes are rare.
 pub fn rocket_league_monitor_size() -> (i32, i32) {
+    static CACHE: Mutex<Option<(Instant, (i32, i32))>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, size)) = *cache {
+        if at.elapsed() < Duration::from_secs(1) {
+            return size;
+        }
+    }
+    let size = rocket_league_monitor_size_now();
+    *cache = Some((Instant::now(), size));
+    size
+}
+
+fn rocket_league_monitor_size_now() -> (i32, i32) {
     match compositor() {
         Compositor::Hyprland => {
             if let Some(json) = hyprctl_json("monitors") {

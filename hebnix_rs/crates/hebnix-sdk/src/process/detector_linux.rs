@@ -127,15 +127,30 @@ pub fn get_save_data_path(platform: RlPlatform) -> PathBuf {
 
 /// name-only check for a running RocketLeague.exe. works even when the exe
 /// path is unreadable (eac protects it), unlike find_rocket_league.
+/// Cached for half a second: this walks all of /proc, and the app asks
+/// several times per frame, which starved the UI thread (and with it the
+/// plugin overlays) on desktops with many processes. Anything that must
+/// know the game is closed right now uses `rocket_league_running_checked`.
 pub fn is_rocket_league_running() -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, running)) = *cache {
+        if at.elapsed() < Duration::from_millis(500) {
+            return running;
+        }
+    }
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-    sys.processes().values().any(|p| {
+    let running = sys.processes().values().any(|p| {
         p.name()
             .to_string_lossy()
             .to_lowercase()
             .contains("rocketleague")
-    })
+    });
+    *cache = Some((Instant::now(), running));
+    running
 }
 
 /// Fallible name-only enumeration for operations that require confirmed closure.
