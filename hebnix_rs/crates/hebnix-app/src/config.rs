@@ -76,6 +76,11 @@ pub struct SettingsCfg {
     /// Linux: the hotkey minimizes the window instead of only hiding it
     /// (for desktops where a hidden window still shows or blocks input)
     pub minimize_to_tray: bool,
+    /// Linux: the per-desktop defaults (Minimize to Tray outside Hyprland) were applied once
+    pub desktop_defaults_applied: bool,
+    /// Linux: the one-time notice pointing at Settings > System when overlays
+    /// or the hotkey misbehave (not shown on Hyprland) was dismissed
+    pub desktop_notice_shown: bool,
     /// Linux: Rocket League's `My Games/Rocket League` folder inside its Wine
     /// prefix, when automatic detection picks the wrong install (empty = auto)
     pub rl_documents_path: String,
@@ -134,6 +139,8 @@ impl Default for SettingsCfg {
             window_opacity: 0.96,
             start_in_tray: false,
             minimize_to_tray: false,
+            desktop_defaults_applied: false,
+            desktop_notice_shown: false,
             rl_documents_path: String::new(),
             close_to_tray: false,
             rl_path: default_rl_path(),

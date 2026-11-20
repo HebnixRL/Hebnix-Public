@@ -167,6 +167,13 @@ pub fn set_main_window_invisible(invisible: bool) {
     MAIN_HIDDEN.store(invisible, Ordering::Relaxed);
 }
 
+/// Hyprland is the desktop the Linux defaults were tuned on (GPU-rendered
+/// overlays, plain hide on the hotkey); everything else gets the KDE Plasma
+/// defaults (software overlays, Minimize to Tray)
+pub fn is_hyprland() -> bool {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|value| !value.is_empty())
+}
+
 // "Minimize to Tray" setting, mirrored here so the hotkey and tray threads
 // can read it without going through the app
 static MINIMIZE_TO_TRAY: AtomicBool = AtomicBool::new(false);

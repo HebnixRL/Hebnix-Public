@@ -514,10 +514,12 @@ mod page_url_tests {
     }
 }
 
-/// How the HTML overlay is rendered. GPU by default; software when forced
-/// (Settings, `HEBNIX_WEBVIEW_SOFTWARE`) or when the last GPU start died while
-/// the overlay was coming up (older NVIDIA drivers abort the whole process
-/// with a "Missing acquire timeline" Wayland protocol error).
+/// How the HTML overlay is rendered. GPU by default on Hyprland, software
+/// elsewhere (the GPU-rendered overlay updates far too slowly on KDE Plasma).
+/// Settings can force either one; `HEBNIX_WEBVIEW_SOFTWARE` forces software.
+/// A GPU start that died while the overlay was coming up switches to software
+/// (older NVIDIA drivers abort the whole process with a "Missing acquire
+/// timeline" Wayland protocol error).
 pub mod render_mode {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -534,6 +536,25 @@ pub mod render_mode {
 
     fn pending_marker() -> PathBuf {
         state_dir().join("webview-gpu-pending")
+    }
+
+    /// set in Settings: GPU rendering where software is the default
+    fn gpu_marker() -> PathBuf {
+        state_dir().join("webview-gpu")
+    }
+
+    /// GPU rendering is only the default where it is known to keep up
+    pub fn default_software() -> bool {
+        !crate::winutil::is_hyprland()
+    }
+
+    /// the Settings choice; takes effect at the next start
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Choice {
+        /// hardware on Hyprland, software elsewhere
+        Auto,
+        Hardware,
+        Software,
     }
 
     /// Decide once, from `main()` before any other thread exists (it may set
@@ -557,6 +578,11 @@ pub mod render_mode {
             let _ = std::fs::write(forced_marker(), "set automatically: GPU overlay crashed\n");
             let _ = std::fs::remove_file(pending_marker());
             true
+        } else if gpu_marker().exists() {
+            false
+        } else if default_software() {
+            tracing::info!("html overlay: software rendering (default outside Hyprland)");
+            true
         } else {
             false
         };
@@ -579,21 +605,41 @@ pub mod render_mode {
         let _ = std::fs::remove_file(pending_marker());
     }
 
-    /// the Settings checkbox; takes effect at the next start
-    pub fn forced_software() -> bool {
-        forced_marker().exists()
+    pub fn choice() -> Choice {
+        if forced_marker().exists() {
+            Choice::Software
+        } else if gpu_marker().exists() {
+            Choice::Hardware
+        } else {
+            Choice::Auto
+        }
     }
 
-    pub fn set_forced_software(on: bool) -> std::io::Result<()> {
-        if on {
-            std::fs::create_dir_all(state_dir())?;
-            std::fs::write(forced_marker(), "set in Settings\n")
-        } else {
-            let _ = std::fs::remove_file(pending_marker());
-            match std::fs::remove_file(forced_marker()) {
+    pub fn set_choice(choice: Choice) -> std::io::Result<()> {
+        fn remove(path: PathBuf) -> std::io::Result<()> {
+            match std::fs::remove_file(path) {
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
                 _ => Ok(()),
             }
+        }
+        let _ = std::fs::remove_file(pending_marker());
+        remove(forced_marker())?;
+        remove(gpu_marker())?;
+        let marker = match choice {
+            Choice::Auto => return Ok(()),
+            Choice::Hardware => gpu_marker(),
+            Choice::Software => forced_marker(),
+        };
+        std::fs::create_dir_all(state_dir())?;
+        std::fs::write(marker, "set in Settings\n")
+    }
+
+    /// what `choice` gives at the next start
+    pub fn choice_is_software(choice: Choice) -> bool {
+        match choice {
+            Choice::Auto => default_software(),
+            Choice::Hardware => false,
+            Choice::Software => true,
         }
     }
 }

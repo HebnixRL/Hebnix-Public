@@ -984,6 +984,15 @@ impl HebnixApp {
         #[cfg(target_os = "linux")]
         {
             apply_rl_documents_path(&config.settings);
+            // outside Hyprland (KDE Plasma and the rest) the hotkey only
+            // reliably hides and shows the window when it minimizes it
+            if !config.settings.desktop_defaults_applied {
+                config.settings.desktop_defaults_applied = true;
+                if !winutil::is_hyprland() {
+                    config.settings.minimize_to_tray = true;
+                }
+                let _ = config.save(&base_dir);
+            }
             winutil::set_minimize_to_tray(config.settings.minimize_to_tray);
         }
         let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering();
@@ -5931,21 +5940,43 @@ impl HebnixApp {
                                     });
                                     #[cfg(target_os = "linux")]
                                     ui.horizontal(|ui| {
-                                        crate::i18n::layout::settings_label(ui, label_w, "Software overlay rendering:");
-                                        let mut forced = crate::webview::render_mode::forced_software();
-                                        let response = ui.checkbox(&mut forced, "").on_hover_text(
-                                            "Draw plugin HTML overlays on the CPU instead of the GPU. Turned on \
-                                             automatically if the GPU overlay crashed Hebnix. Uses more CPU. \
-                                             Takes effect after restarting Hebnix.",
-                                        );
-                                        if response.changed() {
-                                            if let Err(error) = crate::webview::render_mode::set_forced_software(forced) {
+                                        use crate::webview::render_mode::{self, Choice};
+                                        crate::i18n::layout::settings_label(ui, label_w, "Overlay rendering:");
+                                        let auto = if render_mode::default_software() {
+                                            "Automatic (Software)"
+                                        } else {
+                                            "Automatic (Hardware)"
+                                        };
+                                        let label = |choice: Choice| match choice {
+                                            Choice::Auto => auto,
+                                            Choice::Hardware => "Hardware (GPU)",
+                                            Choice::Software => "Software (CPU)",
+                                        };
+                                        let current = render_mode::choice();
+                                        let mut selected = current;
+                                        egui::ComboBox::from_id_salt("overlay-rendering")
+                                            .selected_text(label(selected))
+                                            .show_ui(ui, |ui| {
+                                                for choice in [Choice::Auto, Choice::Hardware, Choice::Software] {
+                                                    ui.selectable_value(&mut selected, choice, label(choice));
+                                                }
+                                            })
+                                            .response
+                                            .on_hover_text(
+                                                "How plugin HTML overlays (Controller Overlay and others) are drawn. \
+                                                 Automatic uses Hardware on Hyprland and Software everywhere else, \
+                                                 where the GPU overlay updates slowly. Software uses more CPU. \
+                                                 Switches to Software by itself if the GPU overlay crashed Hebnix. \
+                                                 Takes effect after restarting Hebnix.",
+                                            );
+                                        if selected != current {
+                                            if let Err(error) = render_mode::set_choice(selected) {
                                                 self.console.write(format!("[Core] Could not save the overlay rendering setting: {error}"));
                                             } else {
                                                 self.console.write("[Core] Overlay rendering changes after restarting Hebnix.");
                                             }
                                         }
-                                        if forced != crate::webview::render_mode::software() {
+                                        if render_mode::choice_is_software(render_mode::choice()) != render_mode::software() {
                                             ui.weak("(restart Hebnix)");
                                         }
                                     });
@@ -6610,6 +6641,56 @@ impl HebnixApp {
         if close {
             self.fullscreen_notice = false;
             self.fullscreen_notice_dismissed = true;
+        }
+    }
+
+    /// Linux, outside Hyprland: shown once on the first start. Overlays and
+    /// the show/hide hotkey were tuned on Hyprland; elsewhere the fix is
+    /// usually one of the Settings > System options.
+    #[cfg(target_os = "linux")]
+    fn render_desktop_notice(&mut self, ctx: &egui::Context) {
+        if self.config.settings.desktop_notice_shown || winutil::is_hyprland() {
+            return;
+        }
+        let mut open_settings = false;
+        let mut close = false;
+        egui::Window::new("Overlays and the hotkey")
+            .id(egui::Id::new("desktop-notice"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                let hotkey = self.config.settings.hotkey.to_uppercase();
+                ui.label(format!(
+                    "If the overlays don't show or update properly, or {hotkey} doesn't hide and show \
+                     Hebnix, open Settings > System and try changing:"
+                ));
+                ui.add_space(4.0);
+                ui.label("• Minimize to Tray");
+                ui.label("• Overlay refresh rate");
+                ui.label("• Overlay rendering (Automatic, Hardware or Software)");
+                ui.add_space(4.0);
+                ui.weak("Hebnix already picked the settings known to work best on your desktop.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open Settings").clicked() {
+                        open_settings = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(t("tray-close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if open_settings {
+            self.tab = Tab::Settings;
+            self.hebnix_settings_tab = HebnixSettingsTab::System;
+        }
+        if open_settings || close {
+            self.config.settings.desktop_notice_shown = true;
+            self.save_config();
         }
     }
 
@@ -7966,6 +8047,8 @@ impl eframe::App for HebnixApp {
             self.render_changelog_popup(ctx);
             #[cfg(target_os = "linux")]
             self.render_appimage_banner(ctx);
+            #[cfg(target_os = "linux")]
+            self.render_desktop_notice(ctx);
             let repair_was_running = self.epic_repair.running;
             self.epic_repair.show(ctx);
             if !repair_was_running && self.epic_repair.running {
