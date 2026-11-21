@@ -1,8 +1,16 @@
 //! wlr-layer-shell overlay surface + wl_shm software rendering.
 //!
-//! Creates a fullscreen, click-through `Layer::Overlay` surface (empty input
-//! region, `KeyboardInteractivity::None`) and renders into it with tiny-skia
-//! into a wl_shm buffer, committing a new buffer each frame.
+//! A fullscreen, click-through `Layer::Overlay` surface (empty input region,
+//! `KeyboardInteractivity::None`) rendered with tiny-skia into wl_shm
+//! buffers.
+//!
+//! The layer surface only exists while something is drawn: hiding destroys
+//! it and the next drawn frame creates a new one on the monitor Rocket
+//! League is on (matched by the game window's position), the same way the
+//! HTML overlay's GTK layer surface comes and goes. Created once and left
+//! to the compositor, it stayed on whichever monitor was active when Hebnix
+//! started, and unmapping/remapping one surface trips over compositors that
+//! reset its state on unmap (KWin).
 //!
 //! Works over RL in both Borderless Windowed and the game's own real
 //! fullscreen (confirmed live on Hyprland) -- the `Overlay` layer is above
@@ -28,7 +36,6 @@ struct State {
     registry_state: RegistryState,
     output_state: OutputState,
     shm: Shm,
-    layer: LayerSurface,
     pool: SlotPool,
     width: u32,
     height: u32,
@@ -140,7 +147,15 @@ pub struct WaylandOverlay {
     queue: EventQueue<State>,
     qh: QueueHandle<State>,
     state: State,
-    visible: bool,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
+    /// the mapped layer surface, None while hidden (see module docs)
+    layer: Option<LayerSurface>,
+    /// the monitor `layer` was created on; None when left to the compositor
+    output: Option<wl_output::WlOutput>,
+    /// Rocket League's window, (left, top, right, bottom) in the
+    /// compositor's logical desktop coordinates
+    target: Option<(i32, i32, i32, i32)>,
     /// buffers presented so far, reused round-robin once the compositor
     /// releases them (see `present`). Capped at a handful so a burst of
     /// frames outrunning the compositor's release rate can't grow the
@@ -154,7 +169,7 @@ impl WaylandOverlay {
     pub fn new() -> Result<Self, String> {
         let conn = Connection::connect_to_env()
             .map_err(|e| format!("wayland connect failed: {e}"))?;
-        let (globals, queue) = wayland_client::globals::registry_queue_init(&conn)
+        let (globals, mut queue) = wayland_client::globals::registry_queue_init(&conn)
             .map_err(|e| format!("wayland registry init failed: {e}"))?;
         let qh = queue.handle();
 
@@ -163,21 +178,81 @@ impl WaylandOverlay {
         let layer_shell = LayerShell::bind(&globals, &qh)
             .map_err(|e| format!("wlr-layer-shell not available (compositor isn't wlroots-based, or doesn't support it): {e}"))?;
         let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm: {e}"))?;
+        let pool = SlotPool::new(1920 * 1080 * 4, &shm).map_err(|e| format!("shm pool: {e}"))?;
 
-        let surface = compositor.create_surface(&qh);
+        let mut state = State {
+            registry_state: RegistryState::new(&globals),
+            output_state: OutputState::new(&globals, &qh),
+            shm,
+            pool,
+            width: 0,
+            height: 0,
+            configured: false,
+            closed: false,
+        };
+        // fetch the monitors' names and positions, needed to place the
+        // surface on the game's monitor
+        queue
+            .roundtrip(&mut state)
+            .map_err(|e| format!("wayland output query failed: {e}"))?;
+
+        Ok(WaylandOverlay {
+            conn,
+            queue,
+            qh,
+            state,
+            compositor,
+            layer_shell,
+            layer: None,
+            output: None,
+            target: None,
+            buffers: Vec::new(),
+        })
+    }
+
+    /// where Rocket League's window is, so the overlay goes on its monitor.
+    /// None (unknown) keeps whatever monitor the surface is already on.
+    pub fn set_target(&mut self, rect: Option<(i32, i32, i32, i32)>) {
+        self.target = rect;
+    }
+
+    /// (output, logical width, logical height) of the monitor holding the
+    /// centre of the game window
+    fn target_output(&self) -> Option<(wl_output::WlOutput, u32, u32)> {
+        let (left, top, right, bottom) = self.target?;
+        let (cx, cy) = ((left + right) / 2, (top + bottom) / 2);
+        self.state.output_state.outputs().find_map(|output| {
+            let info = self.state.output_state.info(&output)?;
+            let (x, y) = info.logical_position.unwrap_or(info.location);
+            let (w, h) = info.logical_size.or_else(|| {
+                // no xdg-output: physical mode size over the integer scale
+                let mode = info.modes.iter().find(|m| m.current)?;
+                let scale = info.scale_factor.max(1);
+                Some((mode.dimensions.0 / scale, mode.dimensions.1 / scale))
+            })?;
+            let inside = (x..x + w).contains(&cx) && (y..y + h).contains(&cy);
+            (inside && w > 0 && h > 0).then_some((output, w as u32, h as u32))
+        })
+    }
+
+    /// create, set up and commit a fresh layer surface (no buffer yet; the
+    /// compositor answers the commit with the configure `present` waits for)
+    fn create_layer(&mut self) {
+        let output = self.target_output().map(|(output, _, _)| output);
+        let surface = self.compositor.create_surface(&self.qh);
 
         // click-through: empty input region so pointer/keyboard events pass
         // straight through to whatever's underneath.
-        if let Ok(region) = Region::new(&compositor) {
+        if let Ok(region) = Region::new(&self.compositor) {
             surface.set_input_region(Some(region.wl_region()));
         }
 
-        let layer = layer_shell.create_layer_surface(
-            &qh,
+        let layer = self.layer_shell.create_layer_surface(
+            &self.qh,
             surface,
             Layer::Overlay,
             Some("hebnix-overlay"),
-            None,
+            output.as_ref(),
         );
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_exclusive_zone(-1);
@@ -185,121 +260,133 @@ impl WaylandOverlay {
         layer.set_size(0, 0); // 0,0 with all anchors = compositor picks full output size
         layer.commit();
 
-        let pool = SlotPool::new(1920 * 1080 * 4, &shm).map_err(|e| format!("shm pool: {e}"))?;
-
-        let state = State {
-            registry_state: RegistryState::new(&globals),
-            output_state: OutputState::new(&globals, &qh),
-            shm,
-            layer,
-            pool,
-            width: 0,
-            height: 0,
-            configured: false,
-            closed: false,
-        };
-
-        Ok(WaylandOverlay {
-            conn,
-            queue,
-            qh,
-            state,
-            visible: false,
-            buffers: Vec::new(),
-        })
+        self.state.configured = false;
+        self.layer = Some(layer);
+        self.output = output;
     }
 
-    /// pump pending wayland events (non-blocking) and return the current
-    /// surface size, or None if not configured yet or the layer got closed.
-    pub fn poll_size(&mut self) -> Option<(u32, u32)> {
+    /// destroy the layer surface (and the buffers that were attached to it)
+    fn destroy_layer(&mut self) {
+        self.buffers.clear();
+        self.layer = None;
+        self.output = None;
+        self.state.configured = false;
         let _ = self.conn.flush();
-        if !self.state.configured {
-            // re-mapping after hide(): wlr-layer-shell wants a commit with
-            // no buffer, then a fresh configure, before a buffer may be
-            // attached again.
-            if !self.visible {
-                // unmapping resets a layer surface to its just-created state
-                // (anchors included), and KWin applies that: committing 0x0
-                // without opposite anchors is a fatal `invalid_size` there,
-                // so resend everything before the remap commit
-                let layer = &self.state.layer;
-                layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-                layer.set_exclusive_zone(-1);
-                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-                layer.set_size(0, 0);
-                layer.commit();
-            }
-            let _ = self.queue.roundtrip(&mut self.state);
-        } else {
-            // `dispatch_pending` alone only processes events already read
-            // into the queue's internal buffer -- it does not itself read
-            // the socket. Without also reading here, events the compositor
-            // sends later (critically, wl_buffer.release) never arrive, so
-            // `present`'s buffer-reuse check sees every buffer as
-            // permanently "still active" and silently drops every frame
-            // after the first few.
-            //
-            // `ReadEventsGuard::read()` may only be called when the fd is
-            // actually readable -- calling it unconditionally desyncs
-            // fd-bearing messages on the socket. This compositor still
-            // reports a recurring (so far harmless-looking, but treated as
-            // fatal below so we recover instead of assuming) EPROTO on our
-            // layer surface even with the readiness check in place; the
-            // error surfaces through `read()`'s Result, not
-            // `dispatch_pending`'s, so both must be checked -- missing the
-            // `read()` side here previously meant the connection silently
-            // stayed "alive" from this function's point of view long after
-            // it had actually died, and the auto-recreate path never ran.
-            let mut dead = false;
-            if let Some(guard) = self.queue.prepare_read() {
-                use std::os::fd::AsFd;
-                let readable = nix::poll::poll(
-                    &mut [nix::poll::PollFd::new(self.queue.as_fd(), nix::poll::PollFlags::POLLIN)],
-                    nix::poll::PollTimeout::ZERO,
-                )
-                .map(|n| n > 0)
-                .unwrap_or(false);
-                if readable {
-                    if let Err(e) = guard.read() {
-                        tracing::warn!("overlay: wayland read failed, will recreate: {e}");
-                        dead = true;
-                    }
+    }
+
+    /// read and dispatch whatever the compositor has sent, without blocking.
+    /// Marks the connection closed if it died.
+    fn pump(&mut self) {
+        let _ = self.conn.flush();
+        // `dispatch_pending` alone only processes events already read
+        // into the queue's internal buffer -- it does not itself read
+        // the socket. Without also reading here, events the compositor
+        // sends later (critically, wl_buffer.release) never arrive, so
+        // `present`'s buffer-reuse check sees every buffer as
+        // permanently "still active" and silently drops every frame
+        // after the first few.
+        //
+        // `ReadEventsGuard::read()` may only be called when the fd is
+        // actually readable -- calling it unconditionally desyncs
+        // fd-bearing messages on the socket. A protocol error surfaces
+        // through `read()`'s Result, not `dispatch_pending`'s, so both
+        // must be checked, or a dead connection looks alive forever and
+        // the auto-recreate path never runs.
+        let mut dead = false;
+        if let Some(guard) = self.queue.prepare_read() {
+            use std::os::fd::AsFd;
+            let readable = nix::poll::poll(
+                &mut [nix::poll::PollFd::new(self.queue.as_fd(), nix::poll::PollFlags::POLLIN)],
+                nix::poll::PollTimeout::ZERO,
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+            if readable {
+                if let Err(e) = guard.read() {
+                    tracing::warn!("overlay: wayland read failed, will recreate: {e}");
+                    dead = true;
                 }
             }
-            if let Err(e) = self.queue.dispatch_pending(&mut self.state) {
-                tracing::warn!("overlay: wayland dispatch failed, will recreate: {e}");
-                dead = true;
-            }
-            if dead {
-                // connection is dead (protocol error, compositor hung up,
-                // etc). Stop hammering it every tick -- mark closed so
-                // `Overlay` (mod.rs) knows to tear down and recreate the
-                // backend instead of retrying a broken connection forever.
-                self.state.closed = true;
-            }
         }
+        if let Err(e) = self.queue.dispatch_pending(&mut self.state) {
+            tracing::warn!("overlay: wayland dispatch failed, will recreate: {e}");
+            dead = true;
+        }
+        if dead {
+            // connection is dead (protocol error, compositor hung up,
+            // etc). Mark closed so `NativeOverlay` (mod_linux.rs) tears
+            // down and recreates the backend instead of retrying a broken
+            // connection forever.
+            self.state.closed = true;
+        }
+    }
+
+    /// pump pending wayland events (non-blocking) and return the size to
+    /// draw at: the mapped surface's, else the game monitor's. None if the
+    /// connection died or no size is known yet.
+    pub fn poll_size(&mut self) -> Option<(u32, u32)> {
+        self.pump();
         if self.state.closed {
             return None;
         }
-        if !self.state.configured || self.state.width == 0 || self.state.height == 0 {
-            return None;
+        let target = self.target_output();
+        // the game moved to another monitor: start over there
+        if let (Some(_), Some((want, _, _))) = (&self.layer, &target)
+            && self.output.as_ref() != Some(want)
+        {
+            self.destroy_layer();
         }
-        Some((self.state.width, self.state.height))
+        if self.layer.is_some() && self.state.configured {
+            return Some((self.state.width, self.state.height));
+        }
+        if let Some((_, w, h)) = target {
+            return Some((w, h));
+        }
+        if self.state.width > 0 && self.state.height > 0 {
+            return Some((self.state.width, self.state.height));
+        }
+        // nothing known about the monitors: map a surface once to learn the
+        // size (it stays mapped only if the frame draws something)
+        if self.layer.is_none() {
+            self.create_layer();
+            if let Err(e) = self.queue.roundtrip(&mut self.state) {
+                tracing::warn!("overlay: wayland roundtrip failed, will recreate: {e}");
+                self.state.closed = true;
+                return None;
+            }
+        }
+        (self.state.configured && self.state.width > 0 && self.state.height > 0)
+            .then_some((self.state.width, self.state.height))
     }
 
-    /// paint `pixmap` (must match the current surface size) into an shm
-    /// buffer and commit it. Reuses a buffer the compositor has already
-    /// released rather than allocating a fresh one every call.
-    pub fn present(&mut self, pixmap: &tiny_skia::Pixmap) {
-        // if not configured or zero size, try to get size first
-        if !self.state.configured || self.state.width == 0 || self.state.height == 0 {
-            let _ = self.poll_size();
+    /// paint `pixmap` into an shm buffer and commit it, mapping the surface
+    /// first if it's hidden. A frame drawn at a size other than the one the
+    /// compositor configured is skipped (the next one uses the right size).
+    /// Reuses a buffer the compositor has already released rather than
+    /// allocating a fresh one every call. Returns whether it was committed.
+    pub fn present(&mut self, pixmap: &tiny_skia::Pixmap) -> bool {
+        if self.state.closed {
+            return false;
+        }
+        if self.layer.is_none() {
+            self.create_layer();
+        }
+        if !self.state.configured {
+            if let Err(e) = self.queue.roundtrip(&mut self.state) {
+                tracing::warn!("overlay: wayland roundtrip failed, will recreate: {e}");
+                self.state.closed = true;
+                return false;
+            }
+            if !self.state.configured {
+                return false;
+            }
         }
         let width = self.state.width;
         let height = self.state.height;
-        if width == 0 || height == 0 {
-            return;
+        if width == 0 || height == 0 || (pixmap.width(), pixmap.height()) != (width, height) {
+            return false;
         }
+        let Some(layer) = self.layer.as_ref() else { return false };
         let stride = width as i32 * 4;
 
         // drop buffers left over from a stale resolution (monitor change).
@@ -319,7 +406,7 @@ impl WaylandOverlay {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!("overlay: create_buffer failed: {e}");
-                        return;
+                        return false;
                     }
                 };
                 self.buffers.push(buffer);
@@ -327,11 +414,11 @@ impl WaylandOverlay {
             }
             // compositor hasn't released any of our buffers yet -- drop
             // this frame rather than growing the pool further.
-            None => return,
+            None => return false,
         };
 
         let Some(canvas) = buffer.canvas(&mut self.state.pool) else {
-            return;
+            return false;
         };
 
         // tiny-skia stores premultiplied RGBA8 (R,G,B,A byte order);
@@ -345,15 +432,20 @@ impl WaylandOverlay {
             dst[3] = src[3];
         }
 
-        let surface = self.state.layer.wl_surface();
+        let surface = layer.wl_surface();
         surface.damage_buffer(0, 0, width as i32, height as i32);
         if let Err(e) = buffer.attach_to(surface) {
             tracing::warn!("overlay: buffer attach failed: {e}");
-            return;
+            return false;
         }
-        self.state.layer.commit();
-        self.visible = true;
+        layer.commit();
         let _ = self.conn.flush();
+        true
+    }
+
+    /// true while a layer surface is mapped
+    pub fn is_shown(&self) -> bool {
+        self.layer.is_some()
     }
 
     /// true once the connection has died (protocol error, compositor
@@ -362,19 +454,12 @@ impl WaylandOverlay {
         self.state.closed
     }
 
-    /// hide the surface
+    /// hide the overlay by destroying the layer surface. Unmapping it with
+    /// a null buffer instead resets its state on KWin, and a surface kept
+    /// around would stay on the monitor it was created on.
     pub fn hide(&mut self) {
-        if !self.visible {
-            return;
+        if self.layer.is_some() {
+            self.destroy_layer();
         }
-        let surface = self.state.layer.wl_surface();
-        surface.attach(None, 0, 0);
-        surface.commit();
-        self.visible = false;
-        // a null buffer unmaps the layer surface; attaching a buffer again
-        // before the compositor's next configure is a protocol error (KWin
-        // enforces it, Hyprland lets it slide), so poll_size() must re-map first
-        self.state.configured = false;
-        let _ = self.conn.flush();
     }
 }
