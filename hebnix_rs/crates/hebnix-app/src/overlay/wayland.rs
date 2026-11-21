@@ -218,8 +218,16 @@ impl WaylandOverlay {
             // no buffer, then a fresh configure, before a buffer may be
             // attached again.
             if !self.visible {
-                self.state.layer.set_size(0, 0);
-                self.state.layer.commit();
+                // unmapping resets a layer surface to its just-created state
+                // (anchors included), and KWin applies that: committing 0x0
+                // without opposite anchors is a fatal `invalid_size` there,
+                // so resend everything before the remap commit
+                let layer = &self.state.layer;
+                layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+                layer.set_exclusive_zone(-1);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+                layer.set_size(0, 0);
+                layer.commit();
             }
             let _ = self.queue.roundtrip(&mut self.state);
         } else {
