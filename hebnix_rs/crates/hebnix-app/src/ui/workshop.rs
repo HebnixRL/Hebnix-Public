@@ -1421,7 +1421,7 @@ impl WorkshopState {
         let presentation = crate::theme::presentation(&ctx);
         let column_count = self.browse_columns(ui, presentation.as_deref());
         self.page_size = column_count * crate::ui::browser::ROWS;
-        crate::ui::browser::pagination(ui, &mut self.page, self.valid.len(), self.page_size);
+        crate::ui::browser::pagination_with_prompt(ui, &mut self.page, self.valid.len(), self.page_size, self.panel_mode);
 
         // Card grid
         let start = self.page * self.page_size;

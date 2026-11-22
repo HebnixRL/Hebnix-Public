@@ -148,11 +148,12 @@ pub(crate) fn set_enabled(game: &Path, on: bool) -> Result<(), String> {
 }
 
 fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool), String> {
-    use crate::patcher::workshop_host::{attach_freeplay_restart, detach_freeplay_restart};
+    use crate::patcher::workshop_host::{attach_tail_blocks, detach_tail_blocks};
 
-    // The Workshop restart handler uses absolute branch destinations. Remove
-    // it before editing the dispatcher prefix, then rebuild its destinations.
-    let restart = detach_freeplay_restart(package)?;
+    // The Workshop host and Freeplay restart blocks use absolute branch
+    // destinations. Remove them before editing the dispatcher prefix, then
+    // rebuild their destinations.
+    let tail = detach_tail_blocks(package)?;
     let builder = Builder(package);
     let hooks = [
         (INIT, builder.logger()?, true, INIT_HASH),
@@ -173,9 +174,7 @@ fn inspect(package: &mut UpkPackage, target: Option<bool>) -> Result<(bool, bool
         package.replace_export_payload(index, &desired)?;
         changed = true;
     }
-    if let Some(legacy) = restart {
-        attach_freeplay_restart(package, legacy)?;
-    }
+    attach_tail_blocks(package, &tail)?;
     Ok((enabled, changed))
 }
 
@@ -437,5 +436,36 @@ mod tests {
         assert_eq!(inspect(&mut package, None).unwrap(), (true, false));
         assert_eq!(inspect(&mut package, Some(false)).unwrap(), (true, true));
         assert_eq!(payload(&package, COMMAND).unwrap().1, before);
+    }
+
+    /// The Workshop host block sits at the end of the dispatcher with the
+    /// restart block, in either order. Auto Upload must take both off and
+    /// put them back where they were.
+    #[test]
+    #[ignore = "requires an installed TAGame.upk with the Workshop menu"]
+    fn auto_upload_preserves_workshop_host() {
+        use crate::patcher::workshop_host::{TailBlock, attach_tail_blocks, detach_tail_blocks};
+
+        let source = PathBuf::from(std::env::var_os("HEBNIX_UPK_TEST_SOURCE").unwrap());
+        for order in [
+            [TailBlock::Freeplay(3), TailBlock::Host],
+            [TailBlock::Host, TailBlock::Freeplay(3)],
+        ] {
+            let mut package = UpkPackage::load(&source).unwrap();
+            if inspect(&mut package, None).unwrap().0 {
+                inspect(&mut package, Some(false)).unwrap();
+            }
+            detach_tail_blocks(&mut package).unwrap();
+            // attach_tail_blocks puts the last entry on first
+            attach_tail_blocks(&mut package, &order).unwrap();
+            let before = payload(&package, COMMAND).unwrap().1;
+            assert_eq!(inspect(&mut package, Some(true)).unwrap(), (false, true));
+            assert_eq!(inspect(&mut package, None).unwrap(), (true, false));
+            let tail = detach_tail_blocks(&mut package).unwrap();
+            assert_eq!(tail, order);
+            attach_tail_blocks(&mut package, &tail).unwrap();
+            assert_eq!(inspect(&mut package, Some(false)).unwrap(), (true, true));
+            assert_eq!(payload(&package, COMMAND).unwrap().1, before);
+        }
     }
 }

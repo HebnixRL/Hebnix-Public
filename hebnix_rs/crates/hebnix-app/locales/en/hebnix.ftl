@@ -145,12 +145,11 @@ settings-set-value = Set { $value }
 settings-ini-restart-note = Changes to the ini apply after restarting Rocket League.
 settings-replay-save-folder = Replay save folder:
 settings-rl-launch-heading = Rocket League Launch
-settings-rl-launch-desc = Tells Hebnix how to restart Rocket League - used by the Restart Rocket League button and Workshop LAN's Host/Join. Leave as auto-detect unless you use Heroic.
+settings-rl-launch-desc = Tells Hebnix how to restart Rocket League - used by the Restart Rocket League button and Workshop LAN's Host/Join. Leave as auto-detect unless you launch it through a non-Steam shortcut.
 settings-rl-mode-unconfigured = Auto-detect (Steam or Epic)
 settings-rl-mode-steam-native = Real Steam game
 settings-rl-mode-epic-direct = Epic Games Launcher
-settings-rl-mode-steam-shortcut = Non-Steam shortcut to Heroic
-settings-rl-mode-heroic-direct = Heroic directly
+settings-rl-mode-steam-shortcut = Non-Steam shortcut (any launcher, e.g. Slipstream)
 settings-rl-current-setup = Current setup: { $mode }
 settings-rl-launch-setup-button = Rocket League Launch Setup...
 
@@ -181,6 +180,7 @@ discord-linked-accounts = Linked Accounts:
 
 ## settings: system
 system-start-with-windows = Start with Windows:
+system-start-with-linux = Start with Linux:
 console-startup-failed = Failed to update startup entry: { $error }
 system-start-in-tray = Start in Tray:
 system-close-to-tray = Close to Tray:
@@ -335,17 +335,13 @@ owned-proxy-prompt-enable-proxy = Enable Proxy
 fullscreen-notice-rocket-league-is-set-to-fullscreen = Rocket League is set to Fullscreen, so the overlay won't draw over it.
     Switch the game's video settings to Borderless or Windowed.
 fullscreen-notice-never-show-again = Never show again
-rl-launch-setup-how-do-you-actually-launch-rocket = How do you actually launch Rocket League? This decides how the Restart Rocket League button and Workshop LAN's Host/Join work. Auto-detect (the default) works for real Steam and Epic Games Launcher installs already - only pick something else here if you use Heroic.
+rl-launch-setup-how-do-you-actually-launch-rocket = How do you actually launch Rocket League? This decides how the Restart Rocket League button and Workshop LAN's Host/Join work. Auto-detect (the default) works for real Steam and Epic Games Launcher installs already - only pick something else here if you launch it through a non-Steam shortcut.
 rl-launch-setup-auto-detect-steam-or-epic-games = Auto-detect (Steam or Epic Games Launcher)
-rl-launch-setup-non-steam-shortcut-that-opens-heroic = Non-Steam shortcut that opens Heroic
-rl-launch-setup-heroic-directly-no-steam-or-epic = Heroic directly, no Steam or Epic Games Launcher involved
 rl-launch-setup-steam-app-id-252950-is-rocket = Steam App ID (252950 is Rocket League's own real listing):
-rl-launch-setup-scan-steam-shortcuts-for-heroic = Scan Steam shortcuts for Heroic
 rl-launch-setup-no-candidates-found-yet-click-scan = No candidates found yet - click Scan, or enter the ID manually below.
+rl-launch-setup-scan-steam-shortcuts = Scan Steam shortcuts
+rl-launch-setup-search-shortcuts = Search shortcuts…
 rl-launch-setup-steam-shortcut-id = Steam shortcut ID:
-rl-launch-setup-heroic-binary-path-e-g-the = Heroic binary path (e.g. the full path to Heroic.exe):
-rl-launch-setup-epic-catalog-app-name-sugar-is = Epic catalog app name (Sugar is Rocket League's, same for everyone):
-rl-launch-setup-runner = Runner:
 rl-launch-setup-save = Save
 install-modal-plugin-archives = Plugin Archives
 hebnix-install-back = < Back
@@ -439,7 +435,6 @@ owned-proxy-prompt-enable-owned-item-catalog = Enable owned-item catalog
 fullscreen-notice-overlay-unavailable = Overlay unavailable
 launch-path-notice-rocket-league = Rocket League
 rl-launch-setup-rocket-league-launch-setup = Rocket League Launch Setup
-rl-launch-setup-non-steam-shortcuts-can-t-pass = Non-Steam shortcuts can't pass launch arguments (a Steam limitation). Workshop LAN's -multihome relaunch will launch Heroic directly instead, bypassing Steam for that session.
 install-modal-install-from-hebnix = ☁
     
     Install from Hebnix
@@ -756,7 +751,6 @@ about-version-app-version-a-safe-eac = Version { $version }
 statsapi-notice-couldn-t-write-the-file-err = Couldn't write the file:
     { $err }
 plugin-delete-prompt-are-you-sure-you-want-to = Are you sure you want to delete { $plugin_name }?
-rl-launch-setup-heroic-binary-rl-launch-draft = Heroic binary: { $heroic_binary }
 hebnix-install-by-author = by { $author }
 hebnix-install-page-display-page-of-total-pages = Page { $display_page } of { $total_pages }
 plugin-windows-window-error-e = window error: { $e }

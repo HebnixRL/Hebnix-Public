@@ -72,6 +72,17 @@ pub(crate) fn header(ui: &mut egui::Ui, title: String, actions: impl FnOnce(&mut
 }
 
 pub(crate) fn pagination(ui: &mut egui::Ui, page: &mut usize, count: usize, page_size: usize) {
+    pagination_with_prompt(ui, page, count, page_size, false);
+}
+
+/// `pagination`, plus the L2/R2 prompt after the buttons when the controller panel pages the list.
+pub(crate) fn pagination_with_prompt(
+    ui: &mut egui::Ui,
+    page: &mut usize,
+    count: usize,
+    page_size: usize,
+    pad_prompt: bool,
+) {
     let pages = count.div_ceil(page_size).max(1);
     *page = (*page).min(pages - 1);
     ui.horizontal_wrapped(|ui| {
@@ -118,6 +129,9 @@ pub(crate) fn pagination(ui: &mut egui::Ui, page: &mut usize, count: usize, page
             .clicked()
         {
             *page = pages - 1;
+        }
+        if pad_prompt {
+            crate::plugins::gamepad_icons::prompt_row(ui, &[(&["l2", "r2"], "Page")]);
         }
     });
     ui.add_space(6.0);

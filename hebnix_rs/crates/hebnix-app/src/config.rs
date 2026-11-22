@@ -180,12 +180,17 @@ impl Default for SettingsCfg {
 #[serde(rename_all = "snake_case")]
 pub enum RlLaunchMode {
     #[default]
+    // Heroic is no longer supported; a Heroic-only setup falls back to
+    // auto-detection.
+    #[serde(alias = "heroic_direct")]
     Unconfigured,
     #[serde(alias = "steam_proton")]
     SteamNative,
     EpicDirect,
-    SteamShortcutToHeroic,
-    HeroicDirect,
+    /// A Steam non-Steam shortcut to any launcher (Slipstream, Heroic, a
+    /// script), started with steam://rungameid.
+    #[serde(alias = "steam_shortcut_to_heroic")]
+    SteamShortcut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,9 +198,9 @@ pub enum RlLaunchMode {
 pub struct RlLaunchCfg {
     pub mode: RlLaunchMode,
     pub steam_id: String,
-    pub heroic_binary: String,
-    pub heroic_app_name: String,
-    pub heroic_runner: String,
+    /// The shortcut's target executable, picked by the setup scan. A
+    /// Slipstream-style config.json next to it can say where the game is.
+    pub shortcut_exe: String,
 }
 
 impl Default for RlLaunchCfg {
@@ -203,9 +208,7 @@ impl Default for RlLaunchCfg {
         Self {
             mode: RlLaunchMode::Unconfigured,
             steam_id: "252950".to_string(),
-            heroic_binary: String::new(),
-            heroic_app_name: "Sugar".to_string(),
-            heroic_runner: "legendary".to_string(),
+            shortcut_exe: String::new(),
         }
     }
 }
@@ -599,4 +602,24 @@ fn parse_ini_bool(v: &str, default: bool) -> bool {
 /// App root dir: `%AppData%\Hebnix`, or `HEBNIX_BASE_DIR` for dev runs.
 pub fn base_dir() -> PathBuf {
     hebnix_sdk::utils::paths::base_dir()
+}
+
+#[cfg(test)]
+mod rl_launch_tests {
+    use super::*;
+
+    /// Configs saved with the removed Heroic modes still load.
+    #[test]
+    fn old_heroic_modes_still_load() {
+        let shortcut: RlLaunchCfg = toml::from_str(
+            "mode = \"steam_shortcut_to_heroic\"\nsteam_id = \"123\"\nheroic_binary = \"/opt/Heroic/heroic\"\nheroic_app_name = \"Sugar\"\nheroic_runner = \"legendary\"\n",
+        )
+        .unwrap();
+        assert_eq!(shortcut.mode, RlLaunchMode::SteamShortcut);
+        assert_eq!(shortcut.steam_id, "123");
+        let direct: RlLaunchCfg = toml::from_str("mode = \"heroic_direct\"\n").unwrap();
+        assert_eq!(direct.mode, RlLaunchMode::Unconfigured);
+        let saved = toml::to_string(&shortcut).unwrap();
+        assert!(saved.contains("mode = \"steam_shortcut\""), "{saved}");
+    }
 }

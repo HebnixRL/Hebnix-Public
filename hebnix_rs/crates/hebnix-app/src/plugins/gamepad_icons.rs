@@ -399,10 +399,25 @@ pub fn icon_for(key: &'static str) -> Option<(&'static [u8], String)> {
     }
 }
 
+/// LT / RT for an xinput pad. Prompts only: `icon_for` leaves them out because a
+/// dinput L2/R2 bind can't fire from an xinput pad, but the panel reads the
+/// triggers itself, so a prompt for them is right.
+fn xinput_trigger_icon(key: &'static str) -> Option<(&'static [u8], String)> {
+    if !matches!(effective_backend(), Backend::XInput) {
+        return None;
+    }
+    let (name, bytes): (&str, &'static [u8]) = match key {
+        "l2" => ("lt", include_bytes!("../../assets/gamepad-icons/xinput/lt.svg")),
+        "r2" => ("rt", include_bytes!("../../assets/gamepad-icons/xinput/rt.svg")),
+        _ => return None,
+    };
+    Some((bytes, format!("xinput_{name}")))
+}
+
 /// Draw a button's prompt icon `size` points tall. False when the connected
 /// controller has no icon for it, so the caller can show text instead.
 pub fn prompt_icon(ui: &mut eframe::egui::Ui, key: &'static str, size: f32) -> bool {
-    let Some((bytes, cache_key)) = icon_for(key) else {
+    let Some((bytes, cache_key)) = icon_for(key).or_else(|| xinput_trigger_icon(key)) else {
         return false;
     };
     let uri = format!("bytes://gamepad-icon/{cache_key}.svg");

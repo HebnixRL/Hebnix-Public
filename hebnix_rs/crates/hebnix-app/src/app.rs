@@ -62,6 +62,24 @@ const USERNAME_HISTORY_LIMIT: usize = 9;
 /// width for a settings page's label column: the widest label on that page,
 /// never narrower than the old fixed 130px, so longer translations aren't
 /// clipped and the inputs next to them still line up.
+/// A non-Steam shortcut that probably starts Rocket League: its name says so,
+/// or it points at a launcher Rocket League is played through on Linux.
+fn likely_rocket_league_shortcut(candidate: &crate::rl_launch::ShortcutCandidate) -> bool {
+    let name = candidate.app_name.to_lowercase();
+    let exe = candidate.exe.to_lowercase();
+    name.contains("rocket")
+        || ["slipstream", "heroic", "legendary", "rocketleague"]
+            .iter()
+            .any(|launcher| exe.contains(launcher))
+}
+
+/// "Start with Windows" on Windows, "Start with Linux" on Linux.
+const START_WITH_SYSTEM_KEY: &str = if cfg!(target_os = "linux") {
+    "system-start-with-linux"
+} else {
+    "system-start-with-windows"
+};
+
 fn label_column_width(ui: &egui::Ui, labels: &[String]) -> f32 {
     crate::i18n::layout::label_column_width(ui, labels, 130.0)
 }
@@ -713,6 +731,7 @@ pub struct HebnixApp {
     rl_launch_setup_open: bool,
     rl_launch_draft: crate::config::RlLaunchCfg,
     rl_launch_shortcut_candidates: Vec<crate::rl_launch::ShortcutCandidate>,
+    rl_launch_shortcut_search: String,
 
     spoofer_mgr: Arc<SpooferManager>,
     owned_inventory: crate::owned_inventory::OwnedInventory,
@@ -1322,6 +1341,7 @@ impl HebnixApp {
             rl_launch_setup_open: false,
             rl_launch_draft,
             rl_launch_shortcut_candidates: Vec::new(),
+            rl_launch_shortcut_search: String::new(),
             spoofer_mgr,
             owned_inventory: crate::owned_inventory::OwnedInventory::default(),
             title_patcher: crate::patcher::title_patcher::TitlePatcherState::default(),
@@ -1555,6 +1575,21 @@ impl HebnixApp {
         }
     }
 
+    /// Whether any package patch is running. Only one may run at a time:
+    /// each edits the live game files, and two at once collide.
+    fn any_patch_busy(&self) -> bool {
+        self.patcher_ball.processing_target.is_some()
+        || self.patcher_boost.processing_target.is_some()
+        || self.patcher_decal.processing_target.is_some()
+        || self.patcher_anthem.busy() || self.colours.busy()
+        || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+        || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
+        || self.scoreboard.busy()
+        || self.workshop.maintenance_busy()
+        || self.freeplay.patch_busy()
+        || self.replay_history_patch.busy()
+    }
+
     fn render_game_mods_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("game_mods_options")
@@ -1562,45 +1597,61 @@ impl HebnixApp {
             .show(ui, |ui| {
                 let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
                 let backups_dir = cooked_pc.join("Backups");
+                // another patch running greys out every panel but its own
+                let locked = self.any_patch_busy();
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
-                        self.save_config();
-                    }
-                });
-                ui.add_space(8.0);
-                crate::i18n::layout::bordered_panel(ui, |ui| {
-                    self.chat_export.render(ui, &cooked_pc, &backups_dir);
-                });
-                ui.add_space(8.0);
-                crate::i18n::layout::bordered_panel(ui, |ui| {
-                    self.lan_commands.render(ui, &cooked_pc, &backups_dir, |error| {
-                        self.console.write(format!("[LAN chat commands] {error}"));
+                    ui.add_enabled_ui(!locked || self.forfeit_command.busy(), |ui| {
+                        if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
+                            self.save_config();
+                        }
                     });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    let rules = self.title_rules();
-                    self.chat_paste.render(ui, &cooked_pc, &backups_dir, rules, |error| {
-                        self.console.write(format!("[Chat Paste] {error}"));
+                    ui.add_enabled_ui(!locked || self.chat_export.busy(), |ui| {
+                        self.chat_export.render(ui, &cooked_pc, &backups_dir);
                     });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
-                        self.save_config();
-                    }
+                    ui.add_enabled_ui(!locked || self.lan_commands.busy(), |ui| {
+                        self.lan_commands.render(ui, &cooked_pc, &backups_dir, |error| {
+                            self.console.write(format!("[LAN chat commands] {error}"));
+                        });
+                    });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
-                        self.save_config();
-                    }
+                    ui.add_enabled_ui(!locked || self.chat_paste.busy(), |ui| {
+                        let rules = self.title_rules();
+                        self.chat_paste.render(ui, &cooked_pc, &backups_dir, rules, |error| {
+                            self.console.write(format!("[Chat Paste] {error}"));
+                        });
+                    });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
-                        self.save_config();
-                    }
+                    ui.add_enabled_ui(!locked || self.instant_suite.busy(), |ui| {
+                        if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
+                            self.save_config();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.celebration.busy(), |ui| {
+                        if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
+                            self.save_config();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.bots_freeplay.busy(), |ui| {
+                        if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
+                            self.save_config();
+                        }
+                    });
                 });
             });
     }
@@ -1612,7 +1663,8 @@ impl HebnixApp {
             ui.heading("Auto Save + Upload");
             ui.separator();
             ui.label("Replay history is checked when a match ends or is left while Rocket League is open.");
-            self.replay_history_patch.show(ui);
+            let locked = self.any_patch_busy() && !self.replay_history_patch.busy();
+            ui.add_enabled_ui(!locked, |ui| self.replay_history_patch.show(ui));
             ui.add_enabled_ui(self.replay_history_patch.enabled(), |ui| {
                 config_changed |= ui
                     .checkbox(
@@ -5596,11 +5648,8 @@ impl HebnixApp {
                                         crate::config::RlLaunchMode::EpicDirect => {
                                             t("settings-rl-mode-epic-direct")
                                         }
-                                        crate::config::RlLaunchMode::SteamShortcutToHeroic => {
+                                        crate::config::RlLaunchMode::SteamShortcut => {
                                             t("settings-rl-mode-steam-shortcut")
-                                        }
-                                        crate::config::RlLaunchMode::HeroicDirect => {
-                                            t("settings-rl-mode-heroic-direct")
                                         }
                                     };
                                     ui.label(t_args(
@@ -5610,6 +5659,7 @@ impl HebnixApp {
                                     if ui.button(t("settings-rl-launch-setup-button")).clicked() {
                                         self.rl_launch_draft = self.config.rl_launch.clone();
                                         self.rl_launch_shortcut_candidates.clear();
+                                        self.rl_launch_shortcut_search.clear();
                                         self.rl_launch_setup_open = true;
                                     }
                                 }
@@ -5758,7 +5808,7 @@ impl HebnixApp {
                                     let label_w = label_column_width(
                                         ui,
                                         &[
-                                            t("system-start-with-windows"),
+                                            t(START_WITH_SYSTEM_KEY),
                                             t("system-start-in-tray"),
                                             t("system-close-to-tray"),
                                             t("system-p2p"),
@@ -5772,7 +5822,7 @@ impl HebnixApp {
                                         ],
                                     );
                                     ui.horizontal(|ui| {
-                                        crate::i18n::layout::settings_label(ui, label_w, t("system-start-with-windows"));
+                                        crate::i18n::layout::settings_label(ui, label_w, t(START_WITH_SYSTEM_KEY));
                                         if ui.checkbox(&mut self.startup_enabled, "").changed() {
                                             if let Err(e) =
                                                 winutil::set_startup_enabled(self.startup_enabled)
@@ -6160,16 +6210,7 @@ impl HebnixApp {
                 .show(ui, |ui| self.maintenance.render(ui, true, &self.base_dir))
                 .inner;
             if confirmed {
-                if self.patcher_ball.processing_target.is_some()
-                    || self.patcher_boost.processing_target.is_some()
-                    || self.patcher_decal.processing_target.is_some()
-                    || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
-                    || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
-                    || self.scoreboard.busy()
-                    || self.workshop.maintenance_busy()
-                    || self.freeplay.patch_busy()
-                    || self.replay_history_patch.busy()
+                if self.any_patch_busy()
                 {
                     self.maintenance.error = Some(t("maintenance-finish-patches"));
                     return;
@@ -6892,20 +6933,8 @@ impl HebnixApp {
                 );
                 ui.radio_value(
                     &mut self.rl_launch_draft.mode,
-                    RlLaunchMode::SteamShortcutToHeroic,
-                    t("rl-launch-setup-non-steam-shortcut-that-opens-heroic"),
-                );
-                if self.rl_launch_draft.mode == RlLaunchMode::SteamShortcutToHeroic {
-                    ui.label(
-                        egui::RichText::new(t("rl-launch-setup-non-steam-shortcuts-can-t-pass"))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(0xe6, 0xa8, 0x3c)),
-                    );
-                }
-                ui.radio_value(
-                    &mut self.rl_launch_draft.mode,
-                    RlLaunchMode::HeroicDirect,
-                    t("rl-launch-setup-heroic-directly-no-steam-or-epic"),
+                    RlLaunchMode::SteamShortcut,
+                    t("settings-rl-mode-steam-shortcut"),
                 );
                 ui.add_space(8.0);
 
@@ -6915,61 +6944,54 @@ impl HebnixApp {
                         ui.label(t("rl-launch-setup-steam-app-id-252950-is-rocket"));
                         ui.text_edit_singleline(&mut self.rl_launch_draft.steam_id);
                     }
-                    RlLaunchMode::SteamShortcutToHeroic => {
-                        if ui
-                            .button(t("rl-launch-setup-scan-steam-shortcuts-for-heroic"))
-                            .clicked()
-                        {
-                            self.rl_launch_shortcut_candidates =
-                                crate::rl_launch::find_heroic_shortcuts();
+                    RlLaunchMode::SteamShortcut => {
+                        if ui.button(t("rl-launch-setup-scan-steam-shortcuts")).clicked() {
+                            let mut found = crate::rl_launch::find_steam_shortcuts();
+                            // likely Rocket League launchers first, then by name
+                            found.sort_by_cached_key(|candidate| {
+                                (
+                                    !likely_rocket_league_shortcut(candidate),
+                                    candidate.app_name.to_lowercase(),
+                                )
+                            });
+                            self.rl_launch_shortcut_candidates = found;
                         }
                         if self.rl_launch_shortcut_candidates.is_empty() {
                             ui.small(t("rl-launch-setup-no-candidates-found-yet-click-scan"));
                         } else {
-                            for candidate in &self.rl_launch_shortcut_candidates {
-                                if ui
-                                    .button(format!("{}  ({})", candidate.app_name, candidate.exe))
-                                    .clicked()
-                                {
-                                    self.rl_launch_draft.steam_id = candidate.rungameid.to_string();
-                                    // the shortcut's own target IS Heroic's binary - almost every
-                                    // Steam shortcut that opens Heroic points straight at it, with
-                                    // the actual game picked by the shortcut's launch options, so
-                                    // there's nothing left to type in by hand here.
-                                    self.rl_launch_draft.heroic_binary =
-                                        candidate.exe.trim().trim_matches('"').to_string();
-                                }
-                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.rl_launch_shortcut_search)
+                                    .hint_text(t("rl-launch-setup-search-shortcuts")),
+                            );
+                            let query = self.rl_launch_shortcut_search.trim().to_lowercase();
+                            egui::ScrollArea::vertical()
+                                .id_salt("rl-launch-shortcut-list")
+                                .max_height(6.0 * ui.spacing().interact_size.y * 1.4)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    for candidate in &self.rl_launch_shortcut_candidates {
+                                        if !query.is_empty()
+                                            && !candidate.app_name.to_lowercase().contains(&query)
+                                            && !candidate.exe.to_lowercase().contains(&query)
+                                        {
+                                            continue;
+                                        }
+                                        if ui
+                                            .button(format!("{}  ({})", candidate.app_name, candidate.exe))
+                                            .clicked()
+                                        {
+                                            self.rl_launch_draft.steam_id =
+                                                candidate.rungameid.to_string();
+                                            self.rl_launch_draft.shortcut_exe =
+                                                candidate.exe.trim().trim_matches('"').to_string();
+                                        }
+                                    }
+                                });
                         }
                         ui.add_space(4.0);
                         ui.label(t("rl-launch-setup-steam-shortcut-id"));
                         ui.text_edit_singleline(&mut self.rl_launch_draft.steam_id);
-                        if !self.rl_launch_draft.heroic_binary.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(t_args(
-                                "rl-launch-setup-heroic-binary-rl-launch-draft",
-                                &[(
-                                    "heroic_binary",
-                                    self.rl_launch_draft.heroic_binary.to_string().into(),
-                                )],
-                            ));
-                        }
                     }
-                    RlLaunchMode::HeroicDirect => {
-                        ui.label(t("rl-launch-setup-heroic-binary-path-e-g-the"));
-                        ui.text_edit_singleline(&mut self.rl_launch_draft.heroic_binary);
-                    }
-                }
-
-                if matches!(
-                    self.rl_launch_draft.mode,
-                    RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect
-                ) {
-                    ui.add_space(4.0);
-                    ui.label(t("rl-launch-setup-epic-catalog-app-name-sugar-is"));
-                    ui.text_edit_singleline(&mut self.rl_launch_draft.heroic_app_name);
-                    ui.label(t("rl-launch-setup-runner"));
-                    ui.text_edit_singleline(&mut self.rl_launch_draft.heroic_runner);
                 }
 
                 ui.add_space(12.0);
@@ -8781,12 +8803,17 @@ impl HebnixApp {
                 } else if mode == ItemsMode::MenuTextures {
                     self.render_menu_textures_page(ui);
                 } else if mode == ItemsMode::GoalExplosion {
+                    let locked = self.any_patch_busy();
                     crate::i18n::layout::bordered_panel(ui, |ui| {
-                        self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
+                        ui.add_enabled_ui(!locked || self.goal_explosion.busy(), |ui| {
+                            self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
+                        });
                     });
                     ui.add_space(8.0);
                     crate::i18n::layout::bordered_panel(ui, |ui| {
-                        self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
+                        ui.add_enabled_ui(!locked || self.goal_explosion_volume.busy(), |ui| {
+                            self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
+                        });
                     });
                 } else if mode == ItemsMode::WheelAlignment {
                     if self.catalogs_loading {

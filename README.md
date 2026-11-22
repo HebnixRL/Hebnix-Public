@@ -64,7 +64,7 @@ cargo build --release
 - X11 support (i3, Cinnamon, XFCE, MATE)
 - evdev input handling
 - Linux path handling (case-sensitive filesystems)
-- Heroic/Steam Proton launcher integration
+- Steam Proton and non-Steam shortcut (e.g. Slipstream) launcher integration
 - AppImage packaging
 
 ## License

@@ -1,27 +1,22 @@
-//! Where Rocket League's "restart"/"restart with -multihome=<address>"
-//! commands actually go, based on the persisted RlLaunchCfg (see
-//! config.rs). Three real-world setups, since RL has no official
-//! Linux/Steam listing anymore:
+//! Where Rocket League's "restart" commands go, based on the persisted
+//! RlLaunchCfg (see config.rs). Rocket League has no official Linux/Steam
+//! listing anymore, so besides the real Steam game there is the generic
+//! setup:
 //!
-//! - SteamProton: a real, owned Steam catalog listing. `steam://run`
+//! - SteamNative: a real, owned Steam catalog listing. `steam://run`
 //!   supports overriding the launch options with an extra argument
 //!   directly.
-//! - SteamShortcutToHeroic: a Steam non-Steam-shortcut whose target is
-//!   Heroic. `steam://rungameid` launches it fine, but `steam://run`'s
-//!   argument override flatly refuses non-Steam shortcuts ("Game
-//!   configuration unavailable", verified live) - so Workshop LAN's
-//!   -multihome relaunch has to bypass Steam and call Heroic directly for
-//!   just that one relaunch (no Steam overlay during the hosted session,
-//!   but it's the only way to get the extra argument in).
-//! - HeroicDirect: no Steam at all, every relaunch calls Heroic directly.
+//! - SteamShortcut: a Steam non-Steam-shortcut to any launcher (Slipstream,
+//!   Heroic, a script). `steam://rungameid` starts it, but Steam won't add
+//!   arguments to a non-Steam shortcut.
 
 use std::path::PathBuf;
 
 use crate::config::{RlLaunchCfg, RlLaunchMode};
 
-/// a Steam non-Steam-shortcut found in shortcuts.vdf whose target looks like
-/// Heroic - offered to the user during setup so they don't have to dig the
-/// numeric ID out of a generated .desktop file by hand.
+/// a Steam non-Steam-shortcut found in shortcuts.vdf - offered to the user
+/// during setup so they don't have to dig the numeric ID out of a generated
+/// .desktop file by hand.
 pub struct ShortcutCandidate {
     pub app_name: String,
     pub exe: String,
@@ -95,20 +90,23 @@ fn parse_map(data: &[u8], mut i: usize) -> Option<(Vec<(String, VdfValue)>, usiz
 enum VdfValue {
     Map(Vec<(String, VdfValue)>),
     Str(String),
-    #[allow(dead_code)]
     Int(i32),
 }
 
-/// non-Steam shortcuts whose target executable looks like Heroic, for the
-/// setup wizard to offer as auto-detected candidates.
-pub fn find_heroic_shortcuts() -> Vec<ShortcutCandidate> {
+
+/// every non-Steam shortcut, for the setup wizard to offer.
+pub fn find_steam_shortcuts() -> Vec<ShortcutCandidate> {
     let Some(path) = shortcuts_vdf_path() else {
         return Vec::new();
     };
     let Ok(data) = std::fs::read(&path) else {
         return Vec::new();
     };
-    let Some((root, _)) = parse_map(&data, 0) else {
+    parse_shortcuts(&data)
+}
+
+fn parse_shortcuts(data: &[u8]) -> Vec<ShortcutCandidate> {
+    let Some((root, _)) = parse_map(data, 0) else {
         return Vec::new();
     };
     let Some((_, VdfValue::Map(shortcuts))) = root.into_iter().find(|(k, _)| k == "shortcuts")
@@ -123,20 +121,24 @@ pub fn find_heroic_shortcuts() -> Vec<ShortcutCandidate> {
         };
         let mut app_name = None;
         let mut exe = None;
+        let mut appid = None;
         for (key, value) in &fields {
-            match (key.as_str(), value) {
-                ("AppName", VdfValue::Str(s)) => app_name = Some(s.clone()),
-                ("Exe", VdfValue::Str(s)) => exe = Some(s.clone()),
+            match (key.to_ascii_lowercase().as_str(), value) {
+                ("appname", VdfValue::Str(s)) => app_name = Some(s.clone()),
+                ("exe", VdfValue::Str(s)) => exe = Some(s.clone()),
+                ("appid", VdfValue::Int(id)) => appid = Some(*id),
                 _ => {}
             }
         }
         let (Some(app_name), Some(exe)) = (app_name, exe) else {
             continue;
         };
-        if !exe.to_ascii_lowercase().contains("heroic") {
-            continue;
-        }
-        let rungameid = compute_shortcut_id(&exe, &app_name);
+        // Current Steam stores the shortcut's own ID; only shortcuts made by
+        // old Steam versions lack it and use the CRC scheme.
+        let rungameid = match appid {
+            Some(id) => ((id as u32 as u64) << 32) | 0x0200_0000,
+            None => compute_shortcut_id(&exe, &app_name),
+        };
         candidates.push(ShortcutCandidate {
             app_name,
             exe,
@@ -167,133 +169,17 @@ fn launch_uri(uri: &str) -> Result<(), String> {
         })
 }
 
-/// Heroic's own single-instance lock names the running instance's pid
-/// (`<host>-<pid>`). None when there is no Heroic config to ask.
-fn heroic_running() -> Option<bool> {
-    let lock = dirs::config_dir()?.join("heroic").join("SingletonLock");
-    if !lock.parent()?.is_dir() {
-        return None;
-    }
-    let Ok(target) = std::fs::read_link(&lock) else {
-        return Some(false);
-    };
-    let pid: u32 = target.to_string_lossy().rsplit('-').next()?.parse().ok()?;
-    // a zombie (exited, not yet reaped) still has a /proc entry
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-    Some(stat.is_some_and(|stat| {
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().next())
-            .is_some_and(|state| state != "Z")
-    }))
-}
-
-/// Heroic decides whether to start a game in offline mode from its own
-/// connectivity state, which starts as "check-online" and only turns
-/// "online" after the first ping finishes, about a second after startup. A
-/// `heroic://launch` URL handed to a freshly started Heroic arrives before
-/// that, so the game gets `--offline`, no Epic login code, and Rocket League
-/// sits on the start screen with EOS/PsyNet errors. So when Heroic isn't
-/// running yet, start it without the URL first and wait for it to report
-/// online; the URL then goes to the already-running instance.
-fn prestart_heroic(binary: &str) {
-    if heroic_running() != Some(false) {
-        return;
-    }
-    tracing::info!("rl_launch: Heroic isn't running, starting it first so it can check connectivity");
-    let started = std::time::SystemTime::now();
-    if let Err(error) = std::process::Command::new(binary)
-        .args(["--no-gui", "--no-sandbox"])
-        .spawn()
-    {
-        tracing::warn!("rl_launch: could not pre-start '{binary}': {error}");
-        return;
-    }
-    let log = dirs::state_dir()
-        .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")))
-        .map(|dir| dir.join("Heroic/logs/heroic.log"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let Some(log) = &log else {
-            // no log to watch: give it a fixed head start instead
-            std::thread::sleep(std::time::Duration::from_secs(8));
-            return;
-        };
-        let fresh = std::fs::metadata(log)
-            .and_then(|meta| meta.modified())
-            .is_ok_and(|modified| modified >= started);
-        if fresh && heroic_reports_online(log) {
-            // let it finish starting up before the launch request
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            return;
-        }
-    }
-    tracing::warn!("rl_launch: Heroic didn't report being online in time, launching anyway");
-}
-
-/// is the newest `Connectivity:` line in Heroic's log "online"
-fn heroic_reports_online(log: &std::path::Path) -> bool {
-    std::fs::read_to_string(log)
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .rev()
-                .find_map(|line| line.split("Connectivity:").nth(1).map(|state| state.trim() == "online"))
-        })
-        .unwrap_or(false)
-}
-
-fn heroic_launch(cfg: &RlLaunchCfg, multihome: Option<&str>) -> Result<(), String> {
-    let mut uri = format!(
-        "heroic://launch?appName={}&runner={}",
-        cfg.heroic_app_name, cfg.heroic_runner
-    );
-    if let Some(address) = multihome {
-        uri.push_str(&format!("&arg=-multihome%3D{address}"));
-    }
-    prestart_heroic(&cfg.heroic_binary);
-    tracing::info!(
-        "rl_launch: spawning '{}' --no-gui --no-sandbox {uri}",
-        cfg.heroic_binary
-    );
-    std::process::Command::new(&cfg.heroic_binary)
-        .args(["--no-gui", "--no-sandbox", &uri])
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| {
-            let message = format!("could not run '{}': {error}", cfg.heroic_binary);
-            tracing::warn!("rl_launch: {message}");
-            message
-        })
-}
-
 /// where RL is actually installed, straight from the launch config -
 /// independent of the live process. Live detection
 /// (`process::find_rocket_league()`) needs to read the running exe's path,
-/// which EAC blocks almost immediately after launch, so in practice it only
-/// ever works in the brief window right at startup; `settings.rl_path` was
-/// getting stuck on whatever it last resolved to (or a stale manual value)
-/// and never correcting itself once EAC engaged - e.g. staying pointed at
-/// an old Steam install while the user actually plays through Heroic,
-/// silently breaking Workshop map installs (they'd copy into the Steam
-/// copy's CookedPCConsole, which the running Heroic-launched game never
-/// reads). This resolves the real install directory from data that doesn't
-/// need the live process at all: legendary's own installed.json for
-/// Heroic-based modes, Steam's appmanifest for SteamProton.
+/// which EAC blocks almost immediately after launch, so this resolves the
+/// install directory from data that doesn't need the live process at all:
+/// Steam's appmanifest for SteamNative, the shortcut launcher's own files
+/// for SteamShortcut.
 pub fn resolve_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
     match cfg.mode {
         RlLaunchMode::Unconfigured | RlLaunchMode::EpicDirect => None,
-        RlLaunchMode::HeroicDirect | RlLaunchMode::SteamShortcutToHeroic => {
-            let path =
-                dirs::home_dir()?.join(".config/heroic/legendaryConfig/legendary/installed.json");
-            let text = std::fs::read_to_string(path).ok()?;
-            let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-            let install_path = json
-                .get(&cfg.heroic_app_name)?
-                .get("install_path")?
-                .as_str()?;
-            Some(PathBuf::from(install_path))
-        }
+        RlLaunchMode::SteamShortcut => shortcut_install_root(cfg),
         RlLaunchMode::SteamNative => {
             let id = std::env::var("HEBNIX_RL_APPID").unwrap_or_else(|_| cfg.steam_id.clone());
             for steamapps in hebnix_sdk::process::steam_library_steamapps_dirs() {
@@ -317,8 +203,7 @@ pub fn resolve_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
 }
 
 /// plain restart, no Workshop LAN address. `HEBNIX_RL_APPID` overrides
-/// `cfg.steam_id` for SteamProton/SteamShortcutToHeroic without needing to
-/// re-run the setup wizard.
+/// `cfg.steam_id` without needing to re-run the setup wizard.
 pub fn restart(cfg: &RlLaunchCfg) -> Result<(), String> {
     tracing::info!("rl_launch: restart() mode={:?}", cfg.mode);
     match cfg.mode {
@@ -326,23 +211,17 @@ pub fn restart(cfg: &RlLaunchCfg) -> Result<(), String> {
             "Rocket League launch isn't set up yet - open Settings > Rocket League Launch Setup"
                 .to_string(),
         ),
-        RlLaunchMode::SteamNative | RlLaunchMode::SteamShortcutToHeroic => {
+        RlLaunchMode::SteamNative | RlLaunchMode::SteamShortcut => {
             let id = std::env::var("HEBNIX_RL_APPID").unwrap_or_else(|_| cfg.steam_id.clone());
             launch_uri(&format!("steam://rungameid/{id}"))
         }
-        RlLaunchMode::HeroicDirect => heroic_launch(cfg, None),
     }
 }
 
-/// Workshop multiplayer without `-multihome`: same start path as a
-/// multihome launch (so a Heroic game goes straight to Heroic, which is
-/// pre-started and waited on), just without the argument.
+/// Workshop multiplayer without `-multihome`: a plain restart.
 pub fn restart_for_multiplayer_without_multihome(cfg: &RlLaunchCfg) -> Result<(), String> {
     tracing::info!("rl_launch: restart without -multihome, mode={:?}", cfg.mode);
-    match cfg.mode {
-        RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect => heroic_launch(cfg, None),
-        _ => restart(cfg),
-    }
+    restart(cfg)
 }
 
 /// Workshop LAN "restart with -multihome=<address>".
@@ -382,8 +261,103 @@ pub fn restart_multihome(cfg: &RlLaunchCfg, address: &str) -> Result<(), String>
             let id = std::env::var("HEBNIX_RL_APPID").unwrap_or_else(|_| cfg.steam_id.clone());
             launch_uri(&format!("steam://run/{id}//{raw}/"))
         }
-        RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect => {
-            heroic_launch(cfg, Some(address))
+        RlLaunchMode::SteamShortcut => Err(
+            "A non-Steam shortcut can't pass -multihome: Steam won't add arguments to it"
+                .to_string(),
+        ),
+    }
+}
+
+/// Rocket League's folder for a non-Steam shortcut. Slipstream keeps a
+/// config.json next to its executable naming the game exe
+/// (`rocket_league_path`); under Proton that is a Windows path on drive Z:,
+/// the root of the Linux file system. Otherwise the game was most likely
+/// installed with legendary, so its installed.json is asked (the standalone
+/// one, then the copy Heroic keeps).
+fn shortcut_install_root(cfg: &RlLaunchCfg) -> Option<PathBuf> {
+    let exe = cfg.shortcut_exe.trim().trim_matches('"');
+    let from_config = (!exe.is_empty())
+        .then(|| std::path::Path::new(exe).parent().map(|dir| dir.join("config.json")))
+        .flatten()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| json.get("rocket_league_path")?.as_str().and_then(game_root_from_exe));
+    if from_config.is_some() {
+        return from_config;
+    }
+    let home = dirs::home_dir()?;
+    [
+        home.join(".config/legendary/installed.json"),
+        home.join(".config/heroic/legendaryConfig/legendary/installed.json"),
+    ]
+    .into_iter()
+    .find_map(|path| {
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        // Sugar is Rocket League's Epic catalog name
+        let install_path = json.get("Sugar")?.get("install_path")?.as_str()?;
+        Some(PathBuf::from(install_path))
+    })
+}
+
+/// `Z:\games\rocketleague\Binaries\Win64\RocketLeague.exe` (or the same as a
+/// Linux path) to `/games/rocketleague`.
+fn game_root_from_exe(exe: &str) -> Option<PathBuf> {
+    let unix = match exe.get(..2) {
+        Some(drive) if drive.eq_ignore_ascii_case("z:") => exe[2..].replace('\\', "/"),
+        _ if exe.starts_with('/') => exe.to_string(),
+        _ => return None,
+    };
+    let path = PathBuf::from(unix);
+    // .../Binaries/Win64/RocketLeague.exe
+    let binaries = path.parent()?.parent()?;
+    binaries
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("Binaries"))
+        .then(|| binaries.parent().map(PathBuf::from))
+        .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// shortcuts.vdf as Steam writes it: one shortcut with its own appid
+    /// (-833557446, i.e. 3461409850) and one old one without.
+    #[test]
+    fn shortcut_ids_use_the_stored_appid() {
+        fn string(key: &str, value: &str) -> Vec<u8> {
+            [&[0x01][..], key.as_bytes(), &[0], value.as_bytes(), &[0]].concat()
         }
+        let mut data = vec![0x00];
+        data.extend(b"shortcuts\0");
+        data.extend([0x00, b'0', 0]);
+        data.extend([&[0x02][..], b"appid\0", &(-833557446i32).to_le_bytes()].concat());
+        data.extend(string("AppName", "Rocket League"));
+        data.extend(string("Exe", "\"/games/Slipstream.exe\""));
+        data.push(0x08);
+        data.extend([0x00, b'1', 0]);
+        data.extend(string("AppName", "Old"));
+        data.extend(string("Exe", "\"/games/old\""));
+        data.push(0x08);
+        data.extend([0x08, 0x08]);
+        let found = parse_shortcuts(&data);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].rungameid, 14866642103835820032);
+        assert_eq!(found[1].rungameid, compute_shortcut_id("\"/games/old\"", "Old"));
+    }
+
+    #[test]
+    fn slipstream_game_root() {
+        assert_eq!(
+            game_root_from_exe(r"Z:\mnt\game\rocketleague\Binaries\Win64\RocketLeague.exe"),
+            Some(PathBuf::from("/mnt/game/rocketleague"))
+        );
+        assert_eq!(
+            game_root_from_exe("/mnt/game/rocketleague/Binaries/Win64/RocketLeague.exe"),
+            Some(PathBuf::from("/mnt/game/rocketleague"))
+        );
+        assert_eq!(game_root_from_exe(r"C:\Games\rocketleague\Binaries\Win64\RocketLeague.exe"), None);
+        assert_eq!(game_root_from_exe("/mnt/game/RocketLeague.exe"), None);
     }
 }

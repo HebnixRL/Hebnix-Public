@@ -1025,6 +1025,32 @@ pub fn focus_own_window_over_game(own_pid: u32) -> bool {
     }
 }
 
+/// give keyboard focus back to Rocket League's window, e.g. when Hebnix hides
+/// after popping over the game. Without it Hyprland leaves nothing focused once
+/// our window unmaps, and the game needs a click before it takes input again.
+/// False when RL's window isn't found or this compositor has no implementation.
+pub fn focus_rocket_league() -> bool {
+    match compositor() {
+        Compositor::Hyprland => {
+            let Some(pid) = cached_rl_pid() else {
+                return false;
+            };
+            if hyprland_lua() {
+                hyprland_lua_dispatch(&format!("hl.dsp.focus({{ window = 'pid:{pid}' }})"));
+            } else {
+                hyprctl_raw(&format!("dispatch focuswindow pid:{pid}"));
+            }
+            true
+        }
+        Compositor::Kwin => {
+            kdotool_lines(&["search", "--name", "Rocket League", "--limit", "1", "windowactivate"]).is_some()
+        }
+        Compositor::Niri => niri_rl_window()
+            .is_some_and(|rl| niri_action(serde_json::json!({ "FocusWindow": { "id": rl.id } }))),
+        _ => false,
+    }
+}
+
 /// un-minimize and activate our own window in place, without the
 /// workspace move `focus_own_window_over_game` does. A Wayland client can't
 /// un-minimize itself (winit ignores it), and a minimized surface gets no
