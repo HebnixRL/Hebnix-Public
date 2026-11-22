@@ -508,7 +508,27 @@ impl Config {
                     cfg.action_button.normalize();
                     return cfg;
                 }
-                Err(e) => tracing::warn!("config.toml is invalid ({e}); using defaults"),
+                Err(e) => {
+                    // Keep the unreadable file: it may be from a newer Hebnix, and saving
+                    // the defaults below would otherwise wipe every setting in it.
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let kept = base_dir.join(format!("config.toml.invalid-{stamp}"));
+                    match std::fs::rename(&toml_path, &kept) {
+                        Ok(()) => tracing::warn!(
+                            "config.toml is invalid ({e}); moved it to {} and using defaults",
+                            kept.display()
+                        ),
+                        Err(rename_err) => {
+                            // could not set it aside, so leave it untouched and don't save
+                            tracing::warn!(
+                                "config.toml is invalid ({e}) and could not be moved aside ({rename_err}); using defaults without saving"
+                            );
+                            return Config::default();
+                        }
+                    }
+                }
             }
         }
 
@@ -621,5 +641,31 @@ mod rl_launch_tests {
         assert_eq!(direct.mode, RlLaunchMode::Unconfigured);
         let saved = toml::to_string(&shortcut).unwrap();
         assert!(saved.contains("mode = \"steam_shortcut\""), "{saved}");
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// An unreadable config.toml is moved aside, not overwritten with defaults.
+    #[test]
+    fn invalid_config_is_kept() {
+        let dir = std::env::temp_dir().join(format!("hebnix-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = "[rl_launch]\nmode = \"from_the_future\"\n";
+        std::fs::write(dir.join("config.toml"), bad).unwrap();
+
+        let _ = Config::load(&dir);
+
+        let kept: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("config.toml.invalid-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path()).unwrap(), bad);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
