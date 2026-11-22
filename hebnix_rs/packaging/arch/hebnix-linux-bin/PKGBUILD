@@ -7,6 +7,9 @@ pkgname=hebnix-linux-bin
 # and publishes the built package to the pacman repo on R2.
 pkgver=2.3.5
 pkgrel=1
+# Release tag without the leading v. Equals $pkgver, or $pkgver-$pkgrel for a
+# numeric re-release (v2.3.5-3); the release workflow sets it.
+_tag=$pkgver
 pkgdesc="Rocket League overlay, stats tracker and item-changer for Linux (Hyprland/wlroots), prebuilt upstream binary"
 arch=('x86_64')
 url="https://github.com/HebnixRL/Hebnix-Public"
@@ -38,11 +41,11 @@ optdepends=(
 provides=('hebnix')
 conflicts=('hebnix-linux')
 install=hebnix.install
-source=("https://github.com/HebnixRL/Hebnix-Public/releases/download/v$pkgver/hebnix-$pkgver-linux-$CARCH-arch.tar.gz")
+source=("https://github.com/HebnixRL/Hebnix-Public/releases/download/v$_tag/hebnix-$_tag-linux-$CARCH-arch.tar.gz")
 sha256sums=('SKIP')
 
 package() {
-	cd "hebnix-$pkgver-linux-$CARCH-arch"
+	cd "hebnix-$_tag-linux-$CARCH-arch"
 	install -Dm755 bin/hebnix "$pkgdir/usr/bin/hebnix"
 	install -Dm755 lib/hebnix/hebnix-tc "$pkgdir/usr/lib/hebnix/hebnix-tc"
 	install -Dm644 share/applications/hebnix.desktop \
