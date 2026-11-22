@@ -45,7 +45,12 @@ pub enum AppMsg {
     CatalogsFetched {
         result: Result<std::collections::HashMap<String, Value>, String>,
     },
-    WorkshopCatalog(Result<Vec<Value>, String>),
+    /// a page of Steam Workshop maps for the Browse Maps tab
+    WorkshopSteamPage {
+        generation: u64,
+        more: bool,
+        result: Result<crate::ui::workshop::SteamPage, String>,
+    },
     WorkshopImage {
         key: String,
         bytes: Vec<u8>,

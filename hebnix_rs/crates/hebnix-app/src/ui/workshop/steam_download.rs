@@ -375,6 +375,12 @@ pub struct SearchItem {
     pub file_size: u64,
     #[serde(default)]
     pub subscriptions: u64,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub preview_url: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -417,7 +423,7 @@ fn encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn search(query: &str, sort: SearchSort, cursor: Option<&str>) -> Result<SearchPage, String> {
+pub(super) fn search(query: &str, sort: SearchSort, cursor: Option<&str>) -> Result<SearchPage, String> {
     let mut path = format!("/search?q={}&sort={}", encode(query.trim()), sort.api_value());
     if let Some(cursor) = cursor {
         path.push_str(&format!("&cursor={}", encode(cursor)));

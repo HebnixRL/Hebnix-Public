@@ -1,5 +1,6 @@
-//! workshop maps tab: browse the hebnix.com catalog, download + swap maps
-//! over the rocket labs placeholders.
+//! workshop maps tab: browse the Steam Workshop (through the hebnix workshop
+//! api, see steam_catalog.rs), download maps from steam's CDN and install them
+//! for the in-game Workshop menu.
 
 use crate::i18n::{t, t_args, t_n};
 use std::collections::{HashMap, HashSet};
@@ -30,6 +31,7 @@ pub(crate) mod ingame_menu;
 mod lan_mutators;
 mod menu_map;
 mod local_import;
+mod steam_catalog;
 mod steam_cdn;
 mod steam_download;
 use archive::ArchiveBrowser;
@@ -38,6 +40,7 @@ use hosted::{HOSTING_SLOT, HostedMap};
 use ingame_menu::InGameMenuState;
 use menu_map::MenuMapState;
 use steam_download::SteamDownloader;
+pub use steam_catalog::SteamPage;
 
 /// common Workshop multiplayer problems (VPNs/proxies, firewalls) and fixes
 const MULTIPLAYER_HELP_URL: &str = "https://github.com/xplodingeggo/hebnix-linux/blob/feature/tsnet-multiplayer/docs/workshop-multiplayer-help.md"; // TEST ONLY: point at HebnixRL/Hebnix-Public main once merged
@@ -185,7 +188,6 @@ fn rocket_league_multihome_address() -> Option<String> {
 pub const WORKSHOP_PLUGIN_ID: &str = "workshop_map_loader";
 pub const WORKSHOP_MODS_DIR_NAME: &str = "mods";
 pub const REMOTE_FILES_BASE: &str = "https://hebnix.com";
-pub const API_ENDPOINT: &str = "https://api.hebnix.com/maps";
 pub const DOWNLOAD_ENDPOINT_BASE: &str = "https://api.hebnix.com/download/map/";
 
 const SHADER_PACKAGE: &str = "Engine_MI_Shaders.upk";
@@ -404,12 +406,30 @@ impl MapManager {
             tracing::warn!("could not fetch {SHADER_PACKAGE}: {error}");
         }
         self.cache_from_workshop_folder(&map_id, rl_path)?;
-        if !self.is_cached(&map_id) {
+        let mut map_data = map_data.clone();
+        if steam_catalog::is_steam_entry(&map_data) {
+            // keep the map's own package name: a LAN join matches on it
+            let file = match steam_catalog::downloaded_file(&self.runtime_dir, &map_id) {
+                Some(file) if self.is_cached(&map_id) => file,
+                _ => {
+                    MAP_DL_DONE.store(0, Ordering::Relaxed);
+                    MAP_DL_TOTAL.store(0, Ordering::Relaxed);
+                    steam_catalog::download_map(&map_id, &self.cache_dir, &|done, total| {
+                        MAP_DL_DONE.store(done, Ordering::Relaxed);
+                        MAP_DL_TOTAL.store(total, Ordering::Relaxed);
+                    })?
+                }
+            };
+            map_data["file"] = Value::String(file);
+            if let Err(e) = steam_catalog::record_downloaded(&self.runtime_dir, &map_data) {
+                tracing::warn!("could not remember the downloaded map: {e}");
+            }
+        } else if !self.is_cached(&map_id) {
             self.download_map_file(&map_id, &cached_map_path)?;
         }
 
         let cooked_pc_dir = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-        self.install_to_workshop_folder(map_data, &cached_map_path, &cooked_pc_dir)
+        self.install_to_workshop_folder(&map_data, &cached_map_path, &cooked_pc_dir)
     }
 
     fn cache_from_workshop_folder(&self, map_id: &str, rl_path: &str) -> Result<(), String> {
@@ -456,7 +476,7 @@ impl MapManager {
             "title": name,
             "author": str_of(map_data, "author", ""),
             "description": str_of(map_data, "description", str_of(map_data, "short_description", "")),
-            "preview_url": if banner.is_empty() { String::new() } else { banner_url_and_cache_rel(banner).0 },
+            "preview_url": if banner.is_empty() || banner.starts_with("https://") { banner.to_string() } else { banner_url_and_cache_rel(banner).0 },
         });
         std::fs::write(folder.join(ingame_menu::META), meta.to_string())
             .map_err(|e| e.to_string())
@@ -637,6 +657,14 @@ fn str_of<'a>(map_data: &'a Value, key: &str, default: &'a str) -> &'a str {
 
 /// remote url + the path to cache it under
 pub fn banner_url_and_cache_rel(banner_path: &str) -> (String, String) {
+    if banner_path.starts_with("https://") {
+        // a steam workshop preview, cached under a hash of its url
+        let tag = hex::encode(&Sha256::digest(banner_path.as_bytes())[..12]);
+        return (
+            steam_catalog::thumbnail_url(banner_path),
+            format!("files/maps/steam/{tag}.img"),
+        );
+    }
     let normalized = banner_path.replace('\\', "/");
     let url = format!("{REMOTE_FILES_BASE}{normalized}");
     (url, normalized.trim_start_matches('/').to_string())
@@ -858,6 +886,17 @@ pub struct WorkshopState {
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
     multiplayer: MultiplayerState,
+    /// workshop results paging: the cursor for the next page, the search it
+    /// belongs to and the ids of the results so far, in Steam's order
+    steam_cursor: Option<String>,
+    steam_total: u64,
+    steam_query: String,
+    steam_results: Vec<String>,
+    steam_loading: bool,
+    /// bumped per new search, so a slow reply for an old one is dropped
+    steam_generation: u64,
+    /// the search box changed; the search runs once typing pauses
+    search_edited: Option<Instant>,
     /// the "P2P File Sharing" system setting. read by the map sync server
     /// each time a player asks for a file, so it applies straight away.
     share_files: Arc<AtomicBool>,
@@ -943,6 +982,13 @@ impl WorkshopState {
             steam_downloader: SteamDownloader::default(),
             archive_browser: ArchiveBrowser::default(),
             multiplayer,
+            steam_cursor: None,
+            steam_total: 0,
+            steam_query: String::new(),
+            steam_results: Vec::new(),
+            steam_loading: false,
+            steam_generation: 0,
+            search_edited: None,
             share_files: Arc::new(AtomicBool::new(true)),
             workshop_maps: PathBuf::new(),
             panel_mode: false,
@@ -961,15 +1007,68 @@ impl WorkshopState {
         self.background_changer.progress(message)
     }
 
-    /// installs a freshly fetched cdn catalog, keeping the maps the player
-    /// imported themselves
-    pub fn set_catalog(&mut self, items: Vec<Value>) {
-        self.catalog = items;
+    /// takes in a page of workshop results. `more` adds it to the results so
+    /// far; otherwise it replaces them (a new search).
+    pub fn add_steam_page(
+        &mut self,
+        generation: u64,
+        more: bool,
+        result: Result<steam_catalog::SteamPage, String>,
+    ) {
+        if generation != self.steam_generation {
+            return;
+        }
+        self.steam_loading = false;
+        let page = match result {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!("[Workshop] {error}");
+                self.catalog_status = error;
+                if !more {
+                    self.steam_results.clear();
+                    self.steam_cursor = None;
+                }
+                self.merge_local_maps();
+                return;
+            }
+        };
+        if !more {
+            self.steam_results.clear();
+        }
+        for item in page.items {
+            let id = id_of(&item);
+            if self.steam_results.contains(&id) {
+                continue;
+            }
+            // fresh details replace a remembered download's
+            match self.catalog.iter_mut().find(|entry| id_of(entry) == id) {
+                Some(entry) => {
+                    let file = entry.get("file").cloned();
+                    *entry = item;
+                    if let Some(file) = file {
+                        entry["file"] = file;
+                    }
+                }
+                None => self.catalog.push(item),
+            }
+            self.steam_results.push(id);
+        }
+        self.steam_cursor = page.next_cursor;
+        self.steam_total = page.total;
         self.merge_local_maps();
-        self.execute_search(true);
+        self.execute_search(!more);
+        if self.valid.is_empty() {
+            self.catalog_status = t("handle-messages-no-maps-found").to_string();
+        }
+        self.publish_downloadable();
+    }
+
+    /// what the in-game Workshop downloader lists: the maps Hebnix knows
+    fn publish_downloadable(&mut self) {
         crate::patcher::workshop_menu::set_downloadable(
             self.catalog
                 .iter()
+                .filter(|map| !is_local_entry(map))
                 .map(|map| crate::patcher::workshop_menu::Downloadable {
                     id: id_of(map),
                     title: str_of(map, "name", "").to_string(),
@@ -977,6 +1076,7 @@ impl WorkshopState {
                     description: str_of(map, "short_description", "").trim().to_string(),
                     preview_url: match str_of(map, "banner_path", "") {
                         "" => String::new(),
+                        banner if banner.starts_with("https://") => banner.to_string(),
                         banner => banner_url_and_cache_rel(banner).0,
                     },
                     downloads: str_of(map, "download_count", "0").parse().unwrap_or(0),
@@ -985,6 +1085,29 @@ impl WorkshopState {
                 .collect(),
         );
         self.downloads_stale = true;
+    }
+
+    /// asks the workshop api for the first page of a search, or with `more`
+    /// the next page of the current one
+    fn request_steam_page(&mut self, more: bool, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if more && (self.steam_loading || self.steam_cursor.is_none()) {
+            return;
+        }
+        if !more {
+            self.steam_generation += 1;
+            self.steam_query = self.search.trim().to_string();
+            self.steam_cursor = None;
+            self.catalog_status = t("catalog-loading-catalog").to_string();
+        }
+        self.steam_loading = true;
+        let (generation, query, cursor) =
+            (self.steam_generation, self.steam_query.clone(), self.steam_cursor.clone());
+        let (tx, ctx) = (tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = steam_catalog::fetch_page(&query, cursor.as_deref());
+            let _ = tx.send(AppMsg::WorkshopSteamPage { generation, more, result });
+            ctx.request_repaint();
+        });
     }
 
     /// Installs the maps picked in the game's Workshop downloader, and puts a new
@@ -1063,11 +1186,12 @@ impl WorkshopState {
     /// adds imported maps missing from the catalog (also what keeps them
     /// visible when the cdn can't be reached)
     pub fn merge_local_maps(&mut self) {
-        let known: HashSet<String> = self.catalog.iter().map(id_of).collect();
+        let mut known: HashSet<String> = self.catalog.iter().map(id_of).collect();
         let missing: Vec<Value> = load_local_maps(&self.manager.runtime_dir)
             .iter()
-            .filter(|map| !known.contains(&map.id))
             .map(LocalMap::to_catalog_entry)
+            .chain(steam_catalog::load_downloaded(&self.manager.runtime_dir))
+            .filter(|map| known.insert(id_of(map)))
             .collect();
         if !missing.is_empty() {
             self.catalog.extend(missing);
@@ -1119,40 +1243,52 @@ impl WorkshopState {
         }
     }
 
-    /// kick off the async catalog fetch (once at startup)
+    /// kick off the first workshop page (once at startup)
     pub fn fetch_catalog(&mut self, tx: Sender<AppMsg>, ctx: eframe::egui::Context) {
         if self.fetched {
             return;
         }
         self.fetched = true;
-        std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<Value>, String> {
-                let resp = get_retry(API_ENDPOINT, Duration::from_secs(10))?;
-                let data: Value = resp.into_json().map_err(|e| e.to_string())?;
-                if let Value::Array(items) = data {
-                    return Ok(items);
-                }
-                Ok(data
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default())
-            })();
-            let _ = tx.send(AppMsg::WorkshopCatalog(result));
-            ctx.request_repaint();
-        });
+        self.merge_local_maps();
+        self.request_steam_page(false, &tx, &ctx);
     }
 
+    /// which catalog entries show. Browsing: the workshop results in Steam's
+    /// order, then imported maps matching the search. View downloaded: every
+    /// downloaded or imported map matching the search.
     pub fn execute_search(&mut self, reset_page: bool) {
         let query = self.search.to_lowercase().trim().to_string();
+        let matches_query = |m: &Value| {
+            str_of(m, "name", "").to_lowercase().contains(&query)
+                || str_of(m, "author", "").to_lowercase().contains(&query)
+        };
         self.valid.clear();
-        for (i, m) in self.catalog.iter().enumerate() {
-            let name = str_of(m, "name", "").to_lowercase();
-            let author = str_of(m, "author", "").to_lowercase();
-            let matches_query = name.contains(&query) || author.contains(&query);
-            let matches_dl = !self.view_downloaded || self.is_downloaded(&id_of(m));
-            if matches_query && matches_dl {
-                self.valid.push(i);
+        if self.view_downloaded {
+            for (i, m) in self.catalog.iter().enumerate() {
+                if matches_query(m) && self.is_downloaded(&id_of(m)) {
+                    self.valid.push(i);
+                }
+            }
+        } else {
+            let index: HashMap<String, usize> = self
+                .catalog
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (id_of(m), i))
+                .collect();
+            // results already match their search (Steam also matches
+            // descriptions); while a new search is pending, narrow them by name
+            let pending = self.search.trim() != self.steam_query;
+            self.valid.extend(
+                self.steam_results
+                    .iter()
+                    .filter_map(|id| index.get(id).copied())
+                    .filter(|&i| !pending || matches_query(&self.catalog[i])),
+            );
+            for (i, m) in self.catalog.iter().enumerate() {
+                if is_local_entry(m) && matches_query(m) {
+                    self.valid.push(i);
+                }
             }
         }
         if reset_page {
@@ -1345,7 +1481,22 @@ impl WorkshopState {
 
         // The shared browser controls leave the map card renderers intact.
         if crate::ui::browser::search(ui, &mut self.search, t("ball-name-or-author")) {
-            self.execute_search(true);
+            if self.view_downloaded {
+                self.execute_search(true);
+            } else {
+                self.search_edited = Some(Instant::now());
+            }
+        }
+        if let Some(edited) = self.search_edited {
+            let wait = Duration::from_millis(450).saturating_sub(edited.elapsed());
+            if wait.is_zero() {
+                self.search_edited = None;
+                if self.search.trim() != self.steam_query {
+                    self.request_steam_page(false, tx, &ctx);
+                }
+            } else {
+                ctx.request_repaint_after(wait);
+            }
         }
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -1353,6 +1504,14 @@ impl WorkshopState {
                 .changed()
             {
                 self.execute_search(true);
+                if !self.view_downloaded && self.search.trim() != self.steam_query {
+                    self.request_steam_page(false, tx, &ctx);
+                }
+            }
+            if self.steam_loading {
+                ui.spinner();
+            } else if !self.view_downloaded && self.steam_total > 0 {
+                ui.weak(format!("{} on the Steam Workshop", self.steam_total));
             }
             ui.menu_button("?", |ui| {
                 ui.set_max_width(280.0);
@@ -1388,6 +1547,10 @@ impl WorkshopState {
         let column_count = self.browse_columns(ui, presentation.as_deref());
         self.page_size = column_count * crate::ui::browser::ROWS;
         crate::ui::browser::pagination(ui, &mut self.page, self.valid.len(), self.page_size);
+        // the next workshop page loads as the player reaches the last one
+        if !self.view_downloaded && self.page + 2 >= self.total_pages() {
+            self.request_steam_page(true, tx, &ctx);
+        }
 
         // Card grid
         let start = self.page * self.page_size;
@@ -2912,6 +3075,14 @@ impl WorkshopState {
     /// called when a WorkshopOpDone message arrives
     pub fn finish_op(&mut self) {
         self.busy.clear();
+        // a workshop download learnt the map's package name; LAN hosting needs it
+        let downloaded = steam_catalog::load_downloaded(&self.manager.runtime_dir);
+        for entry in self.catalog.iter_mut().filter(|e| e.get("file").is_none()) {
+            let id = id_of(entry);
+            if let Some(file) = downloaded.iter().find(|d| id_of(d) == id).and_then(|d| d.get("file")) {
+                entry["file"] = file.clone();
+            }
+        }
         self.execute_search(false);
     }
 
@@ -3325,6 +3496,8 @@ mod theme_layout_tests {
                 let mut workshop = WorkshopState::new(&base);
                 workshop.fetched = true;
                 workshop.catalog = (0..40).map(|i| serde_json::json!({"id":format!("map-{i}"),"name":format!("Map {i}"),"author":"Map author","banner_path":""})).collect();
+                // browsing shows the workshop results
+                workshop.steam_results = workshop.catalog.iter().map(id_of).collect();
                 workshop.execute_search(true);
                 let (tx, _rx) = crossbeam_channel::unbounded();
                 let mut output = egui::FullOutput::default();
