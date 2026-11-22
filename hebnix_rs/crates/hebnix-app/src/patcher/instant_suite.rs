@@ -317,7 +317,7 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
     let desired = if installed.is_none() && !is_vanilla {
         let original = MOVIE.recover_original(cooked, backups, &live)
             .ok_or("No matching original winner code is available to install the Instant Suite hook.")?;
-        let edited = super::title_patcher::movie::install_instant_suite(&current, &original, MOVIE.patched)?
+        let edited = super::title_patcher::movie::apply_template(&current, &original, MOVIE.patched)?
             .ok_or("The winner code block could not be located in the installed menu.")?;
         let (_, upgraded) = edit_hook(&edited, true)?;
         Some(upgraded.unwrap_or(edited))

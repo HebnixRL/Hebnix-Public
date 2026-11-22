@@ -1,9 +1,8 @@
-//! Hebnix 2.3.1 had a Chat Test that put a block at the end of
+//! The Chat Test puts a block at the end of
 //! MatchStatsExporter_TA.ProcessSocketCommand for {"Command":"HebnixChatTest",...}.
-//! Later versions dropped the feature, but a game it was turned on in still has
-//! the block. Other features that edit the function (Auto Upload, the Workshop
-//! host) only accept blocks they know, so the leftover one is recognized here,
-//! built the same way it was installed, and taken out.
+//! Other features that edit the function (Auto Upload, the Workshop host) take
+//! the blocks at its end off first and put them back after. This recognizes the
+//! Chat Test block in any format it was released with, so it can come off.
 use super::script_patch::{Script, replace_script};
 use super::upk_package::UpkPackage;
 use super::workshop_host::{COMMAND, call, context, field, jump, native, object, payload, store, string};

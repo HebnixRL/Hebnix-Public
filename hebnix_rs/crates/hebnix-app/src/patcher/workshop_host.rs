@@ -286,6 +286,7 @@ pub(crate) fn attach_freeplay_restart(upk: &mut UpkPackage, version: u8) -> Resu
 pub(crate) enum TailBlock {
     Freeplay(u8),
     Host,
+    ChatTest,
 }
 
 /// Take every block this module put at the end of ProcessSocketCommand off,
@@ -304,10 +305,10 @@ pub(crate) fn detach_tail_blocks(upk: &mut UpkPackage) -> Result<Vec<TailBlock>,
             return Ok(detached);
         }
         // Each remover only takes a block that sits right before the tail,
-        // and changes nothing when it doesn't. The old Chat Test block is
-        // dropped for good: this version has no Chat Test to put it back.
+        // and changes nothing when it doesn't. The Chat Test block goes back
+        // as the current Chat Test writes it.
         if chat && super::chat_test_cleanup::remove_at_tail(upk)? {
-            tracing::info!("removed the old Chat Test block from {COMMAND}");
+            detached.push(TailBlock::ChatTest);
         } else if host && remove(upk).is_ok() {
             detached.push(TailBlock::Host);
         } else if let Some(version) = freeplay {
@@ -324,6 +325,7 @@ pub(crate) fn attach_tail_blocks(upk: &mut UpkPackage, blocks: &[TailBlock]) -> 
         match block {
             TailBlock::Host => add(upk)?,
             TailBlock::Freeplay(version) => attach_freeplay_restart(upk, *version)?,
+            TailBlock::ChatTest => super::chat_test::attach(upk)?,
         }
     }
     Ok(())

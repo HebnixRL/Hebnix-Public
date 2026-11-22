@@ -104,6 +104,7 @@ pub struct LiteApp {
     tab: Tab,
     plugins_tab: PluginsTab,
     hebnix_settings_tab: HebnixSettingsTab,
+    appearance_theme_tab: bool,
     selected_settings_plugin: Option<String>,
     install_modal: InstallModal,
     console: crate::ui::console::ConsoleState,
@@ -319,6 +320,7 @@ impl LiteApp {
             tab: Tab::Console,
             plugins_tab: PluginsTab::Installed,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
+            appearance_theme_tab: false,
             selected_settings_plugin: None,
             install_modal: InstallModal::default(),
             console: crate::ui::console::ConsoleState::default(),
@@ -887,6 +889,36 @@ impl LiteApp {
         } else {
             self.console.write("[Console] Could not bind that key.");
         }
+    }
+
+    /// switch the UI language right away and remember it
+    fn change_theme(&mut self, ctx: &egui::Context, choice: &str) {
+        let error_file = self.base_dir.join("theme_errors.txt");
+        match theme::apply_theme(ctx, &self.themes_dir, &self.fonts_dir, choice) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&error_file);
+                self.config.settings.theme = choice.to_string();
+                self.save_config();
+                self.console.write(format!(
+                    "[Console] {}",
+                    t_args("console-theme-changed", &[("theme", choice.into())])
+                ));
+            }
+            Err(e) => {
+                let _ = std::fs::write(
+                    &error_file,
+                    format!("Runtime Theme Error ({choice}): {e}\n"),
+                );
+                let _ = theme::apply_theme(ctx, &self.themes_dir, &self.fonts_dir, "Dark");
+                self.config.settings.theme = "Dark".to_string();
+                self.save_config();
+                self.console.write(format!(
+                    "[Console] {}",
+                    t_args("console-theme-failed", &[("theme", choice.into())])
+                ));
+            }
+        }
+        theme::apply_window_opacity(ctx, self.config.settings.window_opacity);
     }
 
     /// switch the UI language right away and remember it
@@ -2216,42 +2248,64 @@ impl LiteApp {
 
     fn render_hebnix_settings(&mut self, ui: &mut egui::Ui) {
         theme::secondary_navigation(ui, "lite_hebnix_settings_list").show(ui, |ui| {
-            let tabs = [
-                (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
-                (HebnixSettingsTab::Directories, t("nav-files-folders")),
-                (HebnixSettingsTab::System, t("settings-nav-system")),
-                (HebnixSettingsTab::Discord, t("settings-nav-discord")),
-                (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
-            ];
-            for (tab, label) in tabs {
-                ui.selectable_value(&mut self.hebnix_settings_tab, tab, label);
-            }
-        });
-        crate::i18n::layout::subtab_content_frame().show(ui, |ui| {
             egui::ScrollArea::vertical()
-                .id_salt("lite_hebnix_settings_content")
-                .auto_shrink([false, false])
+                .id_salt("lite_hebnix_settings_names")
                 .show(ui, |ui| {
-                    ui.heading(match self.hebnix_settings_tab {
-                        HebnixSettingsTab::Interface => t("nav-settings-appearance"),
-                        HebnixSettingsTab::Directories => t("nav-files-folders"),
-                        HebnixSettingsTab::Discord => t("settings-heading-discord"),
-                        HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
-                        HebnixSettingsTab::System => t("settings-heading-system"),
+                    crate::panel::followed(ui, |ui| {
+                        let tabs = [
+                            (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
+                            (HebnixSettingsTab::Directories, t("nav-files-folders")),
+                            (HebnixSettingsTab::System, t("settings-nav-system")),
+                            (HebnixSettingsTab::Discord, t("settings-nav-discord")),
+                            (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
+                        ];
+                        for (value, label) in tabs {
+                            ui.selectable_value(&mut self.hebnix_settings_tab, value, label);
+                        }
                     });
-                    ui.add_space(8.0);
-                    match self.hebnix_settings_tab {
-                        HebnixSettingsTab::Interface => self.render_interface_settings(ui),
-                        HebnixSettingsTab::Directories => self.render_stats_settings(ui),
-                        HebnixSettingsTab::Discord => self.render_discord_settings(ui),
-                        HebnixSettingsTab::ActionButton => self.render_action_button_settings(ui),
-                        HebnixSettingsTab::System => self.render_system_settings(ui),
-                    }
                 });
         });
+
+        egui::CentralPanel::default()
+            .frame(crate::i18n::layout::subtab_content_frame())
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("lite_hebnix_settings_view")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        crate::i18n::layout::bordered_panel(ui, |ui| {
+                            crate::theme::page_heading(ui, match self.hebnix_settings_tab {
+                                HebnixSettingsTab::Interface => t("nav-settings-appearance"),
+                                HebnixSettingsTab::Directories => t("nav-files-folders"),
+                                HebnixSettingsTab::Discord => t("settings-heading-discord"),
+                                HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
+                                HebnixSettingsTab::System => t("settings-heading-system"),
+                            });
+                            ui.separator();
+
+                            match self.hebnix_settings_tab {
+                                HebnixSettingsTab::Interface => self.render_interface_settings(ui),
+                                HebnixSettingsTab::Directories => self.render_stats_settings(ui),
+                                HebnixSettingsTab::Discord => self.render_discord_settings(ui),
+                                HebnixSettingsTab::ActionButton => self.render_action_button_settings(ui),
+                                HebnixSettingsTab::System => self.render_system_settings(ui),
+                            }
+                        });
+                    });
+            });
     }
 
     fn render_interface_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.appearance_theme_tab, false, t("settings-appearance-general"));
+            ui.selectable_value(&mut self.appearance_theme_tab, true, t("settings-appearance-theme"));
+        });
+        ui.separator();
+        if self.appearance_theme_tab {
+            self.render_theme_settings(ui);
+            return;
+        }
+
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
             ui.label(t("settings-keybind-label"));
@@ -2309,33 +2363,6 @@ impl LiteApp {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(t("settings-theme-label"));
-            let mut choice = self.config.settings.theme.clone();
-            egui::ComboBox::from_id_salt("lite_theme")
-                .selected_text(&choice)
-                .show_ui(ui, |ui| {
-                    for item in &self.theme_options {
-                        ui.selectable_value(&mut choice, item.clone(), item);
-                    }
-                });
-            if choice != self.config.settings.theme {
-                if theme::apply_theme(&ctx, &self.themes_dir, &self.fonts_dir, &choice).is_ok() {
-                    self.config.settings.theme = choice;
-                    self.save_config();
-                }
-                theme::apply_window_opacity(&ctx, self.config.settings.window_opacity);
-            }
-            if ui.button(t("btn-refresh")).clicked() {
-                self.theme_options = theme::list_themes(&self.themes_dir);
-            }
-            if ui.button(t("btn-open-folder")).clicked() {
-                let _ = open::that(&self.themes_dir);
-            }
-            if ui.button(t("settings-open-fonts-folder")).clicked() {
-                let _ = open::that(&self.fonts_dir);
-            }
-        });
-        ui.horizontal(|ui| {
             ui.label(t("settings-opacity-label"));
             if ui
                 .add(egui::Slider::new(
@@ -2352,6 +2379,74 @@ impl LiteApp {
                 );
                 theme::apply_window_opacity(&ctx, self.config.settings.window_opacity);
                 self.save_config();
+            }
+        });
+    }
+
+    fn render_theme_settings(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let label_w = crate::i18n::layout::label_column_width(ui, &[t("settings-theme-label")], 130.0);
+        ui.horizontal_wrapped(|ui| {
+            crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
+            let mut selected = self.config.settings.theme.clone();
+            let mut changed = false;
+            egui::ComboBox::from_id_salt("theme_select")
+                .selected_text(selected.clone())
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    for option in self.theme_options.clone() {
+                        if ui
+                            .selectable_value(
+                                &mut selected,
+                                option.clone(),
+                                option,
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            if changed {
+                self.change_theme(&ctx, &selected);
+            }
+            if ui.button(t("btn-refresh")).clicked() {
+                self.theme_options = theme::list_themes(&self.themes_dir);
+                let selected = self.config.settings.theme.clone();
+                self.change_theme(&ctx, &selected);
+                self.console.write(format!(
+                    "[Console] {}",
+                    t("console-themes-rescanned")
+                ));
+            }
+            if ui.button(t("settings-import-themes")).clicked() {
+                let dialog = rfd::FileDialog::new()
+                    .set_title(t("settings-import-themes"))
+                    .add_filter("ZIP", &["zip"]);
+                if let Some(path) = winutil::parent_file_dialog(dialog).pick_file() {
+                    match crate::deep_link::import_theme_zip(&path, &self.themes_dir, &self.fonts_dir) {
+                        Ok(()) => {
+                            self.theme_options = theme::list_themes(&self.themes_dir);
+                            let selected = self.config.settings.theme.clone();
+                            self.change_theme(&ctx, &selected);
+                        }
+                        Err(error) => {
+                            let dialog = rfd::MessageDialog::new()
+                                .set_title(t("settings-import-themes"))
+                                .set_level(rfd::MessageLevel::Error)
+                                .set_description(error);
+                            #[cfg(target_os = "windows")]
+                            let dialog = winutil::parent_message_dialog(dialog);
+                            dialog.show();
+                        }
+                    }
+                }
+            }
+            if ui.button(t("btn-open-folder")).clicked() {
+                let _ = open::that(&self.themes_dir);
+            }
+            if ui.button(t("settings-open-fonts-folder")).clicked() {
+                let _ = open::that(&self.fonts_dir);
             }
         });
     }

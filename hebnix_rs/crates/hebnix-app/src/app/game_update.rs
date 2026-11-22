@@ -94,6 +94,7 @@ impl HebnixApp {
             || self.bots_freeplay.busy()
             || self.freeplay.patch_busy()
             || self.chat_export.busy()
+            || self.chat_test.busy()
             || self.lan_commands.busy()
             || self.chat_paste.busy()
             || self.swapper.busy()

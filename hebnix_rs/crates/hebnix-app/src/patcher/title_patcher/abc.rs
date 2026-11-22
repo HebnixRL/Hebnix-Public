@@ -365,6 +365,25 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
     }
     let (current, old, new) = (Abc::parse(live)?, Abc::parse(before)?, Abc::parse(after)?);
     let header_end = |abc: &Abc, len| abc.bodies.first().map_or(len, |body| body.span.start);
+    // A replacement HUD may already lack the previous title patch. Confirm
+    // none of the title-owned replacements still match before using it as
+    // the new baseline. Another HUD patch may have changed these getters.
+    let has_marker = |abc: &Abc| abc.strings.values.iter().any(|value| value == MARKER);
+    if !has_marker(&old) && has_marker(&new) && !has_marker(&current)
+        && old.bodies.len() == new.bodies.len()
+    {
+        let by_id: std::collections::HashMap<_, _> =
+            current.bodies.iter().map(|body| (body.id, body)).collect();
+        if old.bodies.iter().zip(&new.bodies).all(|(old, new)| {
+            old.id == new.id
+                && (before[old.span.clone()] == after[new.span.clone()]
+                    || by_id.get(&old.id).is_some_and(|live_body| {
+                        live[live_body.span.clone()] != after[new.span.clone()]
+                    }))
+        }) {
+            return Ok(None);
+        }
+    }
     let live_header = &live[..header_end(&current, live.len())];
     let old_header = &before[..header_end(&old, before.len())];
     let new_header = &after[..header_end(&new, after.len())];
@@ -432,6 +451,25 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
     }
     Abc::parse(&output)?;
     Ok(Some(output))
+}
+
+pub(super) fn apply_template(live: &[u8], original: &[u8], patched: &[u8]) -> Result<Option<Vec<u8>>> {
+    if live == patched {
+        return Ok(None);
+    }
+    if live == original {
+        return Ok(Some(patched.to_vec()));
+    }
+    // A body-only template can share a block with independent method edits.
+    // For structural templates, copying bodies between different index tables
+    // requires relocating their operands.
+    let old = Abc::parse(original)?;
+    let new = Abc::parse(patched)?;
+    let header = |abc: &Abc, len| abc.bodies.first().map_or(len, |body| body.span.start);
+    if original[..header(&old, original.len())] != patched[..header(&new, patched.len())] {
+        return Err("The live target ABC differs from the baseline required by this structural hook".into());
+    }
+    revert(live, patched, original)
 }
 
 fn select_original<'a>(
@@ -1574,6 +1612,26 @@ pub(super) fn patch(data: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn template_preserves_an_independent_method_edit() {
+        let image = |first, second| {
+            let mut bytes = vec![16, 0, 46, 0];
+            bytes.extend([0; 11]);
+            bytes.push(2);
+            for (id, opcode) in [first, second].into_iter().enumerate() {
+                bytes.extend([id as u8, 1, 1, 0, 0, 2, opcode, 0x47, 0, 0]);
+            }
+            bytes
+        };
+        let original = image(0x02, 0x02);
+        let patched = image(0x09, 0x02);
+        let live = image(0x02, 0x09);
+        let merged = image(0x09, 0x09);
+        assert_eq!(apply_template(&live, &original, &patched).unwrap(), Some(merged.clone()));
+        assert_eq!(apply_template(&merged, &patched, &original).unwrap(), Some(live));
+        assert!(apply_template(&image(0x26, 0x02), &original, &patched).is_err());
+    }
+
     use super::*;
     use std::{cell::RefCell, rc::Rc};
 

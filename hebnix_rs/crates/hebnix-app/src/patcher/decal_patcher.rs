@@ -2437,6 +2437,24 @@ fn restore_all_decal_files(
     Ok(package_count + tfc_count)
 }
 
+pub(crate) fn restore_uninstall_targets(
+    targets: &[(String, Option<String>)],
+    cooked: &Path,
+    backups: &Path,
+    base: &Path,
+) -> Result<(), String> {
+    for (name, asset) in targets {
+        if let Some(asset) = asset {
+            super::decal_variant::restore_product(
+                &cooked.join(name), &backups.join(format!("{name}.bak")), asset,
+            )?;
+        } else {
+            restore_package_texture_regions(name, cooked, backups, base)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn restore_for_uninstall(cooked: &Path, backups: &Path) -> Result<(), String> {
     let mut targets = Vec::new();
     let mut has_regions = false;
@@ -3303,6 +3321,19 @@ impl DecalPatcherState {
             ctx_clone.request_repaint();
         });
         Ok(())
+    }
+
+    pub(crate) fn uninstall_targets(&self) -> Result<Vec<(String, Option<String>)>, String> {
+        self.active_decals.keys().map(|key| {
+            let (car, skin) = key.split_once('|').ok_or("Invalid active decal record")?;
+            let skin = self.find_skin(car, skin)?;
+            let asset = if skin.shared_package {
+                Some(skin.asset_path.ok_or("The shared decal has no catalog asset path")?)
+            } else {
+                None
+            };
+            Ok((skin.upk_path, asset))
+        }).collect()
     }
 
     pub fn restore_all_decals(

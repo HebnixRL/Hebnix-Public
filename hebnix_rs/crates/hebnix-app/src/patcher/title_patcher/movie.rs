@@ -16,38 +16,44 @@ pub(super) fn patch(raw: &[u8], rules: &[TitleOverride]) -> Result<Option<(Vec<u
     rewrite(raw, &|abc| abc::patch(abc, rules))
 }
 
-/// Install Instant Suite's winner ABC into an otherwise edited movie. Match
-/// the specific ABC block against its original rather than the entire movie.
-pub(in crate::patcher) fn install_instant_suite(
+/// Apply a template's changed ABC blocks to the live movie, retaining its
+/// other tags. Block names identify candidates and ABC validates the edit.
+pub(in crate::patcher) fn apply_template(
     live: &[u8],
     original: &[u8],
     patched: &[u8],
 ) -> Result<Option<Vec<u8>>> {
-    let mut replacement = None;
-    rewrite_blocks(patched, &mut |header, data| {
-        if abc::instant_suite_hook(data)?.is_some() {
-            replacement = Some((header.to_vec(), data.to_vec()));
-        }
-        Ok(None)
-    })?;
-    let (header, patch) = replacement.ok_or("Missing Instant Suite template")?;
-    let mut baseline = None;
-    rewrite_blocks(original, &mut |name, data| {
-        if name == header {
-            baseline = Some(data.to_vec());
-        }
-        Ok(None)
-    })?;
-    let baseline = baseline.ok_or("Missing original winner code")?;
-    rewrite_blocks(live, &mut |name, data| {
-        if name != header {
+    fn blocks(raw: &[u8]) -> Result<std::collections::HashMap<Vec<u8>, Vec<u8>>> {
+        let mut blocks = std::collections::HashMap::new();
+        rewrite_blocks(raw, &mut |header, data| {
+            if blocks.insert(header.to_vec(), data.to_vec()).is_some() {
+                return Err("Ambiguous ABC block name in movie template".into());
+            }
+            Ok(None)
+        })?;
+        Ok(blocks)
+    }
+    let original = blocks(original)?;
+    let mut patched = blocks(patched)?;
+    if original.len() != patched.len() || !original.keys().all(|key| patched.contains_key(key)) {
+        return Err("Movie template changed the ABC block layout".into());
+    }
+    patched.retain(|name, code| original[name] != *code);
+    let mut found = std::collections::HashSet::new();
+    let result = rewrite_blocks(live, &mut |name, data| {
+        let Some(patch) = patched.get(name) else {
             return Ok(None);
+        };
+        if !found.insert(name.to_vec()) {
+            return Err("Ambiguous target ABC block in live movie".into());
         }
-        if data != baseline {
-            return Err("The winner code itself has other edits. Instant Suite could not safely add its hook.".into());
-        }
-        Ok(Some((patch.clone(), 1)))
-    }).map(|edited| edited.map(|(bytes, _)| bytes))
+        abc::apply_template(data, &original[name], patch)
+            .map(|bytes| bytes.map(|bytes| (bytes, 1)))
+    })?;
+    if found.len() != patched.len() {
+        return Err("A target ABC block is missing from the live movie".into());
+    }
+    Ok(result.map(|(bytes, _)| bytes))
 }
 
 /// Run `edit` over every DoABC block of a GFx/SWF movie and rebuild the movie

@@ -564,9 +564,13 @@ fn group_entries(rows: &[Entry]) -> Vec<(&str, Vec<HistoryPoint<'_>>)> {
         if rank_display_entry(entry) {
             continue;
         }
-        let item = swap.map_or_else(|| entry.item_file(), |swap| swap.source_upk.as_str());
+        let item = if entry.linked {
+            entry.label.strip_prefix("Restore ").unwrap_or(&entry.label)
+        } else {
+            swap.map_or_else(|| entry.item_file(), |swap| swap.source_upk.as_str())
+        };
         let group_index = *group_indexes
-            .entry(item.to_ascii_lowercase())
+            .entry((entry.linked, item.to_ascii_lowercase()))
             .or_insert_with(|| {
                 groups.push((item, Vec::new()));
                 groups.len() - 1
@@ -705,16 +709,20 @@ impl History {
                         .copied()
                         .max_by_key(|point| (point.priority(), std::cmp::Reverse(point.index)))
                         .expect("each history group has at least one point");
-                    let name = points
-                        .iter()
-                        .find_map(|point| {
-                            point
-                                .entry
-                                .related_swap()
-                                .map(|swap| swap.source_name.as_str())
-                        })
-                        .or_else(|| swapper.history_item_name(item))
-                        .unwrap_or(&primary.entry.label);
+                    let name = if primary.entry.linked {
+                        item
+                    } else {
+                        points
+                            .iter()
+                            .find_map(|point| {
+                                point
+                                    .entry
+                                    .related_swap()
+                                    .map(|swap| swap.source_name.as_str())
+                            })
+                            .or_else(|| swapper.history_item_name(item))
+                            .unwrap_or(&primary.entry.label)
+                    };
                     if !name.to_lowercase().contains(&filter)
                         && !points.iter().any(|point| {
                             point.entry.file.to_lowercase().contains(&filter)
@@ -723,7 +731,7 @@ impl History {
                     {
                         continue;
                     }
-                    ui.push_id(item.to_ascii_lowercase(), |ui| {
+                    ui.push_id((primary.entry.linked, item.to_ascii_lowercase()), |ui| {
                         crate::i18n::layout::bordered_panel(ui, |ui| {
                             ui.label(egui::RichText::new(name.replace('\u{2192}', "-")).strong());
                             action = render_point(ui, primary, &mut self.editors, enabled, true)
@@ -1097,6 +1105,34 @@ fn rollback(replacements: &[Replacement]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_history_groups_packages_and_restores_by_feature() {
+        let rows = [
+            ("HUD.upk", "Restore Title overrides", true),
+            ("Menu.upk", "Title overrides", true),
+            ("HUD.upk", "Title overrides", true),
+            ("HUD.upk", "Chat Test", true),
+            ("HUD.upk", "Package edit", false),
+        ]
+        .map(|(file, label, linked)| Entry {
+            file: file.into(),
+            label: label.into(),
+            before: String::new(),
+            after: String::new(),
+            recipe: None,
+            swap: None,
+            linked,
+            unix_seconds: 0,
+            cleared: false,
+        });
+        let groups = group_entries(&rows);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].0, "Title overrides");
+        assert_eq!(groups[0].1.len(), 3);
+        assert!(groups[0].1[1].latest());
+        assert!(!groups[0].1[2].latest());
+    }
 
     #[test]
     fn legacy_rank_entries_are_hidden_but_protect_other_history_points() {

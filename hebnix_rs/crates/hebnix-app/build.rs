@@ -13,10 +13,12 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/multiplayer");
 
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
-        use embed_manifest::{embed_manifest, manifest::DpiAwareness, new_manifest};
+        use embed_manifest::{embed_manifest, manifest::{DpiAwareness, ExecutionLevel}, new_manifest};
 
         embed_manifest(
-            new_manifest("Hebnix.HebnixApp").dpi_awareness(DpiAwareness::PerMonitorV2Only),
+            new_manifest("Hebnix.HebnixApp")
+                .requested_execution_level(ExecutionLevel::AsInvoker)
+                .dpi_awareness(DpiAwareness::PerMonitorV2Only),
         )
         .expect("failed to embed application manifest");
 
