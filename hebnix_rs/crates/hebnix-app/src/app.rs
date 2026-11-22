@@ -59,9 +59,6 @@ pub const MIN_HEIGHT: f32 = DEFAULT_HEIGHT;
 
 const USERNAME_HISTORY_LIMIT: usize = 9;
 
-/// width for a settings page's label column: the widest label on that page,
-/// never narrower than the old fixed 130px, so longer translations aren't
-/// clipped and the inputs next to them still line up.
 /// A non-Steam shortcut that probably starts Rocket League: its name says so,
 /// or it points at a launcher Rocket League is played through on Linux.
 fn likely_rocket_league_shortcut(candidate: &crate::rl_launch::ShortcutCandidate) -> bool {
@@ -80,6 +77,9 @@ const START_WITH_SYSTEM_KEY: &str = if cfg!(target_os = "linux") {
     "system-start-with-windows"
 };
 
+/// width for a settings page's label column: the widest label on that page,
+/// never narrower than the old fixed 130px, so longer translations aren't
+/// clipped and the inputs next to them still line up.
 fn label_column_width(ui: &egui::Ui, labels: &[String]) -> f32 {
     crate::i18n::layout::label_column_width(ui, labels, 130.0)
 }
