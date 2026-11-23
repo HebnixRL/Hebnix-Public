@@ -38,6 +38,8 @@ pub mod actions;
 pub mod dispatcher;
 pub mod celebration;
 pub mod bots_freeplay;
+pub mod menu_access;
+pub mod font_glyphs;
 pub mod forfeit_command;
 pub(crate) mod chat_test_cleanup;
 pub mod workshop_host;

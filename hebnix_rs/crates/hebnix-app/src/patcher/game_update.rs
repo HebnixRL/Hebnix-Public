@@ -210,6 +210,8 @@ fn recover_game_mods(cooked: &Path, archive: &Path) -> Result<(), String> {
             super::forfeit_command::enable as fn(&Path, &Path) -> Result<(), String>),
         ("Celebration", super::celebration::enabled, super::celebration::enable),
         ("Bots in Freeplay", super::bots_freeplay::enabled, super::bots_freeplay::enable),
+        ("Menu access in game", super::menu_access::enabled, super::menu_access::enable),
+        ("All-language font", super::font_glyphs::enabled, super::font_glyphs::enable),
     ] {
         if enabled(archive) && !enabled(&backups) {
             apply(cooked, &backups).map_err(|error| format!("{name}: {error}"))?;

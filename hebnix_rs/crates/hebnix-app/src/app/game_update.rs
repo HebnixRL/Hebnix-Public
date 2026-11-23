@@ -92,6 +92,8 @@ impl HebnixApp {
             || self.forfeit_command.busy()
             || self.celebration.busy()
             || self.bots_freeplay.busy()
+            || self.menu_access.busy()
+            || self.font_glyphs.busy()
             || self.freeplay.patch_busy()
             || self.chat_export.busy()
             || self.chat_test.busy()
