@@ -584,6 +584,7 @@ mod tests {
                     car_name: None,
                     car_product_id: None,
                     shared_package: false,
+                    paintable: false,
                 }]),
             );
             let png: Arc<[u8]> = crate::cosmetic_thumbnail::preview_png(

@@ -2,6 +2,7 @@
 mod save_cleanup;
 
 pub use save_cleanup::{
+    restore_before_added_items,
     apply_loadout_edit, loadout_export, loadout_export_bakkes, loadout_order, loadout_owned_instances, loadout_preset, loadout_summaries,
 };
 mod store;

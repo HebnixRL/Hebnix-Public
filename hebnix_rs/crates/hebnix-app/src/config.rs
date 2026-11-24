@@ -110,6 +110,8 @@ pub struct SettingsCfg {
     pub panel_animate: bool,
     /// Relaunch elevated on start when requested by the user.
     pub run_as_admin: bool,
+    /// Keep the game's inventory sync from replacing items added to the save.
+    pub block_inventory_sync: bool,
     /// Publish Hebnix/Rocket League activity to the local Discord client.
     pub discord_rich_presence: bool,
     /// Show presence only while Rocket League is running.
@@ -161,6 +163,7 @@ impl Default for SettingsCfg {
             panel_width: 0.30,
             panel_animate: true,
             run_as_admin: false,
+            block_inventory_sync: true,
             discord_rich_presence: true,
             discord_rocket_league_only: false,
             discord_game_state: true,

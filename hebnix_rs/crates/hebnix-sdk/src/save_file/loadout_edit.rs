@@ -6,7 +6,7 @@ use super::item_cleanup::{
     Document, Field, Object, field, fields, instance, int_array, replace_field, text,
 };
 use super::loadout_code::{Item, Preset, SLOTS, Team};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 pub enum Edit {
@@ -16,7 +16,14 @@ pub enum Edit {
     Equip { position: usize, changes: Vec<(usize, usize, u64, u64)> },
     Update { position: usize, name: String, changes: Vec<(usize, usize, u64, u64)>, colours: [[u8; 2]; 2], expected: Preset },
     Import(Vec<Preset>),
+    /// Local inventory entries `(product id, paint id; 0 = unpainted)` that the account does not own.
+    AddItems(Vec<(i32, u8)>),
 }
+
+/// Added instances count up from here, well above anything the server issues.
+const ADDED_INSTANCE_BASE: u64 = 0x7E57_0000_0000;
+/// The save format caps objects at 100 000; stay clear of it.
+pub const MAX_OBJECTS: usize = 99_000;
 
 /// Attribute key, object type suffix, value field. Only these kinds exist in the save.
 const ATTRS: [(&str, &str, &str); 7] = [
@@ -51,6 +58,7 @@ pub fn plan(raw: &[u8], edit: &Edit) -> Result<Option<Vec<u8>>, String> {
             renamed || equipped || recoloured
         },
         Edit::Import(presets) => import(&mut doc, presets)?,
+        Edit::AddItems(items) => add_items(&mut doc, items)?,
     };
     if !changed {
         return Ok(None);
@@ -348,6 +356,61 @@ fn import(doc: &mut Document, presets: &[Preset]) -> Result<bool, String> {
     let mut refs = set_refs(doc)?;
     refs.extend(new_sets);
     set_array(&mut doc.objects[profile].bytes, "LoadoutSets", &refs)?;
+    Ok(true)
+}
+
+/// Owned `(product, paint)` pairs and the highest instance number in the save.
+fn product_pairs(doc: &Document) -> Result<(HashSet<(i64, i64)>, u64), String> {
+    let mut pairs = HashSet::new();
+    let mut highest = ADDED_INSTANCE_BASE;
+    for (key, index) in inventory_index(doc)? {
+        let bytes = &doc.objects[index].bytes;
+        let attributes = if span(bytes, "Attributes").is_ok() { array_u32(bytes, "Attributes")? } else { Vec::new() };
+        let paint = attributes.iter().filter_map(|&id| doc.objects.get(id as usize))
+            .find(|o| o.kind == "TAGame.ProductAttribute_Painted_TA")
+            .map(|o| read_scalar(&o.bytes, "PaintID")).transpose()?.unwrap_or(0);
+        pairs.insert((scalar_or_zero(bytes, "ProductID")?, paint));
+        if let Ok(lower) = u64::from_str_radix(&key[16..], 16) {
+            highest = highest.max(lower);
+        }
+    }
+    Ok((pairs, highest))
+}
+
+/// Requested pairs the save does not hold yet, without duplicates.
+fn missing_items(doc: &Document, items: &[(i32, u8)]) -> Result<(Vec<(i32, u8)>, u64), String> {
+    let (owned, highest) = product_pairs(doc)?;
+    let mut seen = HashSet::new();
+    let missing = items.iter().copied()
+        .filter(|&(id, paint)| id > 0 && seen.insert((id, paint)) && !owned.contains(&(i64::from(id), i64::from(paint))))
+        .collect();
+    Ok((missing, highest))
+}
+
+/// How many of `items` a save would gain, so the caller can warn before writing.
+pub fn new_item_count(raw: &[u8], items: &[(i32, u8)]) -> Result<usize, String> {
+    Ok(missing_items(&Document::read(raw)?, items)?.0.len())
+}
+
+fn add_items(doc: &mut Document, items: &[(i32, u8)]) -> Result<bool, String> {
+    let (missing, mut instance) = missing_items(doc, items)?;
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    let objects = missing.len() + missing.iter().filter(|(_, paint)| *paint > 0).count();
+    if doc.objects.len() + objects > MAX_OBJECTS {
+        return Err(format!("Adding {} items would exceed the save's object limit. Add fewer items.", missing.len()));
+    }
+    let product_template = template(doc, "TAGame.OnlineProduct_TA")?;
+    let added = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut refs = array_u32(&doc.root, "OnlineProducts")?;
+    for (id, paint) in missing {
+        instance = instance.checked_add(1).ok_or("instance numbers exhausted")?;
+        let attributes = if paint > 0 { vec![("Painted".to_string(), paint.to_string())] } else { Vec::new() };
+        let item = Item { product_id: id, instance_upper: 0, instance_lower: instance, series_id: 0, added_timestamp: added, trade_hold: None, attributes };
+        refs.push(push_product(doc, &product_template, &item)? as u32);
+    }
+    set_array(&mut doc.root, "OnlineProducts", &refs)?;
     Ok(true)
 }
 
@@ -796,6 +859,43 @@ mod tests {
         assert_eq!(read_scalar(paint, "TeamColorID").unwrap(), 19);
         assert_eq!(read_scalar(paint, "CustomColorID").unwrap(), 12);
         assert_eq!(read_scalar(paint, "TeamFinishID").unwrap(), 43);
+    }
+
+    #[test]
+    fn adding_items_skips_owned_pairs_and_numbers_new_instances() {
+        let mut root = empty();
+        append_array(&mut root, "OnlineProducts", &[0]).unwrap();
+        let mut product = empty();
+        insert_property(&mut product, "ProductID", "IntProperty", &42u32.to_le_bytes()).unwrap();
+        append_array(&mut product, "Attributes", &[1]).unwrap();
+        let blob = instance_blob(0, 9);
+        let mut instance_field = write_ue3("InstanceID");
+        instance_field.extend(write_ue3("StructProperty"));
+        instance_field.extend((blob.len() as u32).to_le_bytes());
+        instance_field.extend(0u32.to_le_bytes());
+        instance_field.extend(write_ue3("ProductInstanceID"));
+        instance_field.extend(blob);
+        product.splice(0..0, instance_field);
+        let mut paint = empty();
+        insert_property(&mut paint, "PaintID", "IntProperty", &3u32.to_le_bytes()).unwrap();
+        let mut doc = Document { header: vec![], root, tail: vec![], objects: vec![
+            obj("TAGame.OnlineProduct_TA", 0, product),
+            obj("TAGame.ProductAttribute_Painted_TA", 1, paint),
+        ]};
+        // (42,3) is owned, (43,5) repeats, and 0 or negative ids are ignored.
+        assert!(add_items(&mut doc, &[(42, 3), (42, 0), (43, 5), (43, 5), (0, 0), (-1, 0)]).unwrap());
+        assert_eq!(array_u32(&doc.root, "OnlineProducts").unwrap(), [0, 2, 4]);
+        assert_eq!(doc.objects.len(), 5);
+        let lows: Vec<_> = [2, 4].iter().map(|&i| {
+            let (_, r) = span(&doc.objects[i].bytes, "InstanceID").unwrap();
+            instance(&doc.objects[i].bytes[r]).unwrap().0
+        }).collect();
+        assert_eq!(lows, [format!("{:032x}", ADDED_INSTANCE_BASE + 1), format!("{:032x}", ADDED_INSTANCE_BASE + 2)]);
+        assert_eq!(read_scalar(&doc.objects[4].bytes, "ProductID").unwrap(), 43);
+        let painted = array_u32(&doc.objects[4].bytes, "Attributes").unwrap();
+        assert_eq!(read_scalar(&doc.objects[painted[0] as usize].bytes, "PaintID").unwrap(), 5);
+        // Nothing left to add the second time.
+        assert!(!add_items(&mut doc, &[(42, 3), (42, 0), (43, 5)]).unwrap());
     }
 
     #[test]

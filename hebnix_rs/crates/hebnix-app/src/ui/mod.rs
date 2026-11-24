@@ -1,6 +1,7 @@
 //! ui tabs + widgets.
 
 pub(crate) mod browser;
+pub mod add_items;
 pub mod console;
 pub mod loadouts;
 pub mod rlapi;

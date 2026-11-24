@@ -294,10 +294,48 @@ pub fn apply_loadout_edit(path: &Path, edit: &loadout_edit::Edit) -> Result<(), 
     if hebnix_sdk::process::detector::rocket_league_running_checked()? {
         return Err(crate::i18n::t("loadouts-close-game"));
     }
-    execute(&[path.to_owned()], "loadout", require_closed, |raw| {
+    let tag = if matches!(edit, loadout_edit::Edit::AddItems(_)) { ADDED_ITEMS_TAG } else { "loadout" };
+    execute(&[path.to_owned()], tag, require_closed, |raw| {
         loadout_edit::plan(raw, edit)
     })?;
     Ok(())
+}
+
+/// Backups made before adding items carry this tag, so they can be found again.
+const ADDED_ITEMS_TAG: &str = "additems";
+
+/// Puts back the save as it was before the first added item (the oldest `additems`
+/// backup), keeping every backup. The current save is kept beside it first.
+pub fn restore_before_added_items(path: &Path) -> Result<String, String> {
+    require_closed()?;
+    let dir = path.parent().ok_or("invalid save path")?;
+    let name = path.file_name().ok_or("invalid save filename")?.to_string_lossy().into_owned();
+    let prefix = format!("{name}.hebnix-{ADDED_ITEMS_TAG}-");
+    let mut backups: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            file.starts_with(&prefix) && file.ends_with(".bak")
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    backups.sort();
+    let (_, backup) = backups.into_iter().next().ok_or("No backup from before added items was found next to this save.")?;
+    let good = std::fs::read(&backup).map_err(|e| e.to_string())?;
+    regular(path)?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    std::fs::copy(path, path.with_file_name(format!("{name}.hebnix-prerestore-{stamp}.bak"))).map_err(|e| e.to_string())?;
+    // The game rotates `_1`/`_2` copies of the account save; stale injected ones would be picked up again.
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let mut targets = vec![path.to_owned()];
+    targets.extend(["_1", "_2"].map(|n| path.with_file_name(format!("{stem}{n}.save"))).into_iter().filter(|p| p.is_file()));
+    for target in &targets {
+        let temp = target.with_extension("save.hebnix-restore.tmp");
+        std::fs::write(&temp, &good).map_err(|e| e.to_string())?;
+        std::fs::rename(&temp, target).map_err(|e| e.to_string())?;
+    }
+    Ok(backup.display().to_string())
 }
 
 pub fn loadout_summaries(path: &Path) -> Result<Vec<(String, i64)>, String> {

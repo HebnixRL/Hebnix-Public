@@ -78,6 +78,7 @@ mod tests {
                         car_name: None,
                         car_product_id: None,
                         shared_package: false,
+                        paintable: false,
                     })
                     .collect(),
             ),

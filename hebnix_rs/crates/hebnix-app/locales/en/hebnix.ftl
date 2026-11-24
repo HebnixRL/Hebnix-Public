@@ -1145,3 +1145,39 @@ scoreboard-current-playlist = Show current playlist
 scoreboard-current-gamemode = Show current gamemode
 scoreboard-manual-selection = Choose a playlist manually
 scoreboard-choose-mode = Choose a gamemode
+
+
+add-items-title = Add items to save (experimental)
+add-items-warning-title = Read this before you touch anything
+add-items-warning-body = This writes items into your Rocket League save file that your account does not own. They only exist on your PC. Online matches, trading and the item shop will not know about them, and the next time the game syncs with Psyonix's servers your inventory can be wiped back to what you really own. A big batch can bloat your save by tens of megabytes, slow the game down or stop it loading, and a broken save can take your loadouts with it. Hebnix keeps a .bak copy next to the save, but you are the one who has to restore it. Close Rocket League first. Do not use this on an account you care about, and do not pass these items off as real.
+add-items-understood = I understand this can fry my save and I accept that
+add-items-all = Add every item in the game
+add-items-all-paints = Also add every painted variant (adds tens of thousands of entries, around 20 MB)
+add-items-size-note = Painted variants roughly add 30,000 entries. Expect a very large save and a slow first load.
+add-items-search = Search items
+add-items-every-category = All categories
+add-items-unpainted = Unpainted
+add-items-clear = Clear picks
+add-items-picked = { $count } picked
+add-items-apply = Add { $count } entries to save
+add-items-done = Added { $count } entries. Start the game offline to use them.
+add-items-nothing-new = Nothing to add: the save already has all of these.
+add-items-failed = Adding items failed unexpectedly. Your save was not changed.
+
+loadouts-bakkes-method = Method
+loadouts-bakkes-method-swap = Swaps
+loadouts-bakkes-method-save = Save file (experimental)
+loadouts-bakkes-method-save-note = The items are written into your save as local inventory entries and equipped on the copy. They only work offline, in freeplay and in LAN. Close the game first. Online servers reset loadouts to what you really own.
+loadouts-bakkes-method-fallback = This code has custom colours, which a save cannot hold. Using swaps instead.
+loadouts-bakkes-saved-to-save = Saved "{ $name }" with the code's items added to your save.
+
+sync-block-checkbox = Block the game's inventory sync (keeps added items from being wiped)
+sync-block-hint = Patches TAGame.upk so Rocket League stops replacing your inventory with what the server says you own. Needed for added items to survive an online launch. Remove it any time.
+sync-block-active = Sync block is installed.
+sync-block-remove = Remove sync block
+sync-block-removed = Sync block removed. The game will sync normally again.
+
+add-items-restore = Restore save and disable sync block
+add-items-restore-hint = Puts back the save as it was before the first item was added, then removes the sync block. Every backup stays next to the save, and so does a copy of the save you are replacing. Anything you changed in that save since then (loadouts, new items) is lost.
+add-items-restored = Save restored from the backup and the sync block is off. Start the game to sync normally.
+add-items-restored-block-failed = Save restored, but the sync block could not be removed:

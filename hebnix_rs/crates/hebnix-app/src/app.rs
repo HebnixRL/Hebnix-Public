@@ -518,6 +518,7 @@ enum ItemsSubTab {
     Active,
     Presets,
     Loadouts,
+    AddItems,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -797,6 +798,7 @@ pub struct HebnixApp {
     plugin_delete_prompt: Option<String>,
     presets: crate::presets::PresetStore,
     loadouts: crate::ui::loadouts::LoadoutsPanel,
+    add_items: crate::ui::add_items::AddItemsPanel,
 }
 
 /// load the overlay font picked in settings (bundled default when unset or
@@ -1407,6 +1409,7 @@ impl HebnixApp {
             plugin_delete_prompt: None,
             presets: crate::presets::PresetStore::new(&base_dir.clone()),
             loadouts: Default::default(),
+            add_items: Default::default(),
         };
 
         if hidden {
@@ -2619,6 +2622,7 @@ impl HebnixApp {
                     ItemsSubTab::Active,
                     ItemsSubTab::Presets,
                     ItemsSubTab::Loadouts,
+                    ItemsSubTab::AddItems,
                 ],
                 &mut self.items_subtab,
                 step,
@@ -8191,6 +8195,7 @@ impl HebnixApp {
                 (ItemsSubTab::Active, "nav-active"),
                 (ItemsSubTab::Presets, "presets-presets"),
                 (ItemsSubTab::Loadouts, "loadouts-title"),
+                (ItemsSubTab::AddItems, "add-items-title"),
             ] {
                 ui.selectable_value(&mut self.items_subtab, value, t(key));
             }
@@ -8222,6 +8227,9 @@ impl HebnixApp {
                     });
             });
         }
+        let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
+            .join("TAGame")
+            .join("CookedPCConsole");
         if self.items_subtab == ItemsSubTab::Loadouts {
             if self.catalogs_loading {
                 ui.horizontal(|ui| { ui.spinner(); ui.label(t("app-loading-item-catalogs")); });
@@ -8232,18 +8240,23 @@ impl HebnixApp {
                     self.reload_catalogs(ui.ctx());
                 }
             }
-            let cooked_pc = PathBuf::from(&self.config.settings.rl_path)
-                .join("TAGame")
-                .join("CookedPCConsole");
+            let mut sync_changed = false;
             let apply = egui::ScrollArea::vertical()
                 .id_salt("loadouts_scroll")
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     crate::panel::followed(ui, |ui| {
-                        self.loadouts.show(ui, &mut self.swapper, &cooked_pc, &mut self.presets, self.catalogs_loading)
+                        self.loadouts.block_sync = self.config.settings.block_inventory_sync;
+                        let applied = self.loadouts.show(ui, &mut self.swapper, &cooked_pc, &mut self.presets, self.catalogs_loading);
+                        sync_changed = self.loadouts.block_sync != self.config.settings.block_inventory_sync;
+                        self.config.settings.block_inventory_sync = self.loadouts.block_sync;
+                        applied
                     })
                 })
                 .inner;
+            if sync_changed {
+                let _ = self.config.save(&self.base_dir);
+            }
             if let Some(name) = apply {
                 if let Some(index) = self.presets.presets.iter().position(|p| p.name == name) {
                     self.presets.selected = index;
@@ -8254,12 +8267,25 @@ impl HebnixApp {
             }
             return;
         }
+        if self.items_subtab == ItemsSubTab::AddItems {
+            egui::ScrollArea::vertical().id_salt("add_items_scroll").auto_shrink([false; 2]).show(ui, |ui| {
+                crate::panel::followed(ui, |ui| {
+                    self.add_items.block_sync = self.config.settings.block_inventory_sync;
+                    self.add_items.show(ui, &self.swapper, &cooked_pc, self.catalogs_loading);
+                    if self.add_items.block_sync != self.config.settings.block_inventory_sync {
+                        self.config.settings.block_inventory_sync = self.add_items.block_sync;
+                        let _ = self.config.save(&self.base_dir);
+                    }
+                });
+            });
+            return;
+        }
         let mode = match self.items_subtab {
             ItemsSubTab::Swapper => ItemsMode::Swapper,
             ItemsSubTab::Colours => ItemsMode::Recolour,
             ItemsSubTab::Active => ItemsMode::ItemsActive,
             ItemsSubTab::Presets => ItemsMode::Presets,
-            ItemsSubTab::Loadouts => unreachable!("Loadouts has its own editor"),
+            ItemsSubTab::Loadouts | ItemsSubTab::AddItems => unreachable!("this page has its own editor"),
         };
         self.render_editor_content(ui, mode);
     }

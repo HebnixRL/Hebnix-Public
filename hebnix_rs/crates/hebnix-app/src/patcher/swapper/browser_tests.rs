@@ -47,6 +47,7 @@ impl BrowserFixture {
                         car_name: Some("Universal".into()),
                         car_product_id: None,
                         shared_package: false,
+                        paintable: false,
                     })
                     .collect(),
             ),

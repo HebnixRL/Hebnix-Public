@@ -38,6 +38,7 @@ pub mod actions;
 pub mod dispatcher;
 pub mod celebration;
 pub mod bots_freeplay;
+pub mod sync_block;
 pub mod forfeit_command;
 pub(crate) mod chat_test_cleanup;
 pub mod workshop_host;

@@ -102,6 +102,14 @@ impl SwapCategory {
 }
 
 #[derive(Clone)]
+pub struct CatalogEntry {
+    pub product_id: i64,
+    pub name: String,
+    pub paintable: bool,
+    pub category: SwapCategory,
+}
+
+#[derive(Clone)]
 struct SwapItem {
     name: String,
     upk: String,
@@ -116,6 +124,7 @@ struct SwapItem {
     car_name: Option<String>,
     car_product_id: Option<i64>,
     shared_package: bool,
+    paintable: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -888,6 +897,7 @@ impl SwapperState {
             car_name: car.map(|(_, name, _)| name.to_string()),
             car_product_id: car.and_then(|(_, _, id)| id),
             shared_package: false,
+            paintable: value.get("paintable").and_then(Value::as_bool).unwrap_or(false),
         });
     }
 
@@ -1916,6 +1926,20 @@ impl SwapperState {
             preview = browser::Preview::Ready(crate::ui::browser::fallback_image(Path::new("")));
         }
         browser::preview(ui, &format!("loadout-body-{id}"), preview, 64.0, false);
+    }
+
+    /// Every catalog product with an id, for pickers that are not swaps.
+    pub fn catalog_entries(&self, category: SwapCategory) -> Vec<CatalogEntry> {
+        let mut seen = HashSet::new();
+        self.catalogs.get(&category).into_iter().flat_map(|items| items.iter())
+            .filter_map(|item| Some(CatalogEntry {
+                product_id: item.product_id?,
+                name: item.name.clone(),
+                paintable: item.paintable,
+                category,
+            }))
+            .filter(|entry| seen.insert(entry.product_id))
+            .collect()
     }
 
     /// Catalog name of a product, if it is in the local catalog.
@@ -3526,7 +3550,7 @@ mod theme_content_space_tests {
         let items:Vec<_>=(0..16).map(|i|SwapItem {
             name:format!("Test body {i}"),upk:format!("test-{i}.upk"),path:None,thumbnail:None,body_preview:None,
             audio_bnk:None,upk_type:"simple".into(),product_id:None,
-            car_key:None,car_name:None,car_product_id:None,shared_package:false,
+            car_key:None,car_name:None,car_product_id:None,shared_package:false,paintable:false,
         }).collect();
         swapper.catalogs.insert(SwapCategory::Bodies,Arc::new(items));
         swapper.resolutions.insert(SwapCategory::Bodies,Resolution {

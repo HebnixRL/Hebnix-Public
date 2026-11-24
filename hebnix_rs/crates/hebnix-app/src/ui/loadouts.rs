@@ -16,6 +16,16 @@ use hebnix_sdk::save_file::{self, SaveAccount, bakkes_code, loadout_code};
 use hebnix_sdk::utils::constants::{SAVE_PATH_EPIC, SAVE_PATH_STEAM};
 use serde_json::{Value, json};
 
+/// How an imported code's items reach the game.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum ImportMethod {
+    /// Local package swaps; others still see the base preset
+    #[default]
+    Swap,
+    /// Local inventory entries written into the save, equipped on the copy
+    Save,
+}
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum SaveMode {
     #[default]
@@ -45,9 +55,14 @@ struct Plan {
     rows: Vec<Row>,
     swaps: Vec<Value>,
     cars: CarColours,
+    method: ImportMethod,
+    /// Save method asked for, but custom colours only exist as swaps
+    fell_back: bool,
+    /// (team, slot, product, paint) to equip on the copy when the save method is used
+    equips: Vec<(usize, usize, i32, u8)>,
 }
 
-type PlanKey = (usize, SaveMode, usize, String);
+type PlanKey = (usize, SaveMode, usize, String, ImportMethod);
 type Palettes = [Vec<[u8; 3]>; 3];
 
 enum PaletteLoad {
@@ -72,6 +87,10 @@ pub struct LoadoutsPanel {
     code: Option<bakkes_code::Code>,
     base: usize,
     mode: SaveMode,
+    method: ImportMethod,
+    /// Set by the app from settings before each frame, read back after it
+    pub block_sync: bool,
+    cooked: PathBuf,
     target: usize,
     name: String,
     plan: Option<(PlanKey, Result<Plan, String>)>,
@@ -111,28 +130,7 @@ impl LoadoutsPanel {
     }
 
     fn refresh_accounts(&mut self) {
-        let preferred = save_file::detect_save_data_path();
-        let mut directories: Vec<_> = preferred.into_iter().collect();
-        if let Some(documents) = hebnix_sdk::utils::paths::documents_dir() {
-            for relative in [SAVE_PATH_STEAM, SAVE_PATH_EPIC] {
-                let directory = documents.join(relative);
-                if !directories.contains(&directory) {
-                    directories.push(directory);
-                }
-            }
-        }
-        self.accounts = directories
-            .iter()
-            .flat_map(|directory| save_file::find_save_accounts(Some(directory)))
-            .map(|mut account| {
-                // Positions can differ in rotating copies. Prefer the account's main save.
-                let main = main_save_path(&account.path);
-                if main.is_file() {
-                    account.path = main;
-                }
-                account
-            })
-            .collect();
+        self.accounts = discover_accounts();
         self.save = match self.save.as_deref() {
             Some(previous) => {
                 let main = main_save_path(previous);
@@ -257,6 +255,7 @@ impl LoadoutsPanel {
         presets: &mut PresetStore,
         catalog_loading: bool,
     ) -> Option<String> {
+        self.cooked = cooked_pc.to_path_buf();
         if !self.loaded {
             self.loaded = true;
             self.refresh_accounts();
@@ -334,6 +333,14 @@ impl LoadoutsPanel {
         });
         ui.weak(t("loadouts-bakkes-base-hint"));
         ui.horizontal(|ui| {
+            ui.label(t("loadouts-bakkes-method"));
+            ui.radio_value(&mut self.method, ImportMethod::Swap, t("loadouts-bakkes-method-swap"));
+            ui.radio_value(&mut self.method, ImportMethod::Save, t("loadouts-bakkes-method-save"));
+        });
+        if self.method == ImportMethod::Save {
+            ui.checkbox(&mut self.block_sync, t("sync-block-checkbox")).on_hover_text(t("sync-block-hint"));
+        }
+        ui.horizontal(|ui| {
             ui.radio_value(&mut self.mode, SaveMode::New, t("loadouts-bakkes-mode-new"));
             ui.radio_value(&mut self.mode, SaveMode::Replace, t("loadouts-bakkes-mode-replace"));
         });
@@ -357,7 +364,7 @@ impl LoadoutsPanel {
                 });
             }
         }
-        let key = (self.base, self.mode, self.target, self.name.clone());
+        let key = (self.base, self.mode, self.target, self.name.clone(), self.method);
         if self.plan.as_ref().is_none_or(|(built, _)| *built != key) {
             let plan = build_plan(save, &code, swapper, &self.names, key.clone());
             self.plan = Some((key, plan));
@@ -393,7 +400,12 @@ impl LoadoutsPanel {
         let Some((_, Ok(plan))) = self.plan.take() else {
             return None;
         };
-        match save_plan(save, &plan, presets) {
+        let blocked = if plan.method == ImportMethod::Save && self.block_sync {
+            crate::patcher::sync_block::enable(&self.cooked, &self.cooked.join("Backups"))
+        } else {
+            Ok(())
+        };
+        match blocked.and_then(|()| save_plan(save, &plan, presets)) {
             Ok(mut message) => {
                 if !apply {
                     message.push(' ');
@@ -403,7 +415,7 @@ impl LoadoutsPanel {
                 self.reload();
                 self.code = None;
                 self.input.clear();
-                apply.then_some(plan.name)
+                (apply && plan.method == ImportMethod::Swap).then_some(plan.name)
             }
             Err(error) => {
                 self.message = error;
@@ -885,7 +897,33 @@ fn import_entry(ui: &mut egui::Ui, input: &mut String, can_import: bool) -> bool
     .inner
 }
 
-fn main_save_path(path: &Path) -> PathBuf {
+/// Every save account found for Steam and Epic, pointing at each account's main save.
+pub(crate) fn discover_accounts() -> Vec<SaveAccount> {
+    let preferred = save_file::detect_save_data_path();
+    let mut directories: Vec<_> = preferred.into_iter().collect();
+    if let Some(documents) = hebnix_sdk::utils::paths::documents_dir() {
+        for relative in [SAVE_PATH_STEAM, SAVE_PATH_EPIC] {
+            let directory = documents.join(relative);
+            if !directories.contains(&directory) {
+                directories.push(directory);
+            }
+        }
+    }
+    directories
+        .iter()
+        .flat_map(|directory| save_file::find_save_accounts(Some(directory)))
+        .map(|mut account| {
+            // Positions can differ in rotating copies. Prefer the account's main save.
+            let main = main_save_path(&account.path);
+            if main.is_file() {
+                account.path = main;
+            }
+            account
+        })
+        .collect()
+}
+
+pub(crate) fn main_save_path(path: &Path) -> PathBuf {
     let stem = path.file_stem().unwrap_or_default().to_string_lossy();
     let account = stem.split('_').next().unwrap_or(&stem);
     path.with_file_name(format!("{account}.save"))
@@ -917,7 +955,10 @@ fn build_plan(
     names: &[String],
     key: PlanKey,
 ) -> Result<Plan, String> {
-    let (base, mode, target, typed) = key;
+    let (base, mode, target, typed, requested) = key;
+    let custom_colours = code.blue.colors.is_some() || code.orange.as_ref().is_some_and(|team| team.colors.is_some());
+    let method = if custom_colours { ImportMethod::Swap } else { requested };
+    let fell_back = custom_colours && requested == ImportMethod::Save;
     let replace = (mode == SaveMode::Replace).then_some(target);
     let name = match replace {
         Some(target) => names.get(target).cloned().ok_or_else(|| t("loadouts-bakkes-no-target"))?,
@@ -964,7 +1005,9 @@ fn build_plan(
             if item.paint > 0 {
                 row.you.push_str(&format!(" ({})", t("loadouts-bakkes-painted")));
             }
-            if stock == 0 {
+            if method == ImportMethod::Save {
+                // The save method only needs the items; every slot can be filled.
+            } else if stock == 0 {
                 row.skipped = Some(t("loadouts-bakkes-skip-empty"));
             } else {
                 let pick = SwapPick {
@@ -990,8 +1033,20 @@ fn build_plan(
         }
         rows.push(row);
     }
-    if swaps.is_empty() {
+    if method == ImportMethod::Swap && swaps.is_empty() {
         return Err(t("loadouts-bakkes-no-swaps"));
+    }
+    let mut equips = Vec::new();
+    if method == ImportMethod::Save {
+        let orange = code.orange.as_ref().unwrap_or(&code.blue);
+        for (team, items) in [&code.blue.items, &orange.items].into_iter().enumerate() {
+            for item in items {
+                equips.push((team, usize::from(item.slot), i32::from(item.product_id), item.paint));
+            }
+        }
+        if equips.is_empty() {
+            return Err(t("loadouts-bakkes-no-swaps"));
+        }
     }
     // A team without its own colours uses the blue team's, the same as a shared loadout.
     let blue = code.blue.colors;
@@ -1003,7 +1058,7 @@ fn build_plan(
         orange_accent: orange.map(|(_, accent)| accent),
         ..CarColours::default()
     };
-    Ok(Plan { name, base, replace, rows, swaps, cars })
+    Ok(Plan { name, base, replace, rows, swaps, cars, method, fell_back, equips })
 }
 
 fn colour_picker(ui: &mut egui::Ui, label: &str, selected: &mut u8, colours: &[[u8; 3]]) {
@@ -1070,22 +1125,33 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan, names: &[String]) {
             ui.end_row();
         }
     });
-    ui.weak(t_args("loadouts-bakkes-plan-note", &[("base", names[plan.base].as_str().into())]));
+    if plan.fell_back {
+        ui.colored_label(ui.visuals().warn_fg_color, t("loadouts-bakkes-method-fallback"));
+    }
+    if plan.method == ImportMethod::Save {
+        ui.weak(t("loadouts-bakkes-method-save-note"));
+    } else {
+        ui.weak(t_args("loadouts-bakkes-plan-note", &[("base", names[plan.base].as_str().into())]));
+    }
 }
 
 /// Saves the garage copy of the base, then the swap preset with the same name.
 /// Both names and the preset cap are checked before the save is touched.
 fn save_plan(save: &Path, plan: &Plan, presets: &mut PresetStore) -> Result<String, String> {
     let existing = presets.presets.iter().find(|p| p.name == plan.name).cloned();
-    if plan.replace.is_none() && existing.is_some() {
+    let swaps = plan.method == ImportMethod::Swap;
+    if swaps && plan.replace.is_none() && existing.is_some() {
         return Err(t("loadouts-bakkes-name-taken"));
     }
-    if existing.is_none() && presets.presets.len() >= 10 {
+    if swaps && existing.is_none() && presets.presets.len() >= 10 {
         return Err(t("loadouts-bakkes-preset-cap"));
     }
     let mut copy = loadout_preset(save, plan.base)?;
     copy.name = plan.name.clone();
     apply_loadout_edit(save, &Edit::Import(vec![copy]))?;
+    if plan.method == ImportMethod::Save {
+        return save_method(save, plan);
+    }
     // The copy is appended, so the replaced preset keeps its position until it is removed.
     if let Some(position) = plan.replace {
         apply_loadout_edit(save, &Edit::Delete { position })?;
@@ -1108,6 +1174,27 @@ fn save_plan(save: &Path, plan: &Plan, presets: &mut PresetStore) -> Result<Stri
         "loadouts-bakkes-saved",
         &[("name", plan.name.as_str().into()), ("count", count.to_string().into())],
     ))
+}
+
+/// Adds the code's items to the save and equips them on the freshly copied preset.
+fn save_method(save: &Path, plan: &Plan) -> Result<String, String> {
+    let position = loadout_order(save)?.len().checked_sub(1).ok_or("no preset to equip")?;
+    let wanted: Vec<(i32, u8)> = plan.equips.iter().map(|&(_, _, product, paint)| (product, paint)).collect();
+    apply_loadout_edit(save, &Edit::AddItems(wanted))?;
+    let owned = loadout_owned_instances(save)?;
+    let mut changes = Vec::new();
+    for &(team, slot, product, paint) in &plan.equips {
+        let (_, upper, lower, _) = owned
+            .iter()
+            .find(|(id, _, _, owned_paint)| *id == product && *owned_paint == i64::from(paint))
+            .ok_or_else(|| format!("item #{product} did not make it into the save"))?;
+        changes.push((team, slot, *upper, *lower));
+    }
+    apply_loadout_edit(save, &Edit::Equip { position, changes })?;
+    if let Some(position) = plan.replace {
+        apply_loadout_edit(save, &Edit::Delete { position })?;
+    }
+    Ok(t_args("loadouts-bakkes-saved-to-save", &[("name", plan.name.as_str().into())]))
 }
 
 #[cfg(test)]
