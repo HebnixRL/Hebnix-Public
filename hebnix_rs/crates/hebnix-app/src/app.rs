@@ -556,6 +556,7 @@ enum AppearanceSubTab {
 enum HebnixSettingsTab {
     Interface,
     Directories,
+    Preferences,
     Discord,
     ActionButton,
     System,
@@ -763,6 +764,7 @@ pub struct HebnixApp {
     spoofer_ranks: HashMap<i32, RankSpoofState>,
     spoofer_cert_installed: bool,
     spoofer_certificate_prompt_open: bool,
+    black_infinium_prompt_open: bool,
     spoofer_friends_enabled: bool,
     spoofer_friends: HashMap<String, FriendSpoofState>,
     friends_search: String,
@@ -1374,6 +1376,7 @@ impl HebnixApp {
             spoofer_ranks,
             spoofer_cert_installed: cert_installed,
             spoofer_certificate_prompt_open: false,
+            black_infinium_prompt_open: false,
             spoofer_friends_enabled,
             spoofer_friends,
             friends_search: String::new(),
@@ -2639,6 +2642,7 @@ impl HebnixApp {
                 &[
                     HebnixSettingsTab::Interface,
                     HebnixSettingsTab::Directories,
+                    HebnixSettingsTab::Preferences,
                     HebnixSettingsTab::Discord,
                     HebnixSettingsTab::ActionButton,
                     HebnixSettingsTab::System,
@@ -5020,6 +5024,7 @@ impl HebnixApp {
                         let tabs = [
                             (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
                             (HebnixSettingsTab::Directories, t("nav-files-folders")),
+                            (HebnixSettingsTab::Preferences, t("settings-nav-preferences")),
                             (HebnixSettingsTab::System, t("settings-nav-system")),
                             (HebnixSettingsTab::Discord, t("settings-nav-discord")),
                             (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
@@ -5042,6 +5047,7 @@ impl HebnixApp {
                             crate::theme::page_heading(ui, match self.hebnix_settings_tab {
                                 HebnixSettingsTab::Interface => t("nav-settings-appearance"),
                                 HebnixSettingsTab::Directories => t("nav-files-folders"),
+                                HebnixSettingsTab::Preferences => t("settings-heading-preferences"),
                                 HebnixSettingsTab::Discord => t("settings-heading-discord"),
                                 HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
                                 HebnixSettingsTab::System => t("settings-heading-system"),
@@ -5826,6 +5832,23 @@ impl HebnixApp {
                                     self.render_action_button_settings(ui);
                                 }
 
+                                HebnixSettingsTab::Preferences => {
+                                    use crate::config::BlackInfinium;
+                                    ui.label(t("preferences-black-infinium"));
+                                    ui.label(egui::RichText::new(t("preferences-black-infinium-hint")).weak());
+                                    for (value, key) in [
+                                        (BlackInfinium::Ask, "preferences-black-infinium-ask"),
+                                        (BlackInfinium::Bakkes, "preferences-black-infinium-bakkes"),
+                                        (BlackInfinium::Vanilla, "preferences-black-infinium-vanilla"),
+                                    ] {
+                                        if ui
+                                            .radio_value(&mut self.config.settings.black_infinium, value, t(key))
+                                            .changed()
+                                        {
+                                            let _ = self.config.save(&self.base_dir);
+                                        }
+                                    }
+                                }
                                 HebnixSettingsTab::System => {
                                     let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
                                     self.delete_backups.render(ui, &cooked_pc);
@@ -6656,6 +6679,42 @@ impl HebnixApp {
             }
         } else if close {
             self.item_action_prompt_open = false;
+        }
+    }
+
+    fn render_black_infinium_prompt(&mut self, ctx: &egui::Context) {
+        use crate::config::BlackInfinium;
+        self.swapper.set_black_infinium(self.config.settings.black_infinium);
+        if self.swapper.take_infinium_prompt() {
+            self.black_infinium_prompt_open = true;
+        }
+        if !self.black_infinium_prompt_open {
+            return;
+        }
+        let mut choice = None;
+        egui::Window::new(t("infinium-prompt-title"))
+            .id(egui::Id::new("black-infinium-choice"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(t("infinium-prompt-body"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(t("infinium-prompt-bakkes")).clicked() {
+                        choice = Some(BlackInfinium::Bakkes);
+                    }
+                    if ui.button(t("infinium-prompt-vanilla")).clicked() {
+                        choice = Some(BlackInfinium::Vanilla);
+                    }
+                });
+            });
+        if let Some(choice) = choice {
+            self.config.settings.black_infinium = choice;
+            self.swapper.set_black_infinium(choice);
+            let _ = self.config.save(&self.base_dir);
+            self.black_infinium_prompt_open = false;
+            self.console.write(t("infinium-prompt-saved"));
         }
     }
 
@@ -8109,6 +8168,7 @@ impl eframe::App for HebnixApp {
             self.render_item_action_prompt(ctx);
             self.render_plugin_delete_prompt(ctx);
 
+            self.render_black_infinium_prompt(ctx);
             self.render_spoofer_certificate_prompt(ctx);
             self.render_statsapi_notice(ctx);
             self.render_web_port_notice(ctx);

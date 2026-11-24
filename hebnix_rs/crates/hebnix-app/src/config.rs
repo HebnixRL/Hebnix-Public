@@ -58,9 +58,21 @@ impl Default for WindowCfg {
     }
 }
 
+/// What a Black paint on Infinium wheels becomes. BakkesMod applies a plain
+/// #000000, which looks different from the in-game Black finish.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlackInfinium {
+    #[default]
+    Ask,
+    Bakkes,
+    Vanilla,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SettingsCfg {
+    pub black_infinium: BlackInfinium,
     pub hotkey: String,
     pub theme: String,
     /// UI language code ("en", "de", ...) or "auto" to follow the system
@@ -161,6 +173,7 @@ impl Default for SettingsCfg {
             panel_width: 0.30,
             panel_animate: true,
             run_as_admin: false,
+            black_infinium: BlackInfinium::Ask,
             discord_rich_presence: true,
             discord_rocket_league_only: false,
             discord_game_state: true,

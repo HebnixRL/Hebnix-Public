@@ -32,7 +32,14 @@ impl HttpProxy {
             ca,
             "api.epicgames.dev",
         )))?;
-        let upstream = proxy::build_upstream_agent_pins(Default::default());
+        // Pin upstream DNS so a stale hosts entry for the account host cannot loop back here.
+        #[cfg(windows)]
+        let pins = super::dns::resolve_a("api.epicgames.dev")
+            .map(|ip| [("api.epicgames.dev".to_owned(), ip)].into())
+            .unwrap_or_default();
+        #[cfg(not(windows))]
+        let pins = Default::default();
+        let upstream = proxy::build_upstream_agent_pins(pins);
         let running = Arc::new(AtomicBool::new(true));
         let active = Arc::clone(&running);
         let worker = std::thread::Builder::new()

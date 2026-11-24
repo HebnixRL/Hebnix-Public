@@ -1145,3 +1145,17 @@ scoreboard-current-playlist = Show current playlist
 scoreboard-current-gamemode = Show current gamemode
 scoreboard-manual-selection = Choose a playlist manually
 scoreboard-choose-mode = Choose a gamemode
+
+settings-nav-preferences = Preferences
+settings-heading-preferences = Preferences
+preferences-black-infinium = Black Infinium paint
+preferences-black-infinium-hint = BakkesMod paints Infinium wheels a plain #000000. The in-game Black finish looks different. This decides which one Hebnix uses when something swaps to Black Infinium.
+preferences-black-infinium-ask = Ask me
+preferences-black-infinium-bakkes = BakkesMod Infinium (#000000)
+preferences-black-infinium-vanilla = Vanilla Infinium (in-game Black)
+infinium-prompt-title = Black Infinium
+infinium-prompt-body = Something is swapping to Black Infinium wheels. Use the BakkesMod look (pure #000000) or the vanilla in-game Black? You can change this later in Settings > Preferences.
+infinium-prompt-bakkes = Use BakkesMod Infinium
+infinium-prompt-vanilla = Use vanilla Infinium
+infinium-prompt-saved = Black Infinium choice saved. Apply the swap again.
+swapper-infinium-choose = Choose BakkesMod or vanilla Black Infinium, then apply again.
