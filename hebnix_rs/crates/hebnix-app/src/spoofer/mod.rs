@@ -54,6 +54,37 @@ fn proxy_server(port: u16) -> String {
 
 /// is `server` a proxy setting Hebnix wrote, on any port? Older versions
 /// wrote a bare `127.0.0.1:8080`.
+fn hebnix_proxy_port(server: &str) -> Option<u16> {
+    server
+        .strip_prefix(&format!("http={PROXY_HOST}:"))
+        .and_then(|rest| rest.split_once(';'))
+        .and_then(|(port, _)| port.parse::<u16>().ok())
+        .filter(|port| server == proxy_server(*port))
+}
+
+/// After Hebnix exits while Rocket League is running, the game keeps using the
+/// proxy it started with. Serve that port untouched until the game closes so its
+/// EOS connection survives, then let the caller restore the system proxy.
+pub fn hold_proxy_until_game_exits(base_dir: &Path) {
+    if !marker_path(base_dir).is_file() || !hebnix_sdk::process::is_rocket_league_running() {
+        return;
+    }
+    let Some(port) = read_current_proxy()
+        .proxy_server
+        .as_deref()
+        .and_then(hebnix_proxy_port)
+    else {
+        return;
+    };
+    let Ok(proxy) = http::HttpProxy::start_passthrough(port) else {
+        return;
+    };
+    while hebnix_sdk::process::is_rocket_league_running() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    proxy.stop();
+}
+
 fn is_hebnix_proxy_server(server: &str) -> bool {
     let port = server
         .strip_prefix(&format!("http={PROXY_HOST}:"))
@@ -481,6 +512,11 @@ impl SpooferManager {
 
     fn stop_http(&self) -> Result<(), String> {
         self.http_active.store(false, Ordering::Release);
+        // The running game cached this proxy: keep it up (rules are off) until the
+        // game exits. If Hebnix itself exits first, the watchdog takes the port over.
+        if self.redirect_active.load(Ordering::Acquire) && self.game_running() {
+            return Ok(());
+        }
         if self.redirect_active.load(Ordering::Acquire) {
             // If cleanup fails, keep forwarding through the listener until recovery succeeds.
             restore_legacy_hebnix_proxy(&self.base_dir);

@@ -177,6 +177,7 @@ pub fn run(parent_pid: u32) {
             let _ = CloseHandle(parent);
         }
     }
+    crate::spoofer::hold_proxy_until_game_exits(&crate::config::base_dir());
     if replacement_is_running(parent_pid) {
         return;
     }
