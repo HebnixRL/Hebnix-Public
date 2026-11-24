@@ -1149,7 +1149,7 @@ scoreboard-choose-mode = Choose a gamemode
 
 add-items-title = Add items to save (experimental)
 add-items-warning-title = Read this before you touch anything
-add-items-warning-body = This writes items into your Rocket League save file that your account does not own. They only exist on your PC. Online matches, trading and the item shop will not know about them, and the next time the game syncs with Psyonix's servers your inventory can be wiped back to what you really own. A big batch can bloat your save by tens of megabytes, slow the game down or stop it loading, and a broken save can take your loadouts with it. Hebnix keeps a .bak copy next to the save, but you are the one who has to restore it. Close Rocket League first. Do not use this on an account you care about, and do not pass these items off as real.
+add-items-warning-body = This writes items into your Rocket League save file that your account does not own. They only exist on your PC. Online matches, trading and the item shop will not know about them, and the next time the game syncs with Psyonix's servers your inventory can be wiped back to what you really own. A big batch can bloat your save by tens of megabytes, slow the game down or stop it loading, and a broken save can take your loadouts with it. Hebnix keeps a .bak copy next to the save, and the Restore button below puts back the save from before your first add. Close Rocket League first. Do not use this on an account you care about, and do not pass these items off as real.
 add-items-understood = I understand this can fry my save and I accept that
 add-items-all = Add every item in the game
 add-items-all-paints = Also add every painted variant (adds tens of thousands of entries, around 20 MB)
