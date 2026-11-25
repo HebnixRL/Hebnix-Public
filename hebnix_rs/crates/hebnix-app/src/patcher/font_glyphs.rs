@@ -3,8 +3,9 @@
 //! one for the UI language, so with English UI a Korean, Japanese, Chinese or
 //! Cyrillic name shows as blocks. The patch copies every glyph the EFIGS text
 //! faces lack from the other movies' faces into them (DefineFont3 tags), built
-//! from the player's own package. The original package is kept in the backups
-//! folder and put back on restore.
+//! from the player's own package. Code points no game face has, like the symbols
+//! and scripts in decorated names, are drawn from installed system fonts. The
+//! original package is kept in the backups folder and put back on restore.
 use super::upk_package::UpkPackage;
 use super::workshop_menu_ui::Movie;
 use super::{backup_guard, game_path};
@@ -27,6 +28,27 @@ const DONORS: [Movie; 4] = [
     movie("GFX_Fonts.Fonts_JPN"),
     movie("GFX_Fonts.Fonts_CHN"),
 ];
+/// Installed fonts for code points no game face has, in order of preference.
+/// shortcut: Windows font folder only, so Linux builds get only the game's glyphs.
+const SYSTEM_FONTS: [&str; 15] = [
+    "segoeui.ttf",
+    "seguisym.ttf",
+    "seguihis.ttf",
+    "gadugi.ttf",
+    "javatext.ttf",
+    "ebrima.ttf",
+    "msyi.ttf",
+    "LeelawUI.ttf",
+    "Nirmala.ttc",
+    "mmrtext.ttf",
+    "monbaiti.ttf",
+    "ntailu.ttf",
+    "taile.ttf",
+    "phagspa.ttf",
+    "himalaya.ttf",
+];
+/// DefineFont3 glyphs use a 1024 unit EM in twips.
+const EM: f32 = 1024.0 * 20.0;
 const DEFINE_FONT3: u16 = 75;
 /// Faces with fewer glyphs are icon or digit fonts, not text.
 const TEXT_FACE_GLYPHS: usize = 100;
@@ -170,6 +192,158 @@ impl Font {
     }
 }
 
+/// MSB-first bit writer for SWF shape records.
+#[derive(Default)]
+struct Bits {
+    out: Vec<u8>,
+    used: u32,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, n: u32) {
+        for i in (0..n).rev() {
+            if self.used % 8 == 0 {
+                self.out.push(0);
+            }
+            if value >> i & 1 != 0 {
+                *self.out.last_mut().unwrap() |= 0x80 >> (self.used % 8);
+            }
+            self.used += 1;
+        }
+    }
+
+    fn signed(&mut self, value: i32, n: u32) {
+        self.put((value as u32) & (u32::MAX >> (32 - n)), n);
+    }
+}
+
+/// Bits a signed field needs to hold every value.
+fn signed_bits(values: &[i32]) -> u32 {
+    values.iter().map(|&v| 33 - if v < 0 { v.leading_ones() } else { v.leading_zeros() }).max().unwrap_or(1)
+}
+
+fn rect(x_min: i32, x_max: i32, y_min: i32, y_max: i32) -> Vec<u8> {
+    let n = signed_bits(&[x_min, x_max, y_min, y_max]);
+    let mut bits = Bits::default();
+    bits.put(n, 5);
+    for v in [x_min, x_max, y_min, y_max] {
+        bits.signed(v, n);
+    }
+    bits.out
+}
+
+/// A glyph outline (font units, Y up) as a DefineFont3 SHAPE (twips, Y down).
+fn shape(curves: &[ab_glyph::OutlineCurve], scale: f32) -> Vec<u8> {
+    use ab_glyph::{OutlineCurve, Point, point};
+    let at = |p: Point| ((p.x * scale).round() as i32, (-p.y * scale).round() as i32);
+    let edge = |bits: &mut Bits, pen: &mut (i32, i32), control: Option<(i32, i32)>, to: (i32, i32)| {
+        if let Some(c) = control {
+            let d = [c.0 - pen.0, c.1 - pen.1, to.0 - c.0, to.1 - c.1];
+            let n = signed_bits(&d).max(2);
+            bits.put(0b10, 2);
+            bits.put(n - 2, 4);
+            d.iter().for_each(|&v| bits.signed(v, n));
+        } else if *pen != to {
+            let d = [to.0 - pen.0, to.1 - pen.1];
+            let n = signed_bits(&d).max(2);
+            // straight, general line
+            bits.put(0b11, 2);
+            bits.put(n - 2, 4);
+            bits.put(1, 1);
+            d.iter().for_each(|&v| bits.signed(v, n));
+        }
+        *pen = to;
+    };
+    let mut bits = Bits::default();
+    // one fill bit, no line styles
+    bits.put(1, 4);
+    bits.put(0, 4);
+    let mut pen: Option<(i32, i32)> = None;
+    for curve in curves {
+        let (OutlineCurve::Line(p0, _) | OutlineCurve::Quad(p0, ..) | OutlineCurve::Cubic(p0, ..)) = *curve;
+        let start = at(p0);
+        if pen != Some(start) {
+            // style change record: move to, with fill style 0 on the first as the game's glyphs have
+            let first = pen.is_none();
+            bits.put(if first { 0b000011 } else { 0b000001 }, 6);
+            let n = signed_bits(&[start.0, start.1]);
+            bits.put(n, 5);
+            bits.signed(start.0, n);
+            bits.signed(start.1, n);
+            if first {
+                bits.put(1, 1);
+            }
+            pen = Some(start);
+        }
+        let pen = pen.as_mut().unwrap();
+        match *curve {
+            OutlineCurve::Line(_, p1) => edge(&mut bits, pen, None, at(p1)),
+            OutlineCurve::Quad(_, p1, p2) => edge(&mut bits, pen, Some(at(p1)), at(p2)),
+            OutlineCurve::Cubic(p0, p1, p2, p3) => {
+                // split at t = 0.5 and fit one quad to each half
+                let mid = |a: Point, b: Point| point((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+                let (a, b, c) = (mid(p0, p1), mid(p1, p2), mid(p2, p3));
+                let (d, e) = (mid(a, b), mid(b, c));
+                let m = mid(d, e);
+                let quad = |q0: Point, q1: Point, q2: Point, q3: Point| {
+                    point((3.0 * (q1.x + q2.x) - q0.x - q3.x) / 4.0, (3.0 * (q1.y + q2.y) - q0.y - q3.y) / 4.0)
+                };
+                edge(&mut bits, pen, Some(at(quad(p0, a, d, m))), at(m));
+                edge(&mut bits, pen, Some(at(quad(m, e, c, p3))), at(p3));
+            }
+        }
+    }
+    bits.put(0, 6);
+    bits.out
+}
+
+/// A face holding `data`'s glyph for every BMP code point outside private use.
+fn system_face(data: &[u8]) -> Option<Font> {
+    use ab_glyph::Font as _;
+    let font = ab_glyph::FontRef::try_from_slice_and_index(data, 0).ok()?;
+    let scale = EM / font.units_per_em()?;
+    let (mut codes, mut shapes, mut advances, mut bounds) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for code in (0x20..0xe000).chain(0xf900..0xfffe) {
+        let Some(ch) = char::from_u32(code) else { continue };
+        let id = font.glyph_id(ch);
+        if id.0 == 0 {
+            continue;
+        }
+        let (glyph, rect) = match font.outline(id) {
+            // ab_glyph puts the top edge (font Y up) in min.y
+            Some(o) => (
+                shape(&o.curves, scale),
+                rect(
+                    (o.bounds.min.x * scale).round() as i32,
+                    (o.bounds.max.x * scale).round() as i32,
+                    (-o.bounds.min.y * scale).round() as i32,
+                    (-o.bounds.max.y * scale).round() as i32,
+                ),
+            ),
+            None => (shape(&[], scale), rect(0, 0, 0, 0)),
+        };
+        codes.push(code as u16);
+        shapes.push(glyph);
+        advances.push(((font.h_advance_unscaled(id) * scale).round().clamp(0.0, 32767.0) as i16).to_le_bytes());
+        bounds.push(rect);
+    }
+    Some(Font {
+        id: 0,
+        flags: 0x80,
+        language: 0,
+        name: b"System\0".to_vec(),
+        shapes,
+        codes,
+        layout: Some(Layout { ascent: [0; 2], descent: [0; 2], leading: [0; 2], advances, bounds, kerning: vec![0, 0] }),
+    })
+}
+
+/// Faces from the installed fonts in `SYSTEM_FONTS`; missing or unreadable ones are skipped.
+fn system_faces() -> Vec<Font> {
+    let Some(dir) = std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")) else { return Vec::new() };
+    SYSTEM_FONTS.iter().filter_map(|name| system_face(&fs::read(dir.join(name)).ok()?)).collect()
+}
+
 /// Offset of the first tag after the SWF header.
 fn first_tag(swf: &[u8]) -> Option<usize> {
     Some(8 + rect_len(swf, 8)? + 4)
@@ -208,8 +382,9 @@ fn fonts(swf: &[u8]) -> Vec<Font> {
         .collect()
 }
 
-/// The target movie with every text face given the donors' missing glyphs.
-fn merged(target: &[u8], donors: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+/// The target movie with every text face given the donors' missing glyphs,
+/// then the system faces' glyphs for code points no donor has.
+fn merged(target: &[u8], donors: &[Vec<u8>], system: &[Font]) -> Result<Vec<u8>, String> {
     let donors: Vec<Font> = donors.iter().flat_map(|swf| fonts(swf)).filter(Font::is_text).collect();
     let tags = tags(target).ok_or("The font movie could not be read")?;
     let mut out = target[..first_tag(target).ok_or("The font movie is empty")?].to_vec();
@@ -226,6 +401,9 @@ fn merged(target: &[u8], donors: &[Vec<u8>]) -> Result<Vec<u8>, String> {
                 for donor in donors.iter().filter(|d| (d.heavy() == heavy) == pass) {
                     added += font.merge(donor);
                 }
+            }
+            for face in system {
+                added += font.merge(face);
             }
             if added > 0 {
                 faces += 1;
@@ -277,7 +455,7 @@ pub fn enable(cooked: &Path, backups: &Path) -> Result<(), String> {
         return if enabled(backups) { Ok(()) } else { Err(format!("{PACKAGE} is already patched but its original is missing. Verify the game files.")) };
     }
     let donors = DONORS.iter().map(|m| m.movie(&upk)).collect::<Result<Vec<_>, _>>()?;
-    let swf = merged(&target, &donors)?;
+    let swf = merged(&target, &donors, &system_faces())?;
     backup_guard::prepare(cooked, backups, MARKER, |name| name == BACKUP)?;
     let backup = backup_path(backups);
     fs::copy(&live, &backup).map_err(|e| format!("Could not back up {PACKAGE}: {e}"))?;
@@ -414,12 +592,126 @@ mod tests {
                 println!("{} glyphs={} heavy={} text={}", f.name(), f.codes.len(), f.heavy(), f.is_text());
             }
         }
-        let out = merged(&target, &donors).unwrap();
+        // calibration: the game's Arial A next to the same glyph read from arial.ttf
+        let game = fonts(&target).into_iter().find(|f| f.name() == "Arial").unwrap();
+        let i = game.codes.iter().position(|&c| c == 'A' as u16).unwrap();
+        let ours = system_face(&fs::read(r"C:\Windows\Fonts\arial.ttf").unwrap()).unwrap();
+        let j = ours.codes.iter().position(|&c| c == 'A' as u16).unwrap();
+        for (f, k) in [(&game, i), (&ours, j)] {
+            let layout = f.layout.as_ref().unwrap();
+            println!("{} A advance={} bounds={:?}", f.name(), i16::from_le_bytes(layout.advances[k]), read_rect(&layout.bounds[k]));
+            println!("  {:?}", decode(&f.shapes[k]));
+        }
+        let system = system_faces();
+        for f in &system {
+            println!("system glyphs={}", f.codes.len());
+        }
+        let out = merged(&target, &donors, &system).unwrap();
         assert!(is_merged(&out));
         for f in fonts(&out) {
             println!("merged {} glyphs={}", f.name(), f.codes.len());
         }
         println!("movie {} -> {} bytes", target.len(), out.len());
+    }
+
+    /// MSB-first bit reader, the inverse of `Bits`.
+    struct Reader<'a> {
+        b: &'a [u8],
+        at: usize,
+    }
+
+    impl Reader<'_> {
+        fn get(&mut self, n: u32) -> u32 {
+            (0..n).fold(0, |v, _| {
+                let bit = self.b[self.at / 8] >> (7 - self.at % 8) & 1;
+                self.at += 1;
+                v << 1 | u32::from(bit)
+            })
+        }
+
+        fn signed(&mut self, n: u32) -> i32 {
+            let v = self.get(n);
+            if n > 0 && v >> (n - 1) & 1 != 0 { (v | !(u32::MAX >> (32 - n))) as i32 } else { v as i32 }
+        }
+    }
+
+    fn read_rect(b: &[u8]) -> [i32; 4] {
+        let mut r = Reader { b, at: 0 };
+        let n = r.get(5);
+        [r.signed(n), r.signed(n), r.signed(n), r.signed(n)]
+    }
+
+    /// A SHAPE as absolute points: ('M', x, y), ('L', x, y), ('Q', x, y) per anchor, and
+    /// ('F', fill style 0, fill style 1) where a style is set.
+    fn decode(shape: &[u8]) -> Vec<(char, i32, i32)> {
+        let mut r = Reader { b: shape, at: 0 };
+        let (fill_bits, line_bits) = (r.get(4), r.get(4));
+        let (mut x, mut y, mut out) = (0, 0, Vec::new());
+        loop {
+            if r.get(1) == 0 {
+                let flags = r.get(5);
+                if flags == 0 {
+                    return out;
+                }
+                if flags & 1 != 0 {
+                    let n = r.get(5);
+                    (x, y) = (r.signed(n), r.signed(n));
+                    out.push(('M', x, y));
+                }
+                let f0 = if flags & 2 != 0 { r.get(fill_bits) as i32 } else { -1 };
+                let f1 = if flags & 4 != 0 { r.get(fill_bits) as i32 } else { -1 };
+                if flags & 6 != 0 {
+                    out.push(('F', f0, f1));
+                }
+                if flags & 8 != 0 {
+                    r.get(line_bits);
+                }
+            } else if r.get(1) == 1 {
+                let n = r.get(4) + 2;
+                if r.get(1) == 1 {
+                    x += r.signed(n);
+                    y += r.signed(n);
+                } else if r.get(1) == 1 {
+                    y += r.signed(n);
+                } else {
+                    x += r.signed(n);
+                }
+                out.push(('L', x, y));
+            } else {
+                let n = r.get(4) + 2;
+                x += r.signed(n);
+                y += r.signed(n);
+                x += r.signed(n);
+                y += r.signed(n);
+                out.push(('Q', x, y));
+            }
+        }
+    }
+
+    #[test]
+    fn an_outline_converts_to_a_shape_that_decodes_to_the_same_points() {
+        use ab_glyph::{OutlineCurve::*, point};
+        // a square with a curved top, then a second contour; Y up, scale 2
+        let curves = [
+            Line(point(0.0, 0.0), point(100.0, 0.0)),
+            Quad(point(100.0, 0.0), point(50.0, 150.0), point(0.0, 0.0)),
+            Line(point(-3000.0, 10.0), point(-3000.0, -10.5)),
+            Cubic(point(-3000.0, -10.5), point(0.0, 0.0), point(0.0, 0.0), point(-3000.0, 10.0)),
+        ];
+        assert_eq!(
+            decode(&shape(&curves, 2.0)),
+            vec![
+                ('M', 0, 0),
+                ('F', 1, -1),
+                ('L', 200, 0),
+                ('Q', 0, 0),
+                ('M', -6000, -20),
+                ('L', -6000, 21),
+                ('Q', -1500, 0),
+                ('Q', -6000, -20),
+            ]
+        );
+        assert_eq!(read_rect(&rect(-5, 70000, 0, -1)), [-5, 70000, 0, -1]);
     }
 
     #[test]
@@ -440,7 +732,7 @@ mod tests {
         korean.push((0xac00, &[5, 5]));
         korean.push((0x0410, &[6]));
         let donor = movie(&[font(1, "Korean Face", &korean)]);
-        let out = merged(&target, &[donor]).unwrap();
+        let out = merged(&target, &[donor], &[]).unwrap();
         assert!(is_merged(&out));
         assert!(!is_merged(&target));
         let f = &fonts(&out)[0];
