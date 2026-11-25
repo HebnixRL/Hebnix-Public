@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src data:">
+  <title>Replay Auto Save + Upload</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="container-fluid p-4" id="replay-page">
+    <div class="row g-3">
+      <div class="col-xl-6 d-grid gap-3">
+        <section class="card workspace-card">
+          <div class="card-body d-grid gap-3">
+            <p class="text-body-secondary mb-0">Replay history is checked when a match ends or is left while Rocket League is open.</p>
+            <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="enabled"><label class="form-check-label" for="enabled">Enable Auto Upload</label></div>
+            <p id="patch-status" class="text-warning mb-0" role="status" hidden></p>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="save_locally"><label class="form-check-label" for="save_locally">Save replays locally</label></div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="upload_enabled"><label class="form-check-label" for="upload_enabled">Upload to ballchasing.com</label></div>
+            <div>
+              <label for="provider" class="form-label">Provider</label>
+              <select id="provider" class="form-select"><option value="ballchasing.com">ballchasing.com</option></select>
+            </div>
+            <div>
+              <label class="form-label" for="api_key">API key</label>
+              <div class="input-group">
+                <input class="form-control" id="api_key" type="password" autocomplete="off" spellcheck="false">
+                <button class="btn btn-outline-secondary" type="button" id="clear_key">Clear</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="card workspace-card">
+          <div class="card-body d-grid gap-3">
+            <h2 class="h5 mb-0">Replay Details</h2>
+            <div>
+              <label class="form-label" for="naming_template">Replay name</label>
+              <input class="form-control" id="naming_template" aria-describedby="placeholders">
+              <p class="form-text mb-0" id="placeholders">{date} {time} {time24} {winning_team} {gamemode} {map} {match_guid}</p>
+            </div>
+            <div>
+              <label class="form-label" for="visibility">Visibility</label>
+              <select class="form-select" id="visibility"><option value="private">Private</option><option value="unlisted">Unlisted</option><option value="public">Public</option></select>
+            </div>
+            <div><label class="form-label" for="group_id">Group ID (optional)</label><input class="form-control" id="group_id"></div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="debug_logging"><label class="form-check-label" for="debug_logging">Debug logging</label></div>
+            <button class="btn btn-primary" id="check" type="button">Check latest matches now</button>
+          </div>
+        </section>
+        <section class="card workspace-card">
+          <div class="card-body">
+            <h2 class="h5">Status</h2>
+            <p class="text-body-secondary">Saves and uploads replays from finished matches. Each live match is checked in match history for up to three minutes from detection.</p>
+            <p class="text-warning" id="missing-key" hidden>Enter a ballchasing.com API key to upload replays.</p>
+            <p class="mb-0" id="status" role="status"></p>
+          </div>
+        </section>
+      </div>
+      <div class="col-xl-6">
+        <section class="card workspace-card">
+          <div class="card-body">
+            <h2 class="h5">Last 20 Replays</h2>
+            <p class="text-body-secondary mb-0" id="empty">No replays saved or uploaded yet.</p>
+            <ul class="list-group list-group-flush" id="history"></ul>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="/replay-upload.js"></script>
+</body>
+</html>

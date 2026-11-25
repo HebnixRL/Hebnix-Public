@@ -24,7 +24,7 @@ impl RepairState {
         }
     }
 
-    fn run(&mut self, ctx: &egui::Context) {
+    pub(crate) fn run(&mut self, ctx: &egui::Context) {
         self.confirm = false;
         self.result = None;
         self.running = true;
@@ -38,12 +38,16 @@ impl RepairState {
         });
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll(&mut self) {
         if let Some(result) = self.completion.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.running = false;
             self.completion = None;
             self.result = Some(result);
         }
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) {
+        self.poll();
         if self.confirm {
             egui::Window::new(t("action-fix-epic-connection"))
                 .id(egui::Id::new("action-fix-epic-connection"))

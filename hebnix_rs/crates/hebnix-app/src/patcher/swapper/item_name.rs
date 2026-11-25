@@ -253,7 +253,7 @@ impl State {
 
     fn begin(
         &mut self,
-        ui: &egui::Ui,
+        ctx: &egui::Context,
         cooked: &Path,
         backups: &Path,
         edit: Option<(String, Option<Vec<(String, String)>>)>,
@@ -267,7 +267,7 @@ impl State {
         self.pending = Some(rx);
         self.error = None;
         self.status = None;
-        let ctx = ui.ctx().clone();
+        let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = (|| {
                 if let Some((section, changes)) = edit {
@@ -332,13 +332,7 @@ impl SwapperState {
         self.render_item_names_content(ui, cooked, backups, &inventory.ids);
     }
 
-    fn render_item_names_content(
-        &mut self,
-        ui: &mut egui::Ui,
-        cooked: &Path,
-        backups: &Path,
-        owned_ids: &HashSet<i64>,
-    ) {
+    fn update_item_names(&mut self, cooked: &Path, backups: &Path, ctx: &egui::Context) {
         self.collect_thumbnails();
         if let Some(rx) = &self.name_editor.pending {
             match rx.try_recv() {
@@ -376,8 +370,143 @@ impl SwapperState {
             self.name_editor.manifest = names::Manifest::default();
             self.name_editor.selection = None;
             self.name_editor.page = 0;
-            self.name_editor.begin(ui, cooked, backups, None);
+            self.name_editor.begin(ctx, cooked, backups, None);
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_item_names(&mut self, cooked: &Path, owned_ids: &HashSet<i64>, visible: &[String], ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        self.update_item_names(cooked, &cooked.join("Backups"), ctx);
+        let editor = &self.name_editor;
+        let cat = editor.category;
+        let items = self.catalogs.get(&cat).map(|items| items.as_slice()).unwrap_or_default();
+        let mut entries: Vec<_> = editor.labels.iter().filter(|label| {
+            if label.field != "Label" || category(&label.section) != Some(cat) { return false; }
+            !label.section.strip_suffix("_Online").is_some_and(|base| {
+                editor.originals.get(&(base.to_owned(), "Label".into())) == Some(&label.name)
+            })
+        }).collect();
+        entries.sort_by_cached_key(|label| (label.name.to_lowercase(), label.section.clone()));
+        let rows = entries.into_iter().map(|label| {
+            let item = matching_item(label, items);
+            let image = if visible.contains(&label.section) {
+                let file = item.and_then(|item| preview_thumbnail(cat, item, cooked)).or_else(|| {
+                    let file = format!("{}_T_SF.upk", label.section);
+                    cooked.join(&file).is_file().then_some(file)
+                });
+                file.and_then(|file| {
+                    let kind = item.map_or_else(|| cat.slug().into(), |item| thumbnail_kind(cat, item));
+                    let key = format!("item-name|{}|{}|{}", cooked.display(), file, kind);
+                    if !self.thumbnails.contains_key(&key) {
+                        self.thumbnails.insert(key.clone(), None);
+                        let _ = self.thumbnail_jobs.send((key.clone(), cooked.join(file), format!("raw|{kind}"), ctx.clone()));
+                    }
+                    self.thumbnails.get(&key).and_then(|image| image.as_deref()).and_then(crate::ui::browser::image_url)
+                })
+            } else { None };
+            json!({
+                "id": label.section, "name": label.name, "current": editor.current(&label.section, "Label"),
+                "artist": (cat == SwapCategory::Anthems).then(|| editor.original(&label.section, "Artist")),
+                "currentArtist": (cat == SwapCategory::Anthems).then(|| editor.current(&label.section, "Artist")),
+                "owned": item.and_then(|item| item.product_id).is_some_and(|id| owned_ids.contains(&id)),
+                "patched": editor.manifest.patches.iter().any(|patch| patch.section == label.section),
+                "image": image,
+            })
+        }).collect::<Vec<_>>();
+        let selection = editor.selection.as_ref().map(|section| {
+            let fields = editor.manifest.patches.iter().filter(|patch| &patch.section == section)
+                .map(|patch| &patch.field).collect::<Vec<_>>();
+            json!({
+                "id": section, "name": editor.current(section, "Label"), "original": editor.original(section, "Label"),
+                "artist": (cat == SwapCategory::Anthems && editor.originals.contains_key(&(section.clone(), "Artist".into())))
+                    .then(|| editor.current(section, "Artist")),
+                "fields": fields,
+            })
+        });
+        let categories = SwapCategory::ALL.iter().map(|category| (category.slug(), category.label())).collect::<Vec<_>>();
+        json!({
+            "page": "item-artwork", "kind": "names", "categories": categories, "category": cat.slug(),
+            "languages": names::languages(cooked), "language": editor.file, "rows": rows, "selection": selection,
+            "busy": editor.busy(), "active": !editor.manifest.patches.is_empty(), "error": editor.error,
+            "status": editor.status.as_ref().and_then(|status| status.as_ref().ok()),
+            "labels": {
+                "description": t("item-name-description"), "owned": t("item-name-owned"), "patched": t("item-name-patched-only"),
+                "search": t("item-name-search"), "edit": t("item-name-edit"), "restoreAll": t("item-name-restore-all"),
+                "showNames": t("item-name-show-patched"), "apply": t("item-name-apply"), "restore": t("item-name-restore"),
+                "name": t(if cat == SwapCategory::Anthems { "item-name-song" } else { "item-name-new" }),
+                "artist": t("item-name-artist"), "restoreSong": t("item-name-restore-song"),
+                "restoreArtist": t("item-name-restore-artist"), "empty": t("item-name-empty"), "cancel": t("item-name-cancel"),
+            }
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_item_name_action(&mut self, key: &str, value: serde_json::Value, cooked: &Path, closed: bool, ctx: &egui::Context) {
+        let editor = &mut self.name_editor;
+        if editor.busy() { return; }
+        let backups = cooked.join("Backups");
+        let text = value.as_str().unwrap_or_default();
+        let edit = match key {
+            "language" if text != editor.file && names::languages(cooked).iter().any(|file| file == text) => {
+                editor.file = text.into();
+                editor.labels.clear();
+                editor.originals.clear();
+                editor.manifest = names::Manifest::default();
+                editor.selection = None;
+                None
+            }
+            "category" => {
+                if let Some(cat) = SwapCategory::ALL.into_iter().find(|cat| cat.slug() == text) {
+                    editor.category = cat;
+                    editor.selection = None;
+                }
+                return;
+            }
+            "select" if category(text) == Some(editor.category) && editor.labels.iter().any(|label| label.section == text && label.field == "Label") => {
+                editor.selection = Some(text.into());
+                return;
+            }
+            "cancel" => { editor.selection = None; return; }
+            "refresh" => {
+                self.thumbnails.retain(|key, _| !key.starts_with("item-name|"));
+                self.failed_thumbnails.retain(|key, _| !key.starts_with("item-name|"));
+                None
+            }
+            "restore-all" if closed && !editor.manifest.patches.is_empty() => Some((String::new(), None)),
+            "save" | "restore" | "restore-field" if closed => {
+                let Some(section) = editor.selection.clone() else { return };
+                let changes = match key {
+                    "save" => {
+                        let Some(name) = value["name"].as_str().filter(|name| !name.trim().is_empty() && name.chars().count() <= 128) else { return };
+                        let mut changes = vec![("Label".into(), name.into())];
+                        if editor.category == SwapCategory::Anthems && editor.originals.contains_key(&(section.clone(), "Artist".into())) {
+                            let Some(artist) = value["artist"].as_str().filter(|artist| artist.chars().count() <= 128) else { return };
+                            changes.push(("Artist".into(), artist.into()));
+                        }
+                        Some(changes)
+                    }
+                    "restore-field" => {
+                        let Some(patch) = editor.manifest.patches.iter().find(|patch| patch.section == section && patch.field == text) else { return };
+                        Some(vec![(patch.field.clone(), patch.original.clone())])
+                    }
+                    _ => None,
+                };
+                Some((section, changes))
+            }
+            _ => return,
+        };
+        editor.begin(ctx, cooked, &backups, edit);
+    }
+
+    fn render_item_names_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        backups: &Path,
+        owned_ids: &HashSet<i64>,
+    ) {
+        self.update_item_names(cooked, backups, ui.ctx());
         ui.weak(t("item-name-description"));
         if self.name_editor.pending.is_some() {
             ui.horizontal(|ui| {
@@ -410,7 +539,7 @@ impl SwapperState {
                 self.name_editor.manifest = names::Manifest::default();
                 self.name_editor.selection = None;
                 self.name_editor.page = 0;
-                self.name_editor.begin(ui, cooked, backups, None);
+                self.name_editor.begin(ui.ctx(), cooked, backups, None);
             }
             let before = self.name_editor.category;
             egui::ComboBox::from_id_salt("item-name-category")
@@ -443,7 +572,7 @@ impl SwapperState {
                     .retain(|key, _| !key.starts_with("item-name|"));
                 self.failed_thumbnails
                     .retain(|key, _| !key.starts_with("item-name|"));
-                self.name_editor.begin(ui, cooked, backups, None);
+                self.name_editor.begin(ui.ctx(), cooked, backups, None);
             }
             if ui
                 .add_enabled(
@@ -453,7 +582,7 @@ impl SwapperState {
                 .clicked()
             {
                 self.name_editor
-                    .begin(ui, cooked, backups, Some((String::new(), None)));
+                    .begin(ui.ctx(), cooked, backups, Some((String::new(), None)));
             }
         });
         if let Some(error) = &self.name_editor.error {
@@ -519,8 +648,7 @@ impl SwapperState {
                     if has_artist {
                         changes.push(("Artist".into(), self.name_editor.artist.clone()));
                     }
-                    self.name_editor.begin(
-                        ui,
+                    self.name_editor.begin(ui.ctx(),
                         cooked,
                         backups,
                         Some((section.clone(), Some(changes))),
@@ -535,7 +663,7 @@ impl SwapperState {
                     && ui.button(t("item-name-restore")).clicked()
                 {
                     self.name_editor
-                        .begin(ui, cooked, backups, Some((section.clone(), None)));
+                        .begin(ui.ctx(), cooked, backups, Some((section.clone(), None)));
                 }
                 if has_artist {
                     for field in ["Label", "Artist"] {
@@ -555,8 +683,7 @@ impl SwapperState {
                                 }))
                                 .clicked()
                             {
-                                self.name_editor.begin(
-                                    ui,
+                                self.name_editor.begin(ui.ctx(),
                                     cooked,
                                     backups,
                                     Some((

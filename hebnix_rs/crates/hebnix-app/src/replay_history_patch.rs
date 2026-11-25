@@ -75,19 +75,34 @@ impl State {
         self.enabled && !self.busy()
     }
 
+    pub(crate) fn can_toggle(&self) -> bool {
+        !self.game.as_os_str().is_empty()
+            && !self.busy()
+            && !hebnix_sdk::process::is_rocket_league_running()
+    }
+
+    pub(crate) fn request_enabled(&mut self, ctx: &egui::Context, value: bool) {
+        if value != self.enabled && self.can_toggle() {
+            self.run(ctx, Some(value));
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn toggle_state(&self) -> (bool, &str) {
+        (self.enabled, &self.status)
+    }
+
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
         let mut on = self.enabled;
         if ui
             .add_enabled(
-                !self.game.as_os_str().is_empty()
-                    && !self.busy()
-                    && !hebnix_sdk::process::is_rocket_league_running(),
+                self.can_toggle(),
                 egui::Checkbox::new(&mut on, "Enable Auto Upload"),
             )
             .on_disabled_hover_text("Close Rocket League before changing Auto Upload.")
             .changed()
         {
-            self.run(ui.ctx(), Some(on));
+            self.request_enabled(ui.ctx(), on);
         }
         if self.busy() {
             ui.spinner();

@@ -36,6 +36,38 @@ pub(crate) struct PatchCatalog {
     rx: Receiver<Event>,
 }
 impl PatchCatalog {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &egui::Context, logs: &Sender<AppMsg>, visible: &[String]) -> (Value, Option<PathBuf>) {
+        use serde_json::json;
+        if !self.fetched { self.refresh(ctx); }
+        let result = self.poll(logs);
+        let banners: Vec<_> = self.items.iter().filter(|item| visible.contains(&id(item)))
+            .flat_map(|item| catalog_images(self.kind, item)).map(str::to_owned).collect();
+        for banner in banners { self.image(&banner, ctx); }
+        let rows: Vec<_> = self.items.iter().map(|item| {
+            let item_id = id(item);
+            let banners = catalog_images(self.kind, item);
+            let has_multiple = banners.len() > 1;
+            let images: Vec<_> = if visible.contains(&item_id) {
+                banners.iter().map(|banner| match self.images.get(*banner) {
+                    Some(ImageState::Ready(bytes)) => crate::ui::browser::image_url(bytes),
+                    _ => None,
+                }).collect()
+            } else { Vec::new() };
+            json!({
+                "id": item_id, "name": field(item, "name"), "author": field(item, "author"), "images": images,
+                "downloads": number(item, "download_count"), "downloaded": self.downloaded(&item_id),
+                "busy": self.busy.contains(&item_id), "pack": boolean(item, "is_pack").unwrap_or(self.kind == "boost" && has_multiple),
+            })
+        }).collect();
+        (json!({ "rows": rows, "loading": self.fetching, "status": self.status }), result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_download(&mut self, id: String, ctx: &egui::Context) -> Option<PathBuf> {
+        if id == "0" || self.busy.contains(&id) || !self.items.iter().any(|item| self::id(item) == id) { return None; }
+        if self.downloaded(&id) { Some(self.zip(&id)) } else { self.start_download(id, ctx); None }
+    }
     pub fn new(base: &Path, kind: &'static str) -> Self {
         let cache = base
             .join("plugins")

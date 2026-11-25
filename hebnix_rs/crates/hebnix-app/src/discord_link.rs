@@ -28,6 +28,25 @@ pub struct DiscordLinkState {
 }
 
 impl DiscordLinkState {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self) -> Value {
+        self.poll();
+        serde_json::json!({
+            "code": self.code, "status": self.status, "busy": self.linking, "accounts": self.linked_accounts,
+            "labels": {
+                "heading": t("discord-link-heading"), "instruction": t("discord-link-instruction"),
+                "code": t("discord-link-code"), "button": t("discord-link-button"), "accounts": t("discord-linked-accounts"),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_link(&mut self, code: String, ctx: &egui::Context) {
+        if !self.linking {
+            self.code = code.chars().take(64).collect();
+            self.start_link(ctx.clone());
+        }
+    }
     pub fn new(base_dir: &Path) -> Self {
         let (tx, rx) = mpsc::channel();
         let accounts_path = base_dir.join(LINKED_ACCOUNTS_FILE);

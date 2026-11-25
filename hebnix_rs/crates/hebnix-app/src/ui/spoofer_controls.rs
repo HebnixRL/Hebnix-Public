@@ -78,6 +78,22 @@ impl HebnixApp {
         }
     }
 
+    pub(super) fn remove_spoofer_certificate(&mut self) {
+        if !spoofer::http_needs_elevated_relaunch() {
+            self.disable_certificate_features();
+            if self.spoofer_mgr.account_redirect_active() {
+                self.console.write("[Spoofer] The account redirect could not be removed. The certificate is retained until cleanup succeeds.");
+            } else { match spoofer::uninstall_certificate(&self.base_dir) {
+                Ok(()) => self.console.write("[Spoofer] Certificate removed."),
+                Err(error) => self.console.write(format!("[Spoofer] Certificate removal failed: {error}")),
+            } }
+            self.spoofer_cert_installed =
+                spoofer::ca::is_current_installed(&self.base_dir);
+        } else {
+            self.admin_prompt_open = true;
+        }
+    }
+
     pub(super) fn render_spoofer_certificate_settings(&mut self, ui: &mut egui::Ui) {
         #[cfg(not(target_os = "linux"))]
         {
@@ -98,21 +114,7 @@ impl HebnixApp {
             });
             if self.spoofer_cert_installed {
                 if ui.button(t("spoofer-remove")).clicked() {
-                    if !spoofer::http_needs_elevated_relaunch() {
-                        self.disable_certificate_features();
-                        if self.spoofer_mgr.account_redirect_active() {
-                            self.console.write("[Spoofer] The account redirect could not be removed. The certificate is retained until cleanup succeeds.");
-                        } else { match spoofer::uninstall_certificate(&self.base_dir) {
-                            Ok(()) => self.console.write("[Spoofer] Certificate removed."),
-                            Err(error) => self
-                                .console
-                                .write(format!("[Spoofer] Certificate removal failed: {error}")),
-                        } }
-                        self.spoofer_cert_installed =
-                            spoofer::ca::is_current_installed(&self.base_dir);
-                    } else {
-                        self.admin_prompt_open = true;
-                    }
+                    self.remove_spoofer_certificate();
                 }
             } else if ui.button(t("spoofer-install-certificate")).clicked() {
                 self.install_spoofer_certificate();
@@ -164,6 +166,10 @@ impl HebnixApp {
                     cancel = ui.button(t("spawner-enable-prompt-cancel")).clicked();
                 });
             });
+        self.resolve_admin_prompt(restart, cancel);
+    }
+
+    pub(super) fn resolve_admin_prompt(&mut self, restart: bool, cancel: bool) {
         if restart {
             self.admin_prompt_open = false;
             if let Some(pending) = self.pending_spoofer_features.take() {

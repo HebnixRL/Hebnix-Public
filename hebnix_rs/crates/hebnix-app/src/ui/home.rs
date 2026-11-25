@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum HomeTab {
+pub(super) enum HomeTab {
     #[default]
     LiveMatch,
     Tracker,
@@ -21,7 +21,7 @@ struct MatchEvent {
 
 #[derive(Default)]
 pub(super) struct HomeState {
-    tab: HomeTab,
+    pub(super) tab: HomeTab,
     snapshot: Option<UpdateStateData>,
     updated: Option<Instant>,
     match_guid: Option<String>,
@@ -357,22 +357,88 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
 }
 
 impl HebnixApp {
-    pub(super) fn render_home(&mut self, ui: &mut egui::Ui) {
+    #[cfg(windows)]
+    pub(super) fn live_match_web_data(&self) -> serde_json::Value {
+        use serde_json::json;
+        let running = self.last_rl_open;
+        let connected = running && self.stats.connected();
+        let game = self.home.snapshot.as_ref().filter(|_| connected).map(|state| {
+            let mut teams: Vec<_> = state.game.teams.iter().collect();
+            teams.sort_by_key(|team| team.team_num);
+            let teams: Vec<_> = teams.into_iter().map(|team| {
+                let colour = team_colour(team);
+                let name = if team.name.is_empty() {
+                    t(if team.team_num == 0 { "home-blue-team" } else { "home-orange-team" })
+                } else {
+                    team.name.clone()
+                };
+                let mut players: Vec<_> = state.players.iter().filter(|player| player.team_num == team.team_num).collect();
+                players.sort_by_key(|player| std::cmp::Reverse(player.score));
+                json!({
+                    "name": name, "score": team.score,
+                    "colour": format!("#{:02x}{:02x}{:02x}", colour.r(), colour.g(), colour.b()),
+                    "players": players.iter().map(|p| {
+                        json!([p.name, p.score, p.goals, p.assists, p.saves, p.shots])
+                    }).collect::<Vec<_>>(),
+                })
+            }).collect();
+            json!({
+                "clock": match_clock(Some((state.game.time_seconds, state.game.overtime))),
+                "arena": crate::discord_presence::display_map_name(&state.game.arena),
+                "ended": (self.home.ended || state.game.has_winner).then(|| t("home-match-ended")),
+                "replay": state.game.replay.then(|| t("home-replay")),
+                "stale": self.home.updated.map(|time| time.elapsed().as_secs()).filter(|seconds| *seconds >= 5)
+                    .map(|seconds| format!("{}: {seconds}s", t("home-last-update"))),
+                "teams": teams,
+                "spectators": state.players.iter().filter(|player| {
+                    !state.game.teams.iter().any(|team| team.team_num == player.team_num)
+                }).map(|player| &player.name).collect::<Vec<_>>(),
+            })
+        });
+        let columns = [
+            "home-player",
+            "home-score",
+            "home-goals",
+            "home-assists",
+            "home-saves",
+            "home-shots",
+        ].map(|key| t(key));
+        json!({
+            "running": running,
+            "connected": connected,
+            "live_cosmetics": crate::patcher::live_cosmetics::status_snapshot(),
+            "running_label": t(if running { "home-running" } else { "home-stopped" }),
+            "connection_label": t(if connected { "home-connected" } else { "home-disconnected" }),
+            "waiting": t(if !running { "home-launch-hint" } else if !connected { "home-api-hint" } else { "home-match-hint" }),
+            "events_title": t("home-events"),
+            "empty_events": t("home-no-events"),
+            "spectator_label": t("home-spectator"),
+            "columns": columns,
+            "game": game,
+            "events": self.home.events.iter().filter(|_| connected)
+                .map(|event| json!({ "clock": match_clock(event.clock), "message": event.message }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    pub(super) fn render_home(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
         let connected = self.last_rl_open && self.stats.connected();
         ui.ctx().request_repaint_after(Duration::from_millis(250));
         if crate::theme::presentation(ui.ctx()).is_none_or(|theme| theme.layout.show_page_heading) {
             ui.heading(t("home-title"));
             ui.add_space(8.0);
         }
-        ui.horizontal_wrapped(|ui| {
-            for (tab, key) in [
-                (HomeTab::LiveMatch, "home-live-match"),
-                (HomeTab::Tracker, "home-tracker"),
-            ] {
-                ui.selectable_value(&mut self.home.tab, tab, t(key));
-            }
-        });
-        ui.separator();
+        if !modern_navigation {
+            ui.horizontal_wrapped(|ui| {
+                for (tab, key) in [
+                    (HomeTab::LiveMatch, "home-live-match"),
+                    (HomeTab::Tracker, "home-tracker"),
+                ] {
+                    ui.selectable_value(&mut self.home.tab, tab, t(key));
+                }
+            });
+            ui.separator();
+        }
         match self.home.tab {
             HomeTab::LiveMatch => {
                 let green = if ui.visuals().dark_mode {
@@ -410,6 +476,16 @@ impl HebnixApp {
                                 "home-disconnected"
                             }),
                         );
+                        ui.separator();
+                        ui.strong("Live Cosmetics");
+                        let live = crate::patcher::live_cosmetics::status_snapshot();
+                        let colour = match live["colour"].as_str() {
+                            Some("success") => green,
+                            Some("danger") => egui::Color32::LIGHT_RED,
+                            _ => egui::Color32::YELLOW,
+                        };
+                        ui.colored_label(colour, live["label"].as_str().unwrap_or("Pending"))
+                            .on_hover_text(live["detail"].as_str().unwrap_or_default());
                     });
                 });
                 ui.add_space(8.0);

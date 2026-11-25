@@ -158,6 +158,11 @@ impl Movie {
         swf: &[u8],
         out: &Path,
     ) -> Result<(), String> {
+        self.replace_movie(upk, swf)?;
+        upk.save_fast(out)
+    }
+
+    pub(super) fn replace_movie(&self, upk: &mut UpkPackage, swf: &[u8]) -> Result<(), String> {
         let (index, tag, value, size) = self.locate(upk)?;
         let export = &upk.exports[index];
         let old =
@@ -171,8 +176,7 @@ impl Movie {
         bytes.extend(len.to_le_bytes());
         bytes.extend(swf);
         bytes.extend_from_slice(&old[value + size..]);
-        upk.replace_title_export(index, &bytes)?;
-        upk.save_fast(out)
+        upk.replace_title_export(index, &bytes)
     }
 
     /// whether the live package holds the patched movie

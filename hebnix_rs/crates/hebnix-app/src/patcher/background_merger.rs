@@ -12,6 +12,13 @@ const NO_BACKGROUND_DONOR: &str = "__HBNX_NO_BACKGROUND__";
 pub const CUSTOM_DONOR_PREFIX: &str = "custom:";
 /// `arena:Park_P` borrows a whole arena's look instead of just its sky and background.
 pub use super::map_swap::ARENA_DONOR_PREFIX;
+pub const FULL_MAP_DONOR_PREFIX: &str = "full-map:";
+
+fn donor_arena(donor: &str) -> &str {
+    donor.strip_prefix(FULL_MAP_DONOR_PREFIX)
+        .or_else(|| donor.strip_prefix(ARENA_DONOR_PREFIX))
+        .unwrap_or(donor)
+}
 const SUNSET_DUNES_SCENERY: &str = "Labs_4v4_Arena15_Retro_OOB";
 // Dedicated scenery packages and existing arena donors verified with the exterior filter.
 pub(crate) const SCENERY_DONORS: &[(&str, &str)] = &[
@@ -50,6 +57,7 @@ static BACKGROUND_EDIT: Mutex<()> = Mutex::new(());
 
 enum PreparedDonor {
     Arena { name: String, source: PathBuf },
+    FullMap { name: String, source: PathBuf },
     Scenery(PreparedScenery),
 }
 
@@ -207,7 +215,7 @@ fn apply(
 ) -> Result<String, String> {
     validate_name(host_name)?;
     ensure_game_closed("applying a background")?;
-    if host_name.eq_ignore_ascii_case(donor_name.strip_prefix(ARENA_DONOR_PREFIX).unwrap_or(donor_name)) {
+    if host_name.eq_ignore_ascii_case(donor_arena(donor_name)) {
         return Err("Pick two different arenas.".into());
     }
     let mut donor = prepare_donor(cooked, donor_name)?;
@@ -217,6 +225,7 @@ fn apply(
         PreparedDonor::Arena { name, .. } => {
             format!("{} now looks like {}.", friendly(host_name), friendly(&name))
         }
+        PreparedDonor::FullMap { name, .. } => format!("{} now loads {}.", friendly(host_name), friendly(&name)),
         PreparedDonor::Scenery(_) => format!(
             "{} now uses {}'s background.",
             friendly(host_name),
@@ -245,6 +254,10 @@ pub fn apply_all(
 }
 
 fn prepare_donor(cooked: &Path, donor_name: &str) -> Result<PreparedDonor, String> {
+    if let Some(name) = donor_name.strip_prefix(FULL_MAP_DONOR_PREFIX) {
+        validate_name(name)?;
+        return Ok(PreparedDonor::FullMap { name: name.to_owned(), source: package_source(cooked, name)? });
+    }
     if let Some(name) = donor_name.strip_prefix(ARENA_DONOR_PREFIX) {
         validate_name(name)?;
         return Ok(PreparedDonor::Arena {
@@ -302,7 +315,7 @@ fn apply_prepared(
     only_unchanged: bool,
 ) -> Result<bool, String> {
     validate_name(host_name)?;
-    if host_name.eq_ignore_ascii_case(donor_name.strip_prefix(ARENA_DONOR_PREFIX).unwrap_or(donor_name)) {
+    if host_name.eq_ignore_ascii_case(donor_arena(donor_name)) {
         return Err("Pick two different arenas.".into());
     }
     let host_path = map_path(cooked, host_name);
@@ -330,6 +343,14 @@ fn apply_prepared(
         PreparedDonor::Arena { name, source } => {
             super::map_swap::apply_arena(cooked, host_name, source, name)
         }
+        PreparedDonor::FullMap { source, .. } => (|| {
+            let bytes = std::fs::read(source.as_path()).map_err(|error| format!("Could not read the source map: {error}"))?;
+            UpkPackage::from_bytes(bytes.clone()).map_err(|error| format!("Source arena package is invalid: {error}"))?;
+            ensure_game_closed("swapping a map")?;
+            // Keep the donor package intact so the game loads its gameplay actors and streaming layers.
+            super::upk_history::install_linked(cooked, &host_path, &bytes, "Swap complete arena")?;
+            Ok((String::new(), Vec::new()))
+        })(),
         PreparedDonor::Scenery(scenery) => apply_inner(cooked, &host_path, donor_name, scenery),
     };
     match result {
@@ -1142,7 +1163,7 @@ fn undo_core(cooked: &Path, state: &mut State, host: &str) -> Result<(), String>
             restore_file(cooked, &backup, &live)?
         }
     }
-    for generated_name in std::iter::once(&swap.copy_name).chain(&swap.extra_copies) {
+    for generated_name in std::iter::once(&swap.copy_name).chain(&swap.extra_copies).filter(|name| !name.is_empty()) {
         let still_needed = state.values().any(|other| {
             other.copy_name.eq_ignore_ascii_case(generated_name)
                 || other

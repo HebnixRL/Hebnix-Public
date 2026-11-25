@@ -4004,12 +4004,21 @@ fn build_save_summary(
     Ok(t)
 }
 
+#[cfg(windows)]
+#[path = "lua_api/web_settings.rs"]
+pub(crate) mod web_settings;
+
 fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     let ui = lua.create_table()?;
 
     ui.set(
         "label",
         lua.create_function(|_, text: String| {
+            #[cfg(windows)]
+            if web_settings::active() {
+                web_settings::widget("label", &text, serde_json::json!({"label": text}), false);
+                return Ok(());
+            }
             with_current_ui(|ui| {
                 ui.label(text);
             });
@@ -4020,6 +4029,11 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     ui.set(
         "heading",
         lua.create_function(|_, text: String| {
+            #[cfg(windows)]
+            if web_settings::active() {
+                web_settings::widget("heading", &text, serde_json::json!({"label": text}), false);
+                return Ok(());
+            }
             with_current_ui(|ui| {
                 ui.heading(text);
             });
@@ -4030,6 +4044,11 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     ui.set(
         "colored_label",
         lua.create_function(|_, (hex, text): (String, String)| {
+            #[cfg(windows)]
+            if web_settings::active() {
+                web_settings::widget("colored_label", &text, serde_json::json!({"label": text, "color": hex}), false);
+                return Ok(());
+            }
             with_current_ui(|ui| {
                 let color = parse_hex_color(&hex).unwrap_or(egui::Color32::GRAY);
                 ui.colored_label(color, text);
@@ -4041,6 +4060,8 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     ui.set(
         "copy_to_clipboard",
         lua.create_function(|_, text: String| {
+            #[cfg(windows)]
+            if web_settings::copy(&text) { return Ok(()); }
             with_current_ui(|ui| ui.ctx().copy_text(text));
             Ok(())
         })?,
@@ -4061,6 +4082,16 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                         .unwrap_or(egui::Color32::WHITE);
                     let alpha = color.a();
                     let mut rgb = [color.r(), color.g(), color.b()];
+                    #[cfg(windows)]
+                    if let Some(action) = web_settings::widget("color", &key, serde_json::json!({ "label": label, "value": format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]) }), true) {
+                        if let Some(hex) = action.as_ref().and_then(serde_json::Value::as_str).and_then(parse_hex_color) {
+                            value = if had_alpha {
+                                format!("#{:02x}{:02x}{:02x}{alpha:02x}", hex.r(), hex.g(), hex.b())
+                            } else { format!("#{:02x}{:02x}{:02x}", hex.r(), hex.g(), hex.b()) };
+                            host.store.borrow_mut().set_string(&key, &value);
+                        }
+                        return Ok(value);
+                    }
                     let changed = with_current_ui(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(&label);
@@ -4092,6 +4123,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     ui.set(
         "separator",
         lua.create_function(|_, ()| {
+            #[cfg(windows)]
+            if web_settings::widget("separator", "", serde_json::json!({}), false).is_some() {
+                return Ok(());
+            }
             with_current_ui(|ui| {
                 ui.separator();
             });
@@ -4102,6 +4137,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     ui.set(
         "space",
         lua.create_function(|_, px: Option<f32>| {
+            #[cfg(windows)]
+            if web_settings::widget("space", "", serde_json::json!({ "size": px.unwrap_or(8.0) }), false).is_some() {
+                return Ok(());
+            }
             with_current_ui(|ui| ui.add_space(px.unwrap_or(8.0)));
             Ok(())
         })?,
@@ -4110,6 +4149,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     ui.set(
         "button",
         lua.create_function(|_, text: String| {
+            #[cfg(windows)]
+            if let Some(action) = web_settings::widget("button", &text, serde_json::json!({ "label": text }), true) {
+                return Ok(action.is_some());
+            }
             Ok(with_current_ui(|ui| ui.button(text).clicked()).unwrap_or(false))
         })?,
     )?;
@@ -4121,6 +4164,14 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
             lua.create_function(
                 move |_, (key, label, min, max, default): (String, String, f32, f32, Option<f32>)| {
                     let mut value = host.store.borrow().get_number(&key, default.unwrap_or(min) as f64) as f32;
+                    #[cfg(windows)]
+                    if let Some(action) = web_settings::widget("slider", &key, serde_json::json!({ "label": label, "value": value, "min": min, "max": max }), true) {
+                        if let Some(number) = action.as_ref().and_then(serde_json::Value::as_f64).map(|number| number as f32).filter(|number| number.is_finite() && min <= max) {
+                            value = number.clamp(min, max);
+                            host.store.borrow_mut().set_number(&key, value as f64);
+                        }
+                        return Ok(value);
+                    }
 
                     let changed = with_current_ui(|ui| {
                         let mut is_changed = false;
@@ -4159,6 +4210,15 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                     current_val = opts[0].clone();
                     changed = true;
                 }
+                #[cfg(windows)]
+                if let Some(action) = web_settings::widget("select", &key, serde_json::json!({ "label": label, "value": current_val, "options": opts }), true) {
+                    if let Some(choice) = action.as_ref().and_then(serde_json::Value::as_str).filter(|choice| opts.iter().any(|option| option == *choice)) {
+                        current_val = choice.to_owned();
+                        changed = true;
+                    }
+                    if changed { host.store.borrow_mut().set_string(&key, &current_val); }
+                    return Ok(current_val);
+                }
 
                 let _ = with_current_ui(|ui| {
                     ui.horizontal(|ui| {
@@ -4194,6 +4254,14 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
             lua.create_function(
                 move |_, (key, label, default): (String, String, Option<bool>)| {
                     let mut value = host.store.borrow().get_bool(&key, default.unwrap_or(false));
+                    #[cfg(windows)]
+                    if let Some(action) = web_settings::widget("checkbox", &key, serde_json::json!({ "label": label, "value": value }), true) {
+                        if let Some(on) = action.as_ref().and_then(serde_json::Value::as_bool) {
+                            value = on;
+                            host.store.borrow_mut().set_bool(&key, value);
+                        }
+                        return Ok(value);
+                    }
                     let changed = with_current_ui(|ui| ui.checkbox(&mut value, label).changed())
                         .unwrap_or(false);
                     if changed {
@@ -4231,6 +4299,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                         None => host.store.borrow().get_string(&key, ""),
                     }
                 };
+                #[cfg(windows)]
+                if let Some(value) = web_text_input(&host, &key, placeholder.as_deref(), &buf, false) {
+                    return Ok(value);
+                }
                 let committed = with_current_ui(|ui| {
                     let mut edit = egui::TextEdit::singleline(&mut buf);
                     if let Some(ph) = &placeholder {
@@ -4262,6 +4334,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                     }
                 };
 
+                #[cfg(windows)]
+                if let Some(value) = web_text_input(&host, &key, placeholder.as_deref(), &buf, true) {
+                    return Ok(value);
+                }
                 let committed = with_current_ui(|ui| {
                     let mut edit = egui::TextEdit::singleline(&mut buf).password(true);
 
@@ -4289,6 +4365,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
         ui.set(
             "readonly_textbox",
             lua.create_function(move |_, (text, height): (String, Option<f32>)| {
+                #[cfg(windows)]
+                if web_settings::widget("readonly", "", serde_json::json!({ "label": text, "height": height.unwrap_or(260.0).max(48.0) }), false).is_some() {
+                    return Ok(());
+                }
                 let _ = with_current_ui(|ui| {
                     let display_text = text;
                     let height = height.unwrap_or(260.0).max(48.0);
@@ -4324,6 +4404,8 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                         None => return Ok(false),
                     }
                 };
+                #[cfg(windows)]
+                if web_settings::active() { return Ok(web_settings::image(&path, bytes.as_ref(), &opts)); }
                 let w = opt_num(&opts, "width");
                 let h = opt_num(&opts, "height");
                 let at = match (opt_num(&opts, "x"), opt_num(&opts, "y")) {
@@ -4382,6 +4464,8 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
                 return Ok(false);
             };
 
+            #[cfg(windows)]
+            if web_settings::active() { return Ok(web_settings::image(&cache_key, bytes.as_ref(), &opts)); }
             let w = opt_num(&opts, "width");
             let h = opt_num(&opts, "height");
             let at = match (opt_num(&opts, "x"), opt_num(&opts, "y")) {
@@ -4427,6 +4511,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
         "horizontal",
         lua.create_function(|lua, f: mlua::Function| {
             let ui_tbl: Table = ui_table(lua)?;
+            #[cfg(windows)]
+            if web_settings::container("horizontal", "", serde_json::json!({}), || f.call::<()>(ui_tbl.clone()))? {
+                return Ok(());
+            }
             with_current_ui(|outer| {
                 outer.horizontal(|inner| {
                     with_ui_scope(inner, || {
@@ -4445,6 +4533,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
         "collapsing",
         lua.create_function(|lua, (label, f): (String, mlua::Function)| {
             let ui_tbl: Table = ui_table(lua)?;
+            #[cfg(windows)]
+            if web_settings::container("collapsing", &label, serde_json::json!({"label": label}), || f.call::<()>(ui_tbl.clone()))? {
+                return Ok(());
+            }
             with_current_ui(|outer| {
                 egui::CollapsingHeader::new(&label)
                     .id_salt(&label)
@@ -4468,6 +4560,14 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
         lua.create_function(
             |lua, (left, right, right_width): (mlua::Function, mlua::Function, Option<f32>)| {
                 let ui_tbl: Table = ui_table(lua)?;
+                #[cfg(windows)]
+                if web_settings::container("columns", "", serde_json::json!({"width": right_width.unwrap_or(280.0)}), || {
+                    web_settings::container("column", "left", serde_json::json!({}), || left.call::<()>(ui_tbl.clone()))?;
+                    web_settings::container("column", "right", serde_json::json!({}), || right.call::<()>(ui_tbl.clone()))?;
+                    Ok(())
+                })? {
+                    return Ok(());
+                }
                 with_current_ui(|outer| {
                     let spacing = outer.spacing().item_spacing.x;
                     let total = outer.available_width();
@@ -4506,6 +4606,10 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
         "scroll_area",
         lua.create_function(|lua, (max_height, f): (f32, mlua::Function)| {
             let ui_tbl: Table = ui_table(lua)?;
+            #[cfg(windows)]
+            if web_settings::container("scroll", "", serde_json::json!({"height": max_height.max(20.0)}), || f.call::<()>(ui_tbl.clone()))? {
+                return Ok(());
+            }
             with_current_ui(|outer| {
                 egui::ScrollArea::vertical()
                     .max_height(max_height.max(20.0))
@@ -4524,6 +4628,20 @@ fn build_ui_table(lua: &Lua, host: Rc<HostCtx>) -> mlua::Result<Table> {
     )?;
 
     Ok(ui)
+}
+
+#[cfg(windows)]
+fn web_text_input(host: &HostCtx, key: &str, placeholder: Option<&str>, buf: &str, password: bool) -> Option<String> {
+    let kind = if password { "password" } else { "text" };
+    let action = web_settings::widget(kind, key, serde_json::json!({
+        "label": placeholder.unwrap_or(key), "value": buf,
+    }), true)?;
+    if let Some(value) = action.as_ref().and_then(serde_json::Value::as_str) {
+        host.text_bufs.borrow_mut().insert(key.to_owned(), value.to_owned());
+        host.store.borrow_mut().set_string(key, value);
+        return Some(value.to_owned());
+    }
+    Some(buf.to_owned())
 }
 
 /// save the plugin window pos for next session. two disk writes, dont call it

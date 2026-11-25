@@ -22,6 +22,21 @@ enum Job {
     Done(Result<String, String>),
 }
 
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WebMenuAction {
+    Enable { enabled: bool },
+    Update,
+    Downloader { enabled: bool },
+    Rescan,
+    TeamSize { value: usize },
+    Bots { value: usize },
+    Access { custom: bool, name: String, password: String },
+    Mutator { index: usize, value: usize },
+    Reset,
+}
+
 #[derive(Default)]
 pub struct InGameMenuState {
     folder: String,
@@ -498,6 +513,88 @@ fn change_downloader(cooked: &Path, enabled: bool) -> Result<String, String> {
 }
 
 impl InGameMenuState {
+    #[cfg(windows)]
+    pub(super) fn web_snapshot(&mut self, cooked: &Path, lan_only: bool, ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        self.tick(cooked, ctx);
+        if self.folder.is_empty() {
+            self.folder = workshop_menu::maps_folder(cooked).to_string_lossy().into_owned();
+            self.maps = all_maps(cooked);
+        }
+        if !self.lan.loaded { self.lan.load(cooked); }
+        let rows: Vec<_> = SETTINGS.iter().enumerate().map(|(index, setting)| {
+            let options: Vec<_> = setting.options.iter().map(|(label, _)| *label).collect();
+            json!({ "index": index, "label": setting.label, "options": options, "pick": self.lan.picks[index] })
+        }).collect();
+        json!({
+            "page": "workshop-menu", "rows": rows, "lanOnly": lan_only, "enabled": self.is_enabled(),
+            "busy": self.busy(), "status": self.status, "error": self.enabled.as_ref().and_then(|result| result.as_ref().err()),
+            "downloader": !lan_only && workshop_menu::downloader_on(cooked), "folder": self.folder,
+            "count": self.maps.len(), "team": self.lan.team_size, "bots": self.lan.bots,
+            "botChoices": BOTS.map(|label| label.trim_start_matches("Bots")),
+            "custom": self.lan.override_credentials, "name": self.lan.name, "password": self.lan.password,
+            "extra": self.lan.extra, "offers": crate::patcher::workshop_lan_trial::offer_status(cooked),
+            "freeplay": super::freeplay::current_session_origin() == super::freeplay::SessionOrigin::Freeplay,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_action(&mut self, action: WebMenuAction, cooked: &Path, lan_only: bool, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if !self.lan.loaded { self.lan.load(cooked); }
+        match action {
+            WebMenuAction::Enable { enabled } if !lan_only && self.is_enabled().is_some() => self.start(ctx, cooked, enabled, tx),
+            WebMenuAction::Update if !lan_only && !self.busy() && self.is_enabled() == Some(true) => {
+                if !crate::messages::block_item_action_if_game_running(tx) {
+                    let cooked = cooked.to_owned();
+                    self.spawn(ctx, move || Job::Done(workshop_menu::upgrade_movie(&cooked)
+                        .map(|()| "Workshop patch updated. Start Rocket League to use it.".into())));
+                }
+            }
+            WebMenuAction::Downloader { enabled } if !lan_only && !self.busy() && self.is_enabled() == Some(true) => {
+                if !crate::messages::block_item_action_if_game_running(tx) {
+                    let cooked = cooked.to_owned();
+                    self.spawn(ctx, move || Job::Done(change_downloader(&cooked, enabled)));
+                }
+            }
+            WebMenuAction::Rescan if !lan_only => self.maps = all_maps(cooked),
+            WebMenuAction::Access { custom, name, password } => {
+                self.lan.override_credentials = custom;
+                self.lan.name = name.chars().take(32).collect();
+                self.lan.password = password.chars().take(32).collect();
+                let credentials = custom.then_some((self.lan.name.trim(), self.lan.password.as_str()));
+                self.status = crate::patcher::workshop_host::store_lan_credentials(cooked, credentials)
+                    .map(|()| "LAN match access saved. Host a new match to refresh the server listing.".into())
+                    .unwrap_or_else(|error| error);
+            }
+            WebMenuAction::TeamSize { value } if (1..=4).contains(&value) => {
+                self.lan.team_size = value;
+                self.sync_web_lan(cooked);
+            }
+            WebMenuAction::Bots { value } if value < BOTS.len() => {
+                self.lan.bots = value;
+                self.sync_web_lan(cooked);
+            }
+            WebMenuAction::Mutator { index, value } if SETTINGS.get(index).is_some_and(|setting| value < setting.options.len()) => {
+                self.lan.picks[index] = value;
+                self.sync_web_lan(cooked);
+            }
+            WebMenuAction::Reset => {
+                self.lan.picks.fill(0);
+                self.lan.extra.clear();
+                self.sync_web_lan(cooked);
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn sync_web_lan(&mut self, cooked: &Path) {
+        match self.lan.sync(cooked) {
+            Err(error) => self.status = error,
+            Ok(true) => drop(refresh(cooked)),
+            Ok(false) => {}
+        }
+    }
     fn spawn(&mut self, ctx: &egui::Context, job: impl FnOnce() -> Job + Send + 'static) {
         let (tx, rx) = channel();
         let ctx = ctx.clone();

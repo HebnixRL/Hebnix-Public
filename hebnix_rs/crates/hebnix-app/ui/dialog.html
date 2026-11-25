@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <link rel="stylesheet" href="bootstrap.min.css">
+  <link rel="stylesheet" href="styles.css">
+  <title>Hebnix dialog</title>
+</head>
+<body class="global-dialog-surface">
+  <dialog id="dialog" class="tracker-detail loadout-dialog" aria-labelledby="title">
+    <h1 id="title" class="h5"></h1>
+    <div id="body" class="global-dialog-copy"></div>
+    <div id="actions" class="d-flex gap-2 flex-wrap justify-content-end mt-3"></div>
+  </dialog>
+  <script src="dialog.js" defer></script>
+</body>
+</html>

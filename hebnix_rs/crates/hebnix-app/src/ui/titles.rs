@@ -258,6 +258,127 @@ fn column(ui: &mut egui::Ui, width: f32, height: f32, content: impl FnOnce(&mut 
 }
 
 impl HebnixApp {
+    #[cfg(windows)]
+    pub(super) fn web_titles_data(&mut self, ctx: &egui::Context) -> Value {
+        use serde_json::json;
+        if !self.title_editor.page_open {
+            self.title_editor.page_open = true;
+            self.reload_catalogs(ctx);
+        }
+        self.owned_inventory.poll(ctx);
+        crate::patcher::title_icons::prepare(ctx, std::path::Path::new(&self.config.settings.rl_path));
+        let icons = crate::patcher::title_icons::web_loaded(ctx);
+        self.title_patcher.poll();
+        if !self.spoofer_title_enabled {
+            self.spoofer_title_enabled = true;
+            self.save_config();
+        }
+        let owned = &self.owned_inventory.title_ids;
+        let catalog: Vec<_> = self.title_catalog.iter().map(|entry| {
+            let [r, g, b, _] = entry.game_color().to_array();
+            json!({
+                "id": entry.id, "text": entry.text, "color": hex_color([r, g, b]), "glow": entry.glow,
+                "owned": owned.contains(&entry.id.to_ascii_lowercase()),
+            })
+        }).collect();
+        let rules: Vec<_> = self.spoofer_titles.iter().map(|rule| {
+            let target = rule.target_id.as_ref().and_then(|id| self.title_catalog.iter().find(|title| title.id.eq_ignore_ascii_case(id)));
+            let target_name = target.map(|title| title.text.as_str()).or(rule.target_id.as_deref()).unwrap_or("All titles (fallback)");
+            let warning = rule.target_id.as_ref().and_then(|id| {
+                if target.is_none() && !self.title_catalog.is_empty() { Some("Target unavailable in the current catalog") }
+                else if !owned.contains(&id.to_ascii_lowercase()) { Some("Not owned in the selected save") }
+                else { None }
+            });
+            json!({ "title": rule, "target": target_name, "warning": warning })
+        }).collect();
+        let patch = self.title_rules();
+        let validation = crate::patcher::title_patcher::validate_rules(&patch).err();
+        let draft = self.title_draft();
+        let cooked = self.swapper_cooked_path();
+        let applied = self.title_patcher.applied_matches(&cooked, &patch);
+        json!({
+            "page": "titles", "catalog": catalog, "owned": self.title_editor.library_owned, "targetsOwned": self.title_only_owned,
+            "inventory": self.owned_inventory.web_snapshot(), "draft": draft, "rules": rules,
+            "icons": icons.as_ref(), "busy": self.title_patcher.busy(), "ready": !self.last_rl_open && !self.first_status,
+            "loading": self.catalogs_loading, "catalogError": self.catalogs_error, "status": self.title_patcher.status,
+            "validation": validation, "applied": applied, "editing": self.matching_title_entry().is_some(),
+            "restore": self.title_editor.restore_confirmation, "admin": !spoofer::is_admin() && self.title_patcher.status.contains("os error 5"),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_titles_action(&mut self, action: crate::modern_ui::TitlesAction, ctx: &egui::Context) {
+        use crate::modern_ui::TitlesAction;
+        let ready = !self.last_rl_open && !self.first_status && !self.title_patcher.busy();
+        match action {
+            TitlesAction::Reload if !self.catalogs_loading => { self.reload_catalogs(ctx); return; }
+            TitlesAction::Account { id } => { self.owned_inventory.refresh_web(ctx, id.as_deref()); return; }
+            TitlesAction::Owned { enabled } => self.title_editor.library_owned = enabled,
+            TitlesAction::Restore { key } if key == "cancel" => { self.title_editor.restore_confirmation = false; return; }
+            _ if self.title_patcher.busy() => return,
+            TitlesAction::Copy { id } => {
+                let Some(title) = self.title_catalog.iter().find(|title| title.id == id) else { return; };
+                self.spoofer_title_copy = Some(id);
+                self.spoofer_title = title.text.chars().take(64).collect();
+                self.spoofer_title_color = title.color.as_deref().map(parse_hex_color).unwrap_or([255; 3]);
+                self.spoofer_title_glow = title.glow.is_some();
+                self.spoofer_title_glow_color = title.glow.as_deref().map(parse_hex_color).unwrap_or(self.spoofer_title_color);
+            }
+            TitlesAction::Text { text } => self.spoofer_title = text.chars().filter(|character| *character != '\0').take(64).collect(),
+            TitlesAction::Colour { glow, rgb } => {
+                if glow { self.spoofer_title_glow_color = rgb; } else { self.spoofer_title_color = rgb; }
+            }
+            TitlesAction::Glow { enabled } => self.spoofer_title_glow = enabled,
+            TitlesAction::Target { id } => {
+                if id.as_ref().is_some_and(|id| !self.title_catalog.iter().any(|title| title.id == *id))
+                    || self.title_only_owned && id.as_ref().is_none_or(|id| !self.owned_inventory.title_ids.contains(&id.to_ascii_lowercase()))
+                { return; }
+                self.select_title_target(id);
+            }
+            TitlesAction::Save => {
+                let existing = self.matching_title_entry();
+                if self.spoofer_title.trim().is_empty() || (existing.is_none() && self.spoofer_titles.len() >= 64)
+                    || self.title_only_owned && self.spoofer_title_target.as_ref().is_none_or(|id| !self.owned_inventory.title_ids.contains(&id.to_ascii_lowercase()))
+                { return; }
+                let entry = TitleSpoofSettings {
+                    text: self.spoofer_title.trim().to_owned(), color: hex_color(self.spoofer_title_color),
+                    glow: self.spoofer_title_glow, glow_color: Some(hex_color(self.spoofer_title_glow_color)),
+                    target_id: self.spoofer_title_target.clone(),
+                };
+                let index = if let Some(index) = existing { self.spoofer_titles[index] = entry; index }
+                    else { self.spoofer_titles.push(entry); self.spoofer_titles.len() - 1 };
+                self.title_editor.editing = Some(index);
+                self.title_editor.drafts.retain(|(key, _)| *key != Some(index) && (existing.is_some() || key.is_some()));
+            }
+            TitlesAction::Edit { index } if index < self.spoofer_titles.len() => self.switch_title_editor(Some(index)),
+            TitlesAction::Remove { index } if index < self.spoofer_titles.len() => self.remove_title_entry(index),
+            TitlesAction::Apply if ready => {
+                let rules = self.title_rules();
+                if crate::patcher::title_patcher::validate_rules(&rules).is_ok() {
+                    self.title_patcher.start(self.base_dir.clone(), self.swapper_cooked_path(), Some(rules), ctx.clone());
+                }
+                return;
+            }
+            TitlesAction::Restore { key } if ready => {
+                if key == "open" { self.title_editor.restore_confirmation = true; }
+                else if key == "confirm" && self.title_editor.restore_confirmation {
+                    self.title_editor.restore_confirmation = false;
+                    self.title_patcher.start(self.base_dir.clone(), self.swapper_cooked_path(), None, ctx.clone());
+                }
+                return;
+            }
+            TitlesAction::Admin if !spoofer::is_admin() && self.title_patcher.status.contains("os error 5") => {
+                self.save_config();
+                if spoofer::spawn_elevated_relaunch() {
+                    self.spoofer_mgr.shutdown(); self.workshop.suspend_multiplayer(); std::process::exit(0);
+                }
+                self.title_patcher.status = "Could not restart as administrator.".into();
+                return;
+            }
+            _ => return,
+        }
+        self.save_config();
+    }
     fn title_draft(&self) -> TitleDraft {
         TitleDraft {
             text: self.spoofer_title.clone(),

@@ -134,9 +134,9 @@ impl OwnedInventory {
         self.show_with_actions(ui, |_| {});
     }
 
-    pub fn show_with_actions(&mut self, ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui)) {
+    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
         if !self.initial_refresh_attempted {
-            self.refresh(ui.ctx());
+            self.refresh(ctx);
         }
         if let Some(result) = self.result.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.result = None;
@@ -159,6 +159,43 @@ impl OwnedInventory {
                 }
             }
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&self) -> serde_json::Value {
+        let accounts: Vec<_> = self.accounts.iter().map(|account| {
+            serde_json::json!({
+                "id": account.account_id,
+                "label": account.display_name,
+                "selected": self.selected.as_ref() == Some(&account.path),
+            })
+        }).collect();
+        serde_json::json!({
+            "accounts": accounts,
+            "loading": self.result.is_some(),
+            "error": self.error,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn refresh_web(&mut self, ctx: &egui::Context, account: Option<&str>) {
+        if self.result.is_some() {
+            return;
+        }
+        if let Some(id) = account {
+            let Some(account) = self.accounts.iter().find(|account| account.account_id == id) else {
+                return;
+            };
+            self.selected = Some(account.path.clone());
+            self.ids.clear();
+            self.paints.clear();
+            self.title_ids.clear();
+        }
+        self.refresh(ctx);
+    }
+
+    pub fn show_with_actions(&mut self, ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui)) {
+        self.poll(ui.ctx());
         ui.horizontal_wrapped(|ui| {
             ui.label("Owned items from save:");
             let before = self.selected.clone();

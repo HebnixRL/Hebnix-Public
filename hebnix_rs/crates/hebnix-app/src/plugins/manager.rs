@@ -944,6 +944,36 @@ impl PluginManager {
         lua_api::with_ui_scope(ui, || f.call::<()>(ui_tbl).map_err(|e| e.to_string()))
     }
 
+    #[cfg(windows)]
+    pub(crate) fn web_settings(
+        &self, slug: &str, ctx: &egui::Context, action: Option<(String, serde_json::Value)>,
+        expanded: std::collections::HashSet<String>,
+    ) -> Result<lua_api::web_settings::SettingsFrame, String> {
+        let rt = self.plugins.iter().find(|plugin| plugin.slug == slug && plugin.enabled)
+            .and_then(|plugin| plugin.runtime.as_ref()).ok_or("Plugin settings are unavailable")?;
+        lua_api::web_settings::capture(ctx, action, expanded, || {
+            let table: Table = rt.lua.registry_value(&rt.plugin_table)?;
+            let callback: mlua::Function = table.get("on_settings")?;
+            callback.call::<()>(lua_api::ui_table(&rt.lua)?)
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_window(
+        &self, slug: &str, ctx: &egui::Context, action: Option<(String, serde_json::Value)>,
+        expanded: std::collections::HashSet<String>,
+    ) -> Result<lua_api::web_settings::SettingsFrame, String> {
+        let rt = self.plugins.iter().find(|plugin| plugin.slug == slug && plugin.enabled)
+            .and_then(|plugin| plugin.runtime.as_ref()).ok_or("Plugin window is unavailable")?;
+        lua_api::web_settings::capture(ctx, action, expanded, || {
+            let table: Table = rt.lua.registry_value(&rt.plugin_table)?;
+            if let LuaValue::Function(callback) = table.get("on_window")? {
+                callback.call::<()>(lua_api::ui_table(&rt.lua)?)?;
+            }
+            Ok(())
+        })
+    }
+
     /// render a plugin's floating-window contents
     pub fn render_window(&mut self, slug: &str, ui: &mut egui::Ui) -> Result<(), String> {
         let Some(plugin) = self.plugins.iter().find(|p| p.slug == slug) else {

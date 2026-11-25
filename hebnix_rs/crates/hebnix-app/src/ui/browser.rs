@@ -404,3 +404,19 @@ mod layout_tests {
         std::fs::remove_dir_all(resolved).unwrap();
     }
 }
+
+#[cfg(windows)]
+pub(crate) fn image_url(bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+    let mime = match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Jpeg => "image/jpeg",
+        image::ImageFormat::Gif => "image/gif",
+        image::ImageFormat::WebP => "image/webp",
+        _ => return None,
+    };
+    Some(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}

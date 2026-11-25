@@ -1,6 +1,18 @@
 // crates/hebnix-app/src/app.rs
 mod game_update;
 
+#[cfg(target_os = "windows")]
+#[path = "../ui/routes.rs"]
+mod modern_routes;
+#[cfg(windows)]
+#[path = "../ui/manage.rs"]
+mod modern_manage;
+#[cfg(windows)]
+#[path = "../ui/dialogs.rs"]
+mod modern_dialogs;
+#[cfg(windows)]
+#[path = "../ui/plugin_window.rs"]
+mod wry_plugin_window;
 #[path = "ui/home.rs"]
 mod home;
 #[path = "ui/home_tracker.rs"]
@@ -246,9 +258,9 @@ fn valid_catalog(name: &str, root: &Value) -> bool {
 /// the same files 2.2.x wrote), so the patcher tabs still work when
 /// api.hebnix.com can't be reached.
 #[cfg(target_os = "linux")]
-fn cached_catalogs(base_dir: &std::path::Path) -> Option<HashMap<String, Value>> {
+fn cached_catalogs(base_dir: &std::path::Path, names: &[&str]) -> Option<HashMap<String, Value>> {
     let mut catalogs = HashMap::new();
-    for name in CATALOG_NAMES {
+    for &name in names {
         let bytes = std::fs::read(base_dir.join(format!("{name}.json"))).ok()?;
         let root: Value = serde_json::from_slice(&bytes).ok()?;
         if !valid_catalog(name, &root) {
@@ -259,7 +271,7 @@ fn cached_catalogs(base_dir: &std::path::Path) -> Option<HashMap<String, Value>>
     Some(catalogs)
 }
 
-fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
+pub(crate) fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context, names: &'static [&str]) {
     #[cfg(target_os = "linux")]
     let base_dir = crate::config::base_dir();
     std::thread::Builder::new()
@@ -267,7 +279,7 @@ fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
         .spawn(move || {
             let result = (|| {
                 let mut catalogs = HashMap::new();
-                for name in CATALOG_NAMES {
+                for &name in names {
                     let url = format!("https://api.hebnix.com/catalogs/{name}.json");
                     let response = get_retry(&url, Duration::from_secs(20))
                         .map_err(|error| format!("Failed to fetch {name}.json: {error}"))?;
@@ -291,7 +303,7 @@ fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
                     }
                     Ok(catalogs)
                 }
-                Err(error) => match cached_catalogs(&base_dir) {
+                Err(error) => match cached_catalogs(&base_dir, names) {
                     Some(cached) => {
                         tracing::warn!(%error, "catalog download failed, using the cached copies");
                         Ok(cached)
@@ -622,6 +634,14 @@ struct InstallModal {
 }
 
 pub struct HebnixApp {
+    #[cfg(target_os = "windows")]
+    modern_navigation: Option<crate::modern_ui::Navigation>,
+    #[cfg(windows)]
+    plugin_web_preview_ids: Vec<String>,
+    #[cfg(windows)]
+    swapper_web_status: Option<Result<String, String>>,
+    #[cfg(windows)]
+    swapper_preview_ids: Vec<String>,
     base_dir: PathBuf,
     pending_installs: crate::deep_link::PendingInstalls,
     themes_dir: PathBuf,
@@ -692,6 +712,10 @@ pub struct HebnixApp {
     current_api_port: u16,
 
     selected_settings_plugin: Option<String>,
+    #[cfg(windows)]
+    web_plugin_settings: modern_manage::PluginSettingsState,
+    #[cfg(windows)]
+    wry_plugin_windows: std::collections::HashMap<String, wry_plugin_window::PluginWindow>,
     install_modal: InstallModal,
     restart_notice: bool,
     window_mode: Option<WindowMode>,
@@ -1244,6 +1268,14 @@ impl HebnixApp {
         );
 
         let mut app = Self {
+            #[cfg(target_os = "windows")]
+            modern_navigation: None,
+            #[cfg(windows)]
+            plugin_web_preview_ids: Vec::new(),
+            #[cfg(windows)]
+            swapper_web_status: None,
+            #[cfg(windows)]
+            swapper_preview_ids: Vec::new(),
             base_dir: base_dir.clone(),
             pending_installs: crate::deep_link::PendingInstalls::start(&base_dir, &cc.egui_ctx),
             themes_dir,
@@ -1304,6 +1336,10 @@ impl HebnixApp {
             web_port_edit: String::new(),
             current_api_port: 49123,
             selected_settings_plugin: None,
+            #[cfg(windows)]
+            web_plugin_settings: Default::default(),
+            #[cfg(windows)]
+            wry_plugin_windows: Default::default(),
             install_modal: InstallModal::default(),
             restart_notice: false,
             window_mode: None,
@@ -1439,7 +1475,7 @@ impl HebnixApp {
         if app.spoofer_certificate_prompt_open {
             app.set_hidden(&cc.egui_ctx, false);
         }
-        fetch_catalogs(app.tx.clone(), cc.egui_ctx.clone());
+        fetch_catalogs(app.tx.clone(), cc.egui_ctx.clone(), &CATALOG_NAMES);
 
         if crate::visibility::begin_change(&cc.egui_ctx, app.hidden) {
             crate::visibility::applied(&cc.egui_ctx);
@@ -1544,7 +1580,7 @@ impl HebnixApp {
         }
         self.catalogs_loading = true;
         self.catalogs_error = None;
-        fetch_catalogs(self.tx.clone(), ctx.clone());
+        fetch_catalogs(self.tx.clone(), ctx.clone(), &CATALOG_NAMES);
     }
 
     fn enable_rlapi(&mut self) {
@@ -1774,19 +1810,10 @@ impl HebnixApp {
                 .clicked()
         }).inner;
         if config_changed {
-            self.auto_upload_replays.stop();
-            self.save_config();
-            self.evaluate_proxies();
+            self.replay_upload_settings_changed();
         }
         if check_now {
-            self.auto_upload_replays.check(
-                &self.config.replay_upload,
-                std::path::Path::new(&self.config.settings.rl_path),
-                &self.config.rl_launch,
-                self.tx.clone(),
-                ui.ctx().clone(),
-                true,
-            );
+            self.check_replay_upload(ui.ctx());
         }
         ui.add_space(8.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -1803,6 +1830,25 @@ impl HebnixApp {
             }
             self.auto_upload_replays.show_status(ui);
         });
+    }
+
+    fn replay_upload_settings_changed(&mut self) {
+        self.auto_upload_replays.stop();
+        self.save_config();
+        self.evaluate_proxies();
+    }
+
+    fn check_replay_upload(&mut self, ctx: &egui::Context) {
+        if self.replay_options_enabled() {
+            self.auto_upload_replays.check(
+                &self.config.replay_upload,
+                Path::new(&self.config.settings.rl_path),
+                &self.config.rl_launch,
+                self.tx.clone(),
+                ctx.clone(),
+                true,
+            );
+        }
     }
     fn process_preset_operations(
         &mut self,
@@ -2066,6 +2112,30 @@ impl HebnixApp {
         self.process_preset_operations(cooked_pc, backups_dir, ctx);
     }
 
+    fn capture_preset(&self, backups_dir: &std::path::Path) -> crate::presets::Preset {
+        let swaps = std::fs::read(backups_dir.join("swapper_swaps.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<serde_json::Value>>(&b).ok())
+            .unwrap_or_default();
+        let patches = if self.presets.include_patches {
+            serde_json::json!({
+                "ball": self.patcher_ball.active_ball,
+                "boost": self.patcher_boost.active_boost,
+                "decals": self.patcher_decal.active_decals,
+                "cars": self.patcher_car.active_cars,
+                "car_colours": self.colours.settings.car_colours_patch(),
+            })
+        } else {
+            serde_json::Value::Null
+        };
+        crate::presets::Preset {
+            name: self.presets.name_edit.trim().to_string(),
+            include_patches: self.presets.include_patches,
+            patches,
+            swaps,
+        }
+    }
+
     fn render_presets_tab(
         &mut self,
         ui: &mut egui::Ui,
@@ -2086,27 +2156,7 @@ impl HebnixApp {
                     t("presets-include-patches"),
                 );
                 if ui.button(t("presets-save-preset")).clicked() {
-                    let swaps = std::fs::read(backups_dir.join("swapper_swaps.json"))
-                        .ok()
-                        .and_then(|b| serde_json::from_slice::<Vec<serde_json::Value>>(&b).ok())
-                        .unwrap_or_default();
-                    let patches = if self.presets.include_patches {
-                        serde_json::json!({
-                            "ball": self.patcher_ball.active_ball,
-                            "boost": self.patcher_boost.active_boost,
-                            "decals": self.patcher_decal.active_decals,
-                            "cars": self.patcher_car.active_cars,
-                            "car_colours": self.colours.settings.car_colours_patch(),
-                        })
-                    } else {
-                        serde_json::Value::Null
-                    };
-                    let preset = crate::presets::Preset {
-                        name: self.presets.name_edit.trim().to_string(),
-                        include_patches: self.presets.include_patches,
-                        patches,
-                        swaps,
-                    };
+                    let preset = self.capture_preset(backups_dir);
                     if let Err(error) = self.presets.save(preset) {
                         self.console.write(format!("[Presets] {error}"));
                     }
@@ -2447,6 +2497,111 @@ impl HebnixApp {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn enable_modern_ui(&mut self, cc: &eframe::CreationContext<'_>) {
+        let labels = Self::modern_tab_labels();
+        match crate::modern_ui::Navigation::new(cc, &labels) {
+            Ok(navigation) => {
+                self.modern_navigation = Some(navigation);
+                let (tab, _) = self.modern_tab_selection();
+                self.select_modern_tab(tab, None);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not start Wry navigation");
+                rfd::MessageDialog::new()
+                    .set_title("Hebnix")
+                    .set_description("Modern UI could not open. Hebnix will open in Legacy UI.")
+                    .set_level(rfd::MessageLevel::Warning)
+                    .show();
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn poll_modern_navigation(&mut self, ctx: &egui::Context) {
+        use crate::modern_ui::Action;
+
+        let Some(navigation) = &mut self.modern_navigation else {
+            return;
+        };
+        for action in navigation.take_actions() {
+            match action {
+                Action::Select { tab, child } => self.select_modern_tab(tab, child),
+                Action::Nested { tab, child, leaf } => {
+                    self.select_modern_tab(tab, Some(child));
+                    self.select_modern_leaf(child, leaf);
+                }
+                Action::Maintenance if self.tab == Tab::About => self.maintenance.tab = true,
+                Action::AboutLink(link) if self.tab == Tab::About && !self.maintenance.tab => {
+                    if let Err(error) = open::that(link.url()) {
+                        tracing::warn!(%error, "could not open About link");
+                    }
+                }
+                Action::ReplayUpload(action)
+                    if self.tab == Tab::Replays && self.replays_subtab == ReplaysSubTab::AutoUploadReplays =>
+                {
+                    self.handle_modern_replay_upload(action, ctx);
+                }
+                Action::Console(action) if self.tab == Tab::Console => {
+                    self.handle_modern_console(action, ctx);
+                }
+                Action::Dialog { id, key } => self.handle_global_dialog(&id, &key, ctx),
+                Action::PanelBack if self.panel.active => self.panel.pending_back = true,
+                Action::PanelSelect { index } if self.panel.active && self.panel.page.is_none()
+                    && index < self.panel_pages().len() => self.panel.page = Some(index),
+                Action::PanelAdvanced { enabled } if self.panel.active && self.panel.page.is_none() => {
+                    self.config.settings.panel_advanced = enabled;
+                    self.save_config();
+                }
+                Action::Header(action) => self.handle_modern_header(action, ctx),
+                Action::Tracker(action) if self.on_tracker_page() => {
+                    self.handle_modern_tracker(action, ctx);
+                }
+                Action::BrowseMaps(action) if self.on_browse_maps_page() => {
+                    self.workshop.browse_web_action(action, &self.config.settings.rl_path, &self.tx, ctx);
+                }
+                Action::Arena(action) => {
+                    if let Some(full) = self.arena_page() {
+                        self.workshop.background_changer.web_action(action, &self.config.settings.rl_path, full, &self.tx, ctx);
+                    }
+                }
+                Action::Manage(action) => self.handle_modern_manager(action, ctx),
+                Action::Swapper(action)
+                    if self.tab == Tab::Items && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active) =>
+                {
+                    self.handle_modern_swapper(action, ctx);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn show_modern_navigation(&mut self, ui: &mut egui::Ui) -> bool {
+        self.poll_modern_navigation(ui.ctx());
+        let (tab_index, child) = self.modern_tab_selection();
+        let leaf = child.and_then(|child| {
+            let key = format!("{}/{}", self.tab.config_key(), modern_routes::subtabs(self.tab)[child].1);
+            self.config.settings.navigation_memory.get(&key).copied()
+        });
+        let selected = (tab_index, child, leaf);
+        let content = self.modern_content_page();
+        let Some(navigation) = &mut self.modern_navigation else {
+            return false;
+        };
+        navigation.set_theme(&self.config.settings.theme, ui.ctx());
+        navigation.keep_content(content);
+        if let Err(error) = navigation.show(ui.ctx(), selected) {
+            tracing::warn!(%error, "could not display Wry navigation");
+            return false;
+        }
+        egui::Panel::left("modern_navigation")
+            .exact_size(crate::modern_ui::SIDEBAR_WIDTH)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| ui.set_min_width(crate::modern_ui::SIDEBAR_WIDTH));
+        true
+    }
+
     #[cfg(target_os = "linux")]
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
         if !crate::visibility::begin_change(ctx, hidden) { return; }
@@ -2506,6 +2661,11 @@ impl HebnixApp {
         tracing::info!(hidden, "toggling main window visibility");
         if hidden {
             self.panel.leave(ctx);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            #[cfg(target_os = "windows")]
+            if let Some(navigation) = &mut self.modern_navigation {
+                navigation.hide();
+            }
         }
         if !hidden {
             winutil::note_foreground();
@@ -2536,6 +2696,27 @@ impl HebnixApp {
             // The tray's hidden menu window is also ours. A process-level
             // focus check must not mistake that helper for the main window.
             winutil::focus_main_window();
+            #[cfg(target_os = "windows")]
+            std::thread::spawn(|| {
+                for ms in [60u64, 120, 240] {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    if !winutil::foreground_window_is_ours() && !hebnix_sdk::process::is_rocket_league_focused() { break; }
+                    if let Some(hwnd) = crate::window_state::main_window() {
+                        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, GWL_EXSTYLE, WS_EX_NOACTIVATE};
+                        if unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } & WS_EX_NOACTIVATE.0 as i32 != 0 { break; }
+                        winutil::focus_main_window();
+                    }
+                }
+            });
+            // The viewport is unmapped until the compositor processes Visible(true),
+            // so the focus request above can miss it; retry shortly after it maps.
+            #[cfg(target_os = "linux")]
+            std::thread::spawn(|| {
+                for ms in [60u64, 140, 300, 600] {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    winutil::focus_main_window();
+                }
+            });
         }
 
         ctx.request_repaint();
@@ -2603,14 +2784,7 @@ impl HebnixApp {
                     &mut self.plugins_subtab,
                     step,
                 );
-                // the page only fetches the catalogue when its own tab buttons change
-                if before != self.plugins_subtab
-                    && self.plugins_subtab == PluginsSubTab::Browse
-                    && self.install_modal.catalog.is_empty()
-                    && !self.install_modal.fetching
-                {
-                    self.fetch_hebnix_plugin();
-                }
+                self.maybe_fetch_plugin_catalog(before);
             }
             Tab::Items => walk(
                 &[
@@ -2650,13 +2824,58 @@ impl HebnixApp {
         }
     }
 
-    /// Big-picture side panel: a list of large cards, each opening one existing page.
-    fn render_panel(&mut self, ui: &mut egui::Ui) {
-        // in-game pages first, the rest only behind the Advanced tickbox
+    fn panel_pages(&self) -> Vec<Tab> {
         let mut pages = vec![Tab::Workshop, Tab::Plugins];
         if self.config.settings.panel_advanced {
             pages.extend([Tab::Items, Tab::GameMods, Tab::Spoofer, Tab::Settings]);
         }
+        pages
+    }
+
+    #[cfg(windows)]
+    fn render_wry_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.poll_modern_navigation(&ctx);
+        self.panel.step_slide(&ctx);
+        let pages = self.panel_pages();
+        if std::mem::take(&mut self.panel.pending_back) && self.panel.page.take().is_none() {
+            self.set_hidden(&ctx, true);
+            return;
+        }
+        let step = std::mem::take(&mut self.panel.pending_page);
+        if let Some(tab) = self.panel.page.and_then(|index| pages.get(index)).copied() {
+            self.tab = tab;
+            if step != 0 { self.step_panel_subtab(tab, step); }
+            let page = self.modern_content_page();
+            if let Some(navigation) = &mut self.modern_navigation {
+                navigation.hide_sidebar();
+                navigation.keep_content(page);
+            }
+            self.render_modern_header(ui);
+            if let Some(navigation) = &mut self.modern_navigation {
+                navigation.set_workspace(Some(ui.available_rect_before_wrap()));
+            }
+            self.render_wry_page(ui);
+        } else {
+            self.panel.page = None;
+            if let Some(navigation) = &mut self.modern_navigation {
+                navigation.hide_sidebar();
+                navigation.hide_header();
+                navigation.set_workspace(Some(ui.available_rect_before_wrap()));
+                let model = serde_json::json!({
+                    "page": "controller-menu", "pages": pages.iter().map(|tab| tab.label()).collect::<Vec<_>>(),
+                    "advanced": self.config.settings.panel_advanced,
+                });
+                if let Err(error) = navigation.show_content(ui, crate::modern_ui::ContentPage::Manage, &model) {
+                    tracing::warn!(%error, "could not display the controller menu");
+                }
+            }
+        }
+    }
+
+    /// Big-picture side panel: a list of large cards, each opening one existing page.
+    fn render_panel(&mut self, ui: &mut egui::Ui) {
+        let pages = self.panel_pages();
         let pages = &pages;
         let ctx = ui.ctx().clone();
         self.panel.begin_frame(&ctx);
@@ -2734,7 +2953,7 @@ impl HebnixApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| crate::panel::followed(ui, |ui| {
-                        self.render_current_page(ui);
+                        self.render_current_page(ui, false);
                         crate::panel::follow_focus(ui);
                     }));
             }
@@ -2902,6 +3121,9 @@ impl HebnixApp {
                         }
                     }
                     let launched = rl_open && !self.last_rl_open;
+                    if (rl_state_changed || platform_changed) && !rl_open && crate::watchdog::is_ready() {
+                        crate::patcher::live_cosmetics::start(&self.config.settings.rl_path);
+                    }
 
                     self.handle_rl_status(rl_open, api_open);
                     self.sync_proxy_consumers();
@@ -4180,41 +4402,77 @@ impl HebnixApp {
         }
     }
 
-    fn render_console_tab(&mut self, ui: &mut egui::Ui) {
-        self.render_game_update_controls(ui);
-        let plugin_names: Vec<String> = self
-            .plugin_mgr
+    fn console_plugin_names(&self) -> Vec<String> {
+        self.plugin_mgr
             .plugins
             .iter()
             .map(|p| p.display_name().to_string())
-            .collect();
+            .collect()
+    }
+
+    fn render_console_tab(&mut self, ui: &mut egui::Ui, _modern_navigation: bool) {
+        self.render_game_update_controls(ui);
+        #[cfg(windows)]
+        if _modern_navigation && self.render_modern_console(ui) {
+            return;
+        }
+        let plugin_names = self.console_plugin_names();
         let submitted = self.console.render(ui, &plugin_names);
         if let Some(cmd) = submitted {
             self.execute_command(cmd, ui.ctx());
         }
     }
 
-    fn render_spoofer_tab(&mut self, ui: &mut egui::Ui) {
-        theme::secondary_navigation(ui, "spoofer_settings_list").show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("spoofer_settings_names")
-                .show(ui, |ui| {
-                    crate::panel::followed(ui, |ui| {
-                        let tabs = [
-                            (SpooferSubTab::Username, t("nav-player-name")),
-                            (SpooferSubTab::Titles, t("nav-titles")),
-                            (SpooferSubTab::ProfilePictures, t("nav-profile-pictures")),
-                            (SpooferSubTab::Scoreboard, t("nav-scoreboard")),
-                            (SpooferSubTab::TitleRank, t("spoofer-rank")),
-                            (SpooferSubTab::Friends, t("spoofer-friends")),
-                        ];
-                        for (value, label) in tabs {
-                            ui.selectable_value(&mut self.spoofer_subtab, value, label);
-                        }
-                    });
-                });
-        });
+    fn sync_friend_names(&mut self) -> bool {
+        let discovered = self.spoofer_mgr.discovered_friends.lock().unwrap().clone();
+        let has_discovered = !discovered.is_empty();
+        let mut changed = false;
+        for (id, name) in discovered {
+            let state = self.spoofer_friends.entry(id).or_insert_with(|| {
+                changed = true;
+                FriendSpoofState {
+                    enabled: false,
+                    original_name: name.clone(),
+                    spoofed_name: String::new(),
+                }
+            });
+            if state.original_name != name {
+                state.original_name = name;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_friends();
+        }
+        has_discovered
+    }
 
+    fn render_spoofer_tab(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
+        #[cfg(windows)]
+        if modern_navigation && self.render_modern_manager(ui) {
+            return;
+        }
+        if !modern_navigation {
+            theme::secondary_navigation(ui, "spoofer_settings_list").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("spoofer_settings_names")
+                    .show(ui, |ui| {
+                        crate::panel::followed(ui, |ui| {
+                            let tabs = [
+                                (SpooferSubTab::Username, t("nav-player-name")),
+                                (SpooferSubTab::Titles, t("nav-titles")),
+                                (SpooferSubTab::ProfilePictures, t("nav-profile-pictures")),
+                                (SpooferSubTab::Scoreboard, t("nav-scoreboard")),
+                                (SpooferSubTab::TitleRank, t("spoofer-rank")),
+                                (SpooferSubTab::Friends, t("spoofer-friends")),
+                            ];
+                            for (value, label) in tabs {
+                                ui.selectable_value(&mut self.spoofer_subtab, value, label);
+                            }
+                        });
+                    });
+            });
+        }
         egui::CentralPanel::default()
             .frame(crate::i18n::layout::subtab_content_frame())
             .show(ui, |ui| {
@@ -4289,30 +4547,7 @@ impl HebnixApp {
                                     });
                                     ui.add_space(8.0);
 
-                                    let discovered =
-                                        self.spoofer_mgr.discovered_friends.lock().unwrap().clone();
-
-                                    let mut changed = false;
-                                    for (acc_id, orig_name) in &discovered {
-                                        let entry = self
-                                            .spoofer_friends
-                                            .entry(acc_id.clone())
-                                            .or_insert_with(|| {
-                                                changed = true;
-                                                FriendSpoofState {
-                                                    enabled: false,
-                                                    original_name: orig_name.clone(),
-                                                    spoofed_name: String::new(),
-                                                }
-                                            });
-                                        if entry.original_name != *orig_name {
-                                            entry.original_name = orig_name.clone();
-                                            changed = true;
-                                        }
-                                    }
-                                    if changed {
-                                        self.save_friends();
-                                    }
+                                    let has_discovered = self.sync_friend_names();
 
                                     let mut friends_vec: Vec<_> =
                                         self.spoofer_friends.iter_mut().collect();
@@ -4329,7 +4564,7 @@ impl HebnixApp {
                                             || state.spoofed_name.to_lowercase().contains(&query)
                                     });
 
-                                    if discovered.is_empty() && friends_vec.is_empty() {
+                                    if !has_discovered && friends_vec.is_empty() {
                                         ui.label(
                                             egui::RichText::new(t(
                                                 "spoofer-start-rocket-league-to-populate-friends",
@@ -4385,9 +4620,57 @@ impl HebnixApp {
             });
     }
 
-    fn render_rank_display(&mut self, ui: &mut egui::Ui) {
+    fn update_rank_display(&mut self, cooked: PathBuf, restore: bool, ctx: &egui::Context) {
         use crate::patcher::title_patcher::RankPick;
+        if restore {
+            self.rank_patch.start(
+                self.base_dir.clone(),
+                cooked,
+                Vec::new(),
+                ctx.clone(),
+            );
+        } else {
+            let picks = RANK_SPOOF_PLAYLISTS
+                .iter()
+                .filter_map(|&(id, name, players)| {
+                    let state = self.spoofer_ranks.get(&id).filter(|state| state.enabled)?;
+                    let mmr = if state.mmr.trim().is_empty() {
+                        Ok((default_mu_for_tier(state.rank) * 20.0 + 100.0) as usize)
+                    } else {
+                        state
+                            .mmr
+                            .trim()
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|mmr| (100..=9999).contains(mmr))
+                            .ok_or_else(|| {
+                                format!("Enter an MMR between 100 and 9999 for {name}.")
+                            })
+                    };
+                    Some(mmr.map(|mmr| RankPick {
+                        playlist: id as u8,
+                        tier: state.rank as u8,
+                        division: state.division,
+                        mmr,
+                        players,
+                    }))
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match picks {
+                Ok(picks) => {
+                    self.rank_patch.start(
+                        self.base_dir.clone(),
+                        cooked,
+                        picks,
+                        ctx.clone(),
+                    );
+                }
+                Err(error) => self.rank_patch.status = error,
+            }
+        }
+    }
 
+    fn render_rank_display(&mut self, ui: &mut egui::Ui) {
         crate::i18n::layout::bordered_panel(ui, |ui| {
             crate::theme::page_heading(ui, t("spoofer-rank-spoofing"));
             ui.label("Choose the rank, division and MMR shown locally in Rocket League.");
@@ -4460,51 +4743,8 @@ impl HebnixApp {
                         .clicked();
                     (apply, restore)
                 }).inner;
-                if restore {
-                    self.rank_patch.start(
-                        self.base_dir.clone(),
-                        cooked,
-                        Vec::new(),
-                        ui.ctx().clone(),
-                    );
-                } else if apply {
-                    let picks = RANK_SPOOF_PLAYLISTS
-                        .iter()
-                        .filter_map(|&(id, name, players)| {
-                            let state = self.spoofer_ranks.get(&id).filter(|state| state.enabled)?;
-                            let mmr = if state.mmr.trim().is_empty() {
-                                Ok((default_mu_for_tier(state.rank) * 20.0 + 100.0) as usize)
-                            } else {
-                                state
-                                    .mmr
-                                    .trim()
-                                    .parse::<usize>()
-                                    .ok()
-                                    .filter(|mmr| (100..=9999).contains(mmr))
-                                    .ok_or_else(|| {
-                                        format!("Enter an MMR between 100 and 9999 for {name}.")
-                                    })
-                            };
-                            Some(mmr.map(|mmr| RankPick {
-                                playlist: id as u8,
-                                tier: state.rank as u8,
-                                division: state.division,
-                                mmr,
-                                players,
-                            }))
-                        })
-                        .collect::<Result<Vec<_>, _>>();
-                    match picks {
-                        Ok(picks) => {
-                            self.rank_patch.start(
-                                self.base_dir.clone(),
-                                cooked,
-                                picks,
-                                ui.ctx().clone(),
-                            );
-                        }
-                        Err(error) => self.rank_patch.status = error,
-                    }
+                if restore || apply {
+                    self.update_rank_display(cooked, restore, ui.ctx());
                 }
             });
             if self.rank_patch.busy() {
@@ -4586,33 +4826,33 @@ impl HebnixApp {
         }
     }
 
-    fn render_plugins_tab(&mut self, ui: &mut egui::Ui) {
-        let before = self.plugins_subtab;
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(
-                &mut self.plugins_subtab,
-                PluginsSubTab::Installed,
-                t("nav-installed"),
-            );
-            ui.selectable_value(
-                &mut self.plugins_subtab,
-                PluginsSubTab::Browse,
-                t("nav-browse"),
-            );
-            ui.selectable_value(
-                &mut self.plugins_subtab,
-                PluginsSubTab::Settings,
-                t("settings-subtab-plugin"),
-            );
-        });
-        ui.separator();
-        if before != self.plugins_subtab
-            && self.plugins_subtab == PluginsSubTab::Browse
-            && self.install_modal.catalog.is_empty()
-            && !self.install_modal.fetching
-        {
-            self.fetch_hebnix_plugin();
+    fn render_plugins_tab(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
+        #[cfg(windows)]
+        if modern_navigation && self.render_modern_manager(ui) {
+            return;
         }
+        let before = self.plugins_subtab;
+        if !modern_navigation {
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(
+                    &mut self.plugins_subtab,
+                    PluginsSubTab::Installed,
+                    t("nav-installed"),
+                );
+                ui.selectable_value(
+                    &mut self.plugins_subtab,
+                    PluginsSubTab::Browse,
+                    t("nav-browse"),
+                );
+                ui.selectable_value(
+                    &mut self.plugins_subtab,
+                    PluginsSubTab::Settings,
+                    t("settings-subtab-plugin"),
+                );
+            });
+            ui.separator();
+        }
+        self.maybe_fetch_plugin_catalog(before);
         match self.plugins_subtab {
             PluginsSubTab::Installed => self.render_installed_plugins(ui),
             PluginsSubTab::Browse => {
@@ -4620,6 +4860,16 @@ impl HebnixApp {
                 self.render_hebnix_install(ui, &mut close);
             }
             PluginsSubTab::Settings => self.render_plugin_settings(ui),
+        }
+    }
+
+    fn maybe_fetch_plugin_catalog(&mut self, before: PluginsSubTab) {
+        if before != self.plugins_subtab
+            && self.plugins_subtab == PluginsSubTab::Browse
+            && self.install_modal.catalog.is_empty()
+            && !self.install_modal.fetching
+        {
+            self.fetch_hebnix_plugin();
         }
     }
 
@@ -4833,17 +5083,21 @@ impl HebnixApp {
         }
     }
 
-    fn render_action_button(&mut self, ui: &mut egui::Ui) {
+    fn enabled_action_button_actions(&self) -> Vec<ActionButtonAction> {
         let entries = if self.last_rl_open {
             &self.config.action_button.rocket_league_open
         } else {
             &self.config.action_button.rocket_league_closed
         };
-        let actions: Vec<ActionButtonAction> = entries
+        entries
             .iter()
             .filter(|entry| entry.enabled)
             .map(|entry| entry.action)
-            .collect();
+            .collect()
+    }
+
+    fn render_action_button(&mut self, ui: &mut egui::Ui) {
+        let actions = self.enabled_action_button_actions();
         let Some((&primary, secondary)) = actions.split_first() else {
             return;
         };
@@ -5005,32 +5259,37 @@ impl HebnixApp {
         }
     }
 
-    fn render_settings_tab(&mut self, ui: &mut egui::Ui) {
-        self.render_hebnix_settings(ui);
+    fn render_settings_tab(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
+        #[cfg(windows)]
+        if modern_navigation && self.render_modern_manager(ui) {
+            return;
+        }
+        self.render_hebnix_settings(ui, modern_navigation);
     }
 
-    fn render_hebnix_settings(&mut self, ui: &mut egui::Ui) {
+    fn render_hebnix_settings(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
         let ctx = ui.ctx().clone();
 
-        theme::secondary_navigation(ui, "hebnix_settings_list").show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("hebnix_settings_names")
-                .show(ui, |ui| {
-                    crate::panel::followed(ui, |ui| {
-                        let tabs = [
-                            (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
-                            (HebnixSettingsTab::Directories, t("nav-files-folders")),
-                            (HebnixSettingsTab::System, t("settings-nav-system")),
-                            (HebnixSettingsTab::Discord, t("settings-nav-discord")),
-                            (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
-                        ];
-                        for (value, label) in tabs {
-                            ui.selectable_value(&mut self.hebnix_settings_tab, value, label);
-                        }
+        if !modern_navigation {
+            theme::secondary_navigation(ui, "hebnix_settings_list").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("hebnix_settings_names")
+                    .show(ui, |ui| {
+                        crate::panel::followed(ui, |ui| {
+                            let tabs = [
+                                (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
+                                (HebnixSettingsTab::Directories, t("nav-files-folders")),
+                                (HebnixSettingsTab::System, t("settings-nav-system")),
+                                (HebnixSettingsTab::Discord, t("settings-nav-discord")),
+                                (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
+                            ];
+                            for (value, label) in tabs {
+                                ui.selectable_value(&mut self.hebnix_settings_tab, value, label);
+                            }
+                        });
                     });
-                });
-        });
-
+            });
+        }
         egui::CentralPanel::default()
             .frame(crate::i18n::layout::subtab_content_frame())
             .show(ui, |ui| {
@@ -5050,6 +5309,13 @@ impl HebnixApp {
 
                             match self.hebnix_settings_tab {
                                 HebnixSettingsTab::Interface => {
+                                    #[cfg(windows)]
+                                    if ui.checkbox(&mut self.config.settings.legacy_ui, "Legacy UI")
+                                        .on_hover_text("Applies the next time Hebnix starts.")
+                                        .changed()
+                                    {
+                                        self.save_config();
+                                    }
                                     ui.horizontal_wrapped(|ui| {
                                         ui.selectable_value(
                                             &mut self.appearance_subtab,
@@ -6224,17 +6490,39 @@ impl HebnixApp {
             });
     }
 
-    fn render_about_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.maintenance.tab, false, t("maintenance-about"));
-            ui.selectable_value(&mut self.maintenance.tab, true, t("maintenance-tab"));
-        });
+    fn about_version(&self) -> String {
+        t_args(
+            "about-version-app-version-a-safe-eac",
+            &[
+                ("version", APP_VERSION.to_owned().into()),
+                ("hotkey", self.config.settings.hotkey.to_uppercase().into()),
+            ],
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    fn render_modern_about(&mut self, ui: &egui::Ui) -> bool {
         if self.maintenance.tab {
-            let confirmed = egui::ScrollArea::vertical()
-                .id_salt("about_uninstall")
-                .show(ui, |ui| self.maintenance.render(ui, true, &self.base_dir))
-                .inner;
-            if confirmed {
+            return false;
+        }
+        let about = crate::modern_ui::About {
+            version: self.about_version(),
+            maintenance: t("maintenance-tab"),
+        };
+        let Some(navigation) = &mut self.modern_navigation else {
+            return false;
+        };
+        match navigation.show_content(ui, crate::modern_ui::ContentPage::About, &about) {
+            Ok(shown) => shown,
+            Err(error) => {
+                tracing::warn!(%error, "could not show the About web view");
+                navigation.keep_content(None);
+                false
+            }
+        }
+    }
+
+    fn run_maintenance(&mut self, ctx: &egui::Context) {
                 if self.any_patch_busy()
                 {
                     self.maintenance.error = Some(t("maintenance-finish-patches"));
@@ -6262,7 +6550,7 @@ impl HebnixApp {
                 let base = self.base_dir.clone();
                 let game = std::path::PathBuf::from(&self.config.settings.rl_path);
                 let tx = self.tx.clone();
-                let ctx = ui.ctx().clone();
+                let ctx = ctx.clone();
                 self.maintenance_running = true;
                 std::thread::spawn(move || {
                     let mut restored = Vec::new();
@@ -6281,6 +6569,29 @@ impl HebnixApp {
                     let _ = tx.send(AppMsg::MaintenanceFinished { result, restored, quit });
                     ctx.request_repaint();
                 });
+    }
+
+    fn render_about_tab(&mut self, ui: &mut egui::Ui, _modern_navigation: bool) {
+        #[cfg(target_os = "windows")]
+        if _modern_navigation {
+            if self.maintenance.tab {
+                self.render_modern_manager(ui);
+            } else {
+                self.render_modern_about(ui);
+            }
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.maintenance.tab, false, t("maintenance-about"));
+            ui.selectable_value(&mut self.maintenance.tab, true, t("maintenance-tab"));
+        });
+        if self.maintenance.tab {
+            let confirmed = egui::ScrollArea::vertical()
+                .id_salt("about_uninstall")
+                .show(ui, |ui| self.maintenance.render(ui, true, &self.base_dir))
+                .inner;
+            if confirmed {
+                self.run_maintenance(ui.ctx());
             }
             return;
         }
@@ -6288,18 +6599,7 @@ impl HebnixApp {
         ui.vertical_centered(|ui| {
             crate::theme::page_heading(ui, t("about-hebnix"));
             ui.add_space(10.0);
-            ui.label(t_args(
-                "about-version-app-version-a-safe-eac",
-                &[
-                    ("version", APP_VERSION.to_string().into()),
-                    (
-                        "hotkey",
-                        (self.config.settings.hotkey.to_uppercase())
-                            .to_string()
-                            .into(),
-                    ),
-                ],
-            ));
+            ui.label(self.about_version());
             ui.hyperlink_to("hebnix.com", "https://hebnix.com");
             ui.add_space(12.0);
             credits_row(ui, &[
@@ -6778,6 +7078,24 @@ impl HebnixApp {
         }
     }
 
+    fn start_app_update(&mut self, info: crate::update::UpdateInfo, ctx: &egui::Context) {
+        self.update_downloading = true;
+        self.update_error = None;
+        let setup_url = info.setup_url;
+        let progress = self.update_progress.clone();
+        *progress.lock().unwrap() = Default::default();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let message = match crate::update::download_update(&setup_url, false, &progress) {
+                Ok(staged) => AppMsg::AppUpdateReady { staged },
+                Err(error) => AppMsg::AppUpdateFailed { error },
+            };
+            let _ = tx.send(message);
+            ctx.request_repaint();
+        });
+    }
+
     fn render_update_modal(&mut self, ctx: &egui::Context) {
         let Some(info) = self.update_info.clone() else {
             return;
@@ -6811,21 +7129,7 @@ impl HebnixApp {
                     )
                     .clicked()
                 {
-                    self.update_downloading = true;
-                    self.update_error = None;
-                    let setup_url = info.setup_url;
-                    let progress = self.update_progress.clone();
-                    *progress.lock().unwrap() = Default::default();
-                    let tx = self.tx.clone();
-                    let ctx = ctx.clone();
-                    std::thread::spawn(move || {
-                        let message = match crate::update::download_update(&setup_url, false, &progress) {
-                            Ok(staged) => AppMsg::AppUpdateReady { staged },
-                            Err(error) => AppMsg::AppUpdateFailed { error },
-                        };
-                        let _ = tx.send(message);
-                        ctx.request_repaint();
-                    });
+                    self.start_app_update(info, ctx);
                 }
             });
     }
@@ -6943,6 +7247,10 @@ impl HebnixApp {
 
     fn render_rl_launch_setup(&mut self, ctx: &egui::Context) {
         if !self.rl_launch_setup_open {
+            return;
+        }
+        #[cfg(windows)]
+        if self.modern_navigation.is_some() && self.tab == Tab::Settings && self.hebnix_settings_tab == HebnixSettingsTab::Directories {
             return;
         }
         use crate::config::RlLaunchMode;
@@ -7884,7 +8192,20 @@ impl eframe::App for HebnixApp {
         if !self.panel.active {
             return;
         }
-        let (page, back, list_page) = crate::panel::feed(ctx, raw_input, &self.panel.pad.drain(), &mut self.panel.pending_nav);
+        let events = self.panel.pad.drain();
+        #[cfg(windows)]
+        if let Some(navigation) = &self.modern_navigation {
+            for event in &events {
+                match event {
+                    crate::panel::PadEvent::PrevPage => self.panel.pending_page -= 1,
+                    crate::panel::PadEvent::NextPage => self.panel.pending_page += 1,
+                    _ => {}
+                }
+            }
+            navigation.panel_input(&events);
+            return;
+        }
+        let (page, back, list_page) = crate::panel::feed(ctx, raw_input, &events, &mut self.panel.pending_nav);
         self.panel.pending_page += page;
         self.panel.pending_back |= back;
         self.panel.pending_list_page += list_page;
@@ -7962,7 +8283,30 @@ impl eframe::App for HebnixApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
         crate::visibility::note_ui_frame(ctx);
+        #[cfg(windows)]
+        let modern_mode = self.modern_navigation.is_some();
+        #[cfg(windows)]
+        if let Some(navigation) = &mut self.modern_navigation {
+            navigation.set_theme(&self.config.settings.theme, ctx);
+        }
+        #[cfg(not(windows))]
+        let modern_mode = false;
+        #[cfg(target_os = "windows")]
+        if self.hidden
+            || (self.quitting && crate::watchdog::has_live_handoff())
+        {
+            if let Some(navigation) = &mut self.modern_navigation {
+                navigation.hide();
+            }
+        }
         if self.recovery_running() {
+            #[cfg(windows)]
+            if modern_mode {
+                self.poll_modern_navigation(ctx);
+                if let Some(navigation) = &mut self.modern_navigation { navigation.hide_shell(); }
+                self.show_global_dialog(ctx);
+                return;
+            }
             self.render_game_update_controls(ui);
             return;
         }
@@ -8008,6 +8352,14 @@ impl eframe::App for HebnixApp {
         }
 
         if self.maintenance_running {
+            #[cfg(windows)]
+            if modern_mode {
+                self.poll_modern_navigation(ctx);
+                if let Some(navigation) = &mut self.modern_navigation { navigation.hide_shell(); }
+                self.show_global_dialog(ctx);
+                ctx.request_repaint_after(Duration::from_millis(100));
+                return;
+            }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| { ui.spinner(); ui.label(t("maintenance-working")); });
@@ -8018,6 +8370,14 @@ impl eframe::App for HebnixApp {
         }
 
         if self.update_info.is_some() {
+            #[cfg(windows)]
+            if modern_mode {
+                self.poll_modern_navigation(ctx);
+                if let Some(navigation) = &mut self.modern_navigation { navigation.hide_shell(); }
+                self.show_global_dialog(ctx);
+                ctx.request_repaint_after(Duration::from_millis(100));
+                return;
+            }
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.disable();
                 ui.centered_and_justified(|ui| {
@@ -8032,23 +8392,55 @@ impl eframe::App for HebnixApp {
         if !self.hidden {
             #[cfg(target_os = "linux")]
             egui::Panel::top("linux_titlebar").show(ui, |ui| self.render_titlebar(ui));
-            if self.panel.active {
+            #[cfg(target_os = "windows")]
+            let modern_navigation = !self.panel.active && self.show_modern_navigation(ui);
+            #[cfg(not(target_os = "windows"))]
+            let modern_navigation = false;
+            #[cfg(windows)]
+            theme::set_workspace_title(ctx, None);
+            #[cfg(windows)]
+            let modern_header = modern_navigation && self.render_modern_header(ui);
+            #[cfg(not(windows))]
+            let modern_header = false;
+            #[cfg(windows)]
+            if let Some(navigation) = &mut self.modern_navigation {
+                navigation.set_workspace(modern_header.then(|| ui.available_rect_before_wrap()));
+            }
+            #[cfg(windows)]
+            let rendered_wry = modern_mode;
+            #[cfg(not(windows))]
+            let rendered_wry = false;
+            if rendered_wry {
+                #[cfg(windows)]
+                if self.panel.active {
+                    self.render_wry_panel(ui);
+                } else {
+                    self.render_wry_page(ui);
+                }
+            } else if self.panel.active {
                 self.render_panel(ui);
             } else if let Some(presentation) = theme::presentation(ctx) {
-                self.render_themed_shell(ui, &presentation);
+                if modern_header {
+                    theme::show_shell_content(ui, &presentation, |ui| {
+                        self.render_themed_content(ui, &presentation, modern_navigation);
+                    });
+                } else {
+                    self.render_themed_shell(ui, &presentation, modern_navigation);
+                }
             } else {
             egui::CentralPanel::default().show(ui, |ui| {
+                if !modern_header {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    for tab in Tab::ALL {
-                        if tab == Tab::Home {
-                            if ui.add(egui::Button::image(egui::Image::new(egui::include_image!("../assets/navigation/home.svg"))
-                                .fit_to_exact_size(egui::vec2(18.0, 18.0)).tint(ui.visuals().text_color()))
-                                .selected(self.tab == tab)).on_hover_text(tab.label()).clicked() {
-                                self.tab = tab;
-                            }
-                        } else {
-                            if ui.selectable_value(&mut self.tab, tab, tab.label()).clicked() && tab == Tab::Replays {
+                    if !modern_navigation {
+                        for tab in Tab::ALL {
+                            if tab == Tab::Home {
+                                if ui.add(egui::Button::image(egui::Image::new(egui::include_image!("../assets/navigation/home.svg"))
+                                    .fit_to_exact_size(egui::vec2(18.0, 18.0)).tint(ui.visuals().text_color()))
+                                    .selected(self.tab == tab)).on_hover_text(tab.label()).clicked() {
+                                    self.tab = tab;
+                                }
+                            } else if ui.selectable_value(&mut self.tab, tab, tab.label()).clicked() && tab == Tab::Replays {
                                 self.replays_subtab = ReplaysSubTab::AutoUploadReplays;
                             }
                         }
@@ -8067,13 +8459,14 @@ impl eframe::App for HebnixApp {
                     });
                 });
                 ui.separator();
+                }
 
-                self.render_current_page(ui);
+                self.render_current_page(ui, modern_navigation);
             });
             }
         }
 
-        if self.restart_notice && !self.hidden {
+        if self.restart_notice && !self.hidden && !modern_mode {
             let mut close = false;
             egui::Window::new(t("about-hebnix"))
                 .id(egui::Id::new("Hebnix"))
@@ -8104,31 +8497,36 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
-            self.render_item_clear_prompt(ctx);
-            self.render_admin_prompt(ctx);
-            self.render_item_action_prompt(ctx);
-            self.render_plugin_delete_prompt(ctx);
-
-            self.render_spoofer_certificate_prompt(ctx);
-            self.render_statsapi_notice(ctx);
-            self.render_web_port_notice(ctx);
-            self.render_fullscreen_notice(ctx);
-            self.render_launch_path_notice(ctx);
-            self.render_changelog_popup(ctx);
+            if !modern_mode {
+                self.render_item_clear_prompt(ctx);
+                self.render_admin_prompt(ctx);
+                self.render_item_action_prompt(ctx);
+                self.render_plugin_delete_prompt(ctx);
+                self.render_spoofer_certificate_prompt(ctx);
+                self.render_statsapi_notice(ctx);
+                self.render_web_port_notice(ctx);
+                self.render_fullscreen_notice(ctx);
+                self.render_launch_path_notice(ctx);
+                self.render_changelog_popup(ctx);
+                self.render_update_modal(ctx);
+                self.render_install_modal(ctx);
+                self.render_rl_launch_setup(ctx);
+            }
             #[cfg(target_os = "linux")]
             self.render_appimage_banner(ctx);
             #[cfg(target_os = "linux")]
             self.render_desktop_notice(ctx);
             let repair_was_running = self.epic_repair.running;
-            self.epic_repair.show(ctx);
+            if modern_mode {
+                self.epic_repair.poll();
+            } else {
+                self.epic_repair.show(ctx);
+            }
             if !repair_was_running && self.epic_repair.running {
                 self.spoofer_mgr.shutdown();
             } else if repair_was_running && !self.epic_repair.running {
                 self.evaluate_proxies();
             }
-            self.render_update_modal(ctx);
-            self.render_install_modal(ctx);
-            self.render_rl_launch_setup(ctx);
         }
         // the tray icon registers and answers over GLib's main loop, which winit does not run
         #[cfg(target_os = "linux")]
@@ -8156,13 +8554,27 @@ impl eframe::App for HebnixApp {
         self.workshop.sync_lan_connection(&join_rl_path);
         self.workshop.poll_downloads(&join_rl_path, &self.tx.clone(), ctx);
         self.workshop.panel_mode = self.panel.active;
-        self.workshop.render_join_prompt(ctx, &join_rl_path);
+        if modern_mode {
+            self.workshop.poll_join_prompt(ctx, &join_rl_path);
+        } else {
+            self.workshop.render_join_prompt(ctx, &join_rl_path);
+        }
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
-        self.render_plugin_windows(ctx);
-        if !self.hidden
+        if modern_mode {
+            #[cfg(windows)]
+            self.render_wry_plugin_windows(ctx);
+        } else {
+            self.render_plugin_windows(ctx);
+        }
+        if !self.hidden && !modern_mode
             && !crate::notifications::render_clock_warning(ctx, &mut self.req_clock_warning_open)
         {
             self.render_notification_popup(ctx);
+        }
+        #[cfg(windows)]
+        if modern_mode {
+            self.req_clock_warning_open |= hebnix_sdk::req_auth::take_clock_warning();
+            self.show_global_dialog(ctx);
         }
         self.plugin_mgr.flush_window_positions();
         self.render_game_overlay();
@@ -8183,19 +8595,29 @@ impl eframe::App for HebnixApp {
 }
 
 impl HebnixApp {
-    fn render_items_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            for (value, key) in [
-                (ItemsSubTab::Swapper, "nav-swapper"),
-                (ItemsSubTab::Colours, "nav-colours"),
-                (ItemsSubTab::Active, "nav-active"),
-                (ItemsSubTab::Presets, "presets-presets"),
-                (ItemsSubTab::Loadouts, "loadouts-title"),
-            ] {
-                ui.selectable_value(&mut self.items_subtab, value, t(key));
-            }
-        });
-        ui.separator();
+    fn render_items_tab(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
+        #[cfg(windows)]
+        if modern_navigation && self.render_modern_manager(ui) {
+            return;
+        }
+        #[cfg(windows)]
+        if modern_navigation && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active) && self.render_modern_swapper(ui) {
+            return;
+        }
+        if !modern_navigation {
+            ui.horizontal_wrapped(|ui| {
+                for (value, key) in [
+                    (ItemsSubTab::Swapper, "nav-swapper"),
+                    (ItemsSubTab::Colours, "nav-colours"),
+                    (ItemsSubTab::Active, "nav-active"),
+                    (ItemsSubTab::Presets, "presets-presets"),
+                    (ItemsSubTab::Loadouts, "loadouts-title"),
+                ] {
+                    ui.selectable_value(&mut self.items_subtab, value, t(key));
+                }
+            });
+            ui.separator();
+        }
         if matches!(
             self.items_subtab,
             ItemsSubTab::Swapper | ItemsSubTab::Colours
@@ -8264,30 +8686,41 @@ impl HebnixApp {
         self.render_editor_content(ui, mode);
     }
 
-    fn render_upk_studio(&mut self, ui: &mut egui::Ui) {
-        let mut section = self.items_mode.section().expect("studio page");
-        let previous = section;
-        ui.horizontal_wrapped(|ui| {
-            for (value, key) in [
-                (StudioSection::CustomAssets, "studio-custom-assets"),
-                (StudioSection::Appearance, "studio-appearance"),
-                (StudioSection::Active, "nav-active"),
-                (StudioSection::History, "upk-history"),
-            ] {
-                ui.selectable_value(&mut section, value, t(key));
-            }
-        });
-        if section != previous {
-            self.items_mode = match section {
-                StudioSection::CustomAssets => ItemsMode::Patching,
-                StudioSection::Appearance => ItemsMode::GameColours,
-                StudioSection::Active => ItemsMode::Manage,
-                StudioSection::History => ItemsMode::History,
-            };
+    fn select_studio_section(&mut self, section: StudioSection) {
+        if self.items_mode.section() == Some(section) {
+            return;
         }
-        ui.separator();
-        if section == StudioSection::History && section != previous {
+        self.items_mode = match section {
+            StudioSection::CustomAssets => ItemsMode::Patching,
+            StudioSection::Appearance => ItemsMode::GameColours,
+            StudioSection::Active => ItemsMode::Manage,
+            StudioSection::History => ItemsMode::History,
+        };
+        if section == StudioSection::History {
             self.upk_history.enter();
+        }
+    }
+
+    fn render_upk_studio(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
+        #[cfg(windows)]
+        if modern_navigation {
+            self.render_modern_manager(ui);
+            return;
+        }
+        let mut section = self.items_mode.section().expect("studio page");
+        if !modern_navigation {
+            ui.horizontal_wrapped(|ui| {
+                for (value, key) in [
+                    (StudioSection::CustomAssets, "studio-custom-assets"),
+                    (StudioSection::Appearance, "studio-appearance"),
+                    (StudioSection::Active, "nav-active"),
+                    (StudioSection::History, "upk-history"),
+                ] {
+                    ui.selectable_value(&mut section, value, t(key));
+                }
+            });
+            self.select_studio_section(section);
+            ui.separator();
         }
         if !matches!(section, StudioSection::Active | StudioSection::History) {
             theme::secondary_navigation(ui, "studio_navigation").show(ui, |ui| {
@@ -8864,6 +9297,7 @@ impl HebnixApp {
                         });
                     });
                 } else if mode == ItemsMode::WheelAlignment {
+                    crate::patcher::live_cosmetics::render(ui, &cooked_pc, true);
                     if self.catalogs_loading {
                         ui.spinner();
                     }
@@ -8887,6 +9321,7 @@ impl HebnixApp {
                         }
                     }
                 } else if mode == ItemsMode::GameColours {
+                    crate::patcher::live_cosmetics::render(ui, &cooked_pc, false);
                     self.colours.poll();
                     if let Some(action) = self.colours.render(ui, &backups_dir) {
                         if crate::messages::block_item_action_if_game_running(&self.tx) {
@@ -8919,7 +9354,21 @@ impl HebnixApp {
             });
     }
 
-    fn render_current_page(&mut self, ui: &mut egui::Ui) {
+    fn render_scoped_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        modern_navigation: bool,
+        render: fn(&mut Self, &mut egui::Ui, bool),
+    ) {
+        #[cfg(windows)]
+        if modern_navigation {
+            crate::modern_ui::styled_controls(ui, |ui| render(self, ui, modern_navigation));
+            return;
+        }
+        render(self, ui, modern_navigation);
+    }
+
+    fn render_current_page(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
         self.patcher_anthem.poll(&mut self.config, &self.tx);
         if self.tab != Tab::Patcher
             || self.items_mode != ItemsMode::Patching
@@ -8931,36 +9380,72 @@ impl HebnixApp {
             self.title_editor.leave_page();
         }
         match self.tab {
-            Tab::Home => self.render_home(ui),
-            Tab::Console => self.render_console_tab(ui),
+            Tab::Home => {
+                #[cfg(windows)]
+                if modern_navigation && self.render_modern_home(ui) {
+                    return;
+                }
+                self.render_home(ui, modern_navigation);
+            }
+            Tab::Console => self.render_console_tab(ui, modern_navigation),
             Tab::Workshop => {
+                #[cfg(windows)]
+                if modern_navigation && self.render_modern_manager(ui) {
+                    return;
+                }
+                #[cfg(windows)]
+                if modern_navigation && let Some(full) = self.arena_page() && self.render_modern_arena(ui, full) {
+                    return;
+                }
+                #[cfg(windows)]
+                if modern_navigation && self.on_browse_maps_page() && self.render_modern_browse_maps(ui) {
+                    return;
+                }
                 let rl_path = self.config.settings.rl_path.clone();
                 let tx = self.tx.clone();
-                self.workshop.render(ui, &rl_path, &tx);
+                self.workshop.render(ui, &rl_path, &tx, modern_navigation);
             }
-            Tab::Spoofer => self.render_spoofer_tab(ui),
-            Tab::Items => self.render_items_tab(ui),
-            Tab::Patcher => self.render_upk_studio(ui),
-            Tab::Freeplay => self.freeplay.render(ui, &self.config.settings.rl_path),
-            Tab::GameMods => self.render_game_mods_tab(ui),
-            Tab::Settings => self.render_settings_tab(ui),
-            Tab::Plugins => self.render_plugins_tab(ui),
+            Tab::Spoofer => self.render_scoped_controls(ui, modern_navigation, Self::render_spoofer_tab),
+            Tab::Items => self.render_items_tab(ui, modern_navigation),
+            Tab::Patcher => self.render_upk_studio(ui, modern_navigation),
+            Tab::Freeplay => {
+                #[cfg(windows)]
+                if modern_navigation && self.render_modern_manager(ui) {
+                    return;
+                }
+                self.freeplay.render(ui, &self.config.settings.rl_path);
+            }
+            Tab::GameMods => {
+                #[cfg(windows)]
+                if modern_navigation && self.render_modern_manager(ui) {
+                    return;
+                }
+                self.render_game_mods_tab(ui);
+            }
+            Tab::Settings => self.render_scoped_controls(ui, modern_navigation, Self::render_settings_tab),
+            Tab::Plugins => self.render_scoped_controls(ui, modern_navigation, Self::render_plugins_tab),
             Tab::Replays => {
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(
-                        &mut self.replays_subtab,
-                        ReplaysSubTab::AutoUploadReplays,
-                        t("nav-auto-upload"),
-                    );
-                    ui.selectable_value(
-                        &mut self.replays_subtab,
-                        ReplaysSubTab::ReplayTimeline,
-                        t("nav-replay-library"),
-                    );
-                });
-                ui.separator();
+                if !modern_navigation {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(
+                            &mut self.replays_subtab,
+                            ReplaysSubTab::AutoUploadReplays,
+                            t("nav-auto-upload"),
+                        );
+                        ui.selectable_value(
+                            &mut self.replays_subtab,
+                            ReplaysSubTab::ReplayTimeline,
+                            t("nav-replay-library"),
+                        );
+                    });
+                    ui.separator();
+                }
                 match self.replays_subtab {
                     ReplaysSubTab::ReplayTimeline => {
+                        #[cfg(windows)]
+                        if modern_navigation && self.render_modern_manager(ui) {
+                            return;
+                        }
                         let folder = crate::auto_upload_replays::configured_replay_directory(
                             &self.config.replay_upload,
                             std::path::Path::new(&self.config.settings.rl_path),
@@ -8969,6 +9454,10 @@ impl HebnixApp {
                         self.replay_timeline.show(ui, folder, &self.ws_stats);
                     }
                     ReplaysSubTab::AutoUploadReplays => {
+                        #[cfg(target_os = "windows")]
+                        if modern_navigation && self.render_modern_replay_upload(ui) {
+                            return;
+                        }
                         ui.columns(2, |columns| {
                             egui::ScrollArea::vertical()
                                 .id_salt("replays_auto_upload")
@@ -8984,7 +9473,7 @@ impl HebnixApp {
                     }
                 }
             }
-            Tab::About => self.render_about_tab(ui),
+            Tab::About => self.render_about_tab(ui, modern_navigation),
         }
     }
     fn render_themed_navigation(&mut self, ui: &mut egui::Ui, p: &theme::Presentation, vertical: bool) {
@@ -9018,24 +9507,41 @@ impl HebnixApp {
             .small().color(self.status_color)).wrap());
     }
 
-    fn render_themed_shell(&mut self, ui: &mut egui::Ui, p: &theme::Presentation) {
+    fn render_themed_shell(&mut self, ui: &mut egui::Ui, p: &theme::Presentation, modern_navigation: bool) {
+        let modern_layout;
+        let p = if modern_navigation && matches!(p.layout.shell, theme::Shell::Sidebar | theme::Shell::Rail) {
+            modern_layout = theme::Presentation {
+                layout: theme::ThemeLayout {
+                    shell: theme::Shell::Topbar,
+                    ..p.layout.clone()
+                },
+                ..p.clone()
+            };
+            &modern_layout
+        } else {
+            p
+        };
         theme::show_shell(ui, p, |ui, part| match part {
             theme::ShellPart::Navigation(true) => {
                 theme::sidebar(ui, |ui, part| match part {
                     theme::SidebarPart::Footer => self.render_themed_sidebar_footer(ui),
                     theme::SidebarPart::Pages => {
-                        ui.heading("Hebnix");
-                        ui.add_space(10.0);
-                        egui::ScrollArea::vertical().id_salt("theme_nav_scroll")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| crate::panel::followed(ui, |ui| self.render_themed_navigation(ui, p, true)));
+                        if !modern_navigation {
+                            ui.heading("Hebnix");
+                            ui.add_space(10.0);
+                            egui::ScrollArea::vertical().id_salt("theme_nav_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| crate::panel::followed(ui, |ui| self.render_themed_navigation(ui, p, true)));
+                        }
                     }
                 });
             }
             theme::ShellPart::Navigation(false) => {
                 theme::toolbar(ui, |ui| {
-                    self.render_themed_navigation(ui, p, false);
-                    ui.add_space(8.0);
+                    if !modern_navigation {
+                        self.render_themed_navigation(ui, p, false);
+                        ui.add_space(8.0);
+                    }
                     p.toolbar_actions(ui, |ui| {
                         self.render_action_button(ui);
                         crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
@@ -9045,15 +9551,20 @@ impl HebnixApp {
                     });
                 });
             }
-            theme::ShellPart::Content => {
-                if p.layout.show_page_heading && !matches!(self.tab, Tab::Workshop | Tab::Home) { ui.heading(self.tab.label()); ui.add_space(8.0); }
-                self.render_current_page(ui);
-            }
+            theme::ShellPart::Content => self.render_themed_content(ui, p, modern_navigation),
         });
+    }
+
+    fn render_themed_content(&mut self, ui: &mut egui::Ui, presentation: &theme::Presentation, modern_navigation: bool) {
+        if presentation.layout.show_page_heading && !matches!(self.tab, Tab::Workshop | Tab::Home) {
+            theme::page_heading(ui, self.tab.label());
+            ui.add_space(8.0);
+        }
+        self.render_current_page(ui, modern_navigation);
     }
 }
 
-mod network;
+pub(crate) mod network;
 
 /// Is Hebnix's own window focused? On Linux `foreground_window_is_ours` is a
 /// constant false on Hyprland/KDE/niri, which made the "only from Hebnix or

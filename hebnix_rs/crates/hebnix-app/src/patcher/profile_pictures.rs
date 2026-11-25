@@ -136,6 +136,16 @@ fn matches(package: &UpkPackage, receipt: &Receipt, on: bool) -> bool {
                 .is_ok_and(|(_, b)| b == if on { &e.patched } else { &e.original })
         })
 }
+fn live_restored_baseline(package: &UpkPackage, receipt: &Receipt) -> bool {
+    if !receipt.exports.iter().all(|e| bytes(package, &e.path).is_ok_and(|(_, b)| b == e.original)) { return false; }
+    let path = crate::config::base_dir().join("state/live-cosmetics/transaction.json");
+    let Some(journal) = fs::read(path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else { return false; };
+    receipt.names.iter().all(|name| {
+        let Some(current) = package.names.get(name.index) else { return false; };
+        current == &name.original || journal["names"].as_array().is_some_and(|names| names.iter().any(|edit|
+            edit[0].as_u64() == Some(name.index as u64) && edit[1].as_str() == Some(name.original.as_str()) && edit[2].as_str() == Some(current.as_str())))
+    })
+}
 
 // Workshop's author-name fix shares our callback host. A package restored by
 // another Hebnix feature can have that fix toggled since this receipt was made.
@@ -329,7 +339,7 @@ fn workshop_baseline(directory: &Path) -> Result<(UpkPackage, Option<(Receipt, b
     let enabled = matches(&package, &saved, true);
     if enabled {
         restore_snapshot(&mut package, &saved)?;
-    } else if !matches(&package, &saved, false) && !restored_workshop_variant(&package, &saved) {
+    } else if !matches(&package, &saved, false) && !restored_workshop_variant(&package, &saved) && !live_restored_baseline(&package, &saved) {
         return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
     }
     Ok((package, Some((saved, enabled))))
@@ -548,7 +558,7 @@ fn set_enabled_checked(
             .into());
         }
         if !matches(&package, saved, !on) && !(upgrading && matches(&package, saved, true)) {
-            if restored_workshop_variant(&package, saved) {
+            if restored_workshop_variant(&package, saved) || live_restored_baseline(&package, saved) {
                 if !on {
                     return Ok("Native profile pictures are disabled.".into());
                 }
@@ -889,12 +899,20 @@ fn validate(code: &Code) -> Result<(), String> {
                     }
                 }
                 0x57 => {
-                    if self.take(1)?[0] != 0x28 {
-                        return Err("Unsupported array token".into());
+                    match self.take(1)?[0] {
+                        0x00 => {
+                            if self.take(1)?[0] != 0 { return Err("Unsupported array element mode".into()); }
+                            self.expression(depth + 1)?;
+                            self.expression(depth + 1)?;
+                        }
+                        0x01 => self.expression(depth + 1)?,
+                        0x28 => {
+                            self.expression(depth + 1)?;
+                            self.take(2)?;
+                            self.parameters(depth + 1)?;
+                        }
+                        _ => return Err("Unsupported array token".into()),
                     }
-                    self.expression(depth + 1)?;
-                    self.take(2)?;
-                    self.parameters(depth + 1)?;
                 }
                 0x2a => (),
                 0x2c => {

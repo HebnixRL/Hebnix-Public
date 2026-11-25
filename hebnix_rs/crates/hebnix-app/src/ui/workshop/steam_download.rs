@@ -592,6 +592,61 @@ impl Default for SteamDownloader {
 }
 
 impl SteamDownloader {
+    #[cfg(windows)]
+    pub(super) fn web_snapshot(&mut self, runtime: &Path) -> (serde_json::Value, Option<LocalMap>) {
+        use serde_json::json;
+        let settings = self.settings.get_or_insert_with(|| load_settings(runtime));
+        let busy = self.busy.load(Ordering::Relaxed);
+        let mut map = None;
+        let mut status = String::new();
+        let mut log = Vec::new();
+        let mut dotnet = false;
+        if let Ok(mut shared) = self.shared.lock() {
+            if let Some(result) = &shared.finished {
+                status = match result {
+                    Ok(item) => {
+                        if !busy && !shared.delivered { map = Some(item.clone()); }
+                        t_args("render-imported-map-find-it-under-browse", &[("map", item.name.as_str().into())])
+                    }
+                    Err(error) => error.clone(),
+                };
+            }
+            if map.is_some() { shared.delivered = true; }
+            dotnet = shared.needs_dotnet;
+            log.clone_from(&shared.log);
+        }
+        let labels = json!({
+            "title": t("render-download-from-the-steam-workshop"), "intro": t("render-paste-a-rocket-league-workshop-link"),
+            "key": t("render-hubcap-api-key"), "show": t("tray-show"), "get": t("render-get-a-key"),
+            "link": t("render-workshop-link-or-id"), "download": t("render-download-map"),
+            "needKey": t("render-enter-a-hubcap-api-key-first"), "invalid": t("render-that-doesn-t-look-like-a"),
+            "terminal": t("render-run-in-terminal"), "copy": t("render-copy-command"),
+        });
+        (json!({
+            "key": settings.hubcap_api_key, "input": self.input, "show": self.show_key,
+            "busy": busy, "status": status, "log": log, "dotnet": dotnet,
+            "command": DOTNET_INSTALL_COMMAND, "labels": labels,
+        }), map)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_action(&mut self, key: &str, api: Option<String>, input: Option<String>, cache: &Path, runtime: &Path, ctx: &egui::Context) {
+        let settings = self.settings.get_or_insert_with(|| load_settings(runtime));
+        if let Some(api) = api {
+            settings.hubcap_api_key = api;
+            save_settings(runtime, settings);
+        }
+        if let Some(input) = input { self.input = input; }
+        match key {
+            "download" if !self.busy.load(Ordering::Relaxed) && parse_key(&settings.hubcap_api_key).is_some() => {
+                if let Some(id) = parse_workshop_id(&self.input) { self.start(id, cache.to_owned(), runtime.to_owned(), ctx); }
+            }
+            "get" => { let _ = open::that(HUBCAP_SITE); }
+            "terminal" => run_in_terminal(DOTNET_INSTALL_COMMAND),
+            "copy" => ctx.copy_text(DOTNET_INSTALL_COMMAND.to_owned()),
+            _ => {}
+        }
+    }
     fn start(&self, wid: String, cache_dir: PathBuf, runtime_dir: PathBuf, ctx: &egui::Context) {
         let api_key = parse_key(
             self.settings

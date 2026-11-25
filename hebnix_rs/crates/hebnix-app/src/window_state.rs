@@ -12,7 +12,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, PostMessageW,
-    SW_RESTORE, SW_SHOW, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WM_PAINT,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WM_PAINT,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
@@ -68,6 +68,9 @@ pub fn apply_window_visibility(hwnd: HWND, hidden: bool) {
             SetWindowLongW(hwnd, GWL_EXSTYLE, desired);
         }
         if hidden {
+            // Alpha alone can leave DirectComposition's non-client frame over
+            // the game. Remove the complete native window from composition.
+            let _ = ShowWindow(hwnd, SW_HIDE);
             if let Err(error) = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA) {
                 tracing::warn!(%error, "could not apply main window hidden alpha");
             }

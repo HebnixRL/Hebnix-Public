@@ -134,6 +134,25 @@ pub fn apply(upk: &mut UpkPackage) -> Result<(), String> {
     }
     Ok(())
 }
+pub(super) fn live_bodies(upk: &UpkPackage) -> Result<Vec<(&'static str, Script)>, String> {
+    TARGETS.iter().map(|target| Ok((target.function, statement(target.read,
+        object(upk, target.message)?, object(upk, MESSAGE_STRUCT)?, object(upk, PLAYER_NAME)?, object(upk, MESSAGE)?)))) .collect()
+}
+pub(super) fn normalize_for_live(upk: &mut UpkPackage) -> Result<(), String> {
+    for (path, statement) in live_bodies(upk)? {
+        let index = upk.find_object(path).ok_or("Chat function missing")? as usize - 1;
+        let mut script = Script::of_function(&payload(upk, index))?;
+        let suffix = [statement.bytes(), &END].concat();
+        if script.bytes().ends_with(&suffix) {
+            let start = script.len() - suffix.len();
+            script.cut(start, statement.len(), statement.refs());
+            replace_script(upk, path, &script)?;
+        } else if script.bytes().windows(MARKER.len()).any(|w| w == MARKER.as_bytes()) {
+            return Err("Chat export hook could not be migrated safely".into());
+        }
+    }
+    Ok(())
+}
 
 /// Whether each target is patched.
 fn states(upk: &UpkPackage) -> Result<Vec<bool>, String> {
@@ -171,6 +190,7 @@ fn read_saved(backups: &Path) -> Option<Saved> {
 }
 
 pub fn enabled(backups: &Path) -> bool {
+    if super::live_cosmetics::managed() { return super::live_cosmetics::mod_enabled("chat-export"); }
     read_saved(backups).is_some()
 }
 
@@ -369,8 +389,7 @@ impl State {
     }
 
     /// Draw the toggle and where the chat goes.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path) {
-        use crate::i18n::t;
+    fn poll(&mut self, ctx: &eframe::egui::Context) {
         if let Some(job) = &self.job {
             match job.try_recv() {
                 Ok(result) => {
@@ -378,9 +397,46 @@ impl State {
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
             }
         }
+    }
+
+    pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool) {
+        if super::live_cosmetics::managed() {
+            self.status = super::live_cosmetics::set_mod(cooked, "chat-export", want, None).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            return;
+        }
+        use crate::i18n::t;
+        if self.busy() { return; }
+        let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = if want {
+                enable(&cooked, &backups).map(|_| t("game-mod-chat-export-on"))
+            } else {
+                restore(&cooked, &backups).map(|_| t("game-mod-chat-export-off"))
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path) -> serde_json::Value {
+        use crate::i18n::t;
+        self.poll(ctx);
+        let on = enabled(backups);
+        serde_json::json!({
+            "id": "chat-export", "enabled": on, "busy": self.busy(), "status": self.status,
+            "label": t("game-mod-chat-export"), "description": t("game-mod-chat-export-description"), "output": output_path().display().to_string(),
+        })
+    }
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path) {
+        use crate::i18n::t;
+        self.poll(ui.ctx());
         let on = enabled(backups);
         let mut want = on;
         ui.add_enabled_ui(!self.busy(), |ui| {
@@ -390,18 +446,7 @@ impl State {
         ui.label(t("game-mod-chat-export-description"));
         ui.small(output_path().display().to_string());
         if want != on {
-            let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.job = Some(rx);
-            self.status.clear();
-            std::thread::spawn(move || {
-                let result = if want {
-                    enable(&cooked, &backups).map(|_| t("game-mod-chat-export-on"))
-                } else {
-                    restore(&cooked, &backups).map(|_| t("game-mod-chat-export-off"))
-                };
-                let _ = tx.send(result);
-            });
+            self.set_enabled(cooked, backups, want);
         }
         if self.busy() {
             ui.spinner();

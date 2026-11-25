@@ -63,10 +63,12 @@ impl Default for WindowCfg {
 pub struct SettingsCfg {
     pub hotkey: String,
     pub theme: String,
+    pub legacy_ui: bool,
     /// UI language code ("en", "de", ...) or "auto" to follow the system
     pub language: String,
     /// Main tab selected when Hebnix starts.
     pub default_tab: String,
+    pub navigation_memory: BTreeMap<String, usize>,
     /// One-time migration to the Home dashboard; later startup choices persist.
     #[serde(default)]
     pub home_default_migrated: bool,
@@ -133,8 +135,10 @@ impl Default for SettingsCfg {
         Self {
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
+            legacy_ui: false,
             language: crate::i18n::AUTO.to_string(),
             default_tab: "Home".to_string(),
+            navigation_memory: BTreeMap::new(),
             home_default_migrated: true,
             window_opacity: 0.96,
             start_in_tray: false,

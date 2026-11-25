@@ -350,6 +350,17 @@ pub fn apply_theme(
         Some(parse_theme(&text)?)
     };
     prepare_presentation(ctx, loaded.as_ref(), themes_dir)?;
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        ctx.style_mut_of(theme, |style| {
+            let scroll = &mut style.spacing.scroll;
+            scroll.floating = false;
+            scroll.foreground_color = true;
+            scroll.bar_width = 8.0;
+            scroll.bar_inner_margin = 3.0;
+            scroll.bar_outer_margin = 2.0;
+            scroll.handle_min_length = 28.0;
+        });
+    }
     match name {
         "Dark" => {
             ctx.set_theme(egui::Theme::Dark);

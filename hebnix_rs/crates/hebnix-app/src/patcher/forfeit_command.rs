@@ -68,10 +68,13 @@ fn is_patched(upk: &UpkPackage) -> bool {
 
 /// Add the dispatcher block and the key action that runs it.
 pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), String> {
-    let script = body(object(upk, PRI_CLASS)?, object(upk, PRI_VARIABLE)?, object(upk, VOTE)?);
+    let script = live_body(upk)?;
     dispatcher::install(upk, backups, build, SLOT as u8, &script, &[])?;
     actions::remove(upk, SLOT)?;
     actions::add(upk, SLOT, &format!("{} {SLOT}", dispatcher::COMMAND))
+}
+pub(super) fn live_body(upk: &UpkPackage) -> Result<Script, String> {
+    Ok(body(object(upk, PRI_CLASS)?, object(upk, PRI_VARIABLE)?, object(upk, VOTE)?))
 }
 
 /// The Action name TAInput.ini binds the key to.
@@ -127,6 +130,7 @@ fn read_saved(backups: &Path) -> Option<Saved> {
 }
 
 pub fn enabled(backups: &Path) -> bool {
+    if super::live_cosmetics::managed() { return super::live_cosmetics::mod_enabled("forfeit"); }
     read_saved(backups).is_some()
 }
 
@@ -300,6 +304,33 @@ pub fn set_binding(action: &str, legacy: &[&str], key: Option<&str>, pad: Option
 /// The picker waiting for a button press (its id) and, once pressed, the button.
 static CAPTURE: std::sync::Mutex<Option<(String, Option<Option<String>>)>> = std::sync::Mutex::new(None);
 
+#[cfg(windows)]
+pub(crate) fn web_capture_start(id: &str, ctx: &eframe::egui::Context) {
+    let mut capture = CAPTURE.lock().unwrap_or_else(|error| error.into_inner());
+    if capture.is_some() { return; }
+    *capture = Some((id.to_owned(), None));
+    let (id, ctx) = (id.to_owned(), ctx.clone());
+    std::thread::spawn(move || {
+        let button = hebnix_sdk::input::detect_any_hotkey(Some(std::time::Duration::from_secs(6)))
+            .filter(|bind| bind.is_controller)
+            .and_then(|bind| crate::plugins::gamepad_icons::dinput_name_for(&bind))
+            .and_then(|icon| PAD_BUTTONS.iter().find(|(_, item)| *item == icon))
+            .map(|(name, _)| (*name).to_owned());
+        if let Ok(mut capture) = CAPTURE.lock() { *capture = Some((id, Some(button))); }
+        ctx.request_repaint();
+    });
+}
+
+#[cfg(windows)]
+pub(crate) fn web_capture_poll() -> (Option<String>, Option<(String, String)>) {
+    let mut capture = CAPTURE.lock().unwrap_or_else(|error| error.into_inner());
+    match capture.as_ref() {
+        Some((id, None)) => (Some(id.clone()), None),
+        Some((_, Some(_))) => (None, capture.take().and_then(|(id, result)| result.flatten().map(|button| (id, button)))),
+        None => (None, None),
+    }
+}
+
 /// `pad` as the setting the binding takes: None for no button.
 pub fn pad_setting(pad: &str) -> Option<&str> {
     Some(pad).filter(|pad| !pad.is_empty())
@@ -375,9 +406,7 @@ impl State {
     }
 
     /// Draw the toggle and key picker. Returns true when `key` changed.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String, pad: &mut String) -> bool {
-        use crate::i18n::t;
-        use eframe::egui;
+    fn poll(&mut self, ctx: &eframe::egui::Context) {
         if let Some(job) = &self.job {
             match job.try_recv() {
                 Ok(result) => {
@@ -385,9 +414,47 @@ impl State {
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
             }
         }
+    }
+
+    pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool, key: String, pad: String) {
+        if super::live_cosmetics::managed() {
+            self.status = super::live_cosmetics::set_mod(cooked, "forfeit", want, Some((&key, &pad))).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            return;
+        }
+        use crate::i18n::t;
+        if self.busy() { return; }
+        let (cooked, backups, key, pad) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone(), pad.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = if !want {
+                restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-forfeit-off"))
+            } else {
+                enable(&cooked, &backups).and_then(|_| set_binding(&action(), &LEGACY, Some(&key), pad_setting(&pad))).map(|_| t("game-mod-forfeit-on"))
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path, key: &str, pad: &str) -> serde_json::Value {
+        use crate::i18n::t;
+        self.poll(ctx);
+        let on = enabled(backups);
+        serde_json::json!({
+            "id": "forfeit", "enabled": on, "busy": self.busy(), "status": self.status,
+            "label": t("game-mod-forfeit"), "description": t("game-mod-forfeit-description"), "keyboard": if key.is_empty() { DEFAULT_KEY } else { key }, "pad": pad, "keys": KEYS.as_slice(), "keyboardLabel": t("game-mod-forfeit-key"),
+        })
+    }
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String, pad: &mut String) -> bool {
+        use crate::i18n::t;
+        use eframe::egui;
+        self.poll(ui.ctx());
         if key.is_empty() {
             *key = DEFAULT_KEY.into();
         }
@@ -409,18 +476,7 @@ impl State {
             key_changed |= pad_picker(ui, "forfeit_pad", pad);
         });
         if want != on || (key_changed && on) {
-            let (cooked, backups, key, pad) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone(), pad.clone());
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.job = Some(rx);
-            self.status.clear();
-            std::thread::spawn(move || {
-                let result = if !want {
-                    restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-forfeit-off"))
-                } else {
-                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &LEGACY, Some(&key), pad_setting(&pad))).map(|_| t("game-mod-forfeit-on"))
-                };
-                let _ = tx.send(result);
-            });
+            self.set_enabled(cooked, backups, want, key.clone(), pad.clone());
         }
         if self.busy() {
             ui.spinner();

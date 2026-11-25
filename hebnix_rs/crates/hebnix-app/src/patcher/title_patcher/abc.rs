@@ -6,6 +6,84 @@ type Result<T> = std::result::Result<T, String>;
 const LIMIT: usize = 1_000_000;
 const MARKER: &str = "HEBNIX_TITLE_UPK_V1";
 
+#[cfg(test)]
+#[test]
+#[ignore = "requires local Rocket League packages in HEBNIX_DECAL_PROBE_COOKED"]
+fn inspect_live_decal_hooks() {
+    use crate::patcher::upk_package::{UpkPackage, strip};
+
+    let cooked = std::path::PathBuf::from(std::env::var_os("HEBNIX_DECAL_PROBE_COOKED").unwrap());
+    let garage = UpkPackage::load(&cooked.join("GFx_GarageMenu_SF.upk")).unwrap();
+    let mut inspected_movies = 0;
+    for export in &garage.exports {
+        if !matches!(strip(&garage.class_of(export)), "SwfMovie" | "GFxMovieInfo") {
+            continue;
+        }
+        let (properties, _) = garage.serialized_props(export).unwrap();
+        let raw = properties.iter().find(|p| p.name == "RawData").unwrap();
+        let start = export.serial_offset + raw.value_offset;
+        super::movie::rewrite(&garage.image[start + 4..start + raw.size], &|data| {
+            let abc = Abc::parse(data)?;
+            for class in &abc.classes {
+                let owner = &abc.name(class.name)?.full;
+                for field in class.fields.iter().chain(&class.statics) {
+                    let name = &abc.name(field.name)?.local;
+                    let lower = name.to_ascii_lowercase();
+                    if ![
+                        "previewproduct",
+                        "previewloadout",
+                        "equipproduct",
+                        "settexture",
+                        "decal",
+                    ]
+                    .iter()
+                    .any(|term| lower.contains(term))
+                    {
+                        continue;
+                    }
+                    let Some(method) = field.method.and_then(|id| abc.methods.get(id)) else {
+                        continue;
+                    };
+                    let params = method
+                        .params
+                        .iter()
+                        .map(|&id| abc.name(id).map(|name| name.full.as_str()))
+                        .collect::<Result<Vec<_>>>()?;
+                    println!("{owner}.{name}({})", params.join(", "));
+                }
+            }
+            Ok(None)
+        })
+        .unwrap();
+        inspected_movies += 1;
+    }
+    assert!(inspected_movies > 0, "No garage movies found");
+    for package in ["TAGame.upk", "Engine.upk", "ProjectX.upk"] {
+        let upk = UpkPackage::load(&cooked.join(package)).unwrap();
+        for (index, export) in upk.exports.iter().enumerate() {
+            if strip(&upk.class_of(export)) != "Function" {
+                continue;
+            }
+            let path = upk.object_path(index as i32 + 1);
+            let lower = path.to_ascii_lowercase();
+            if [
+                "settextureparameter",
+                "applydecal",
+                "loaddecal",
+                "previewproduct",
+                "previewloadout",
+                "applyloadouttoskeletalmesh",
+                "importtexture",
+            ]
+            .iter()
+            .any(|name| lower.contains(name))
+            {
+                println!("{package} {} {path}", index + 1);
+            }
+        }
+    }
+}
+
 struct Reader<'a> {
     data: &'a [u8],
     at: usize,
@@ -1067,6 +1145,54 @@ pub(in crate::patcher) fn instant_suite_bridge(data: &[u8], enabled: bool) -> Re
         return Err("Instant Suite bridge validation failed".into());
     }
     Ok(Some((output, 1)))
+}
+
+pub(in crate::patcher) fn live_chat_paste(data: &[u8]) -> Result<Option<(Vec<u8>, usize)>> {
+    let abc = Abc::parse(data)?;
+    let Some(class) = abc.classes.iter().find(|c| abc.name(c.name).is_ok_and(|n| n.local == "HudScreen")) else { return Ok(None); };
+    let Some(id) = class.fields.iter().find_map(|f| (abc.name(f.name).ok()?.local == "hbxPaste").then_some(f.method).flatten()) else { return Ok(None); };
+    if abc.strings.values.iter().any(|s| s == "HEBNIX_LIVE_CHAT_PASTE") { return Ok(None); }
+    let body = abc.bodies.iter().find(|b| b.id == id && b.exceptions == 0).ok_or("Unsupported chat paste method body")?;
+    let old = &data[body.code.clone()];
+    if !old.starts_with(&[0xd0, 0x30]) { return Err("Chat paste scope prologue changed".into()); }
+    let find = |name: &str| abc.names.iter().position(|n| n.full == name).ok_or_else(|| format!("Chat paste is missing {name}"));
+    let hooks = find("projectx.proxy:UIShellHooks")?;
+    let native = find(":SHELL_CallUnrealFunction")?;
+    let mut strings = abc.strings.values.clone();
+    let mut uints = Vec::new();
+    let mut constants = Constants { strings: &mut strings, uints: &mut uints };
+    let mut code = vec![0xd0, 0x30];
+    op(&mut code, 0x60, hooks);
+    for value in ["GFxShell_TA", "Shell"] { op(&mut code, 0x2c, constants.string(value)); }
+    code.extend([0x24, 0]);
+    for value in ["GetKeyForAction", "HbxLive.mods.chat-paste"] { op(&mut code, 0x2c, constants.string(value)); }
+    code.push(0x27);
+    op(&mut code, 0x46, native); put(&mut code, 6);
+    code.push(0x70);
+    op(&mut code, 0x2c, constants.string("1"));
+    let allowed = branch(&mut code, 0x19);
+    code.push(RETURN_VOID);
+    let resume = code.len(); bind(&mut code, allowed, resume)?;
+    code.extend_from_slice(&old[2..]);
+    constants.string("HEBNIX_LIVE_CHAT_PASTE");
+    let mut replacement = Vec::new();
+    for value in [body.id, body.stack.max(8), body.locals, body.init_scope, body.max_scope, code.len()] { put(&mut replacement, value); }
+    replacement.extend(code);
+    replacement.extend_from_slice(&data[body.code.end..body.span.end]);
+    let mut pool = Vec::new(); put(&mut pool, strings.len());
+    pool.extend_from_slice(&data[abc.strings.entries..abc.strings.span.end]);
+    for value in &strings[abc.strings.count..] { put(&mut pool, value.len()); pool.extend(value.as_bytes()); }
+    let mut edits = vec![(body.span.clone(), replacement), (abc.strings.span.clone(), pool)];
+    edits.sort_by_key(|(span, _)| span.start);
+    let mut out = data.to_vec();
+    for (span, bytes) in edits.into_iter().rev() { out.splice(span, bytes); }
+    Abc::parse(&out)?;
+    Ok(Some((out, 1)))
+}
+pub(in crate::patcher) fn has_chat_paste(data: &[u8]) -> Result<bool> {
+    let abc = Abc::parse(data)?;
+    Ok(abc.classes.iter().any(|c| abc.name(c.name).is_ok_and(|n| n.local == "HudScreen")
+        && c.fields.iter().any(|f| abc.name(f.name).is_ok_and(|n| n.local == "hbxPaste"))))
 }
 
 fn replace_body_code(data: &[u8], body: &Body, new_code: &[u8]) -> Vec<u8> {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const PACKAGE: &str = "TAGame.upk";
-const DEFAULT_KEY: &str = "L";
+pub(crate) const DEFAULT_KEY: &str = "L";
 /// The key action slot (see actions.rs), also the dispatcher block id.
 const SLOT: u32 = 3;
 const EVENT_CLASS: &str = "GameEvent_Soccar_TA";
@@ -61,6 +61,12 @@ fn is_patched(upk: &UpkPackage) -> bool {
 
 /// Add the dispatcher block and the key action that runs it.
 pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), String> {
+    let (script, jumps) = live_body(upk)?;
+    dispatcher::install(upk, backups, build, SLOT as u8, &script, &jumps)?;
+    actions::remove(upk, SLOT)?;
+    actions::add(upk, SLOT, &format!("{} {SLOT}", dispatcher::COMMAND))
+}
+pub(super) fn live_body(upk: &UpkPackage) -> Result<(Script, Vec<usize>), String> {
     let refs = Refs {
         class: object(upk, EVENT_CLASS)?,
         get_event: object(upk, GET_EVENT)?,
@@ -68,10 +74,7 @@ pub fn apply(upk: &mut UpkPackage, backups: &Path, build: &str) -> Result<(), St
         spawn_bot: object(upk, SPAWN_BOT)?,
         reset: object(upk, RESET)?,
     };
-    let (script, jumps) = body(&refs);
-    dispatcher::install(upk, backups, build, SLOT as u8, &script, &jumps)?;
-    actions::remove(upk, SLOT)?;
-    actions::add(upk, SLOT, &format!("{} {SLOT}", dispatcher::COMMAND))
+    Ok(body(&refs))
 }
 
 /// The Action name TAInput.ini binds the key to.
@@ -93,6 +96,7 @@ fn read_saved(backups: &Path) -> Option<Saved> {
 }
 
 pub fn enabled(backups: &Path) -> bool {
+    if super::live_cosmetics::managed() { return super::live_cosmetics::mod_enabled("bots-freeplay"); }
     read_saved(backups).is_some()
 }
 
@@ -187,9 +191,7 @@ impl State {
     }
 
     /// Draw the toggle and key picker. Returns true when `key` changed.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String, pad: &mut String) -> bool {
-        use crate::i18n::t;
-        use eframe::egui;
+    fn poll(&mut self, ctx: &eframe::egui::Context) {
         if let Some(job) = &self.job {
             match job.try_recv() {
                 Ok(result) => {
@@ -197,9 +199,47 @@ impl State {
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
             }
         }
+    }
+
+    pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool, key: String, pad: String) {
+        if super::live_cosmetics::managed() {
+            self.status = super::live_cosmetics::set_mod(cooked, "bots-freeplay", want, Some((&key, &pad))).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            return;
+        }
+        use crate::i18n::t;
+        if self.busy() { return; }
+        let (cooked, backups, key, pad) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone(), pad.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = if !want {
+                restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-bots-freeplay-off"))
+            } else {
+                enable(&cooked, &backups).and_then(|_| set_binding(&action(), &[], Some(&key), pad_setting(&pad))).map(|_| t("game-mod-bots-freeplay-on"))
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path, key: &str, pad: &str) -> serde_json::Value {
+        use crate::i18n::t;
+        self.poll(ctx);
+        let on = enabled(backups);
+        serde_json::json!({
+            "id": "bots-freeplay", "enabled": on, "busy": self.busy(), "status": self.status,
+            "label": t("game-mod-bots-freeplay"), "description": t("game-mod-bots-freeplay-description"), "keyboard": if key.is_empty() { DEFAULT_KEY } else { key }, "pad": pad, "keys": KEYS.as_slice(), "keyboardLabel": t("game-mod-bots-freeplay-key"),
+        })
+    }
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, key: &mut String, pad: &mut String) -> bool {
+        use crate::i18n::t;
+        use eframe::egui;
+        self.poll(ui.ctx());
         if key.is_empty() {
             *key = DEFAULT_KEY.into();
         }
@@ -221,18 +261,7 @@ impl State {
             key_changed |= pad_picker(ui, "bots_freeplay_pad", pad);
         });
         if want != on || (key_changed && on) {
-            let (cooked, backups, key, pad) = (cooked.to_path_buf(), backups.to_path_buf(), key.clone(), pad.clone());
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.job = Some(rx);
-            self.status.clear();
-            std::thread::spawn(move || {
-                let result = if !want {
-                    restore(&cooked, &backups).and_then(|_| unbind()).map(|_| t("game-mod-bots-freeplay-off"))
-                } else {
-                    enable(&cooked, &backups).and_then(|_| set_binding(&action(), &[], Some(&key), pad_setting(&pad))).map(|_| t("game-mod-bots-freeplay-on"))
-                };
-                let _ = tx.send(result);
-            });
+            self.set_enabled(cooked, backups, want, key.clone(), pad.clone());
         }
         if self.busy() {
             ui.spinner();

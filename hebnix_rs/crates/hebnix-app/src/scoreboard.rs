@@ -540,6 +540,17 @@ impl State {
             }
         });
         let preferences_changed = *preferences != before;
+        self.apply_controls(names, mmr, preferences_changed, ui.ctx());
+        if self.operation.is_some() {
+            ui.spinner();
+        }
+        if !self.status.is_empty() {
+            ui.label(&self.status);
+        }
+        preferences_changed
+    }
+
+    fn apply_controls(&mut self, names: bool, mmr: bool, preferences_changed: bool, ctx: &egui::Context) {
         let patch_changed = mmr != self.show_mmr || names != self.unanonymize;
         if preferences_changed || patch_changed {
             self.end_match();
@@ -550,16 +561,64 @@ impl State {
                     show_mmr: mmr,
                     unanonymize: names,
                 }),
-                ui.ctx(),
+                ctx,
             );
         }
-        if self.operation.is_some() {
-            ui.spinner();
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&self, preferences: &ScoreboardCfg) -> serde_json::Value {
+        serde_json::json!({
+            "page": "player-scoreboard",
+            "live": crate::patcher::live_cosmetics::snapshot(),
+            "ready": self.operation.is_none() && !self.game.as_os_str().is_empty(),
+            "loading": self.operation.is_some(), "status": self.status,
+            "names": self.unanonymize, "mmr": self.show_mmr, "ignore": preferences.ignore_self,
+            "source": match preferences.mmr_source {
+                ScoreboardMmrSource::Playlist => "playlist",
+                ScoreboardMmrSource::Gamemode => "gamemode",
+                ScoreboardMmrSource::Manual => "manual",
+            },
+            "playlist": preferences.fixed_playlist, "playlists": MANUAL_PLAYLISTS,
+            "labels": {
+                "names": t("scoreboard-unanonymize"), "enableNames": t("scoreboard-enable-unanonymize"),
+                "ignore": t("scoreboard-ignore-self"), "mmr": t("scoreboard-show-mmr"),
+                "enableMmr": t("scoreboard-enable-mmr"), "playlist": t("scoreboard-current-playlist"),
+                "gamemode": t("scoreboard-current-gamemode"), "manual": t("scoreboard-manual-selection"),
+                "choose": t("scoreboard-choose-mode"),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_change(
+        &mut self, preferences: &mut ScoreboardCfg, key: &str, value: &serde_json::Value, ctx: &egui::Context,
+    ) -> bool {
+        let before = preferences.clone();
+        let ready = self.operation.is_none() && !self.game.as_os_str().is_empty();
+        let mut names = self.unanonymize;
+        let mut mmr = self.show_mmr;
+        match key {
+            "names" if ready => names = value.as_bool().unwrap_or(names),
+            "mmr" if ready => mmr = value.as_bool().unwrap_or(mmr),
+            "ignore" => preferences.ignore_self = value.as_bool().unwrap_or(preferences.ignore_self),
+            "source" => match value.as_str() {
+                Some("playlist") => preferences.mmr_source = ScoreboardMmrSource::Playlist,
+                Some("gamemode") => preferences.mmr_source = ScoreboardMmrSource::Gamemode,
+                Some("manual") => preferences.mmr_source = ScoreboardMmrSource::Manual,
+                _ => return false,
+            },
+            "playlist" if preferences.mmr_source == ScoreboardMmrSource::Manual => {
+                let Some(id) = value.as_i64().filter(|selected| MANUAL_PLAYLISTS.iter().any(|(id, _)| id == selected)) else {
+                    return false;
+                };
+                preferences.fixed_playlist = Some(id);
+            }
+            _ => return false,
         }
-        if !self.status.is_empty() {
-            ui.label(&self.status);
-        }
-        preferences_changed
+        let changed = *preferences != before;
+        self.apply_controls(names, mmr, changed, ctx);
+        changed
     }
 }
 impl Drop for State {

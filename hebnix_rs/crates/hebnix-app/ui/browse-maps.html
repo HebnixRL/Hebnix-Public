@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src data:">
+  <title>Browse Maps</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="tracker-body">
+  <main class="container-fluid tracker-page browse-maps-page">
+    <section class="tracker-detail p-3 mb-3">
+      <div class="d-flex flex-wrap gap-3 align-items-center">
+        <input class="form-control flex-grow-1 maps-search" id="search" type="search">
+        <label class="form-check-label d-flex gap-2 align-items-center">
+          <input class="form-check-input mt-0" id="downloaded" type="checkbox">
+          <span id="downloaded-label"></span>
+        </label>
+      </div>
+      <details class="mt-3">
+        <summary id="help-title"></summary>
+        <div id="help" class="small text-body-secondary mt-2"></div>
+      </details>
+    </section>
+    <div class="tracker-detail p-3 mb-3" id="menu-warning" hidden>
+      <p class="mb-2">Installed maps appear in Rocket League’s Workshop menu.</p>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="enable-menu">Enable in-game Workshop menu</button>
+    </div>
+    <p class="text-body-secondary mb-3" id="count" role="status"></p>
+    <div id="empty" class="tracker-detail p-3" hidden></div>
+    <section class="maps-grid" id="maps" aria-label="Maps"></section>
+    <nav id="map-pages" class="d-flex justify-content-center align-items-center gap-2 my-3" aria-label="Map pages">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="prev">Previous</button>
+        <span class="small" id="page"></span>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="next">Next</button>
+    </nav>
+  </main>
+  <script src="/browse-maps.js"></script>
+</body>
+</html>

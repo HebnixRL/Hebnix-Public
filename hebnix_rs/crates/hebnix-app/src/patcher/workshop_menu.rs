@@ -254,7 +254,7 @@ const IMPORT_JSON_BUILDS: [(&str, &str); 2] = [(r"..\..\TAGame\HebnixWorkshop.js
 const NAMES: [(&str, &str); 2] = [("TransformedLeftX", "LoadFileToString"), ("TargetFind", "ImportJSON")];
 
 pub(super) fn rename_names(upk: &mut UpkPackage, on: bool) -> Result<(), String> {
-    let keep_loader = super::instant_suite::has_native_bridge(upk) || super::workshop_host::has_freeplay_restart(upk);
+    let keep_loader = super::instant_suite::has_native_bridge(upk) || super::workshop_host::has_freeplay_restart(upk) || super::live_cosmetics::has_native_bridge(upk);
     for (vanilla, patched) in NAMES {
         let index = upk.names.iter().position(|n| n == vanilla || n == patched)
             .ok_or_else(|| format!("{vanilla} is missing from {PACKAGE}"))?;

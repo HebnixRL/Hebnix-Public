@@ -71,6 +71,7 @@ pub(crate) struct State {
     pending: Option<mpsc::Receiver<Result<Completion, String>>>,
     game: PathBuf,
     enabled: bool,
+    auto_enable_requested: bool,
     needs_update: bool,
     status: String,
     error: bool,
@@ -83,6 +84,8 @@ pub(crate) struct State {
     prune_pending: bool,
     last_account_check: Option<Instant>,
     textures: HashMap<String, egui::TextureHandle>,
+    #[cfg(windows)]
+    web_images: HashMap<String, String>,
 }
 impl State {
     pub(crate) fn busy(&self) -> bool {
@@ -140,6 +143,7 @@ impl State {
             pending: None,
             game: PathBuf::new(),
             enabled: false,
+            auto_enable_requested: false,
             needs_update: false,
             status: String::new(),
             error: false,
@@ -152,6 +156,8 @@ impl State {
             prune_pending: false,
             last_account_check: None,
             textures: HashMap::new(),
+            #[cfg(windows)]
+            web_images: HashMap::new(),
         };
         if !state.settings.history.is_empty() || !state.settings.active.is_empty() {
             state.save();
@@ -228,6 +234,11 @@ impl State {
         });
     }
     pub(crate) fn tick(&mut self, ctx: &egui::Context, game: &Path) {
+        if !self.auto_enable_requested && self.pending.is_none() && !game.as_os_str().is_empty()
+            && self.game == game && !hebnix_sdk::process::is_rocket_league_running() {
+            self.auto_enable_requested = true;
+            self.set_enabled(ctx, game, true);
+        }
         if self.game != game && self.pending.is_none() {
             self.game = game.to_owned();
             self.enabled = false;
@@ -444,6 +455,84 @@ impl State {
             .and_then(|a| self.settings.active.get(&a.key))
             .cloned()
     }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, game: &Path) -> serde_json::Value {
+        use base64::Engine;
+        use serde_json::json;
+        let active = self.active_picture();
+        let busy = self.busy();
+        let running = hebnix_sdk::process::is_rocket_league_running();
+        self.web_images.retain(|id, _| self.settings.history.contains(id) || Some(id) == active.as_ref());
+        for id in self.settings.history.iter().chain(active.iter()) {
+            if !self.web_images.contains_key(id) && let Ok(bytes) = gallery::read(&self.root, id) {
+                self.web_images.insert(id.clone(), format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+            }
+        }
+        let rows: Vec<_> = self.settings.history.iter().filter_map(|id| {
+            self.web_images.get(id).map(|image| json!({ "id": id, "image": image }))
+        }).collect();
+        let accounts: Vec<_> = self.save_accounts.iter().map(|account| {
+            let platform = if account.platform == "epic" { "Epic" } else { "Steam" };
+            json!([account.key, format!("{} ({platform})", account.name)])
+        }).collect();
+        json!({
+            "page": "profile-pictures", "enabled": self.enabled, "canToggle": !busy && !running && !game.as_os_str().is_empty(),
+            "running": running, "busy": busy, "accounts": accounts, "account": self.owner.as_ref().map(|a| &a.key),
+            "owner": self.owner.as_ref().map(|a| &a.name), "active": active,
+            "current": active.as_ref().and_then(|id| self.web_images.get(id)), "rows": rows,
+            "update": self.enabled && self.needs_update, "retry": self.enabled && !self.needs_update && !busy && self.runtime.is_none(),
+            "status": self.status, "error": self.error,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, game: &Path, key: &str, value: &serde_json::Value, ctx: &egui::Context) {
+        if self.busy() { return; }
+        match key {
+            "enabled" | "update" if !game.as_os_str().is_empty() && !hebnix_sdk::process::is_rocket_league_running() => {
+                if let Some(enabled) = value.as_bool() { self.set_enabled(ctx, game, enabled); }
+            }
+            "account" if !hebnix_sdk::process::is_rocket_league_running() => {
+                if let Some(key) = value.as_str().filter(|key| self.save_accounts.iter().any(|account| account.key == *key)) {
+                    self.settings.account = Some(key.to_owned());
+                    self.owner = accounts::choose(&self.save_accounts, Some(key), false, None);
+                    self.status.clear();
+                    self.error = false;
+                    self.save();
+                }
+            }
+            "import" => self.import_picture(ctx),
+            "upload" | "remove" => {
+                if let Some(id) = value.as_str().filter(|id| self.settings.history.iter().any(|known| known.as_str() == *id)) {
+                    if key == "upload" { self.upload(ctx, id.to_owned()); }
+                    else { self.remove_recent(id); }
+                }
+            }
+            "retry" if self.enabled && !self.needs_update && self.runtime.is_none() => self.retry_connection(ctx),
+            _ => {}
+        }
+    }
+
+    fn import_picture(&mut self, ctx: &egui::Context) {
+        let root = self.root.clone();
+        self.spawn(ctx, "", move || {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Import profile picture")
+                .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+            let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() else {
+                return Ok(Completion::Canceled);
+            };
+            gallery::import(&root, &file).map(Completion::Imported)
+        });
+    }
+
+    fn retry_connection(&mut self, ctx: &egui::Context) {
+        let pictures = self.pictures();
+        self.spawn(ctx, "Connecting…", move || {
+            Ok(Completion::Started(true, false, service::Runtime::start(&pictures).map(Some)))
+        });
+    }
     fn account_picker(&mut self, ui: &mut egui::Ui, running: bool, busy: bool) {
         if !self.save_accounts.is_empty() {
             let mut key = self.owner.as_ref().map(|a| a.key.clone());
@@ -500,17 +589,7 @@ impl State {
                     .add_enabled(!busy, egui::Button::new("Import picture…"))
                     .clicked()
                 {
-                    let root = self.root.clone();
-                    self.spawn(ui.ctx(), "", move || {
-                        let dialog = rfd::FileDialog::new()
-                            .set_title("Import profile picture")
-                            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-                        let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file()
-                        else {
-                            return Ok(Completion::Canceled);
-                        };
-                        gallery::import(&root, &file).map(Completion::Imported)
-                    });
+                    self.import_picture(ui.ctx());
                 }
             });
         });
@@ -661,14 +740,7 @@ impl State {
                         && !busy
                         && left.button("Retry connection").clicked()
                     {
-                        let pictures = self.pictures();
-                        self.spawn(left.ctx(), "Connecting…", move || {
-                            Ok(Completion::Started(
-                                true,
-                                false,
-                                service::Runtime::start(&pictures).map(Some),
-                            ))
-                        });
+                        self.retry_connection(left.ctx());
                     }
                     if let Some(id) = self.active_picture() {
                         if let Some(texture) = self.texture(left.ctx(), &id) {

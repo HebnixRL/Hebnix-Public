@@ -38,9 +38,6 @@ pub fn spawn() -> bool {
     }
     *child_slot = None;
 
-    if !crate::spoofer::is_admin() {
-        return false;
-    }
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
@@ -130,6 +127,7 @@ pub fn run(parent_pid: u32) {
     }
     crate::spoofer::restore_if_crashed(&crate::config::base_dir());
     let _ = crate::multiplayer_lan::cleanup_system_state();
+    crate::patcher::live_cosmetics::cleanup_after_exit(parent_pid);
     if watchdog_owner().is_some_and(|owner| owner == parent_pid) {
         let _ = std::fs::remove_file(watchdog_owner_path());
     }
@@ -148,7 +146,7 @@ fn watchdog_owner() -> Option<u32> {
         .ok()
 }
 
-fn replacement_is_running(parent_pid: u32) -> bool {
+pub(crate) fn replacement_is_running(parent_pid: u32) -> bool {
     let Some(owner) = watchdog_owner().filter(|owner| *owner != parent_pid) else {
         return false;
     };

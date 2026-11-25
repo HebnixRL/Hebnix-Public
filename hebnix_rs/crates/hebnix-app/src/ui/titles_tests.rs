@@ -3,6 +3,7 @@
 use super::{TitleCatalogEntry, parse_hex_color};
 use crate::spoofer;
 use crate::spoofer::rules::TitleSpoofSettings;
+use serde_json::Value;
 use eframe::egui::{self, Color32};
 use std::{path::PathBuf, sync::Arc};
 
@@ -48,6 +49,9 @@ struct HebnixApp {
     saves: usize,
 }
 impl HebnixApp {
+    fn swapper_cooked_path(&self) -> PathBuf {
+        PathBuf::from(&self.config.settings.rl_path).join("TAGame/CookedPCConsole")
+    }
     fn save_config(&mut self) {
         self.saves += 1;
     }

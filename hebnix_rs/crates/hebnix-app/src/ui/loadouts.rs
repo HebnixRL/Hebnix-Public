@@ -16,6 +16,9 @@ use hebnix_sdk::save_file::{self, SaveAccount, bakkes_code, loadout_code};
 use hebnix_sdk::utils::constants::{SAVE_PATH_EPIC, SAVE_PATH_STEAM};
 use serde_json::{Value, json};
 
+#[cfg(windows)]
+pub(crate) mod web;
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum SaveMode {
     #[default]
@@ -75,6 +78,8 @@ pub struct LoadoutsPanel {
     target: usize,
     name: String,
     plan: Option<(PlanKey, Result<Plan, String>)>,
+    #[cfg(windows)]
+    web_previews: Vec<usize>,
 }
 
 enum LoadoutDialog {
@@ -849,7 +854,7 @@ fn tile_action(ui: &mut egui::Ui, action: &str, label: &str) -> egui::Response {
         .fit_to_exact_size(egui::vec2(14.0, 14.0))
         .tint(tint);
     let label = t(label);
-    let response = ui.add_sized([24.0, 20.0], egui::Button::image(icon).frame(false));
+    let response = ui.add_sized([24.0, 24.0], egui::Button::image(icon).frame(false));
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });

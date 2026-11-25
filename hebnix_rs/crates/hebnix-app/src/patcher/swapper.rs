@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 mod browser;
 mod item_name;
 mod thumbnail_patcher;
+#[cfg(windows)]
+mod web;
+#[cfg(windows)]
+pub(crate) use web::{WebSwap, web_category};
 #[cfg(test)]
 mod browser_tests;
 
@@ -655,6 +659,17 @@ impl SwapperState {
         cooked_pc: &Path,
         item: &SwapItem,
     ) {
+        self.queue_thumbnail_for_context(ui.ctx(), category, filename, cooked_pc, item);
+    }
+
+    fn queue_thumbnail_for_context(
+        &mut self,
+        ctx: &egui::Context,
+        category: SwapCategory,
+        filename: &str,
+        cooked_pc: &Path,
+        item: &SwapItem,
+    ) {
         let key = thumbnail_key(category, filename, item);
         if !self.thumbnails.contains_key(&key) {
             self.thumbnails.insert(key.clone(), None);
@@ -669,7 +684,7 @@ impl SwapperState {
                     }
                 },
                 thumbnail_kind(category, item),
-                ui.ctx().clone(),
+                ctx.clone(),
             ));
         }
     }
@@ -677,6 +692,20 @@ impl SwapperState {
     fn resolved_items(
         &mut self,
         ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        items: &[SwapItem],
+    ) -> Option<Arc<Vec<ResolvedItem>>> {
+        let resolved = self.resolve_items(ui.ctx(), category, cooked_pc, items);
+        if resolved.is_none() {
+            ui.weak(t("resolved-items-preparing-items"));
+        }
+        resolved
+    }
+
+    fn resolve_items(
+        &mut self,
+        ctx: &egui::Context,
         category: SwapCategory,
         cooked_pc: &Path,
         items: &[SwapItem],
@@ -712,17 +741,12 @@ impl SwapperState {
                 cooked_pc.to_path_buf(),
                 items.to_vec(),
                 generation,
-                ui.ctx().clone(),
+                ctx.clone(),
             ));
         }
-        let resolved = self
-            .resolutions
+        self.resolutions
             .get(&category)
-            .and_then(|entry| entry.items.clone());
-        if resolved.is_none() {
-            ui.weak(t("resolved-items-preparing-items"));
-        }
-        resolved
+            .and_then(|entry| entry.items.clone())
     }
 
     pub fn owned_only(&self) -> bool {
@@ -734,11 +758,19 @@ impl SwapperState {
     }
 
     pub fn set_catalogs(&mut self, catalogs: &HashMap<String, Value>) -> Result<(), String> {
+        self.set_catalog_categories(catalogs, &SwapCategory::ALL)
+    }
+
+    pub(crate) fn set_catalog_categories(
+        &mut self,
+        catalogs: &HashMap<String, Value>,
+        categories: &[SwapCategory],
+    ) -> Result<(), String> {
         let bodies = catalogs
             .get(SwapCategory::Bodies.slug())
             .ok_or_else(|| "The bodies catalog was not downloaded".to_string())?;
         let mut parsed = HashMap::new();
-        for category in SwapCategory::ALL {
+        for &category in categories {
             let root = catalogs
                 .get(category.slug())
                 .ok_or_else(|| format!("The {} catalog was not downloaded", category.slug()))?;

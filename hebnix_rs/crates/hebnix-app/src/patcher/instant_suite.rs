@@ -113,7 +113,7 @@ pub(super) fn has_native_bridge(upk: &UpkPackage) -> bool {
 
 /// Shell.GetKeyForAction is a native-backed GFx method with a string return
 /// slot. Handle one reserved action and run the original body for other keys.
-fn edit_bridge(upk: &mut UpkPackage, enabled: bool) -> Result<bool, String> {
+pub(super) fn edit_bridge(upk: &mut UpkPackage, enabled: bool) -> Result<bool, String> {
     use super::script_patch::{Script, replace_script};
     let object = |path| upk.find_object(path).ok_or_else(|| format!("Missing {path}"));
     let name = |value: &str| upk.names.iter().position(|name| name == value)
@@ -163,7 +163,7 @@ fn edit_bridge(upk: &mut UpkPackage, enabled: bool) -> Result<bool, String> {
     Ok(true)
 }
 
-fn install_bridge(cooked: &Path, enabled: bool) -> Result<bool, String> {
+pub(super) fn install_bridge(cooked: &Path, enabled: bool) -> Result<bool, String> {
     let _guard = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
     let live = game_path::resolve(cooked, "TAGame.upk");
     if !enabled && !live.is_file() {
@@ -359,7 +359,9 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
             switch_existing_hook(cooked, false)?;
         }
     }
-    install_bridge(cooked, false)?;
+    if !super::live_decals::status(cooked).unwrap_or(false) {
+        install_bridge(cooked, false)?;
+    }
     let _ = std::fs::remove_file(command_path(cooked));
     match std::fs::remove_file(backups.join(ENABLED)) {
         Ok(()) => Ok(()),
@@ -410,6 +412,68 @@ pub struct State {
 }
 
 impl State {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, cooked: &Path, cfg: &crate::config::GameModsCfg) -> serde_json::Value {
+        use crate::i18n::t;
+        use serde_json::json;
+        let mode = cfg.instant_suite_mode.as_str();
+        let maps = if mode == "workshop" {
+            let (enabled, maps) = self.maps.get_or_insert_with(|| {
+                (super::workshop_menu::status(cooked).unwrap_or(false), crate::ui::workshop::ingame_menu::all_maps(cooked))
+            });
+            Some(json!({"enabled": enabled, "items": maps.iter().map(|map| (map.path.to_string_lossy(), &map.title)).collect::<Vec<_>>() }))
+        } else { None };
+        let labels = json!({
+            "private": t("game-mod-instant-suite-private"), "tournaments": t("game-mod-instant-suite-tournaments"),
+            "mode": t("game-mod-instant-suite-mode"), "map": t("game-mod-instant-suite-map"),
+            "pick": t("game-mod-instant-suite-pick-map"), "reload": t("game-mod-instant-suite-reload-maps"),
+            "needsMenu": t("game-mod-instant-suite-needs-menu"),
+        });
+        json!({
+            "id": "instant-suite", "label": t("game-mod-instant-suite"), "description": t("game-mod-instant-suite-description"),
+            "enabled": self.on == Some(true), "busy": self.busy() || self.on.is_none(), "status": self.status,
+            "private": cfg.instant_suite_private, "tournaments": cfg.instant_suite_tournaments,
+            "mode": if MODES.contains(&mode) { mode } else { DEFAULT_MODE }, "map": cfg.instant_suite_map,
+            "modes": std::iter::once(DEFAULT_MODE).chain(MODES).map(|id| (id, t(&format!("game-mod-instant-suite-mode-{id}")))).collect::<Vec<_>>(),
+            "labels": labels, "maps": maps,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_toggle(&mut self, cooked: &Path, want: bool) {
+        if super::live_cosmetics::managed() {
+            match super::live_cosmetics::set_mod(cooked, "instant-suite", want, None) {
+                Ok(()) => { self.on = Some(want); self.status = "Live settings saved".into(); },
+                Err(e) => self.status = e,
+            }
+            return;
+        }
+        if self.busy() || self.on.is_none() || self.on == Some(want) { return; }
+        let (cooked, backups) = (cooked.to_owned(), cooked.join("Backups"));
+        self.status.clear();
+        self.needs_upgrade = false;
+        self.spawn(move || if want { enable(&cooked, &backups).map(|()| true) } else { restore(&cooked, &backups).map(|()| false) });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_option(&mut self, key: &str, value: &serde_json::Value, cfg: &mut crate::config::GameModsCfg) -> bool {
+        match key {
+            "private" => cfg.instant_suite_private = value.as_bool().unwrap_or(cfg.instant_suite_private),
+            "tournaments" => cfg.instant_suite_tournaments = value.as_bool().unwrap_or(cfg.instant_suite_tournaments),
+            "mode" => {
+                let Some(mode) = value.as_str().filter(|mode| *mode == DEFAULT_MODE || MODES.contains(mode)) else { return false };
+                cfg.instant_suite_mode = mode.to_owned();
+            }
+            "map" => {
+                let Some(path) = value.as_str() else { return false };
+                if !self.maps.as_ref().is_some_and(|(_, maps)| maps.iter().any(|map| map.path == Path::new(path))) { return false; }
+                cfg.instant_suite_map = path.to_owned();
+            }
+            "reload" => { self.maps = None; return false; }
+            _ => return false,
+        }
+        true
+    }
     pub fn busy(&self) -> bool {
         self.job.is_some()
     }
@@ -445,6 +509,10 @@ impl State {
             }
             *self = Self { install: Some(cooked.to_path_buf()), ..Default::default() };
         }
+        if super::live_cosmetics::managed() {
+            self.on = Some(super::live_cosmetics::mod_enabled("instant-suite"));
+            self.needs_upgrade = false;
+        } else {
         let now = std::time::Instant::now();
         if !self.busy() && self.next_check.is_none_or(|check| now >= check) {
             self.next_check = Some(now + Duration::from_secs(2));
@@ -472,6 +540,7 @@ impl State {
                 }
                 Ok(true)
             });
+        }
         }
         let on = self.on == Some(true) && self.install.as_deref() == Some(cooked) && !self.busy();
         let action = if on && (mode != "workshop" || Path::new(map).is_file()) {
@@ -558,10 +627,20 @@ impl State {
             }
         }
         if want != on {
+            if super::live_cosmetics::managed() {
+                match super::live_cosmetics::set_mod(cooked, "instant-suite", want, None) {
+                    Ok(()) => { self.on = Some(want); self.status = "Live settings saved".into(); },
+                    Err(error) => self.status = error,
+                }
+            } else {
             let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
             self.status.clear();
             self.needs_upgrade = false;
             self.spawn(move || if want { enable(&cooked, &backups).map(|()| true) } else { restore(&cooked, &backups).map(|()| false) });
+            }
+        }
+        if changed && super::live_cosmetics::managed() {
+            if let Err(error) = super::live_cosmetics::sync_game_options(cooked, settings) { self.status = error; }
         }
         if self.busy() {
             ui.spinner();

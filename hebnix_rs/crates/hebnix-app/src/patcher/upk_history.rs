@@ -646,12 +646,7 @@ impl History {
         self.editors.clear();
     }
 
-    pub(crate) fn render(
-        &mut self,
-        ui: &mut egui::Ui,
-        cooked: &Path,
-        swapper: &super::swapper::SwapperState,
-    ) {
+    fn update(&mut self, cooked: &Path) {
         if self.cooked != cooked {
             self.cooked = cooked.to_owned();
             self.refresh(cooked);
@@ -672,6 +667,116 @@ impl History {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, cooked: &Path, swapper: &super::swapper::SwapperState) -> serde_json::Value {
+        use serde_json::json;
+        self.update(cooked);
+        let running = hebnix_sdk::process::is_rocket_league_running();
+        let groups = group_entries(&self.entries).into_iter().filter_map(|(item, points)| {
+            let primary = points.iter().copied().max_by_key(|point| (point.priority(), std::cmp::Reverse(point.index)))?;
+            let name = points.iter().find_map(|point| point.entry.related_swap().map(|swap| swap.source_name.as_str()))
+                .or_else(|| swapper.history_item_name(item)).unwrap_or(&primary.entry.label).replace('→', "-");
+            let rows = std::iter::once(primary).chain(points.iter().copied().filter(|point| point.index != primary.index))
+                .map(|point| {
+                    let entry = point.entry;
+                    let first = point.index == primary.index;
+                    let date = time::OffsetDateTime::from_unix_timestamp(entry.unix_seconds).ok().map(|utc| {
+                        let local = time::UtcOffset::local_offset_at(utc).map_or(utc, |offset| utc.to_offset(offset));
+                        format!("{} {:02}:{:02}", local.date(), local.hour(), local.minute())
+                    });
+                    let label = if entry.linked { t("upk-history-linked").to_string() }
+                        else if let Some(swap) = point.swap.filter(|swap| !swap.source_upk.eq_ignore_ascii_case(&swap.target_upk)) {
+                            t_args("upk-history-swapped-with", &[("item", swap.target_name.as_str().into())]).to_string()
+                        } else { entry.label.replace('→', "-") };
+                    let (restore, command) = if first && point.latest() && !point.has_linked {
+                        ("upk-history-restore-original", "original")
+                    } else if first && point.latest() { ("upk-history-revert", "before") }
+                    else { ("upk-history-before", "before") };
+                    let recipe = entry.recipe.as_ref();
+                    json!({
+                        "index": point.index, "file": entry.file, "date": date, "label": label,
+                        "disabled": entry.linked || point.current.linked, "linked": entry.linked,
+                        "restore": t(restore), "command": command, "after": !point.latest(),
+                        "colour": recipe.filter(|r| r.paint != painted_swap::SwapPaint::Default).map(|r| r.paint.description()),
+                        "alignment": recipe.and_then(|r| r.alignment).filter(|a| *a != wheel_alignment::Settings::default()).map(|a| a.description()),
+                        "edit": recipe.filter(|_| point.latest()).map(|r| json!({"paint": r.paint, "alignment": r.alignment})),
+                    })
+                }).collect::<Vec<_>>();
+            Some(json!({"name": name, "rows": rows}))
+        }).collect::<Vec<_>>();
+        let paints = painted_swap::SwapPaint::ALL.iter().map(|paint| (paint.label(), paint)).collect::<Vec<_>>();
+        json!({
+            "page": "upk-history", "groups": groups, "paints": paints, "busy": self.job.is_some(), "running": running,
+            "status": self.status, "labels": {
+                "refresh": t("upk-history-refresh"), "search": t("upk-history-search"), "empty": t("upk-history-empty"),
+                "close": t("upk-history-close-game"), "checkpoints": t("upk-history-checkpoints"),
+                "after": t("upk-history-after"), "edit": t("upk-history-edit"), "editColour": t("upk-history-edit-colour"),
+                "apply": t("upk-history-apply"), "reset": t("upk-history-reset-alignment"),
+            }
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, cooked: &Path, key: &str, index: Option<usize>, value: serde_json::Value, ctx: &egui::Context) {
+        if self.job.is_some() {
+            return;
+        }
+        if key == "refresh" {
+            self.refresh(cooked);
+            return;
+        }
+        if hebnix_sdk::process::is_rocket_league_running() || self.cooked != cooked {
+            return;
+        }
+        let Some((point, primary)) = group_entries(&self.entries).into_iter().find_map(|(_, points)| {
+            let point = points.iter().copied().find(|point| Some(point.index) == index)?;
+            let primary = points.iter().max_by_key(|row| (row.priority(), std::cmp::Reverse(row.index)))?;
+            Some((point, primary.index == point.index))
+        }) else { return };
+        if point.current.linked || point.entry.linked {
+            return;
+        }
+        let action = match key {
+            "original" if primary && point.latest() && !point.has_linked => Action::Original,
+            "before" => Action::Before,
+            "after" if !point.latest() => Action::After,
+            "edit" if point.latest() => {
+                let Some(mut recipe) = point.entry.recipe.clone() else { return };
+                let Ok(paint) = serde_json::from_value::<painted_swap::SwapPaint>(value["paint"].clone()) else { return };
+                if !matches!(paint, painted_swap::SwapPaint::Custom(_)) && !painted_swap::SwapPaint::ALL.contains(&paint) && paint != painted_swap::SwapPaint::Red {
+                    return;
+                }
+                recipe.paint = paint;
+                if recipe.alignment.is_some() {
+                    let Ok(alignment) = serde_json::from_value::<wheel_alignment::Settings>(value["alignment"].clone()) else { return };
+                    if alignment.validate().is_err() { return; }
+                    recipe.alignment = Some(alignment);
+                }
+                Action::Edit(recipe)
+            }
+            _ => return,
+        };
+        let entry = if matches!(action, Action::Original) { point.original } else { point.entry }.clone();
+        let current = point.current.after.clone();
+        let cooked = cooked.to_owned();
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        self.job = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(restore(&cooked, &entry, &current, action));
+            ctx.request_repaint();
+        });
+    }
+
+    pub(crate) fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        swapper: &super::swapper::SwapperState,
+    ) {
+        self.update(cooked);
         let running = hebnix_sdk::process::is_rocket_league_running();
         let enabled = !running && self.job.is_none();
         egui::ScrollArea::vertical()

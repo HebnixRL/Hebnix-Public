@@ -66,11 +66,11 @@ impl State {
 
     fn begin(
         &mut self,
-        ui: &egui::Ui,
+        ctx: &egui::Context,
         action: impl FnOnce() -> Result<patches::Manifest, String> + Send + 'static,
     ) {
         let (sender, receiver) = unbounded();
-        let ctx = ui.ctx().clone();
+        let ctx = ctx.clone();
         self.pending = Some(receiver);
         self.status = None;
         std::thread::spawn(move || {
@@ -83,7 +83,7 @@ impl State {
 impl SwapperState {
     fn editor_preview(
         &mut self,
-        ui: &egui::Ui,
+        ctx: &egui::Context,
         cooked: &Path,
         selection: &Selection,
     ) -> browser::Preview {
@@ -100,7 +100,7 @@ impl SwapperState {
                 key.clone(),
                 cooked.join(&selection.file),
                 format!("raw|{}", selection.kind),
-                ui.ctx().clone(),
+                ctx.clone(),
             ));
         }
         if let Some(Some(png)) = self.thumbnails.get(&key) {
@@ -135,13 +135,7 @@ impl SwapperState {
         self.render_thumbnail_patcher_content(ui, cooked, backups, &inventory.ids);
     }
 
-    fn render_thumbnail_patcher_content(
-        &mut self,
-        ui: &mut egui::Ui,
-        cooked: &Path,
-        backups: &Path,
-        owned_ids: &HashSet<i64>,
-    ) {
+    fn update_thumbnail_editor(&mut self, cooked: &Path, backups: &Path) {
         self.collect_thumbnails();
         // Finish an operation before changing installs, so its result cannot leak into another game.
         if let Some(receiver) = &self.thumbnail_editor.pending {
@@ -170,6 +164,162 @@ impl SwapperState {
             self.thumbnail_editor.status = None;
             self.thumbnail_editor.reload(backups);
         }
+    }
+
+    #[cfg(windows)]
+    fn web_thumbnail_candidates(&self, cooked: &Path, category: SwapCategory, owned_ids: &HashSet<i64>) -> Vec<(Selection, bool)> {
+        let mut seen = HashSet::new();
+        self.catalogs.get(&category).into_iter().flat_map(|items| items.iter()).filter_map(|item| {
+            let file = inferred_thumbnail(category, item, cooked)?;
+            let kind = thumbnail_kind(category, item);
+            if file.contains(['/', '\\', ':']) || !seen.insert((file.to_lowercase(), kind.clone())) { return None; }
+            let owned = item.product_id.is_some_and(|id| owned_ids.contains(&id));
+            Some((Selection { file, kind, name: item_label(category, item) }, owned))
+        }).collect()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_item_thumbnails(&mut self, cooked: &Path, owned_ids: &HashSet<i64>, visible: &[String], ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        self.update_thumbnail_editor(cooked, &cooked.join("Backups"));
+        let cat = self.thumbnail_editor.category;
+        let entries = self.web_thumbnail_candidates(cooked, cat, owned_ids);
+        let owned_only = self.thumbnail_editor.owned_only;
+        let owned_keys = if self.thumbnail_editor.patched_only && owned_only {
+            self.catalogs.iter().flat_map(|(category, items)| {
+                items.iter().filter(|item| item.product_id.is_some_and(|id| owned_ids.contains(&id))).filter_map(|item| {
+                    Some((inferred_thumbnail(*category, item, cooked)?.to_lowercase(), thumbnail_kind(*category, item)))
+                }).collect::<Vec<_>>()
+            }).collect::<HashSet<_>>()
+        } else { HashSet::new() };
+        let patches = self.thumbnail_editor.manifest.packages.clone();
+        let status = self.thumbnail_editor.status.as_ref().and_then(|status| status.as_ref().ok()).cloned();
+        let error = self.thumbnail_editor.load_error.clone().or_else(|| self.thumbnail_editor.status.as_ref().and_then(|status| status.as_ref().err()).cloned());
+        let busy = self.thumbnail_editor.busy();
+        let patched_only = self.thumbnail_editor.patched_only;
+        let mut rows = Vec::new();
+        let to_image = |preview| match preview {
+            browser::Preview::Ready(bytes) => crate::ui::browser::image_url(&bytes),
+            _ => None,
+        };
+        if patched_only {
+            for package in &patches {
+                for patch in &package.patches {
+                    if owned_only && !owned_keys.contains(&(package.file.to_lowercase(), patch.kind.clone())) { continue; }
+                    let id = format!("{}|{}", package.file, patch.export);
+                    let selection = Selection { file: package.file.clone(), kind: patch.kind.clone(), name: patch.name.clone() };
+                    let image = visible.contains(&id).then(|| to_image(self.editor_preview(ctx, cooked, &selection))).flatten();
+                    rows.push(json!({"id": id, "name": patch.name, "file": package.file, "image": image, "patched": true}));
+                }
+            }
+        } else {
+            for (selection, owned) in entries {
+                if owned_only && !owned { continue; }
+                let id = format!("{}|{}", selection.file, selection.kind);
+                let preview = visible.contains(&id).then(|| self.editor_preview(ctx, cooked, &selection));
+                let failed = preview.as_ref().and_then(|preview| match preview { browser::Preview::Failed(error) => Some(error.clone()), _ => None });
+                let image = preview.and_then(to_image);
+                rows.push(json!({"id": id, "name": selection.name, "file": selection.file, "image": image, "error": failed}));
+            }
+        }
+        let selection = self.thumbnail_editor.selection.clone().map(|selection| {
+            let image = to_image(self.editor_preview(ctx, cooked, &selection));
+            let export = patches.iter().filter(|package| package.file.eq_ignore_ascii_case(&selection.file))
+                .flat_map(|package| &package.patches).find(|patch| patch.kind == selection.kind).map(|patch| patch.export);
+            json!({
+                "id": format!("{}|{}", selection.file, selection.kind), "name": selection.name, "image": image,
+                "replacement": self.thumbnail_editor.replacement.as_deref().and_then(crate::ui::browser::image_url),
+                "export": export,
+            })
+        });
+        let categories = SwapCategory::ALL.iter().map(|category| (category.slug(), category.label())).collect::<Vec<_>>();
+        json!({
+            "page": "item-artwork", "kind": "thumbnails", "categories": categories, "category": cat.slug(),
+            "rows": rows, "selection": selection, "busy": busy, "active": patches.iter().any(|p| !p.patches.is_empty()),
+            "error": error, "status": status, "owned": owned_only, "patched": patched_only,
+            "labels": {
+                "description": t("thumbnail-patcher-description"), "owned": "Show Only Owned Items", "patched": t("thumbnail-patcher-show-patched"),
+                "search": t("thumbnail-patcher-search"), "edit": t("thumbnail-patcher-select"), "restoreAll": t("thumbnail-patcher-restore-all"),
+                "apply": t("thumbnail-patcher-apply"), "restore": t("thumbnail-patcher-restore"), "current": t("thumbnail-patcher-current"),
+                "choose": t("thumbnail-patcher-choose-image"), "replacement": t("thumbnail-patcher-replacement"),
+                "empty": t(if patched_only { "thumbnail-patcher-no-patches" } else { "thumbnail-patcher-empty" }), "cancel": t("item-name-cancel"),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_item_thumbnail_action(&mut self, key: &str, value: serde_json::Value, cooked: &Path, closed: bool, owned_ids: &HashSet<i64>, ctx: &egui::Context) {
+        if self.thumbnail_editor.busy() { return; }
+        let backups = cooked.join("Backups");
+        let text = value.as_str().unwrap_or_default();
+        match key {
+            "category" => {
+                if let Some(category) = SwapCategory::ALL.into_iter().find(|category| category.slug() == text) {
+                    self.thumbnail_editor.category = category;
+                    self.thumbnail_editor.selection = None;
+                }
+            }
+            "owned" | "patched" => {
+                let enabled = value.as_bool().unwrap_or(false);
+                if key == "owned" { self.thumbnail_editor.owned_only = enabled; }
+                else { self.thumbnail_editor.patched_only = enabled; }
+                self.thumbnail_editor.selection = None;
+            }
+            "refresh" => self.thumbnail_editor.reload(&backups),
+            "select" if !self.thumbnail_editor.patched_only => {
+                let candidates = self.web_thumbnail_candidates(cooked, self.thumbnail_editor.category, owned_ids);
+                if let Some((selection, _)) = candidates.into_iter().find(|(item, owned)| {
+                    (!self.thumbnail_editor.owned_only || *owned) && format!("{}|{}", item.file, item.kind) == text
+                }) && matches!(self.editor_preview(ctx, cooked, &selection), browser::Preview::Ready(_)) {
+                    self.thumbnail_editor.selection = Some(selection);
+                }
+            }
+            "cancel" => self.thumbnail_editor.selection = None,
+            "choose" if self.thumbnail_editor.selection.is_some() => {
+                let dialog = rfd::FileDialog::new().add_filter(t("thumbnail-patcher-images"), &["png", "jpg", "jpeg", "webp", "bmp", "gif", "ico"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    match patches::import_image(&path) {
+                        Ok(png) => {
+                            self.thumbnail_editor.replacement = Some(png.into());
+                            self.thumbnail_editor.status = None;
+                        }
+                        Err(error) => self.thumbnail_editor.status = Some(Err(error)),
+                    }
+                }
+            }
+            "save" if closed => {
+                let (Some(selection), Some(png)) = (self.thumbnail_editor.selection.clone(), self.thumbnail_editor.replacement.clone()) else { return; };
+                if matches!(self.editor_preview(ctx, cooked, &selection), browser::Preview::Ready(_)) {
+                    let cooked = cooked.to_owned();
+                    self.thumbnail_editor.begin(ctx, move || patches::apply(&cooked, &backups, &selection.file, &selection.kind, &selection.name, &png));
+                }
+            }
+            "restore-all" if closed && self.thumbnail_editor.manifest.count() > 0 => {
+                let cooked = cooked.to_owned();
+                self.thumbnail_editor.begin(ctx, move || patches::restore_all(&cooked, &backups));
+            }
+            "restore" if closed => {
+                let pair = self.thumbnail_editor.manifest.packages.iter().find_map(|package| {
+                    package.patches.iter().find(|patch| format!("{}|{}", package.file, patch.export) == text)
+                        .map(|patch| (package.file.clone(), patch.export))
+                });
+                if let Some((file, export)) = pair {
+                    let cooked = cooked.to_owned();
+                    self.thumbnail_editor.begin(ctx, move || patches::restore(&cooked, &backups, &file, export));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_thumbnail_patcher_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        cooked: &Path,
+        backups: &Path,
+        owned_ids: &HashSet<i64>,
+    ) {
+        self.update_thumbnail_editor(cooked, backups);
         ui.weak(t("thumbnail-patcher-description"));
         if let Some(status) = &self.thumbnail_editor.status {
             match status {
@@ -237,7 +387,7 @@ impl SwapperState {
             {
                 let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
                 self.thumbnail_editor
-                    .begin(ui, move || patches::restore_all(&cooked, &backups));
+                    .begin(ui.ctx(), move || patches::restore_all(&cooked, &backups));
             }
         });
         if let Some(error) = &self.thumbnail_editor.load_error {
@@ -325,7 +475,7 @@ impl SwapperState {
                                 |ui| {
                                     browser::frame(ui, false).show(ui, |ui| {
                                         ui.set_width((width - 20.0).max(1.0));
-                                        let preview = self.editor_preview(ui, cooked, selection);
+                                        let preview = self.editor_preview(ui.ctx(), cooked, selection);
                                         let loaded = matches!(&preview, browser::Preview::Ready(_));
                                         browser::preview(
                                             ui,
@@ -366,7 +516,7 @@ impl SwapperState {
     ) {
         ui.separator();
         ui.strong(&selection.name);
-        let preview = self.editor_preview(ui, cooked, selection);
+        let preview = self.editor_preview(ui.ctx(), cooked, selection);
         let loaded = matches!(&preview, browser::Preview::Ready(_));
         ui.horizontal_wrapped(|ui| {
             ui.vertical(|ui| {
@@ -415,7 +565,7 @@ impl SwapperState {
                     let png = self.thumbnail_editor.replacement.clone().unwrap();
                     let selection = selection.clone();
                     let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
-                    self.thumbnail_editor.begin(ui, move || {
+                    self.thumbnail_editor.begin(ui.ctx(), move || {
                         patches::apply(
                             &cooked,
                             &backups,
@@ -441,7 +591,7 @@ impl SwapperState {
                             backups.to_path_buf(),
                             selection.file.clone(),
                         );
-                        self.thumbnail_editor.begin(ui, move || {
+                        self.thumbnail_editor.begin(ui.ctx(), move || {
                             patches::restore(&cooked, &backups, &file, export)
                         });
                     }
@@ -495,8 +645,7 @@ impl SwapperState {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.vertical(|ui| {
                                         ui.set_width(100.0);
-                                        let preview = self.editor_preview(
-                                            ui,
+                                        let preview = self.editor_preview(ui.ctx(),
                                             cooked,
                                             &Selection {
                                                 file: package.file.clone(),
@@ -522,7 +671,7 @@ impl SwapperState {
                                                 package.file.clone(),
                                             );
                                             let export = patch.export;
-                                            self.thumbnail_editor.begin(ui, move || {
+                                            self.thumbnail_editor.begin(ui.ctx(), move || {
                                                 patches::restore(&cooked, &backups, &file, export)
                                             });
                                         }

@@ -827,6 +827,39 @@ impl UpkPackage {
             .collect()
     }
 
+    /// Reuse a blank import for a reflected field of an already imported native
+    /// class. This cannot introduce asset packages or change object identities.
+    pub(crate) fn bind_native_field(&mut self, slot: usize, outer: i32, class: &str, name: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+        if !self.empty_import_slots().contains(&slot) || outer >= 0 || !self.imports.get((-outer - 1) as usize).is_some_and(|i| strip(&self.name_of(i.class_package)) == "Core") {
+            return Err("Native field binding requires a blank slot and an existing native class import".into());
+        }
+        let mut bytes = vec![0; 28];
+        write_fname_bytes(&mut bytes, 0, self.exact_name_index("Core")?)?;
+        write_fname_bytes(&mut bytes, 8, self.exact_name_index(class)?)?;
+        write_i32(&mut bytes, 16, outer)?;
+        write_fname_bytes(&mut bytes, 20, self.exact_name_index(name)?)?;
+        let before = self.import_bytes(slot)?;
+        self.restore_import_bytes(slot, &bytes)?;
+        Ok((before, bytes))
+    }
+    pub(crate) fn import_bytes(&self, slot: usize) -> Result<Vec<u8>, String> {
+        let at = self.imports.get(slot).ok_or("Invalid import slot")?.entry_offset;
+        Ok(self.image[at..at + 28].to_vec())
+    }
+    pub(crate) fn restore_import_bytes(&mut self, slot: usize, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() != 28 { return Err("Invalid import record size".into()); }
+        let at = self.imports.get(slot).ok_or("Invalid import slot")?.entry_offset;
+        let mut cursor = Cursor::new(bytes);
+        let class_package = read_fname(&mut cursor, self.header.file_version)?;
+        let class_name = read_fname(&mut cursor, self.header.file_version)?;
+        let outer_index = cursor.i32()?;
+        let object_name = read_fname(&mut cursor, self.header.file_version)?;
+        if !self.valid_fname(class_package) || !self.valid_fname(class_name) || !self.valid_fname(object_name) { return Err("Invalid import names".into()); }
+        self.patch(at, bytes)?;
+        self.imports[slot] = ImportEntry { entry_offset: at, class_package, class_name, outer_index, object_name };
+        Ok(())
+    }
+
     fn exact_name_index(&self, wanted: &str) -> Result<usize, String> {
         self.names
             .iter()

@@ -73,3 +73,4 @@ upk-history-reset-alignment = Reset alignment
 upk-history-restore-original = Restore original
 
 nav-menu-textures-experimental = Menus (experimental)
+nav-map-swapper = Map Swapper

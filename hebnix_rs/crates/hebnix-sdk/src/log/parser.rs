@@ -166,6 +166,23 @@ pub fn local_player_session() -> Option<LogSessionInfo> {
     Some(parse_session(&String::from_utf8_lossy(&bytes)))
 }
 
+/// Read the anti-cheat setting recorded during the game's startup.
+pub fn easy_anti_cheat_enabled() -> Option<bool> {
+    let mut startup = Vec::new();
+    std::fs::File::open(find_launch_log())
+        .ok()?
+        .take(256 * 1024)
+        .read_to_end(&mut startup)
+        .ok()?;
+    String::from_utf8_lossy(&startup)
+        .lines()
+        .find_map(|line| match line.split_once("] EAC: bAntiCheatEnabled=")?.1.trim() {
+            "(True)" => Some(true),
+            "(False)" => Some(false),
+            _ => None,
+        })
+}
+
 /// Read match context once StatsAPI has reported a live match.
 pub fn local_match_context() -> Option<(Option<String>, LogGameInfo)> {
     let bytes = std::fs::read(find_launch_log()).ok()?;

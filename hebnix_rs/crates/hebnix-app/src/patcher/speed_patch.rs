@@ -330,6 +330,73 @@ impl Default for State {
 impl State {
     pub(crate) fn busy(&self) -> bool { self.running }
 
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, cfg: &SpeedPatchCfg, ctx: &egui::Context, tx: &Sender<AppMsg>) -> serde_json::Value {
+        self.poll(ctx, tx);
+        serde_json::json!({
+            "page": "speed-patch", "items": cfg.items_page, "speed": self.speed,
+            "min": MIN_MULTIPLIER, "max": MAX_MULTIPLIER, "busy": self.running,
+            "package": self.package.as_ref().map(|path| path.display().to_string()),
+            "status": self.status.as_ref().map(|result| match result { Ok(message) | Err(message) => message }),
+            "error": self.status.as_ref().is_some_and(Result::is_err),
+            "labels": {
+                "description": t("speed-patch-description"), "items": t("speed-patch-items-page"),
+                "itemsHint": t("speed-patch-items-page-hint"), "oneoff": t("speed-patch-oneoff-title"),
+                "oneoffHint": t("speed-patch-oneoff-hint"), "choose": t("speed-patch-choose"),
+                "noPackage": t("speed-patch-no-package"), "multiplier": t("speed-patch-multiplier"),
+                "patch": t("speed-patch-patch"), "restore": t("app-restore"),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_choose(&mut self, cooked: &Path) {
+        let dialog = rfd::FileDialog::new().set_directory(cooked).add_filter("UPK", &["upk"]);
+        if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+            self.package = Some(path);
+            self.status = None;
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_run(&mut self, cooked: &Path, speed: f32, restore: bool, tx: &Sender<AppMsg>) {
+        self.speed = clamp(speed);
+        self.run(if restore { Job::Restore } else { Job::Patch }, cooked, &cooked.join("Backups"), tx);
+    }
+
+    fn poll(&mut self, ctx: &egui::Context, tx: &Sender<AppMsg>) {
+        if let Some(rx) = &self.rx {
+            if let Ok(result) = rx.try_recv() {
+                let (Ok(message) | Err(message)) = &result;
+                let _ = tx.send(AppMsg::Log(format!("[Speed] {message}")));
+                self.status = Some(result);
+                self.running = false;
+                self.rx = None;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    fn run(&mut self, job: Job, cooked_pc: &Path, backups_dir: &Path, tx: &Sender<AppMsg>) {
+        if self.running { return; }
+        if let Some(package) = self.package.clone() {
+            if crate::messages::block_item_action_if_game_running(tx) {
+                return;
+            }
+            let (sender, receiver) = crossbeam_channel::bounded(1);
+            self.rx = Some(receiver);
+            self.running = true;
+            self.status = None;
+            let cooked = cooked_pc.to_path_buf();
+            let backups = backups_dir.to_path_buf();
+            let speed = self.speed;
+            std::thread::spawn(move || {
+                let _ = sender.send(run_job(job, &package, &cooked, &backups, speed));
+            });
+        }
+    }
+
     /// Returns true when the saved settings changed.
     pub fn render(
         &mut self,
@@ -339,17 +406,7 @@ impl State {
         backups_dir: &Path,
         tx: &Sender<AppMsg>,
     ) -> bool {
-        if let Some(rx) = &self.rx {
-            if let Ok(result) = rx.try_recv() {
-                let (Ok(message) | Err(message)) = &result;
-                let _ = tx.send(AppMsg::Log(format!("[Speed] {message}")));
-                self.status = Some(result);
-                self.running = false;
-                self.rx = None;
-            } else {
-                ui.ctx().request_repaint();
-            }
-        }
+        self.poll(ui.ctx(), tx);
         let mut changed = false;
         ui.heading(t("app-speed-patch"));
         ui.separator();
@@ -410,20 +467,8 @@ impl State {
             }
             None => {}
         }
-        if let (Some(job), Some(package)) = (job, self.package.clone()) {
-            if crate::messages::block_item_action_if_game_running(tx) {
-                return changed;
-            }
-            let (sender, receiver) = crossbeam_channel::bounded(1);
-            self.rx = Some(receiver);
-            self.running = true;
-            self.status = None;
-            let cooked = cooked_pc.to_path_buf();
-            let backups = backups_dir.to_path_buf();
-            let speed = self.speed;
-            std::thread::spawn(move || {
-                let _ = sender.send(run_job(job, &package, &cooked, &backups, speed));
-            });
+        if let Some(job) = job {
+            self.run(job, cooked_pc, backups_dir, tx);
         }
         changed
     }

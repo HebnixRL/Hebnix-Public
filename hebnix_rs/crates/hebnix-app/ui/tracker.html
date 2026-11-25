@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:">
+  <title>Tracker</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="tracker-body">
+  <main class="container-fluid tracker-page">
+    <div id="status" class="text-body-secondary mb-3" role="status" hidden></div>
+    <section class="tracker-summary" id="summary" aria-label="Tracker summary" hidden>
+      <div class="tracker-person" id="player" hidden>
+        <img id="avatar" class="tracker-avatar" alt="">
+        <div class="tracker-person-text">
+          <strong id="name"></strong>
+          <button type="button" class="btn btn-sm btn-outline-secondary mt-1" id="retry" hidden></button>
+        </div>
+      </div>
+      <div class="tracker-metric tracker-with-icon" id="playlist" hidden>
+        <img id="playlist-badge" class="tracker-badge" alt="" hidden>
+        <div><small>Current Playlist</small><strong id="playlist-name"></strong></div>
+      </div>
+      <div class="tracker-metric" id="current" hidden>
+        <small>Current MMR</small><strong class="tracker-number" id="rating"></strong>
+      </div>
+      <div class="tracker-metric tracker-with-icon" id="rank-card" hidden>
+        <img id="rank-badge" class="tracker-badge" alt="" hidden>
+        <div class="tracker-rank-text"><small>Rank</small><strong id="rank"></strong><span id="rank-division" hidden></span></div>
+      </div>
+      <div class="tracker-metric" id="change-card" hidden>
+        <small id="change-label"></small><strong class="tracker-number" id="change"></strong>
+      </div>
+    </section>
+    <section class="tracker-detail" id="detail" hidden>
+      <header class="tracker-detail-header">
+        <div class="tracker-detail-mode">
+          <img id="badge" class="tracker-badge" alt="" hidden>
+          <div><h2 class="mb-1" id="mode-title"></h2><p class="mb-0" id="mode-rank"></p></div>
+        </div>
+        <div class="tracker-metric"><small>MMR</small><strong class="tracker-number" id="detail-rating"></strong></div>
+        <div class="tracker-metric"><small id="detail-change-label"></small><strong class="tracker-number" id="detail-change"></strong></div>
+      </header>
+      <div class="tracker-chart-area" id="chart-area">
+        <div class="d-flex flex-wrap justify-content-between gap-2 mb-2">
+          <h3 class="h6 mb-0" id="history-title"></h3>
+          <small id="subtitle"></small>
+        </div>
+        <div class="tracker-history-layout">
+          <nav id="modes" class="tracker-modes" aria-label="Game modes"></nav>
+          <div class="tracker-history-graph">
+            <div class="tracker-plot" id="plot" role="group" aria-labelledby="history-title" hidden>
+              <canvas id="chart" aria-hidden="true"></canvas>
+              <div class="tracker-chart-points" id="points"></div>
+            </div>
+            <p id="history-empty" class="text-body-secondary mb-0" hidden></p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/tracker.js"></script>
+</body>
+</html>

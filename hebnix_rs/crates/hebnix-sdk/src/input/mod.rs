@@ -37,4 +37,6 @@ pub use game_actions::{
     action_binds, chat_channel_bind, clear_action_bind_cache, is_action_pressed, ui_scale,
 };
 pub use keyboard::{detect_hotkey, is_key_pressed, tap_key, type_text, type_text_while};
+#[cfg(target_os = "windows")]
+pub use keyboard::name_to_vk;
 pub use xinput::{XINPUT_BUTTON_DISPLAY, XInputState, get_xinput_state};

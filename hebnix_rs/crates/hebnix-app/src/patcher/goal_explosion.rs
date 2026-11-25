@@ -215,9 +215,7 @@ impl State {
         self.job.is_some()
     }
 
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path) {
-        use crate::i18n::{t, t_args};
-        use eframe::egui;
+    fn poll(&mut self, ctx: &eframe::egui::Context, backups: &Path) {
         if !self.loaded {
             self.loaded = true;
             if let Some(scale) = current(backups) {
@@ -231,9 +229,60 @@ impl State {
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
             }
         }
+    }
+
+    fn start(&mut self, cooked: &Path, backups: &Path, restore_original: bool) {
+        use crate::i18n::{t, t_args};
+        if self.busy() || (restore_original && current(backups).is_none()) { return; }
+        let (cooked, backups, scale) = (cooked.to_path_buf(), backups.to_path_buf(), self.scale);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = if !restore_original {
+                enable(&cooked, &backups, scale).map(|_| {
+                    t_args("goal-explosion-applied", &[("scale", format!("{scale:.2}").into())])
+                })
+            } else {
+                restore(&cooked, &backups).map(|_| t("goal-explosion-restored"))
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path) -> serde_json::Value {
+        use crate::i18n::{t, t_args};
+        self.poll(ctx, backups);
+        let active = current(backups);
+        let status = if self.status.is_empty() {
+            active.map(|value| t_args("goal-explosion-active", &[("scale", format!("{value:.2}").into())])).unwrap_or_default()
+        } else {
+            self.status.clone()
+        };
+        serde_json::json!({
+            "title": t("nav-goal-explosion-scale"), "description": t("goal-explosion-description"),
+            "value": self.scale, "min": MIN_SCALE, "max": MAX_SCALE, "suffix": "x", "log": true, "mute": "",
+            "busy": self.busy(), "active": active.is_some(), "status": status,
+            "apply": t("goal-explosion-apply"), "restore": t("goal-explosion-restore"),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_run(&mut self, cooked: &Path, value: f32, restore: bool) {
+        if value.is_finite() && !self.busy() {
+            self.scale = value.clamp(MIN_SCALE, MAX_SCALE);
+            self.start(cooked, &cooked.join("Backups"), restore);
+        }
+    }
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path) {
+        use crate::i18n::{t, t_args};
+        use eframe::egui;
+        self.poll(ui.ctx(), backups);
         ui.heading(t("nav-goal-explosion-scale"));
         ui.label(t("goal-explosion-description"));
         ui.add_space(8.0);
@@ -252,20 +301,7 @@ impl State {
                 )
                 .clicked();
             if apply_clicked || restore_clicked {
-                let (cooked, backups, scale) = (cooked.to_path_buf(), backups.to_path_buf(), self.scale);
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.job = Some(rx);
-                self.status.clear();
-                std::thread::spawn(move || {
-                    let result = if apply_clicked {
-                        enable(&cooked, &backups, scale).map(|_| {
-                            t_args("goal-explosion-applied", &[("scale", format!("{scale:.2}").into())])
-                        })
-                    } else {
-                        restore(&cooked, &backups).map(|_| t("goal-explosion-restored"))
-                    };
-                    let _ = tx.send(result);
-                });
+                self.start(cooked, backups, restore_clicked);
             }
         });
         if self.busy() {

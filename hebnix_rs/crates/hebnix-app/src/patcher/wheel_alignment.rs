@@ -27,22 +27,22 @@ impl Settings {
     pub(super) fn history_controls(&mut self, ui: &mut egui::Ui) {
         ui.add(
             egui::Slider::new(&mut self.camber, -30.0..=30.0)
-                .step_by(0.25)
+                .step_by(0.5)
                 .text(t("render-camber-degrees")),
         );
         ui.add(
             egui::Slider::new(&mut self.vertical, -15.0..=15.0)
-                .step_by(0.25)
+                .step_by(0.5)
                 .text(t("render-up-down")),
         );
         ui.add(
             egui::Slider::new(&mut self.lateral, -15.0..=15.0)
-                .step_by(0.25)
+                .step_by(0.5)
                 .text(t("render-left-right-track-width")),
         );
     }
 
-    fn validate(self) -> Result<(), String> {
+    pub(super) fn validate(self) -> Result<(), String> {
         if !self.camber.is_finite()
             || !self.vertical.is_finite()
             || !self.lateral.is_finite()
@@ -572,6 +572,61 @@ pub struct WheelAlignmentState {
 impl WheelAlignmentState {
     pub(crate) fn busy(&self) -> bool { self.receiver.is_some() }
 
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, cooked: &Path, ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        self.poll(cooked, ctx);
+        if let Some((_, file)) = self.cars.get(self.selected) {
+            let dir = record_dir(cooked, file);
+            if self.loaded.as_ref() != Some(&dir) {
+                self.settings = super::upk_history::current_recipe(cooked, &cooked.join(file))
+                    .ok().flatten().and_then(|recipe| recipe.alignment)
+                    .or_else(|| read(&dir.join("alignment.json")).ok().and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok()).map(|record| record.settings))
+                    .unwrap_or_default();
+                self.loaded = Some(dir);
+            }
+        }
+        let edited: Vec<_> = self.edited.iter().map(|(file, reverted)| {
+            let index = self.cars.iter().position(|(_, path)| path == file);
+            let name = index.map_or(file.as_str(), |index| self.cars[index].0.as_str());
+            let label = if *reverted { format!("{name} — reverted") } else { name.to_owned() };
+            json!({"file": file, "index": index, "label": label})
+        }).collect();
+        let labels = json!({
+            "camber": t("render-camber-degrees"), "camberHint": t("render-negative-tops-inward-positive-tops-outwa"),
+            "vertical": t("render-up-down"), "verticalHint": t("render-positive-up-negative-down-values-are"),
+            "lateral": t("render-left-right-track-width"), "lateralHint": t("render-mirrored-adjustment-positive-moves-both"),
+            "apply": t("render-apply-alignment"), "filter": t("render-filter-cars"), "reset": t("render-revert-to-0"),
+            "revert": t("render-revert-settings"), "empty": t("render-no-cars-adjusted-yet"),
+            "noCatalog": t("render-car-catalog-is-not-available-yet"),
+            "close": t("render-close-rocket-league-before-changing-alig"),
+        });
+        json!({
+            "page": "wheel-alignment", "models": self.cars.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            "selected": self.selected, "settings": self.settings, "status": self.status,
+            "busy": self.busy(), "running": hebnix_sdk::process::is_rocket_league_running(), "edited": edited, "labels": labels,
+            "editedLabel": t_args("render-edited-cars-edited", &[("edited", self.edited.len().to_string().into())]),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_select(&mut self, index: usize) {
+        if !self.busy() && index < self.cars.len() { self.selected = index; }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_run(&mut self, cooked: &Path, settings: Option<Settings>, remove: Option<String>, ctx: &egui::Context) {
+        if let Some(file) = remove {
+            if self.edited.iter().any(|(current, _)| current == &file) {
+                self.start(cooked, file, Settings::default(), TransactionAction::RevertAndForget, ctx);
+            }
+        } else if let Some(settings) = settings {
+            if settings.validate().is_ok() && let Some((_, file)) = self.cars.get(self.selected) {
+                self.start(cooked, file.clone(), settings, TransactionAction::Apply, ctx);
+            }
+        }
+    }
+
     fn refresh_edited(&mut self, cooked: &Path) {
         self.edited.clear();
         if let Ok(entries) = fs::read_dir(cooked.join("Backups").join("WheelAlignment")) {
@@ -614,7 +669,7 @@ impl WheelAlignmentState {
         self.selected = 0;
         self.loaded = None;
     }
-    pub fn render(&mut self, ui: &mut egui::Ui, cooked: &Path) {
+    fn poll(&mut self, cooked: &Path, ctx: &egui::Context) {
         if let Some(rx) = &self.receiver {
             match rx.try_recv() {
                 Ok(result) => {
@@ -631,7 +686,7 @@ impl WheelAlignmentState {
                     self.receiver = None;
                 }
                 _ => {
-                    ui.ctx()
+                    ctx
                         .request_repaint_after(std::time::Duration::from_millis(100));
                 }
             }
@@ -639,6 +694,24 @@ impl WheelAlignmentState {
         if self.edited_root.as_deref() != Some(cooked) {
             self.refresh_edited(cooked);
         }
+    }
+
+    fn start(&mut self, cooked: &Path, file: String, settings: Settings, action: TransactionAction, ctx: &egui::Context) {
+        if self.busy() || hebnix_sdk::process::is_rocket_league_running() { return; }
+        let cooked = cooked.to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        self.receiver = Some(rx);
+        self.status = t("render-preparing-alignment").into();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = transaction(&cooked, &file, settings, action);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn render(&mut self, ui: &mut egui::Ui, cooked: &Path) {
+        self.poll(cooked, ui.ctx());
         let busy = self.receiver.is_some();
         let rl_open = hebnix_sdk::process::is_rocket_league_running();
         let mut action = None;
@@ -692,13 +765,13 @@ impl WheelAlignmentState {
                 ui.weak(t("render-negative-tops-inward-positive-tops-outwa"));
                 ui.add(
                     egui::Slider::new(&mut self.settings.vertical, -15.0..=15.0)
-                        .step_by(0.25)
+                        .step_by(0.5)
                         .text(t("render-up-down")),
                 );
                 ui.weak(t("render-positive-up-negative-down-values-are"));
                 ui.add(
                     egui::Slider::new(&mut self.settings.lateral, -15.0..=15.0)
-                        .step_by(0.25)
+                        .step_by(0.5)
                         .text(t("render-left-right-track-width")),
                 );
                 ui.weak(t("render-mirrored-adjustment-positive-moves-both"));
@@ -769,16 +842,7 @@ impl WheelAlignmentState {
             });
         }
         if let Some((file, settings, action)) = action {
-            let cooked = cooked.to_path_buf();
-            let (tx, rx) = mpsc::channel();
-            self.receiver = Some(rx);
-            self.status = t("render-preparing-alignment").into();
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let result = transaction(&cooked, &file, settings, action);
-                let _ = tx.send(result);
-                ctx.request_repaint();
-            });
+            self.start(cooked, file, settings, action, ui.ctx());
         }
         ui.add_space(8.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {

@@ -11,6 +11,26 @@ pub struct State {
 }
 
 impl State {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "confirming": self.confirm, "error": self.error, "label": t("delete-backups"),
+            "confirm": t("delete-backups-confirm"), "cancel": t("delete-backups-cancel"), "note": t("delete-backups-note"),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, action: &str, cooked: &Path) {
+        match action {
+            "open" => { self.confirm = true; self.error = None; }
+            "cancel" => self.confirm = false,
+            "confirm" if self.confirm => {
+                self.confirm = false;
+                self.error = super::backup_guard::delete_backups(cooked).err();
+            }
+            _ => {}
+        }
+    }
     pub fn render(&mut self, ui: &mut egui::Ui, cooked_pc: &Path) {
         ui.horizontal(|ui| {
             if self.confirm {

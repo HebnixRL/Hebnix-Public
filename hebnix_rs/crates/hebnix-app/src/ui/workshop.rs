@@ -23,7 +23,13 @@ use crate::multiplayer_lan::{
 };
 mod archive;
 mod banner_image;
-mod background_changer;
+#[cfg(windows)]
+mod web;
+#[cfg(windows)]
+pub(crate) use web::{AddMapsAction, BrowseMapsAction, MultiplayerAction};
+#[cfg(windows)]
+pub(crate) use menu_map::WebMapAction;
+pub(crate) mod background_changer;
 mod hosted;
 pub(crate) mod freeplay;
 pub(crate) mod ingame_menu;
@@ -726,10 +732,11 @@ pub enum ImageState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum WorkshopView {
+pub(crate) enum WorkshopView {
     Browse,
     Import,
     ArenaBackgrounds,
+    MapSwapper,
     MenuMap,
     InGameMenu,
     Multiplayer,
@@ -862,6 +869,8 @@ pub struct WorkshopState {
     pub view_downloaded: bool,
     pub target: String,
     pub images: HashMap<String, ImageState>,
+    #[cfg(windows)]
+    web_banners: HashMap<String, Option<String>>,
     pub busy: HashSet<String>,
     /// the catalogue changed, so the in-game downloader's list needs rewriting
     downloads_stale: bool,
@@ -869,8 +878,8 @@ pub struct WorkshopState {
     pub fetched: bool,
     pub confirm_delete: Option<Value>,
     theme_selected_map: Option<String>,
-    view: WorkshopView,
-    background_changer: BackgroundChangerState,
+    pub(crate) view: WorkshopView,
+    pub(crate) background_changer: BackgroundChangerState,
     menu_map: MenuMapState,
     ingame_menu: InGameMenuState,
     /// right-clicked map (catalog index) and where the menu opens
@@ -909,6 +918,7 @@ impl WorkshopState {
             WorkshopView::Browse,
             WorkshopView::Import,
             WorkshopView::ArenaBackgrounds,
+            WorkshopView::MapSwapper,
             WorkshopView::InGameMenu,
             WorkshopView::MenuMap,
             WorkshopView::Multiplayer,
@@ -954,6 +964,8 @@ impl WorkshopState {
             view_downloaded: false,
             target: WORKSHOP_TARGET.to_string(),
             images: HashMap::new(),
+            #[cfg(windows)]
+            web_banners: HashMap::new(),
             busy: HashSet::new(),
             downloads_stale: false,
             catalog_status: t("catalog-loading-catalog").to_string(),
@@ -1229,7 +1241,7 @@ impl WorkshopState {
         tx: &Sender<AppMsg>,
     ) {
         match page {
-            StudioMapPage::ArenaBackgrounds => self.background_changer.render(ui, rl_path, tx),
+            StudioMapPage::ArenaBackgrounds => self.background_changer.render(ui, rl_path, tx, false),
         }
     }
 
@@ -1271,55 +1283,64 @@ impl WorkshopState {
         }
     }
 
+    fn prepare_view(&mut self, rl_path: &str, ctx: &egui::Context) {
+        let connected = self.multiplayer.tunnel_ready;
+        if self.lan_synced != Some(connected) {
+            self.lan_synced = Some(connected);
+            ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
+            ingame_menu::watch_ticks();
+            self.startup_sync(rl_path, ctx);
+        }
+        self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
+            &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
+        );
+    }
+
     /// Render the Maps tab using the configured Rocket League path.
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
         rl_path: &str,
         tx: &Sender<AppMsg>,
+        modern_navigation: bool,
     ) {
-        let connected = self.multiplayer.tunnel_ready;
-        if self.lan_synced != Some(connected) {
-            self.lan_synced = Some(connected);
-            ingame_menu::sync_lan(&Path::new(rl_path).join("TAGame").join("CookedPCConsole"), connected);
-            ingame_menu::watch_ticks();
-            self.startup_sync(rl_path, ui.ctx());
-        }
-        self.workshop_maps = crate::patcher::workshop_menu::workshop_dir(
-            &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
-        );
+        self.prepare_view(rl_path, ui.ctx());
         let ctx = ui.ctx().clone();
 
         if crate::theme::presentation(&ctx).is_some_and(|theme| theme.layout.show_page_heading) {
             ui.heading(t("tab-workshop"));
             ui.add_space(8.0);
         }
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(
-                &mut self.view,
-                WorkshopView::Browse,
-                t("render-browse-maps"),
-            );
-            ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
-            ui.selectable_value(&mut self.view, WorkshopView::ArenaBackgrounds, t("nav-arena-backgrounds"));
-            ui.selectable_value(
-                &mut self.view,
-                WorkshopView::InGameMenu,
-                if self.panel_mode { "LAN settings" } else { "In-game menu" },
-            );
-            if !self.panel_mode {
-                ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
-            }
-            ui.selectable_value(
-                &mut self.view,
-                WorkshopView::Multiplayer,
-                t("render-multiplayer"),
-            );
-        });
-        ui.separator();
-        if self.view == WorkshopView::ArenaBackgrounds {
+        if !modern_navigation {
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(
+                    &mut self.view,
+                    WorkshopView::Browse,
+                    t("render-browse-maps"),
+                );
+                ui.selectable_value(&mut self.view, WorkshopView::Import, t("nav-add-maps"));
+                ui.selectable_value(&mut self.view, WorkshopView::ArenaBackgrounds, t("nav-arena-backgrounds"));
+                ui.selectable_value(&mut self.view, WorkshopView::MapSwapper, t("nav-map-swapper"));
+                ui.selectable_value(
+                    &mut self.view,
+                    WorkshopView::InGameMenu,
+                    if self.panel_mode { "LAN settings" } else { "In-game menu" },
+                );
+                if !self.panel_mode {
+                    ui.selectable_value(&mut self.view, WorkshopView::MenuMap, t("menu-map-title"));
+                }
+                ui.selectable_value(
+                    &mut self.view,
+                    WorkshopView::Multiplayer,
+                    t("render-multiplayer"),
+                );
+            });
+            ui.separator();
+        }
+        if matches!(self.view, WorkshopView::ArenaBackgrounds | WorkshopView::MapSwapper) {
+            let full_map = self.view == WorkshopView::MapSwapper;
             egui::ScrollArea::vertical().id_salt("arena_backgrounds_page").show(ui, |ui| {
-                crate::i18n::layout::bordered_panel(ui, |ui| self.background_changer.render(ui, rl_path, tx));
+                crate::i18n::layout::bordered_panel(ui, |ui| self.background_changer.render(ui, rl_path, tx, full_map));
             });
             return;
         }
@@ -1520,27 +1541,7 @@ impl WorkshopState {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button(t("plugin-delete-prompt-yes")).clicked() {
-                            let id = id_of(&map_data);
-                            let ok = if is_local_entry(&map_data) {
-                                let removed = remove_local_map(
-                                    &self.manager.cache_dir,
-                                    &self.manager.runtime_dir,
-                                    &id,
-                                )
-                                .is_ok();
-                                if removed {
-                                    self.catalog.retain(|entry| id_of(entry) != id);
-                                }
-                                removed
-                            } else {
-                                self.manager.delete_from_cache(&id)
-                            };
-                            if !ok {
-                                let _ = tx.send(AppMsg::Log(
-                                    "[Workshop] Failed to delete file. Ensure the game is closed or the file isn't in use.".to_string(),
-                                ));
-                            }
-                            self.execute_search(false);
+                            self.delete_browse_map(&map_data, tx);
                             close = true;
                         }
                         if ui.button(t("plugin-delete-prompt-no")).clicked() {
@@ -1552,6 +1553,25 @@ impl WorkshopState {
                 self.confirm_delete = None;
             }
         }
+    }
+
+    fn delete_browse_map(&mut self, map_data: &Value, tx: &Sender<AppMsg>) {
+        let id = id_of(map_data);
+        let ok = if is_local_entry(map_data) {
+            let removed = remove_local_map(&self.manager.cache_dir, &self.manager.runtime_dir, &id).is_ok();
+            if removed {
+                self.catalog.retain(|entry| id_of(entry) != id);
+            }
+            removed
+        } else {
+            self.manager.delete_from_cache(&id)
+        };
+        if !ok {
+            let _ = tx.send(AppMsg::Log(
+                "[Workshop] Failed to delete file. Ensure the game is closed or the file isn't in use.".to_string(),
+            ));
+        }
+        self.execute_search(false);
     }
 
     fn render_multiplayer(
@@ -2038,7 +2058,7 @@ impl WorkshopState {
     /// players are a collapsed list so it stays usable with lots of them.
     /// Centered popup, on any tab, offering the hosted map of the player the
     /// game just failed to join.
-    pub fn render_join_prompt(&mut self, ctx: &egui::Context, rl_path: &str) {
+    pub(crate) fn poll_join_prompt(&mut self, ctx: &egui::Context, rl_path: &str) {
         for (map, ip) in std::mem::take(&mut self.fetch_queue) {
             self.install_peer_map(map, IpAddr::V4(ip), true, rl_path, ctx);
         }
@@ -2120,24 +2140,70 @@ impl WorkshopState {
             }
         }
         ctx.request_repaint_after(Duration::from_secs(2));
+    }
+
+    fn join_offer(&self, rl_path: &str) -> Option<(hebnix_sdk::log::JoinMismatch, PeerOffer, SlotMap)> {
+        let session = self.multiplayer.relay.as_ref()?;
         let Some(failed) = self.join_mismatch.clone() else {
-            return;
+            return None;
         };
         if self.join_mismatch_dismissed.as_ref() == Some(&failed) {
-            return;
+            return None;
         }
         let Some((offer, map)) = session.peer_offers().into_iter().find_map(|offer| {
             let map = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT)?.clone();
             (offer.ip.to_string() == failed.ip).then_some((offer, map))
         }) else {
-            return;
+            return None;
         };
         let workshop = crate::patcher::workshop_menu::workshop_dir(
             &Path::new(rl_path).join("TAGame").join("CookedPCConsole"),
         );
         if peer_workshop_file(&workshop, &map).is_some() {
-            return;
+            return None;
         }
+        Some((failed, offer, map))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_join_offer(&self, rl_path: &str) -> Option<(String, String, bool)> {
+        let (_, peer, map) = self.join_offer(rl_path)?;
+        Some((peer.label().to_string(), map.name, self.multiplayer.map_install_busy.load(Ordering::Relaxed)))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_resolve_join_offer(&mut self, download: bool, rl_path: &str, ctx: &egui::Context) {
+        if download && self.multiplayer.map_install_busy.load(Ordering::Relaxed) { return; }
+        let Some((failed, peer, map)) = self.join_offer(rl_path) else { return };
+        self.join_mismatch_dismissed = Some(failed);
+        if download {
+            let map = SlotMap { slot: WORKSHOP_TARGET.to_owned(), ..map };
+            if self.multiplayer.peer_warning_accepted {
+                self.install_peer_map(map, peer.ip, true, rl_path, ctx);
+            } else {
+                self.multiplayer.pending_peer_install = Some((map, peer.ip, true));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_pending_peer(&self) -> Option<&str> {
+        self.multiplayer.pending_peer_install.as_ref().map(|(map, _, _)| map.name.as_str())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_resolve_peer(&mut self, accept: bool, rl_path: &str, ctx: &egui::Context) {
+        if let Some((map, peer, from_peer)) = self.multiplayer.pending_peer_install.take()
+            && accept
+        {
+            self.multiplayer.peer_warning_accepted = true;
+            self.install_peer_map(map, peer, from_peer, rl_path, ctx);
+        }
+    }
+
+    pub fn render_join_prompt(&mut self, ctx: &egui::Context, rl_path: &str) {
+        self.poll_join_prompt(ctx, rl_path);
+        let Some((failed, offer, map)) = self.join_offer(rl_path) else { return };
         let busy = self.multiplayer.map_install_busy.load(Ordering::Relaxed);
         let mut download = false;
         let mut dismiss = false;
@@ -3373,7 +3439,7 @@ mod theme_layout_tests {
                         },
                         |ui| {
                             egui::CentralPanel::default().show(ui, |ui| {
-                                workshop.render(ui, "", &tx);
+                                workshop.render(ui, "", &tx, false);
                                 assert!(
                                     ui.min_rect().right() <= width + 1.0,
                                     "Map content overflows at {theme}/{width}"

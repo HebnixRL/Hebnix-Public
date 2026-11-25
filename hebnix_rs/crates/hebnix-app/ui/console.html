@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <title>Console</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="console-page p-4 d-flex flex-column">
+    <section class="card workspace-card flex-grow-1 overflow-hidden">
+      <pre id="lines" class="font-monospace small p-3 mb-0 h-100 overflow-auto" aria-label="Console output" tabindex="0"></pre>
+    </section>
+    <form id="command-form" class="mt-3 console-command">
+      <ul id="suggestions" class="list-group console-suggestions" hidden></ul>
+      <div class="input-group">
+        <input id="command" class="form-control font-monospace" type="text" aria-label="Command" autocomplete="off" spellcheck="false">
+        <button class="btn btn-primary" type="submit">Run</button>
+      </div>
+    </form>
+  </main>
+  <script src="/console.js"></script>
+</body>
+</html>

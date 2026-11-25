@@ -184,6 +184,7 @@ fn native_matches(hidden: bool) -> bool {
         return false;
     };
     unsafe {
+        if hidden && !IsWindowVisible(hwnd).as_bool() { return true; }
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let away = WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
         if style & away != if hidden { away } else { 0 } {

@@ -42,6 +42,8 @@ pub mod forfeit_command;
 pub(crate) mod chat_test_cleanup;
 pub mod workshop_host;
 pub mod instant_suite;
+pub(crate) mod live_decals;
+pub(crate) mod live_cosmetics;
 pub mod title_icons;
 pub mod speed_patch;
 pub mod title_patcher;
@@ -80,3 +82,32 @@ pub(crate) fn patch_source_selector(ui: &mut eframe::egui::Ui, source: &mut Patc
     .inner
 }
 pub mod upk_history;
+
+#[cfg(test)]
+mod runtime_config_probe {
+    #[test]
+    #[ignore = "read-only inspection of an explicitly supplied local game package"]
+    fn inspect() {
+        let path = std::env::var("HEBNIX_CONFIG_PROBE").unwrap();
+        let package = super::upk_package::UpkPackage::load(std::path::Path::new(&path)).unwrap();
+        let patterns = std::env::var("HEBNIX_CONFIG_PATTERNS").unwrap();
+        for entry in &package.exports {
+            let name = package.asset_path(entry.table_index as i32 + 1);
+            if !patterns.split('|').any(|pattern| pattern.strip_prefix('=').map_or_else(|| name.contains(pattern), |exact| name == exact)) { continue; }
+            println!("{name} [{}] {}", package.class_of(entry), entry.serial_size);
+            if patterns.split('|').any(|pattern| pattern.strip_prefix('=').is_some_and(|exact| name == exact)) {
+                let bytes = &package.image[entry.serial_offset..entry.serial_offset + entry.serial_size];
+                println!("hex={:02x?}", bytes);
+                for at in 0..bytes.len().saturating_sub(3) {
+                    let reference = i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                    if reference.unsigned_abs() > 8 && reference.unsigned_abs() < 100000 {
+                        let path = package.asset_path(reference);
+                        if !path.is_empty() && !path.starts_with('<') {
+                            println!("{at:04x} ref? {reference} {path}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

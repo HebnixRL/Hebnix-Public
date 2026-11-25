@@ -172,6 +172,88 @@ pub struct ColoursState {
 }
 
 impl ColoursState {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ball: bool, backups: &Path) -> serde_json::Value {
+        use serde_json::json;
+        self.poll();
+        self.load_active(backups);
+        let page = if ball {
+            let balls = super::ball_visual::BALLS;
+            let can_colour = super::ball_visual::colour_texture(self.ball_source, self.ball_donor).is_some();
+            let active = self.ball_swaps.iter().find(|swap| swap.source == self.ball_source);
+            let applied = active.map(|swap| t_args("ball-appearance-applied-super-super2", &[
+                ("original", balls[swap.source].0.into()), ("replacement", balls[swap.donor].0.into()),
+            ]));
+            let labels = json!({
+                "description": t("ball-appearance-change-the-ball-s-shape-locally"),
+                "hint": t("ball-appearance-experimental-visual-swap-collision-and-p"),
+                "source": t("ball-appearance-original-ball"), "donor": t("ball-appearance-replace-appearance-with"),
+                "colour": t("ball-appearance-include-replacement-colours-experimental"),
+                "colourHint": t(if can_colour { "ball-appearance-copies-the-colour-texture-special-shader" }
+                    else { "ball-appearance-colours-are-available-for-normal-selecte" }),
+                "restoreFirst": t("ball-appearance-restore-this-ball-before-choosing-anothe"),
+                "apply": t("ball-appearance-apply-ball-appearance"), "restore": t("ball-appearance-restore-ball-appearance"),
+            });
+            json!({
+                "page": "ball-appearance", "labels": labels, "balls": balls.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+                "source": self.ball_source, "donor": self.ball_donor, "colours": self.ball_colours,
+                "canColour": can_colour, "applied": applied, "ballError": self.ball_state_error,
+                "canRestore": active.is_some() && self.ball_state_error.is_none(),
+                "canApply": active.is_none() && self.ball_source != self.ball_donor && self.ball_state_error.is_none(),
+            })
+        } else {
+            let labels: serde_json::Map<String, serde_json::Value> = [
+                ("description", "render-stadium-hud-and-garage-palette-colours"), ("stadium", "render-stadium-colours"),
+                ("stadiumOn", "render-apply-stadium-colours"), ("stadiumHint", "render-banners-flags-and-field-lines"),
+                ("blue", "colours-blue-team"), ("orange", "colours-orange-team"), ("defaults", "render-defaults"),
+                ("swap", "render-swap-teams"), ("hud", "render-hud-colours"), ("hudOn", "render-apply-hud-colours"),
+                ("hudHint", "render-boost-meter-and-scoreboard"), ("match", "render-match-stadium"),
+                ("palette", "render-extended-colour-palette"), ("paletteOn", "render-add-pure-white-to-pure-black"),
+                ("paletteHint", "render-only-you-see-these-colours-disable"), ("car", "render-custom-car-colours"),
+                ("carOn", "render-apply-custom-car-colours"), ("carHint", "render-custom-car-colours-hint"),
+                ("custom", "colours-custom-colour"), ("heatseeker", "render-heatseeker-ball-glow"),
+                ("heatseekerOn", "render-override-the-maximum-speed-glow-locally"), ("heatseekerHint", "render-changes-the-high-speed-bloom-and"),
+                ("maxSpeed", "colours-max-speed"), ("apply", "render-apply-colours"), ("restore", "ball-restore-original"),
+            ].into_iter().map(|(key, label)| (key.to_owned(), json!(t(label)))).collect();
+            json!({
+                "page": "game-colours", "labels": labels, "settings": self.settings, "defaults": ColourSettings::default(),
+                "canRestore": self.settings.applied || backups.join(BACKUP_NAME).is_file(),
+                "backup": t_args("render-pristine-backup-backup-name", &[("backup", BACKUP_NAME.into())]),
+            })
+        };
+        let mut page = page;
+        page["busy"] = json!(self.busy);
+        page["status"] = json!(self.status);
+        page["error"] = json!(self.error);
+        page
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_colour_settings(&mut self, mut settings: ColourSettings) {
+        settings.applied = self.settings.applied;
+        settings.applied_car_colours = self.settings.applied_car_colours.clone();
+        settings.custom_colour = None;
+        self.settings = settings;
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_ball_action(&mut self, key: &str, value: &serde_json::Value) -> Option<ColourAction> {
+        if self.busy { return None; }
+        let index = value.as_u64().and_then(|index| usize::try_from(index).ok()).filter(|index| *index < super::ball_visual::BALLS.len());
+        let active = self.ball_swaps.iter().any(|swap| swap.source == self.ball_source);
+        let support = super::ball_visual::colour_texture(self.ball_source, self.ball_donor).is_some();
+        match key {
+            "source" => { if let Some(index) = index { self.ball_source = index; } }
+            "donor" => { if let Some(index) = index.filter(|index| *index != self.ball_source) { self.ball_donor = index; } }
+            "colours" if support => self.ball_colours = value.as_bool().unwrap_or(self.ball_colours),
+            "apply" if !active && self.ball_source != self.ball_donor && self.ball_state_error.is_none() => {
+                return Some(ColourAction::ApplyBall { source: self.ball_source, donor: self.ball_donor, colours: self.ball_colours && support });
+            }
+            "restore" if active && self.ball_state_error.is_none() => return Some(ColourAction::RestoreBall { source: self.ball_source }),
+            _ => {}
+        }
+        None
+    }
     pub(crate) fn invalidate_active(&mut self) {
         self.loaded_backups_dir = None;
     }

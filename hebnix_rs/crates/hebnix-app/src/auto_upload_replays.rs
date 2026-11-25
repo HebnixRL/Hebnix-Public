@@ -349,6 +349,16 @@ impl AutoUploadReplays {
         // Windows rename cannot replace an existing file; MoveFileExW can.
         replace_file(&temporary, &self.base_dir.join(HISTORY_FILE))
     }
+    #[cfg(windows)]
+    pub(crate) fn web_status(&self) -> (&str, bool) {
+        (&self.status, !self.pending.is_empty())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn recent_history(&self) -> impl Iterator<Item = &UploadHistoryEntry> {
+        self.history.iter().take(20)
+    }
+
     pub fn show_status(&self, ui: &mut egui::Ui) {
         ui.label("Saves and uploads replays from finished matches.");
         ui.small("Each live match is checked in match history for up to three minutes from detection.");
@@ -970,7 +980,7 @@ fn save_local_replay(directory: &Path, match_guid: &str, replay: &[u8]) -> Resul
     Ok(path)
 }
 
-fn replay_outcome(entry: &UploadHistoryEntry) -> &'static str {
+pub(crate) fn replay_outcome(entry: &UploadHistoryEntry) -> &'static str {
     match (
         !entry.local_path.is_empty(),
         !entry.replay_id.is_empty(),

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src data:">
+  <title>Item Swapper</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="container-fluid p-3 swapper-page">
+    <div class="card workspace-card mb-3" id="inventory">
+      <div class="card-body row g-3 align-items-end">
+        <div class="col-md-4"><label for="category" class="form-label">Category</label><select class="form-select" id="category"></select></div>
+        <div class="col-md-8">
+          <label for="account" class="form-label">Owned items from save</label>
+          <div class="swapper-account">
+            <select class="form-select" id="account"></select>
+            <label class="swapper-owned" title="Show only owned replacements"><input class="form-check-input mt-0" type="checkbox" id="owned" checked> Owned only</label>
+            <button type="button" class="btn btn-outline-secondary text-nowrap" id="refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="col-12 text-body-secondary small" id="inventory-status" role="status" hidden></div>
+      </div>
+    </div>
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <p class="text-body-secondary mb-0" id="catalog-status" role="status" hidden></p>
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="reload" hidden>Reload catalogs</button>
+    </div>
+    <section class="card workspace-card" id="editor" hidden>
+      <div class="card-body d-grid gap-3">
+        <h2 class="h5 mb-0" id="category-title"></h2>
+        <div id="car-fields" hidden>
+          <label for="car" class="form-label">Car</label><select class="form-select" id="car"></select>
+          <div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="match-car" checked><label class="form-check-label" for="match-car">Match selected car</label></div>
+        </div>
+        <div class="swapper-picker-banner" id="picker-banner"></div>
+        <input class="form-control" type="search" id="source-search" placeholder="Search items to use" aria-label="Search items to use">
+        <input class="form-control" type="search" id="target-search" placeholder="Search items to replace" aria-label="Search items to replace" hidden>
+        <div class="swapper-grid" id="picker" role="group" aria-labelledby="picker-banner"></div>
+        <p class="small text-body-secondary mb-0" id="picker-empty" hidden></p>
+        <footer class="swapper-footer">
+          <div class="swapper-footer-left">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="back" hidden>← Back</button>
+            <div class="swapper-paint" id="paint-fields" hidden>
+              <label for="paint">Paint</label><select class="form-select form-select-sm" id="paint"></select>
+              <label id="custom-fields" hidden><span class="visually-hidden">Custom colour</span><input class="form-control form-control-color" type="color" id="custom" value="#ffffff"></label>
+            </div>
+            <div class="swapper-paint" id="speed-fields" hidden>
+              <label for="speed">Speed</label><input class="form-control form-control-sm" id="speed" type="number" value="1" min="0" max="20" step=".25">
+            </div>
+          </div>
+          <nav class="swapper-pages d-flex gap-2 align-items-center" id="picker-pages" aria-label="Item pages">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="prev-page">Previous</button>
+            <span id="page-label" class="small text-nowrap"></span>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="next-page">Next</button>
+          </nav>
+          <div class="swapper-footer-right">
+            <button type="button" class="btn btn-sm btn-primary" id="choose-replacement" disabled>Choose Replacement <span aria-hidden="true">→</span></button>
+            <button type="button" class="btn btn-sm btn-primary" id="apply" hidden disabled>Apply <span aria-hidden="true">✓</span></button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="restore-all" hidden>Restore all</button>
+          </div>
+        </footer>
+      </div>
+    </section>
+    <p id="status" class="mt-3" role="status" hidden></p>
+  </main>
+  <script src="/swapper.js"></script>
+</body>
+</html>

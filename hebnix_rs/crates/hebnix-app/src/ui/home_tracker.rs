@@ -73,6 +73,9 @@ struct Profile {
     playlists: BTreeMap<i64, Playlist>,
     #[serde(skip)]
     avatar: Option<egui::TextureHandle>,
+    #[cfg(windows)]
+    #[serde(skip)]
+    web_avatar: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -366,6 +369,10 @@ impl Tracker {
                         }
                         match (self.profiles.get_mut(&key), avatar) {
                             (Some(profile), Ok(avatar)) => {
+                                #[cfg(windows)]
+                                {
+                                    profile.web_avatar = avatar.as_ref().and_then(web_avatar);
+                                }
                                 profile.avatar = avatar.map(|image| {
                                     ctx.load_texture(
                                         "tracker-avatar",
@@ -487,6 +494,91 @@ impl Tracker {
         if let Some(account) = next {
             self.select_account(account);
             ui.ctx().request_repaint();
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_snapshot(&self) -> serde_json::Value {
+        use serde_json::json;
+        let account = self.account.as_ref();
+        let profile = account.and_then(|account| self.profiles.get(&account.key));
+        let checking = self.fetch.as_ref().filter(|(key, _, _)| {
+            account.is_some_and(|account| account.key == *key)
+        }).map(|(_, kind, _)| *kind);
+        let modes: Vec<_> = profile.into_iter().flat_map(|profile| {
+            profile.playlists.iter().filter(|(_, playlist)| playlist.seen == profile.checked)
+        }).collect();
+        let selected = modes.iter().find(|(id, _)| self.selected == Some(**id))
+            .or_else(|| modes.first()).map(|(id, playlist)| (**id, *playlist));
+        let history: Vec<_> = selected.into_iter().flat_map(|(_, playlist)| &playlist.changes)
+            .map(|change| {
+                let label = time::Date::from_julian_day(change.day).ok().map(|date| format!("{:02}/{:02}", date.day(), u8::from(date.month())));
+                json!({ "day": change.day, "label": label, "mmr": change.mmr })
+            }).collect();
+        json!({
+            "subtitle": t("home-tracker-history-window"),
+            "history_title": t("home-tracker-history"),
+            "empty_history": t("home-tracker-no-history"),
+            "retry_label": t("home-tracker-avatar-retry"),
+            "can_retry": profile.is_some_and(|profile| profile.avatar.is_none()) && checking.is_none(),
+            "waiting": account.is_none().then(|| t("home-tracker-waiting")),
+            "error": self.error.then(|| t("home-tracker-error")),
+            "loading": checking.map(|kind| t(match kind {
+                CheckKind::Ratings => "home-tracker-loading",
+                CheckKind::Avatar => "home-tracker-avatar-loading",
+            })),
+            "empty": (profile.is_some() && modes.is_empty()).then(|| t("home-tracker-empty")),
+            "player": account.map(|account| json!({
+                "name": profile.map(|profile| profile.name.as_str()).filter(|name| !name.is_empty()).unwrap_or(&account.name),
+                "avatar": profile.and_then(|p| p.web_avatar.as_deref()),
+            })),
+            "modes": modes.iter().map(|(id, playlist)| json!({
+                "id": **id,
+                "name": web_playlist_name(&playlist.rank.playlist_name),
+                "rating": rating_value(&playlist.rank),
+                "badge": web_rank(&playlist.rank),
+            })).collect::<Vec<_>>(),
+            "selection": selected.map(|(id, playlist)| {
+                let rank = &playlist.rank;
+                let division = (1..22).contains(&rank.tier_id).then(|| {
+                    usize::try_from(rank.division_id).ok().and_then(|i| ["I", "II", "III", "IV"].get(i)).copied()
+                }).flatten().map(|division| format!("{} {division}", t("home-tracker-division")));
+                json!({
+                    "id": id,
+                    "name": web_playlist_name(&rank.playlist_name),
+                    "rating": rating_text(rank),
+                    "rank": (id != CASUAL_PLAYLIST_ID).then(|| rank_name(rank)),
+                    "division": division,
+                    "badge": web_rank(rank),
+                    "change_label": t("home-tracker-change"),
+                    "change": playlist.mmr_change().map(|value| {
+                        let sign = if value > 0 { "+" } else { "" };
+                        format!("{sign}{}", format::int(value))
+                    }),
+                    "history": history,
+                })
+            }),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_select(&mut self, id: i64) {
+        if self.account.as_ref().and_then(|account| self.profiles.get(&account.key))
+            .is_some_and(|profile| profile.playlists.get(&id).is_some_and(|playlist| playlist.seen == profile.checked))
+        {
+            self.selected = Some(id);
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_retry_avatar(&mut self, ctx: &egui::Context) {
+        if let Some(account) = &self.account
+            && self.profiles.get(&account.key).is_some_and(|profile| profile.avatar.is_none())
+            && !self.fetch.as_ref().is_some_and(|(key, _, _)| *key == account.key)
+            && let Some(check) = self.requested.get_mut(&account.key)
+        {
+            check.avatar_at = Some(Instant::now());
+            ctx.request_repaint();
         }
     }
 
@@ -742,6 +834,42 @@ fn profile_avatar(url: Option<&str>) -> Result<Option<egui::ColorImage>, String>
         [rgba.width() as usize, rgba.height() as usize],
         rgba.as_raw(),
     )))
+}
+
+#[cfg(windows)]
+fn web_playlist_name(name: &str) -> &str {
+    let name = name.strip_suffix(" (Ranked)").unwrap_or(name);
+    if name == "Tournament Match" { "Tournament" } else { name }
+}
+
+#[cfg(windows)]
+fn web_avatar(image: &egui::ColorImage) -> Option<String> {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    let pixels: Vec<u8> = image.pixels.iter().flat_map(|color| color.to_srgba_unmultiplied()).collect();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&pixels, image.size[0] as u32, image.size[1] as u32, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(web_png(&png))
+}
+
+#[cfg(windows)]
+fn web_png(bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+#[cfg(windows)]
+fn web_rank(rank: &PlaylistRank) -> Option<&'static str> {
+    static BADGES: std::sync::OnceLock<[Option<String>; 23]> = std::sync::OnceLock::new();
+    if rank.playlist_id == CASUAL_PLAYLIST_ID {
+        return None;
+    }
+    let badges = BADGES.get_or_init(|| TIERS.map(|source| match source {
+        egui::ImageSource::Bytes { bytes, .. } => Some(web_png(bytes.as_ref())),
+        _ => None,
+    }));
+    badges.get(rank.tier_id as usize).unwrap_or(&badges[0]).as_deref()
 }
 
 fn rank_badge(rank: &PlaylistRank, size: f32) -> Option<egui::Image<'static>> {

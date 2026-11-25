@@ -81,7 +81,7 @@ impl ToastView {
                 if ui
                     .add_enabled(
                         center.history().next().is_some(),
-                        egui::Button::new(t("toast-clear")),
+                        egui::Button::new(t("spoofer-clear")),
                     )
                     .clicked()
                 {

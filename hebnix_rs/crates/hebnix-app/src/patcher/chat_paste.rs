@@ -43,6 +43,7 @@ fn saved_path(backups: &Path) -> PathBuf {
 
 /// Switched on, even while another feature has put a package without the patch back.
 pub fn enabled(backups: &Path) -> bool {
+    if super::live_cosmetics::managed() { return super::live_cosmetics::mod_enabled("chat-paste"); }
     saved_path(backups).is_file()
 }
 
@@ -246,8 +247,7 @@ impl State {
     }
 
     /// Draw the toggle.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, rules: Vec<TitleOverride>, mut report: impl FnMut(&str)) {
-        use crate::i18n::t;
+    fn poll(&mut self, ctx: &eframe::egui::Context, mut report: impl FnMut(&str)) {
         if let Some(job) = &self.job {
             match job.try_recv() {
                 Ok(result) => {
@@ -258,9 +258,33 @@ impl State {
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
             }
         }
+    }
+
+    pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool, rules: Vec<TitleOverride>) {
+        if super::live_cosmetics::managed() {
+            self.status = super::live_cosmetics::set_mod(cooked, "chat-paste", want, None).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            return;
+        }
+        use crate::i18n::t;
+        if self.busy() { return; }
+        let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = if want {
+                enable(&cooked, &backups, &rules).map(|_| t("game-mod-chat-paste-on"))
+            } else {
+                restore_with_rules(&cooked, &backups, &rules).map(|_| t("game-mod-chat-paste-off"))
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    fn upgrade_if_needed(&mut self, cooked: &Path, backups: &Path) -> bool {
         let on = enabled(backups);
         if on && !self.upgraded && !self.busy() && !hebnix_sdk::process::is_rocket_league_running() {
             self.upgraded = true;
@@ -271,24 +295,31 @@ impl State {
                 let _ = tx.send(reapply(&cooked, &backups).map(|_| String::new()));
             });
         }
+        on
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path, cooked: &Path, mut report: impl FnMut(&str)) -> serde_json::Value {
+        use crate::i18n::t;
+        self.poll(ctx, report);
+        let on = self.upgrade_if_needed(cooked, backups);
+        serde_json::json!({
+            "id": "chat-paste", "enabled": on, "busy": self.busy(), "status": self.status,
+            "label": t("game-mod-chat-paste"), "description": t("game-mod-chat-paste-description"),
+        })
+    }
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, rules: Vec<TitleOverride>, report: impl FnMut(&str)) {
+        use crate::i18n::t;
+        self.poll(ui.ctx(), report);
+        let on = self.upgrade_if_needed(cooked, backups);
         let mut want = on;
         ui.add_enabled_ui(!self.busy(), |ui| {
             ui.checkbox(&mut want, t("game-mod-chat-paste")).on_hover_text(t("game-mod-chat-paste-description"));
         });
         ui.label(t("game-mod-chat-paste-description"));
         if want != on {
-            let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.job = Some(rx);
-            self.status.clear();
-            std::thread::spawn(move || {
-                let result = if want {
-                    enable(&cooked, &backups, &rules).map(|_| t("game-mod-chat-paste-on"))
-                } else {
-                    restore_with_rules(&cooked, &backups, &rules).map(|_| t("game-mod-chat-paste-off"))
-                };
-                let _ = tx.send(result);
-            });
+            self.set_enabled(cooked, backups, want, rules);
         }
         if self.busy() {
             ui.spinner();

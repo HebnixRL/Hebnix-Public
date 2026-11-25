@@ -163,6 +163,13 @@ fn save_jumps(backups: &Path, blocks: &[Block]) -> Result<(), String> {
 pub fn has(upk: &UpkPackage, id: u8) -> bool {
     current(upk, &BTreeMap::new()).is_ok_and(|(_, _, blocks)| blocks.iter().any(|b| b.id == id))
 }
+pub(super) fn normalize_for_live(upk: &mut UpkPackage, backups: &Path) -> Result<(), String> {
+    let Some(saved) = read_saved(backups) else { return Ok(()); };
+    let (index, _, blocks) = current(upk, &saved.jumps)?;
+    if blocks.is_empty() { return Ok(()); }
+    if blocks.iter().any(|block| !(1..=3).contains(&block.id)) { return Err("Unknown dispatcher extension prevents live migration".into()); }
+    upk.replace_export_payload(index, &saved.original)
+}
 
 /// Put `body` in as block `id`, replacing the block with that id. The first
 /// block saves the game's function under `backups`. `jumps` are the byte
