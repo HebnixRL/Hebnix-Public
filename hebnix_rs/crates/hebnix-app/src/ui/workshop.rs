@@ -1029,6 +1029,26 @@ impl WorkshopState {
             return;
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if let Some(path) = ingame_menu::take_host_request() {
+            let (cooked, tx, ctx) = (cooked.clone(), tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                crate::toast::report("lan-host", "Preparing the map for LAN...", None, false);
+                let msg = match ingame_menu::host_lan_path(&cooked, &path) {
+                    Ok(name) if !crate::patcher::workshop_host::ready(&cooked) => format!(
+                        "[Workshop] '{name}' is in its LAN slot. Restart Rocket League once so Hebnix can start it."
+                    ),
+                    Ok(name) => {
+                        let command = hebnix_sdk::stats::WsCommand::new(crate::patcher::workshop_host::MESSAGE);
+                        let _ = tx.send(AppMsg::SendWsCommand(command));
+                        format!("[Workshop] Hosting '{name}' over LAN.")
+                    }
+                    Err(e) => format!("[Workshop] Could not host that map over LAN: {e}"),
+                };
+                crate::toast::report("lan-host", &msg, None, true);
+                let _ = tx.send(AppMsg::Log(msg));
+                ctx.request_repaint();
+            });
+        }
         let downloader = crate::patcher::workshop_menu::downloader_on(&cooked);
         if downloader {
             crate::preview_server::start(&self.manager.cache_dir);

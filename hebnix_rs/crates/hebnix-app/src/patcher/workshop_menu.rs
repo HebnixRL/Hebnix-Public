@@ -1075,14 +1075,13 @@ fn list_path(cooked: &Path) -> PathBuf {
 /// What the menu's code reads from the fields the list does not otherwise
 /// use. ItemPath is what a right-click loads: the map's LAN slot copy, or the
 /// map itself, with the host settings file named at the end. Filename holds
-/// flags: "t" when the map is ticked for LAN, "h" when a plain pick hosts too.
+/// flags: "t" when the slot copy is ready, "h" when a plain pick hosts too.
 struct LanFields {
     item_path: String,
     flags: String,
 }
 
 fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
-    let ticked = super::workshop_slots::ticked(cooked);
     let on = host_on(cooked);
     let next = NEXT.lock().map(|n| n.clone()).unwrap_or_default();
     maps.iter()
@@ -1091,8 +1090,9 @@ fn lan_fields(cooked: &Path, maps: &[WorkshopMap]) -> Vec<LanFields> {
             let in_slot = slot.is_some();
             let lan = slot.unwrap_or_else(|| map.path.clone());
             let mut flags = String::new();
-            // the menu loads the slot copy of a map flagged "t", which is every map that has one
-            if in_slot || ticked.contains(&*map.path.to_string_lossy()) {
+            // the menu loads the slot copy of a map flagged "t"; for any other map
+            // it asks Hebnix to make the copy (HBXHOSTREQ) and never loads the map itself
+            if in_slot {
                 flags.push('t');
             }
             if on {

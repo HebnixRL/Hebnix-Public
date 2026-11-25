@@ -171,6 +171,7 @@ pub fn watch_ticks() {
                 let text = String::from_utf8_lossy(&bytes[..end]);
                 queue_sync(&text);
                 queue_downloads(&text);
+                queue_host(&text);
             }
         });
     });
@@ -215,6 +216,47 @@ fn queue_downloads(text: &str) {
             queue.push(id.to_string());
         }
     }
+}
+
+static HOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// the Workshop list logs the path of a map it was asked to host before its
+/// LAN slot copy exists; Hebnix makes the copy and starts the match
+fn queue_host(text: &str) {
+    let Some(path) = text
+        .lines()
+        .rev()
+        .find_map(|line| line.split_once("HBXHOSTREQ: [GFx] ").map(|(_, path)| path.trim()))
+    else {
+        return;
+    };
+    if let Ok(mut request) = HOST.lock() {
+        *request = Some(path.to_string());
+    }
+}
+
+/// the path of a map the game asked to host, once
+pub fn take_host_request() -> Option<String> {
+    HOST.lock().ok()?.take()
+}
+
+/// Copy the map the in-game list asked to host into its LAN slot and queue it
+/// to start. `path` comes from the game log, so it must be a listed map.
+pub(crate) fn host_lan_path(cooked: &Path, path: &str) -> Result<String, String> {
+    let folder = workshop_menu::maps_folder(cooked);
+    let maps = all_maps(cooked);
+    let map = maps
+        .iter()
+        .find(|m| m.path.to_string_lossy() == path)
+        .ok_or("the game asked to host a map that is not in the Workshop folder")?;
+    let dir = map
+        .path
+        .strip_prefix(&folder)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .ok_or("the map is not in the Workshop folder")?;
+    host_lan(cooked, &dir.as_os_str().to_string_lossy())?;
+    Ok(map.title.clone())
 }
 
 /// catalogue ids picked in the game's downloader since the last call
