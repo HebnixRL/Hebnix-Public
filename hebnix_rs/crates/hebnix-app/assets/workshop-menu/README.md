@@ -23,8 +23,9 @@ reads (`ui/workshop/ingame_menu.rs`).
 v27 is the shipped v26 movie with `build/v27_host.py` applied to its
 disassembly (the steps are at the top of that file). Hosting a map whose LAN
 slot copy is not ready (no `t` flag) logs `HBXHOSTREQ: [GFx] <FullPath>`
-instead of loading it; Hebnix copies the map into its slot and starts the
-match with the `HebnixHost` command (`ui/workshop.rs::poll_downloads`).
+instead of loading it; Hebnix copies the map into its slot and rewrites the
+map list (`ui/workshop.rs::poll_downloads`). The list is read when the menu
+opens, so hosting the map again after reopening it loads the slot copy.
 
 Rows whose `Filename` flag holds `D` are the downloader's catalogue, not installed
 maps. L3 opens a 4x3 grid of them over the vanilla list (LB/RB page, A download,

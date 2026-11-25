@@ -1033,15 +1033,13 @@ impl WorkshopState {
             let (cooked, tx, ctx) = (cooked.clone(), tx.clone(), ctx.clone());
             std::thread::spawn(move || {
                 crate::toast::report("lan-host", "Preparing the map for LAN...", None, false);
+                // The menu reads the map list each time it opens, so the next
+                // pick loads the slot copy. HebnixHost is not sent: its
+                // TAGame.upk block crashes the current game build.
                 let msg = match ingame_menu::host_lan_path(&cooked, &path) {
-                    Ok(name) if !crate::patcher::workshop_host::ready(&cooked) => format!(
-                        "[Workshop] '{name}' is in its LAN slot. Restart Rocket League once so Hebnix can start it."
+                    Ok(name) => format!(
+                        "[Workshop] '{name}' is ready for LAN. Close and reopen the Workshop list, then host it again."
                     ),
-                    Ok(name) => {
-                        let command = hebnix_sdk::stats::WsCommand::new(crate::patcher::workshop_host::MESSAGE);
-                        let _ = tx.send(AppMsg::SendWsCommand(command));
-                        format!("[Workshop] Hosting '{name}' over LAN.")
-                    }
                     Err(e) => format!("[Workshop] Could not host that map over LAN: {e}"),
                 };
                 crate::toast::report("lan-host", &msg, None, true);
