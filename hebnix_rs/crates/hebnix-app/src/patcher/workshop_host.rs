@@ -20,7 +20,7 @@ use super::game_path;
 use std::path::Path;
 
 const PACKAGE: &str = "TAGame.upk";
-const COMMAND: &str = "MatchStatsExporter_TA.ProcessSocketCommand";
+pub(super) const COMMAND: &str = "MatchStatsExporter_TA.ProcessSocketCommand";
 const WORKSHOP: &str = "GFxData_Workshop_TA";
 /// The stats socket message Hebnix sends, and the file with the path to load.
 pub const MESSAGE: &str = "HebnixHost";
@@ -37,18 +37,18 @@ const FREEPLAY_ENABLED: &str = "Freeplay.enabled";
 const LAN_NAME: &str = "HbxLanName.txt";
 const LAN_PASSWORD: &str = "HbxLanPassword.txt";
 
-fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
+pub(super) fn object(upk: &UpkPackage, path: &str) -> Result<i32, String> {
     upk.find_object(path).ok_or_else(|| format!("{path} was not found in {PACKAGE}"))
 }
 
-fn field(upk: &UpkPackage, op: u8, path: &str) -> Result<Script, String> {
+pub(super) fn field(upk: &UpkPackage, op: u8, path: &str) -> Result<Script, String> {
     let mut s = Script::new();
     s.raw(&[op]).object(object(upk, path)?);
     Ok(s)
 }
 
 /// A final-function call: the function, its arguments, end.
-fn call(upk: &UpkPackage, path: &str, args: &[Script]) -> Result<Script, String> {
+pub(super) fn call(upk: &UpkPackage, path: &str, args: &[Script]) -> Result<Script, String> {
     let mut s = field(upk, 0x1c, path)?;
     for arg in args {
         s.append(arg);
@@ -58,7 +58,7 @@ fn call(upk: &UpkPackage, path: &str, args: &[Script]) -> Result<Script, String>
 }
 
 /// Context: `target.body`, the size of the body in memory, the return property.
-fn context(upk: &UpkPackage, target: Script, body: Script, property: Option<&str>) -> Result<Script, String> {
+pub(super) fn context(upk: &UpkPackage, target: Script, body: Script, property: Option<&str>) -> Result<Script, String> {
     let size = u16::try_from(body.mem_size()).map_err(|_| "The host block's context is too long".to_string())?;
     let mut s = Script::new();
     s.raw(&[0x19, 0]).append(&target).raw(&size.to_le_bytes());
@@ -67,7 +67,7 @@ fn context(upk: &UpkPackage, target: Script, body: Script, property: Option<&str
     Ok(s)
 }
 
-fn native(opcode: u8, args: &[Script]) -> Script {
+pub(super) fn native(opcode: u8, args: &[Script]) -> Script {
     let mut s = Script::new();
     s.raw(&[opcode]);
     for arg in args {
@@ -77,14 +77,14 @@ fn native(opcode: u8, args: &[Script]) -> Script {
     s
 }
 
-fn string(text: &str) -> Script {
+pub(super) fn string(text: &str) -> Script {
     let mut s = Script::new();
     s.raw(&[0x1f]).raw(text.as_bytes()).raw(&[0x00]);
     s
 }
 
 /// The player's data store: PrimaryPC.GetLocalPlayer() then GFxShell_TA.GetShell(..).DataStore.
-fn store(upk: &UpkPackage) -> Result<Script, String> {
+pub(super) fn store(upk: &UpkPackage) -> Result<Script, String> {
     let player = context(
         upk,
         field(upk, 0x01, "MatchStatsExporter_TA.PrimaryPC")?,
@@ -119,7 +119,7 @@ fn native_nothing() -> Script {
     s
 }
 
-fn jump(target: usize, condition: &Script) -> Result<Script, String> {
+pub(super) fn jump(target: usize, condition: &Script) -> Result<Script, String> {
     let target = u16::try_from(target).map_err(|_| "The host block's jump is past the script limit".to_string())?;
     let mut s = Script::new();
     s.raw(&[0x07]).raw(&target.to_le_bytes()).append(condition);
@@ -170,7 +170,7 @@ fn block(upk: &UpkPackage, base: usize) -> Result<Script, String> {
     Ok(out)
 }
 
-fn payload(upk: &UpkPackage) -> Result<(usize, Script), String> {
+pub(super) fn payload(upk: &UpkPackage) -> Result<(usize, Script), String> {
     let index = object(upk, COMMAND).ok().filter(|i| *i > 0).ok_or("ProcessSocketCommand was not found")? as usize - 1;
     let export = &upk.exports[index];
     let bytes = &upk.image[export.serial_offset..export.serial_offset + export.serial_size];
@@ -279,6 +279,56 @@ pub(crate) fn attach_freeplay_restart(upk: &mut UpkPackage, version: u8) -> Resu
     let block = freeplay_block(upk, script.mem_size() - END, version)?;
     script.insert_before_tail(END, &block);
     replace_script(upk, COMMAND, &script)
+}
+
+/// A block this module keeps at the end of ProcessSocketCommand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TailBlock {
+    Freeplay(u8),
+    Host,
+    ChatTest,
+}
+
+/// Take every block this module put at the end of ProcessSocketCommand off,
+/// last one first, so another feature can edit the function. Their jumps
+/// count from the start of the function, so they can't stay while the code
+/// before them changes. Give the result to `attach_tail_blocks` to put them
+/// back in the same order.
+pub(crate) fn detach_tail_blocks(upk: &mut UpkPackage) -> Result<Vec<TailBlock>, String> {
+    let mut detached = Vec::new();
+    loop {
+        let (_, script) = payload(upk)?;
+        let freeplay = freeplay_version(&script);
+        let host = has(upk);
+        let chat = super::chat_test_cleanup::present(&script);
+        if freeplay.is_none() && !host && !chat {
+            return Ok(detached);
+        }
+        // Each remover only takes a block that sits right before the tail,
+        // and changes nothing when it doesn't. The Chat Test block goes back
+        // as the current Chat Test writes it.
+        if chat && super::chat_test_cleanup::remove_at_tail(upk)? {
+            detached.push(TailBlock::ChatTest);
+        } else if host && remove(upk).is_ok() {
+            detached.push(TailBlock::Host);
+        } else if let Some(version) = freeplay {
+            edit_freeplay_restart(upk, false)?;
+            detached.push(TailBlock::Freeplay(version));
+        } else {
+            return Err(format!("{COMMAND} ends with a block Hebnix doesn't know"));
+        }
+    }
+}
+
+pub(crate) fn attach_tail_blocks(upk: &mut UpkPackage, blocks: &[TailBlock]) -> Result<(), String> {
+    for block in blocks.iter().rev() {
+        match block {
+            TailBlock::Host => add(upk)?,
+            TailBlock::Freeplay(version) => attach_freeplay_restart(upk, *version)?,
+            TailBlock::ChatTest => super::chat_test::attach(upk)?,
+        }
+    }
+    Ok(())
 }
 
 pub fn freeplay_ready(cooked: &Path) -> bool {

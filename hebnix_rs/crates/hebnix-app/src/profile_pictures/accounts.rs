@@ -86,7 +86,7 @@ fn profile_name(name: &str) -> Option<String> {
         Some(name.into())
     }
 }
-pub(super) fn discover(previous: &[Account]) -> Vec<Account> {
+pub(crate) fn discover(previous: &[Account]) -> Vec<Account> {
     let mut directories = Vec::new();
     if let Some(docs) = hebnix_sdk::utils::paths::documents_dir() {
         for relative in [
@@ -154,6 +154,10 @@ pub(crate) fn current() -> Option<Account> {
     if !hebnix_sdk::process::is_rocket_league_running() {
         return None;
     }
+    last_launched()
+}
+
+pub(crate) fn last_launched() -> Option<Account> {
     let session = hebnix_sdk::log::local_player_session()?;
     let primary = session.primary_id?;
     let mut account = Account::from_primary(&primary)?;

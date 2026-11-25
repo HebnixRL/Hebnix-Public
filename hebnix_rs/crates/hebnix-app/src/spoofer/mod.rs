@@ -97,12 +97,33 @@ pub fn disable_saved_http_features(base_dir: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+/// Whether the HTTP features (Name, Friends) and certificate controls need
+/// Hebnix itself to run as Administrator first.
+pub fn http_needs_elevated_relaunch() -> bool {
+    !is_admin()
+}
+
+/// Trust the proxy certificate. The caller has checked
+/// `http_needs_elevated_relaunch`.
+pub fn install_certificate(base_dir: &std::path::Path) -> Result<(), String> {
+    ca::install(base_dir)
+}
+
+/// Remove the proxy certificate. The caller has checked
+/// `http_needs_elevated_relaunch`.
+pub fn uninstall_certificate(_base_dir: &std::path::Path) -> Result<(), String> {
+    ca::uninstall()
+}
+
 pub fn spawn_elevated_relaunch() -> bool {
     use std::os::windows::process::CommandExt;
 
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
+    if !crate::maintenance::elevation_location_ready(&exe) {
+        return false;
+    }
     let exe = exe.to_string_lossy().replace('\'', "''"); // ps single quote escape
     let pid = std::process::id();
     let renderer_args = if crate::window_state::safe_rendering() {
@@ -120,11 +141,21 @@ pub fn spawn_elevated_relaunch() -> bool {
          try {{ Start-Process -FilePath '{exe}'{renderer_args} -Verb RunAs -ErrorAction Stop }} \
          catch {{ Start-Process -FilePath '{exe}' -ArgumentList '{fallback_args}' }}"
     );
-    std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+    let Some(system_root) = std::env::var_os("SystemRoot") else {
+        return false;
+    };
+    let powershell = PathBuf::from(system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let started = std::process::Command::new(powershell)
+        .env_remove("HEBNIX_RELOCATION_ACK")
+        .env_remove("HEBNIX_UPDATE_ACK")
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .spawn()
-        .is_ok()
+        .is_ok();
+    if started {
+        crate::maintenance::acknowledge_update();
+    }
+    started
 }
 
 fn marker_path(base_dir: &Path) -> PathBuf {

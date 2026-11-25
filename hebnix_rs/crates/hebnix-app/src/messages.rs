@@ -177,10 +177,12 @@ pub enum AppMsg {
         result: Result<Option<crate::update::ChangelogEntry>, String>,
     },
     AppUpdateReady { staged: std::path::PathBuf },
-    MaintenanceFinished { result: Result<(), String> },
+    MaintenanceFinished { result: Result<(), String>, restored: Vec<crate::maintenance::PatchGroup>, quit: bool },
     AppUpdateFailed {
         error: String,
     },
+    #[cfg(target_os = "linux")]
+    AppImageUpdateDone { result: Result<(), String> },
     PluginUpdatesFound {
         updates: Result<Vec<Value>, String>,
     },

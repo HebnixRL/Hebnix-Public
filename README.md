@@ -1,9 +1,14 @@
-# Hebnix
+<div align="center">
+
+<img src="https://hebnix.com/media/hero-desktop.png" />
 
 Hebnix serves as an intelligent gateway to Rocket League's Stats API, Configuration Files, game files and plugins.\
 The purpose is to consolidate several Rocket League Quality of Life tools into 1 platform that is simple to work with, user friendly and feature rich.
 
 [Website](https://hebnix.com) | [Plugins](https://hebnix.com/plugins) | [Download](https://hebnix.com/download) | [Developer Documentation](https://docs.hebnix.com) | [Discord](https://discord.gg/yr6xXb5wQd)
+
+<a href="https://moonpkg.github.io/cli/app/?type=github&repo=HebnixRL/Hebnix-Public"><img src="https://github.com/moonpkg/cli/blob/main/docs/assets/install-btn.png?raw=true" width="256" alt="Install with moon" /></a>
+</div>
 
 ## Access to our Rank API data
 
@@ -64,7 +69,7 @@ cargo build --release
 - X11 support (i3, Cinnamon, XFCE, MATE)
 - evdev input handling
 - Linux path handling (case-sensitive filesystems)
-- Heroic/Steam Proton launcher integration
+- Steam Proton and non-Steam shortcut (e.g. Slipstream) launcher integration
 - AppImage packaging
 
 ## License

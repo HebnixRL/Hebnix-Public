@@ -105,16 +105,21 @@ fn patch_with_rules(cooked: &Path, backups: &Path, rules: &[TitleOverride]) -> R
             .ok_or("No compatible HUD baseline is available for Chat Paste.")?;
         std::fs::create_dir_all(saved.parent().unwrap_or(backups)).map_err(|e| e.to_string())?;
         super::upk_history::replace(&saved, &original)?;
-        let result = title_patcher::rebase_hud_movie(cooked, &live, &before, upk, index, rules, &|raw| {
-            if digest(raw) != MOVIE.vanilla {
-                return Err("Chat Paste could not identify the original HUD code beneath Titles.".into());
+        let edit = |raw: &[u8]| {
+            title_patcher::movie::apply_template(raw, &original, MOVIE.patched)
+                .map(|movie| movie.map(|movie| (movie, 1)))
+        };
+        let result = (|| {
+            if title_patcher::rebase_hud_movie(
+                cooked, &live, &before, UpkPackage::from_bytes(before.clone())?, index, rules, &edit,
+            )? {
+                return Ok(());
             }
-            let mut patched = MOVIE.patched.to_vec();
-            patched[..3].copy_from_slice(b"GFX");
-            Ok(Some((patched, 1)))
-        }).and_then(|applied| {
-            if applied { Ok(()) } else { Err("The HUD movie has edits outside the Titles restore record.".into()) }
-        });
+            if let Some((movie, _)) = edit(&current)? {
+                install(cooked, &before, &mut upk, &movie)?;
+            }
+            Ok(())
+        })();
         if result.is_err() && !existing {
             let _ = std::fs::remove_file(&saved);
         }
@@ -175,13 +180,14 @@ fn unpatch_with_rules(cooked: &Path, backups: &Path, rules: &[TitleOverride]) ->
         } else {
             let index = usize::try_from(upk.find_object(MOVIE.export).ok_or("HUD movie is missing")? - 1)
                 .map_err(|_| "Invalid HUD movie export")?;
-            if !title_patcher::rebase_hud_movie(cooked, &live, &before, upk, index, rules, &|raw| {
-                if digest(raw) != digest(MOVIE.patched) {
-                    return Err("The Chat Paste hook differs from its recorded HUD baseline.".into());
-                }
-                Ok(Some((vanilla.clone(), 1)))
-            })? {
-                return Err("Could not identify the Chat Paste edit in the shared HUD.".into());
+            let edit = |raw: &[u8]| {
+                title_patcher::movie::apply_template(raw, MOVIE.patched, &vanilla)
+                    .map(|movie| movie.map(|movie| (movie, 1)))
+            };
+            if !title_patcher::rebase_hud_movie(
+                cooked, &live, &before, UpkPackage::from_bytes(before.clone())?, index, rules, &edit,
+            )? && let Some((movie, _)) = edit(&current)? {
+                install(cooked, &before, &mut upk, &movie)?;
             }
         }
     }

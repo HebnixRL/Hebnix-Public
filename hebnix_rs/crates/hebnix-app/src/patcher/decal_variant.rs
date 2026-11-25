@@ -44,7 +44,7 @@ fn retire_carriers(
         used.extend(roots);
     }
     for root in previous.difference(&used) {
-        let _ = fs::remove_file(game_dir.join(format!("{root}_SF.upk")));
+        let _ = fs::remove_file(crate::patcher::game_path::resolve(&game_dir, format!("{root}_SF.upk")));
         let _ = fs::remove_file(backups.join(format!("{root}_SF.upk.bak")));
     }
 }
@@ -112,7 +112,7 @@ pub fn make_carrier(
     );
     cosmetic_upk::create_decal_carrier(
         source,
-        &game_dir.join(&filename),
+        &crate::patcher::game_path::resolve(&game_dir, &filename),
         base_dir,
         source_asset,
         &path,

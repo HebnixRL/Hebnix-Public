@@ -574,6 +574,16 @@ impl Backend {
         }
     }
 
+    /// false once the Wayland surface was destroyed behind our back (the
+    /// game moved to another monitor), so an unchanged frame is presented
+    /// again rather than skipped
+    fn is_shown(&self) -> bool {
+        match self {
+            Backend::Wayland(o) => o.is_shown(),
+            Backend::X11(_) => true,
+        }
+    }
+
     fn poll_size(&mut self) -> Option<(u32, u32)> {
         match self {
             Backend::Wayland(o) => o.poll_size(),
@@ -581,10 +591,15 @@ impl Backend {
         }
     }
 
-    fn present(&mut self, pixmap: &Pixmap) {
+    /// false when the frame wasn't put on screen (Wayland: surface not
+    /// configured yet, or no free buffer)
+    fn present(&mut self, pixmap: &Pixmap) -> bool {
         match self {
             Backend::Wayland(o) => o.present(pixmap),
-            Backend::X11(o) => o.present(pixmap),
+            Backend::X11(o) => {
+                o.present(pixmap);
+                true
+            }
         }
     }
 
@@ -644,20 +659,18 @@ impl NativeOverlay {
         }
     }
 
-    /// paint one frame. `rect` (windows-style RL window bounds) is currently
-    /// unused: the overlay always anchors full-screen per the wlr-layer-shell
-    /// design (see module docs) rather than being positioned/sized to match
-    /// a specific window like the old DirectComposition/GDI backends did.
-    pub fn frame(&mut self, _rect: (i32, i32, i32, i32), draw_fn: impl FnOnce(f32, f32)) {
-        // the wayland connection can die mid-session -- confirmed live to be
-        // Hyprland occasionally sending our layer surface a fresh configure
-        // (plausibly triggered by another layer client's exclusive zone
-        // changing, e.g. waybar's own hide/show) that this backend doesn't
-        // yet handle cleanly, reported by Hyprland as "layerSurface was not
-        // configured, but a buffer was attached". Rather than chase that
-        // compositor interaction further, rebuild the connection when it
-        // happens so the overlay self-heals within about a second instead
-        // of staying dark for the rest of the session. Rate-limited so a
+    /// paint one frame. `rect` is the RL window (left, top, right, bottom):
+    /// the overlay always covers the whole monitor, and on Wayland `rect`
+    /// picks which monitor that is (see wayland.rs).
+    pub fn frame(&mut self, rect: (i32, i32, i32, i32), draw_fn: impl FnOnce(f32, f32)) {
+        // the wayland connection can die mid-session. The known causes were
+        // remapping the layer surface after hide() unmapped it: before a
+        // fresh configure ("layerSurface was not configured, but a buffer
+        // was attached" on Hyprland, a fatal protocol error on KWin) and
+        // without resending its anchors (KWin's invalid_size). hide() now
+        // destroys the surface instead. Should it still happen,
+        // rebuild the connection so the overlay self-heals within about a
+        // second instead of staying dark for the rest of the session. Rate-limited so a
         // connection that dies immediately on every reconnect (should the
         // trigger ever fire on every tick) can't turn into a tight loop.
         if self.backend.as_ref().is_some_and(|b| b.is_closed()) {
@@ -689,6 +702,9 @@ impl NativeOverlay {
         let Some(backend) = self.backend.as_mut() else {
             return;
         };
+        if let Backend::Wayland(overlay) = backend {
+            overlay.set_target(Some(rect));
+        }
         let Some((w, h)) = backend.poll_size() else {
             return;
         };
@@ -711,11 +727,11 @@ impl NativeOverlay {
             self.hide();
             return;
         }
-        if self.last_frame.as_ref().is_some_and(|last| last == &pixmap) {
+        if backend.is_shown() && self.last_frame.as_ref().is_some_and(|last| last == &pixmap) {
             return;
         }
-        backend.present(&pixmap);
-        self.last_frame = Some(pixmap);
+        // a frame that didn't make it on screen is tried again next tick
+        self.last_frame = backend.present(&pixmap).then_some(pixmap);
     }
 
     pub fn hide(&mut self) {
@@ -802,8 +818,8 @@ pub mod native {
 }
 
 /// Windows hosts the HTML plugin overlays in a DirectComposition window. The
-/// Linux HTML overlay is `WebviewOverlay` (webview_linux.rs), which doesn't
-/// plug into this, so this reports no target and plugin pages stay off.
+/// Linux HTML overlay is `WebviewOverlay` (webview_linux.rs), which owns its
+/// own layer-shell window, so this only reports a placeholder target.
 pub struct Overlay;
 
 impl Overlay {
@@ -812,7 +828,7 @@ impl Overlay {
     }
 
     pub fn webview_target(&self) -> Option<((), ())> {
-        None
+        Some(((), ()))
     }
 
     pub fn commit(&self) {}

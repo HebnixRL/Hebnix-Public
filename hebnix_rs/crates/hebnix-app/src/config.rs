@@ -73,6 +73,17 @@ pub struct SettingsCfg {
     /// main window bg opacity (0.5-1.0)
     pub window_opacity: f32,
     pub start_in_tray: bool,
+    /// Linux: the hotkey minimizes the window instead of only hiding it
+    /// (for desktops where a hidden window still shows or blocks input)
+    pub minimize_to_tray: bool,
+    /// Linux: the per-desktop defaults (Minimize to Tray outside Hyprland) were applied once
+    pub desktop_defaults_applied: bool,
+    /// Linux: the one-time notice pointing at Settings > System when overlays
+    /// or the hotkey misbehave (not shown on Hyprland) was dismissed
+    pub desktop_notice_shown: bool,
+    /// Linux: Rocket League's `My Games/Rocket League` folder inside its Wine
+    /// prefix, when automatic detection picks the wrong install (empty = auto)
+    pub rl_documents_path: String,
     pub close_to_tray: bool,
     pub rl_path: String,
     pub rl_path_confirmed: bool,
@@ -127,6 +138,10 @@ impl Default for SettingsCfg {
             home_default_migrated: true,
             window_opacity: 0.96,
             start_in_tray: false,
+            minimize_to_tray: false,
+            desktop_defaults_applied: false,
+            desktop_notice_shown: false,
+            rl_documents_path: String::new(),
             close_to_tray: false,
             rl_path: default_rl_path(),
             rl_path_confirmed: false,
@@ -165,12 +180,17 @@ impl Default for SettingsCfg {
 #[serde(rename_all = "snake_case")]
 pub enum RlLaunchMode {
     #[default]
+    // Heroic is no longer supported; a Heroic-only setup falls back to
+    // auto-detection.
+    #[serde(alias = "heroic_direct")]
     Unconfigured,
     #[serde(alias = "steam_proton")]
     SteamNative,
     EpicDirect,
-    SteamShortcutToHeroic,
-    HeroicDirect,
+    /// A Steam non-Steam shortcut to any launcher (Slipstream, Heroic, a
+    /// script), started with steam://rungameid.
+    #[serde(alias = "steam_shortcut_to_heroic")]
+    SteamShortcut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,9 +198,9 @@ pub enum RlLaunchMode {
 pub struct RlLaunchCfg {
     pub mode: RlLaunchMode,
     pub steam_id: String,
-    pub heroic_binary: String,
-    pub heroic_app_name: String,
-    pub heroic_runner: String,
+    /// The shortcut's target executable, picked by the setup scan. A
+    /// Slipstream-style config.json next to it can say where the game is.
+    pub shortcut_exe: String,
 }
 
 impl Default for RlLaunchCfg {
@@ -188,9 +208,7 @@ impl Default for RlLaunchCfg {
         Self {
             mode: RlLaunchMode::Unconfigured,
             steam_id: "252950".to_string(),
-            heroic_binary: String::new(),
-            heroic_app_name: "Sugar".to_string(),
-            heroic_runner: "legendary".to_string(),
+            shortcut_exe: String::new(),
         }
     }
 }
@@ -490,7 +508,27 @@ impl Config {
                     cfg.action_button.normalize();
                     return cfg;
                 }
-                Err(e) => tracing::warn!("config.toml is invalid ({e}); using defaults"),
+                Err(e) => {
+                    // Keep the unreadable file: it may be from a newer Hebnix, and saving
+                    // the defaults below would otherwise wipe every setting in it.
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let kept = base_dir.join(format!("config.toml.invalid-{stamp}"));
+                    match std::fs::rename(&toml_path, &kept) {
+                        Ok(()) => tracing::warn!(
+                            "config.toml is invalid ({e}); moved it to {} and using defaults",
+                            kept.display()
+                        ),
+                        Err(rename_err) => {
+                            // could not set it aside, so leave it untouched and don't save
+                            tracing::warn!(
+                                "config.toml is invalid ({e}) and could not be moved aside ({rename_err}); using defaults without saving"
+                            );
+                            return Config::default();
+                        }
+                    }
+                }
             }
         }
 
@@ -584,4 +622,50 @@ fn parse_ini_bool(v: &str, default: bool) -> bool {
 /// App root dir: `%AppData%\Hebnix`, or `HEBNIX_BASE_DIR` for dev runs.
 pub fn base_dir() -> PathBuf {
     hebnix_sdk::utils::paths::base_dir()
+}
+
+#[cfg(test)]
+mod rl_launch_tests {
+    use super::*;
+
+    /// Configs saved with the removed Heroic modes still load.
+    #[test]
+    fn old_heroic_modes_still_load() {
+        let shortcut: RlLaunchCfg = toml::from_str(
+            "mode = \"steam_shortcut_to_heroic\"\nsteam_id = \"123\"\nheroic_binary = \"/opt/Heroic/heroic\"\nheroic_app_name = \"Sugar\"\nheroic_runner = \"legendary\"\n",
+        )
+        .unwrap();
+        assert_eq!(shortcut.mode, RlLaunchMode::SteamShortcut);
+        assert_eq!(shortcut.steam_id, "123");
+        let direct: RlLaunchCfg = toml::from_str("mode = \"heroic_direct\"\n").unwrap();
+        assert_eq!(direct.mode, RlLaunchMode::Unconfigured);
+        let saved = toml::to_string(&shortcut).unwrap();
+        assert!(saved.contains("mode = \"steam_shortcut\""), "{saved}");
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// An unreadable config.toml is moved aside, not overwritten with defaults.
+    #[test]
+    fn invalid_config_is_kept() {
+        let dir = std::env::temp_dir().join(format!("hebnix-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = "[rl_launch]\nmode = \"from_the_future\"\n";
+        std::fs::write(dir.join("config.toml"), bad).unwrap();
+
+        let _ = Config::load(&dir);
+
+        let kept: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("config.toml.invalid-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path()).unwrap(), bad);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

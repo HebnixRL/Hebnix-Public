@@ -41,7 +41,7 @@ pub use wine_prefix::{
 };
 #[cfg(target_os = "linux")]
 pub use window::{
-    can_track_own_window, exempt_own_window_decorations, focus_own_window_over_game, get_rocket_league_window_rect,
+    can_query_focus, can_track_own_window, exempt_own_window_decorations, focus_own_window_over_game, focus_rocket_league, get_rocket_league_window_rect,
     cursor_in_rl_window, cursor_position, hyprland_layer_visible, is_cursor_inside_rl_window,
     is_rocket_league_focused,
     place_own_window, raise_other_instance, reassert_own_window_decorations, rocket_league_hwnd,

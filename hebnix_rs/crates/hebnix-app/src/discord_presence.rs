@@ -4,7 +4,11 @@
 //! client on its own thread means a missing/restarting Discord client can never
 //! stall the UI or the Rocket League monitor.
 
-use std::fs::{File, OpenOptions};
+#[cfg(not(target_os = "linux"))]
+use std::fs::{File as Pipe, OpenOptions};
+// Linux: Discord's IPC endpoint is a Unix socket, not a named pipe
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream as Pipe;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
@@ -191,7 +195,7 @@ impl Drop for DiscordPresence {
 fn run_worker(rx: Receiver<Command>, mut enabled: bool) {
     let mut desired: Option<Activity> = None;
     let mut sent: Option<Activity> = None;
-    let mut pipe: Option<File> = None;
+    let mut pipe: Option<Pipe> = None;
     let mut nonce = 0_u64;
 
     loop {
@@ -249,13 +253,71 @@ fn run_worker(rx: Receiver<Command>, mut enabled: bool) {
     }
 }
 
-fn clear_activity(pipe: Option<&mut File>, nonce: &mut u64) {
+fn clear_activity(pipe: Option<&mut Pipe>, nonce: &mut u64) {
     if let Some(pipe) = pipe {
         let _ = send_activity(pipe, None, nonce);
     }
 }
 
-fn connect() -> io::Result<File> {
+/// directories Discord may put its IPC socket in, most common first
+#[cfg(target_os = "linux")]
+fn ipc_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut dirs = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        dirs.push(runtime.clone());
+        dirs.push(runtime.join("app/com.discordapp.Discord"));
+        dirs.push(runtime.join("app/com.discordapp.DiscordCanary"));
+        dirs.push(runtime.join("snap.discord"));
+        dirs.push(runtime.join("snap.discord-canary"));
+    }
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        if let Some(dir) = std::env::var_os(var) {
+            dirs.push(PathBuf::from(dir));
+        }
+    }
+    dirs.push(PathBuf::from("/tmp"));
+    dirs
+}
+
+#[cfg(target_os = "linux")]
+fn connect() -> io::Result<Pipe> {
+    let mut last_error = None;
+    for dir in ipc_dirs() {
+        for index in 0..10 {
+            let path = dir.join(format!("discord-ipc-{index}"));
+            match Pipe::connect(&path) {
+                Ok(mut socket) => {
+                    socket.set_write_timeout(Some(Duration::from_secs(2)))?;
+                    let handshake = serde_json::json!({"v": 1, "client_id": APPLICATION_ID});
+                    write_frame(&mut socket, 0, &handshake)?;
+                    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    read_ready(&mut socket)?;
+                    socket.set_read_timeout(None)?;
+                    return Ok(socket);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Discord IPC socket not found")))
+}
+
+/// Discord answers every frame; nothing here needs the replies, but unread
+/// data would eventually fill the socket buffer, so throw it away.
+#[cfg(target_os = "linux")]
+fn drain_replies(socket: &mut Pipe) {
+    let mut scratch = [0u8; 4096];
+    if socket.set_nonblocking(true).is_err() {
+        return;
+    }
+    while matches!(socket.read(&mut scratch), Ok(n) if n > 0) {}
+    let _ = socket.set_nonblocking(false);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn connect() -> io::Result<Pipe> {
     let mut last_error = None;
     for index in 0..10 {
         let path = format!(r"\\.\pipe\discord-ipc-{index}");
@@ -273,7 +335,7 @@ fn connect() -> io::Result<File> {
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Discord IPC pipe not found")))
 }
 
-fn read_ready(pipe: &mut File) -> io::Result<()> {
+fn read_ready(pipe: &mut Pipe) -> io::Result<()> {
     let mut header = [0_u8; 8];
     pipe.read_exact(&mut header)?;
     let opcode = u32::from_le_bytes(header[..4].try_into().expect("four-byte opcode"));
@@ -303,7 +365,9 @@ fn read_ready(pipe: &mut File) -> io::Result<()> {
     Ok(())
 }
 
-fn send_activity(pipe: &mut File, activity: Option<&Activity>, nonce: &mut u64) -> io::Result<()> {
+fn send_activity(pipe: &mut Pipe, activity: Option<&Activity>, nonce: &mut u64) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    drain_replies(pipe);
     *nonce = nonce.wrapping_add(1);
     let activity = activity.map(activity_json);
     let payload = serde_json::json!({
@@ -342,7 +406,7 @@ fn activity_json(activity: &Activity) -> serde_json::Value {
     value
 }
 
-fn write_frame(pipe: &mut File, opcode: u32, payload: &serde_json::Value) -> io::Result<()> {
+fn write_frame(pipe: &mut Pipe, opcode: u32, payload: &serde_json::Value) -> io::Result<()> {
     let body = serde_json::to_vec(payload).map_err(io::Error::other)?;
     let length = u32::try_from(body.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Discord payload is too large"))?;

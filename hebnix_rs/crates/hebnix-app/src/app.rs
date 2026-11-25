@@ -59,6 +59,24 @@ pub const MIN_HEIGHT: f32 = DEFAULT_HEIGHT;
 
 const USERNAME_HISTORY_LIMIT: usize = 9;
 
+/// A non-Steam shortcut that probably starts Rocket League: its name says so,
+/// or it points at a launcher Rocket League is played through on Linux.
+fn likely_rocket_league_shortcut(candidate: &crate::rl_launch::ShortcutCandidate) -> bool {
+    let name = candidate.app_name.to_lowercase();
+    let exe = candidate.exe.to_lowercase();
+    name.contains("rocket")
+        || ["slipstream", "heroic", "legendary", "rocketleague"]
+            .iter()
+            .any(|launcher| exe.contains(launcher))
+}
+
+/// "Start with Windows" on Windows, "Start with Linux" on Linux.
+const START_WITH_SYSTEM_KEY: &str = if cfg!(target_os = "linux") {
+    "system-start-with-linux"
+} else {
+    "system-start-with-windows"
+};
+
 /// width for a settings page's label column: the widest label on that page,
 /// never narrower than the old fixed 130px, so longer translations aren't
 /// clipped and the inputs next to them still line up.
@@ -188,6 +206,15 @@ impl TitleCatalogEntry {
 
 }
 
+/// Settings > Directories override for Rocket League's Documents folder
+#[cfg(target_os = "linux")]
+fn apply_rl_documents_path(settings: &crate::config::SettingsCfg) {
+    let path = settings.rl_documents_path.trim();
+    hebnix_sdk::process::set_documents_override(
+        (!path.is_empty()).then(|| std::path::PathBuf::from(path)),
+    );
+}
+
 const CATALOG_NAMES: [&str; 14] = [
     "antennas", "anthems", "banners", "bodies", "boosts", "borders", "engines", "finishes",
     "goals", "skins", "titles", "toppers", "trails", "wheels",
@@ -207,7 +234,34 @@ fn titles_from_catalog(root: &Value) -> Result<Vec<TitleCatalogEntry>, String> {
     }
 }
 
+fn valid_catalog(name: &str, root: &Value) -> bool {
+    if name == "skins" {
+        root.get("cars").is_some_and(Value::is_object)
+    } else {
+        root.get(name).is_some_and(Value::is_array)
+    }
+}
+
+/// Linux keeps the last downloaded catalogs in the data folder (`<name>.json`,
+/// the same files 2.2.x wrote), so the patcher tabs still work when
+/// api.hebnix.com can't be reached.
+#[cfg(target_os = "linux")]
+fn cached_catalogs(base_dir: &std::path::Path) -> Option<HashMap<String, Value>> {
+    let mut catalogs = HashMap::new();
+    for name in CATALOG_NAMES {
+        let bytes = std::fs::read(base_dir.join(format!("{name}.json"))).ok()?;
+        let root: Value = serde_json::from_slice(&bytes).ok()?;
+        if !valid_catalog(name, &root) {
+            return None;
+        }
+        catalogs.insert(name.to_string(), root);
+    }
+    Some(catalogs)
+}
+
 fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
+    #[cfg(target_os = "linux")]
+    let base_dir = crate::config::base_dir();
     std::thread::Builder::new()
         .name("catalog-fetcher".into())
         .spawn(move || {
@@ -220,18 +274,31 @@ fn fetch_catalogs(tx: Sender<AppMsg>, ctx: egui::Context) {
                     let root: Value = response
                         .into_json()
                         .map_err(|error| format!("Failed to parse {name}.json: {error}"))?;
-                    let valid = if name == "skins" {
-                        root.get("cars").is_some_and(Value::is_object)
-                    } else {
-                        root.get(name).is_some_and(Value::is_array)
-                    };
-                    if !valid {
+                    if !valid_catalog(name, &root) {
                         return Err(format!("{name}.json has an invalid catalog structure"));
                     }
                     catalogs.insert(name.to_string(), root);
                 }
                 Ok(catalogs)
             })();
+            #[cfg(target_os = "linux")]
+            let result = match result {
+                Ok(catalogs) => {
+                    for (name, root) in &catalogs {
+                        if let Ok(bytes) = serde_json::to_vec(root) {
+                            let _ = std::fs::write(base_dir.join(format!("{name}.json")), bytes);
+                        }
+                    }
+                    Ok(catalogs)
+                }
+                Err(error) => match cached_catalogs(&base_dir) {
+                    Some(cached) => {
+                        tracing::warn!(%error, "catalog download failed, using the cached copies");
+                        Ok(cached)
+                    }
+                    None => Err(error),
+                },
+            };
             let _ = tx.send(AppMsg::CatalogsFetched { result });
             ctx.request_repaint();
         })
@@ -650,6 +717,8 @@ pub struct HebnixApp {
     plugin_monitor_checked: Option<std::time::Instant>,
     update_info: Option<crate::update::UpdateInfo>,
     update_downloading: bool,
+    #[cfg(target_os = "linux")]
+    appimage_update: Option<crate::update::AppImageBanner>,
     update_error: Option<String>,
     update_progress: crate::update::SharedProgress,
     maintenance: crate::maintenance::UninstallUi,
@@ -662,6 +731,7 @@ pub struct HebnixApp {
     rl_launch_setup_open: bool,
     rl_launch_draft: crate::config::RlLaunchCfg,
     rl_launch_shortcut_candidates: Vec<crate::rl_launch::ShortcutCandidate>,
+    rl_launch_shortcut_search: String,
 
     spoofer_mgr: Arc<SpooferManager>,
     owned_inventory: crate::owned_inventory::OwnedInventory,
@@ -714,6 +784,7 @@ pub struct HebnixApp {
     bots_freeplay: crate::patcher::bots_freeplay::State,
     delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
+    chat_test: crate::patcher::chat_test::State,
     lan_commands: crate::patcher::lan_commands::State,
     chat_paste: crate::patcher::chat_paste::State,
     instant_suite: crate::patcher::instant_suite::State,
@@ -927,9 +998,24 @@ impl HebnixApp {
 
         crate::screen::init(tx.clone());
         let mut plugin_mgr = PluginManager::new(plugin_dir.clone(), tx.clone(), APP_VERSION);
+        plugin_mgr.shared.borrow_mut().local_chat_socket = Some(Arc::clone(&ws_stats));
         plugin_mgr.refresh(&mut config, true);
         let _ = config.save(&base_dir);
 
+        #[cfg(target_os = "linux")]
+        {
+            apply_rl_documents_path(&config.settings);
+            // outside Hyprland (KDE Plasma and the rest) the hotkey only
+            // reliably hides and shows the window when it minimizes it
+            if !config.settings.desktop_defaults_applied {
+                config.settings.desktop_defaults_applied = true;
+                if !winutil::is_hyprland() {
+                    config.settings.minimize_to_tray = true;
+                }
+                let _ = config.save(&base_dir);
+            }
+            winutil::set_minimize_to_tray(config.settings.minimize_to_tray);
+        }
         let hidden = config.settings.start_in_tray && !crate::window_state::safe_rendering();
         tracing::info!(
             hidden,
@@ -949,6 +1035,10 @@ impl HebnixApp {
             let tx = control_tx.clone();
             let ctx = cc.egui_ctx.clone();
             hotkey.listen(move || {
+                // a window minimized on Wayland gets no redraws, so the toggle
+                // below would never be handled until it is back
+                #[cfg(target_os = "linux")]
+                winutil::wake_minimized_main_window();
                 crate::ui_work::send_toggle_control(&tx, &ctx, AppMsg::ToggleVisibility);
             });
         }
@@ -1113,7 +1203,7 @@ impl HebnixApp {
 
         // HTTP consumers now request elevation themselves, independently of the
         // retired master switch. A declined UAC relaunch must not loop.
-        if (spoofer_username_enabled || spoofer_friends_enabled) && !spoofer::is_admin() {
+        if (spoofer_username_enabled || spoofer_friends_enabled) && spoofer::http_needs_elevated_relaunch() {
             let skip_elevate = std::env::args().any(|arg| arg == spoofer::SKIP_ELEVATE_ARG);
             if !skip_elevate && spoofer::spawn_elevated_relaunch() {
                 std::process::exit(0);
@@ -1239,6 +1329,8 @@ impl HebnixApp {
             plugin_monitor_checked: None,
             update_info: None,
             update_downloading: false,
+            #[cfg(target_os = "linux")]
+            appimage_update: None,
             update_error: None,
             update_progress: Default::default(),
             maintenance: Default::default(),
@@ -1251,6 +1343,7 @@ impl HebnixApp {
             rl_launch_setup_open: false,
             rl_launch_draft,
             rl_launch_shortcut_candidates: Vec::new(),
+            rl_launch_shortcut_search: String::new(),
             spoofer_mgr,
             owned_inventory: crate::owned_inventory::OwnedInventory::default(),
             title_patcher: crate::patcher::title_patcher::TitlePatcherState::default(),
@@ -1301,6 +1394,7 @@ impl HebnixApp {
             bots_freeplay: Default::default(),
             delete_backups: Default::default(),
             chat_export: Default::default(),
+            chat_test: Default::default(),
             lan_commands: Default::default(),
             chat_paste: Default::default(),
             instant_suite: Default::default(),
@@ -1484,6 +1578,21 @@ impl HebnixApp {
         }
     }
 
+    /// Whether any package patch is running. Only one may run at a time:
+    /// each edits the live game files, and two at once collide.
+    fn any_patch_busy(&self) -> bool {
+        self.patcher_ball.processing_target.is_some()
+        || self.patcher_boost.processing_target.is_some()
+        || self.patcher_decal.processing_target.is_some()
+        || self.patcher_anthem.busy() || self.colours.busy()
+        || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+        || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
+        || self.scoreboard.busy()
+        || self.workshop.maintenance_busy()
+        || self.freeplay.patch_busy()
+        || self.replay_history_patch.busy()
+    }
+
     fn render_game_mods_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_salt("game_mods_options")
@@ -1491,45 +1600,67 @@ impl HebnixApp {
             .show(ui, |ui| {
                 let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
                 let backups_dir = cooked_pc.join("Backups");
+                // another patch running greys out every panel but its own
+                let locked = self.any_patch_busy();
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
-                        self.save_config();
-                    }
-                });
-                ui.add_space(8.0);
-                crate::i18n::layout::bordered_panel(ui, |ui| {
-                    self.chat_export.render(ui, &cooked_pc, &backups_dir);
-                });
-                ui.add_space(8.0);
-                crate::i18n::layout::bordered_panel(ui, |ui| {
-                    self.lan_commands.render(ui, &cooked_pc, &backups_dir, |error| {
-                        self.console.write(format!("[LAN chat commands] {error}"));
+                    ui.add_enabled_ui(!locked || self.forfeit_command.busy(), |ui| {
+                        if self.forfeit_command.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.forfeit_key, &mut self.config.game_mods.forfeit_pad) {
+                            self.save_config();
+                        }
                     });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    let rules = self.title_rules();
-                    self.chat_paste.render(ui, &cooked_pc, &backups_dir, rules, |error| {
-                        self.console.write(format!("[Chat Paste] {error}"));
+                    ui.add_enabled_ui(!locked || self.chat_export.busy(), |ui| {
+                        self.chat_export.render(ui, &cooked_pc, &backups_dir);
                     });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
-                        self.save_config();
-                    }
+                    ui.add_enabled_ui(!locked || self.chat_test.busy(), |ui| {
+                        self.chat_test.render(ui, &cooked_pc, &backups_dir, &self.ws_stats);
+                    });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
-                        self.save_config();
-                    }
+                    ui.add_enabled_ui(!locked || self.lan_commands.busy(), |ui| {
+                        self.lan_commands.render(ui, &cooked_pc, &backups_dir, |error| {
+                            self.console.write(format!("[LAN chat commands] {error}"));
+                        });
+                    });
                 });
                 ui.add_space(8.0);
                 crate::i18n::layout::bordered_panel(ui, |ui| {
-                    if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
-                        self.save_config();
-                    }
+                    ui.add_enabled_ui(!locked || self.chat_paste.busy(), |ui| {
+                        let rules = self.title_rules();
+                        self.chat_paste.render(ui, &cooked_pc, &backups_dir, rules, |error| {
+                            self.console.write(format!("[Chat Paste] {error}"));
+                        });
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.instant_suite.busy(), |ui| {
+                        if self.instant_suite.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods) {
+                            self.save_config();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.celebration.busy(), |ui| {
+                        if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
+                            self.save_config();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.bots_freeplay.busy(), |ui| {
+                        if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
+                            self.save_config();
+                        }
+                    });
                 });
             });
     }
@@ -1541,7 +1672,8 @@ impl HebnixApp {
             ui.heading("Auto Save + Upload");
             ui.separator();
             ui.label("Replay history is checked when a match ends or is left while Rocket League is open.");
-            self.replay_history_patch.show(ui);
+            let locked = self.any_patch_busy() && !self.replay_history_patch.busy();
+            ui.add_enabled_ui(!locked, |ui| self.replay_history_patch.show(ui));
             ui.add_enabled_ui(self.replay_history_patch.enabled(), |ui| {
                 config_changed |= ui
                     .checkbox(
@@ -1854,7 +1986,11 @@ impl HebnixApp {
                 if !spoofer::is_admin()
                     && crate::patcher::colours::needs_admin(cooked_pc)
                 {
-                    messages.push("Car colours need administrator rights; apply them from the Colours tab".into());
+                    messages.push(if cfg!(target_os = "linux") {
+                        "Car colours can't be written: make the game folder writable by your user".into()
+                    } else {
+                        "Car colours need administrator rights; apply them from the Colours tab".into()
+                    });
                 } else {
                     self.presets.pending_cars = Some(cars);
                     queued += 1;
@@ -2311,6 +2447,60 @@ impl HebnixApp {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
+        if !crate::visibility::begin_change(ctx, hidden) { return; }
+        tracing::info!(hidden, "toggling main window visibility");
+        if hidden {
+            self.panel.leave(ctx);
+        } else {
+            winutil::note_foreground();
+        }
+        self.hidden = hidden;
+
+        if let Some(tray) = &self.tray {
+            tray.set_hidden(hidden);
+        }
+        winutil::set_main_window_invisible(hidden);
+        // Windows hides the window by dropping its layered-window alpha. On
+        // Wayland/X11 a transparent window stays mapped (a blank, click-through
+        // window left on screen, and showing it again never re-maps it above
+        // the game), so the viewport is really unmapped here.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(!hidden));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(hidden));
+        if winutil::minimize_to_tray() {
+            // Un-minimizing only works from here on X11; on Wayland
+            // wake_minimized_main_window() (hotkey/tray threads) already did it.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(hidden));
+            if !hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+
+        if hidden {
+            self.topmost = false;
+            winutil::set_main_window_topmost(false);
+            winutil::restore_foreground();
+        } else {
+            if self.topmost || hebnix_sdk::process::is_rocket_league_focused() {
+                self.topmost = true;
+                winutil::set_main_window_topmost(true);
+            }
+            // Wayland has no exclusive fullscreen, so the window can always be
+            // raised over the game. focus_main_window() also moves it onto the
+            // game's workspace, so only do that when popping over the game;
+            // otherwise F2 from another workspace would drag the user back.
+            if self.topmost {
+                winutil::focus_main_window();
+            }
+        }
+
+        ctx.request_repaint();
+        self.plugin_mgr.dispatch_gui_visibility(!hidden);
+        crate::visibility::applied(ctx);
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
         if !crate::visibility::begin_change(ctx, hidden) { return; }
         tracing::info!(hidden, "toggling main window visibility");
@@ -2346,15 +2536,6 @@ impl HebnixApp {
             // The tray's hidden menu window is also ours. A process-level
             // focus check must not mistake that helper for the main window.
             winutil::focus_main_window();
-            // The viewport is unmapped until the compositor processes Visible(true),
-            // so the focus request above can miss it; retry shortly after it maps.
-            #[cfg(target_os = "linux")]
-            std::thread::spawn(|| {
-                for ms in [60u64, 140, 300, 600] {
-                    std::thread::sleep(Duration::from_millis(ms));
-                    winutil::focus_main_window();
-                }
-            });
         }
 
         ctx.request_repaint();
@@ -2363,7 +2544,7 @@ impl HebnixApp {
     }
 
     fn handle_toggle_visibility(&mut self, ctx: &egui::Context) {
-        let hebnix_focused = winutil::foreground_window_is_ours();
+        let hebnix_focused = own_window_focused();
         let rocket_league_focused = hebnix_sdk::process::is_rocket_league_focused();
         if self
             .config
@@ -2392,7 +2573,7 @@ impl HebnixApp {
             .config
             .settings
             .restrict_hotkey_to_hebnix_or_rocket_league
-            && !winutil::foreground_window_is_ours()
+            && !own_window_focused()
             && !hebnix_sdk::process::is_rocket_league_focused()
         {
             return;
@@ -2632,7 +2813,7 @@ impl HebnixApp {
                 AppMsg::SpooferCertificateLost => {
                     self.disable_certificate_features();
                     self.spoofer_cert_installed = false;
-                    self.spoofer_certificate_prompt_open = spoofer::is_admin();
+                    self.spoofer_certificate_prompt_open = !spoofer::http_needs_elevated_relaunch();
                     if self.spoofer_certificate_prompt_open {
                         self.set_hidden(ctx, false);
                     }
@@ -2743,7 +2924,25 @@ impl HebnixApp {
                     Ok(Some(info)) => {
                         self.console
                             .write(format!("[Core] Update available: v{}", info.version));
-                        if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
+                        if !cfg!(windows) {
+                            #[cfg(target_os = "linux")]
+                            {
+                                let in_app = crate::update::appimage_path().is_some();
+                                self.console.write(crate::update::linux_update_hint(in_app));
+                                if in_app {
+                                    self.appimage_update = Some(crate::update::AppImageBanner {
+                                        version: info.version,
+                                        downloading: false,
+                                        done: false,
+                                        error: None,
+                                    });
+                                }
+                            }
+                            #[cfg(not(target_os = "linux"))]
+                            self.console.write(
+                                "[Core] To update: download the new version from https://hebnix.com/download.",
+                            );
+                        } else if hebnix_sdk::utils::paths::portable_option("skip_update_lock") {
                             self.console.write(
                                 "[Core] skip_update_lock is set in portable.txt, not locking for the update.",
                             );
@@ -2827,22 +3026,48 @@ impl HebnixApp {
                         }
                     }
                 }
-                AppMsg::MaintenanceFinished { result } => {
+                AppMsg::MaintenanceFinished { result, restored, quit } => {
                     self.maintenance_running = false;
+                    if restored.contains(&crate::maintenance::PatchGroup::GameMods) {
+                        self.config.game_mods.instant_suite_mode = "nothing".into();
+                        self.save_config();
+                    }
+                    if restored.contains(&crate::maintenance::PatchGroup::Custom) {
+                        self.config.patcher.active_ball = None;
+                        self.config.patcher.active_boost = None;
+                        self.config.patcher.active_decals.clear();
+                        self.config.patcher.active_cars.clear();
+                        self.config.patcher.active_anthems.clear();
+                        self.patcher_ball.active_ball = None;
+                        self.patcher_boost.active_boost = None;
+                        self.patcher_decal.active_decals.clear();
+                        self.patcher_car.active_cars.clear();
+                        self.patcher_anthem.active_anthems.clear();
+                        self.save_config();
+                    }
                     match result {
-                        Ok(()) => {
-                            if self.maintenance.restore_game {
-                                self.config.patcher.active_ball = None;
-                                self.config.patcher.active_boost = None;
-                                self.config.patcher.active_decals.clear();
-                                self.config.patcher.active_cars.clear();
-                                self.config.patcher.active_anthems.clear();
-                            }
+                        Ok(()) if quit => {
                             if self.maintenance.certificate { self.disable_certificate_features(); }
                             self.spoofer_mgr.shutdown();
                             self.force_quit(ctx);
                         }
+                        Ok(()) => {
+                            self.maintenance.confirm = false;
+                            self.maintenance.patch_groups = [false; 4];
+                            self.maintenance.error = None;
+                            self.console.write(t("maintenance-patches-removed"));
+                        }
                         Err(error) => { self.maintenance.error = Some(error); }
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                AppMsg::AppImageUpdateDone { result } => {
+                    if let Some(banner) = self.appimage_update.as_mut() {
+                        banner.downloading = false;
+                        match result {
+                            Ok(()) => banner.done = true,
+                            Err(error) => banner.error = Some(error),
+                        }
                     }
                 }
                 AppMsg::AppUpdateFailed { error } => {
@@ -5146,6 +5371,7 @@ impl HebnixApp {
                                         ui,
                                         &[
                                             t("settings-rl-folder-label"),
+                                            "Rocket League Documents:".to_string(),
                                             t("settings-statsapi-ini-label"),
                                             "PacketSendRate:".to_string(),
                                             "Port:".to_string(),
@@ -5177,6 +5403,65 @@ impl HebnixApp {
                                             }
                                         }
                                     });
+
+                                    // saves and logs live in the game's Wine prefix, not the
+                                    // game folder; found automatically unless picked here
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let rl_docs = hebnix_sdk::process::rocket_league_documents_dir()
+                                            .map(|docs| docs.join("My Games").join("Rocket League"));
+                                        let picked = !self.config.settings.rl_documents_path.trim().is_empty();
+                                        ui.horizontal(|ui| {
+                                            crate::i18n::layout::settings_label(ui, label_w, "Rocket League Documents:");
+                                            let mut display = match (&rl_docs, picked) {
+                                                (Some(path), true) => path.display().to_string(),
+                                                (Some(path), false) => format!("{} (found automatically)", path.display()),
+                                                (None, _) => "Not found, start Rocket League once or pick it".to_string(),
+                                            };
+                                            ui.add_enabled(
+                                                false,
+                                                egui::TextEdit::singleline(&mut display).desired_width(480.0),
+                                            );
+                                            if ui.button(t("btn-browse")).clicked() {
+                                                let mut dialog = rfd::FileDialog::new();
+                                                if let Some(path) = &rl_docs {
+                                                    dialog = dialog.set_directory(path);
+                                                }
+                                                if let Some(dir) = dialog.pick_folder() {
+                                                    self.config.settings.rl_documents_path =
+                                                        dir.to_string_lossy().to_string();
+                                                    apply_rl_documents_path(&self.config.settings);
+                                                    self.save_config();
+                                                }
+                                            }
+                                            if picked && ui.button("Reset").clicked() {
+                                                self.config.settings.rl_documents_path.clear();
+                                                apply_rl_documents_path(&self.config.settings);
+                                                self.save_config();
+                                            }
+                                        });
+                                        let docs_root = rl_docs
+                                            .as_ref()
+                                            .and_then(|path| path.parent())
+                                            .and_then(|path| path.parent());
+                                        if picked
+                                            && docs_root.is_none_or(|docs| {
+                                                hebnix_sdk::process::wine_prefix::rocket_league_activity(docs).is_none()
+                                            })
+                                        {
+                                            ui.colored_label(
+                                                egui::Color32::YELLOW,
+                                                "No Rocket League saves or logs in this folder. Pick its My Games/Rocket League folder inside the Wine prefix.",
+                                            );
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Where Rocket League keeps saves and logs: My Games/Rocket League in its Wine prefix's Documents, e.g. ~/Games/Heroic/Prefixes/rocketleague/pfx/drive_c/users/steamuser/Documents/My Games/Rocket League.",
+                                            )
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                        );
+                                    }
 
                                     ui.horizontal(|ui| {
                                         crate::i18n::layout::settings_label(ui, label_w, t("settings-statsapi-ini-label"));
@@ -5378,11 +5663,8 @@ impl HebnixApp {
                                         crate::config::RlLaunchMode::EpicDirect => {
                                             t("settings-rl-mode-epic-direct")
                                         }
-                                        crate::config::RlLaunchMode::SteamShortcutToHeroic => {
+                                        crate::config::RlLaunchMode::SteamShortcut => {
                                             t("settings-rl-mode-steam-shortcut")
-                                        }
-                                        crate::config::RlLaunchMode::HeroicDirect => {
-                                            t("settings-rl-mode-heroic-direct")
                                         }
                                     };
                                     ui.label(t_args(
@@ -5392,6 +5674,7 @@ impl HebnixApp {
                                     if ui.button(t("settings-rl-launch-setup-button")).clicked() {
                                         self.rl_launch_draft = self.config.rl_launch.clone();
                                         self.rl_launch_shortcut_candidates.clear();
+                                        self.rl_launch_shortcut_search.clear();
                                         self.rl_launch_setup_open = true;
                                     }
                                 }
@@ -5540,7 +5823,7 @@ impl HebnixApp {
                                     let label_w = label_column_width(
                                         ui,
                                         &[
-                                            t("system-start-with-windows"),
+                                            t(START_WITH_SYSTEM_KEY),
                                             t("system-start-in-tray"),
                                             t("system-close-to-tray"),
                                             t("system-p2p"),
@@ -5554,7 +5837,7 @@ impl HebnixApp {
                                         ],
                                     );
                                     ui.horizontal(|ui| {
-                                        crate::i18n::layout::settings_label(ui, label_w, t("system-start-with-windows"));
+                                        crate::i18n::layout::settings_label(ui, label_w, t(START_WITH_SYSTEM_KEY));
                                         if ui.checkbox(&mut self.startup_enabled, "").changed() {
                                             if let Err(e) =
                                                 winutil::set_startup_enabled(self.startup_enabled)
@@ -5576,6 +5859,22 @@ impl HebnixApp {
                                             .checkbox(&mut self.config.settings.start_in_tray, "")
                                             .changed()
                                         {
+                                            self.save_config();
+                                        }
+                                    });
+                                    #[cfg(target_os = "linux")]
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, "Minimize to Tray:");
+                                        let response = ui
+                                            .checkbox(&mut self.config.settings.minimize_to_tray, "")
+                                            .on_hover_text(
+                                                "The toggle hotkey minimizes Hebnix instead of only hiding it. \
+                                                 Turn this on if the hidden window still shows in your taskbar \
+                                                 or blocks your desktop (GNOME, KDE and other desktops). \
+                                                 Bring it back with the hotkey, the tray icon or your taskbar.",
+                                            );
+                                        if response.changed() {
+                                            winutil::set_minimize_to_tray(self.config.settings.minimize_to_tray);
                                             self.save_config();
                                         }
                                     });
@@ -5702,6 +6001,48 @@ impl HebnixApp {
                                             );
                                         if slider.drag_stopped() || slider.lost_focus() {
                                             self.save_config();
+                                        }
+                                    });
+                                    #[cfg(target_os = "linux")]
+                                    ui.horizontal(|ui| {
+                                        use crate::webview::render_mode::{self, Choice};
+                                        crate::i18n::layout::settings_label(ui, label_w, "Overlay rendering:");
+                                        let auto = if render_mode::default_software() {
+                                            "Automatic (Software)"
+                                        } else {
+                                            "Automatic (Hardware)"
+                                        };
+                                        let label = |choice: Choice| match choice {
+                                            Choice::Auto => auto,
+                                            Choice::Hardware => "Hardware (GPU)",
+                                            Choice::Software => "Software (CPU)",
+                                        };
+                                        let current = render_mode::choice();
+                                        let mut selected = current;
+                                        egui::ComboBox::from_id_salt("overlay-rendering")
+                                            .selected_text(label(selected))
+                                            .show_ui(ui, |ui| {
+                                                for choice in [Choice::Auto, Choice::Hardware, Choice::Software] {
+                                                    ui.selectable_value(&mut selected, choice, label(choice));
+                                                }
+                                            })
+                                            .response
+                                            .on_hover_text(
+                                                "How plugin HTML overlays (Controller Overlay and others) are drawn. \
+                                                 Automatic uses Hardware on Hyprland and Software everywhere else, \
+                                                 where the GPU overlay updates slowly. Software uses more CPU. \
+                                                 Switches to Software by itself if the GPU overlay crashed Hebnix. \
+                                                 Takes effect after restarting Hebnix.",
+                                            );
+                                        if selected != current {
+                                            if let Err(error) = render_mode::set_choice(selected) {
+                                                self.console.write(format!("[Core] Could not save the overlay rendering setting: {error}"));
+                                            } else {
+                                                self.console.write("[Core] Overlay rendering changes after restarting Hebnix.");
+                                            }
+                                        }
+                                        if render_mode::choice_is_software(render_mode::choice()) != render_mode::software() {
+                                            ui.weak("(restart Hebnix)");
                                         }
                                     });
                                     ui.add_space(8.0);
@@ -5884,16 +6225,7 @@ impl HebnixApp {
                 .show(ui, |ui| self.maintenance.render(ui, true, &self.base_dir))
                 .inner;
             if confirmed {
-                if self.patcher_ball.processing_target.is_some()
-                    || self.patcher_boost.processing_target.is_some()
-                    || self.patcher_decal.processing_target.is_some()
-                    || self.patcher_anthem.busy() || self.colours.busy()
-                    || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
-                    || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
-                    || self.scoreboard.busy()
-                    || self.workshop.maintenance_busy()
-                    || self.freeplay.patch_busy()
-                    || self.replay_history_patch.busy()
+                if self.any_patch_busy()
                 {
                     self.maintenance.error = Some(t("maintenance-finish-patches"));
                     return;
@@ -5902,23 +6234,41 @@ impl HebnixApp {
                     self.maintenance.error = Some(t("maintenance-close-game"));
                     return;
                 }
+                let decals = if self.maintenance.selected_patches().any(|group| group == crate::maintenance::PatchGroup::Custom) {
+                    match self.patcher_decal.uninstall_targets() {
+                        Ok(targets) => targets,
+                        Err(error) => {
+                            self.maintenance.error = Some(error);
+                            return;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 self.save_config();
                 self.spoofer_mgr.shutdown();
                 let options = self.maintenance.clone();
+                let patcher = self.config.patcher.clone();
                 let base = self.base_dir.clone();
                 let game = std::path::PathBuf::from(&self.config.settings.rl_path);
                 let tx = self.tx.clone();
                 let ctx = ui.ctx().clone();
                 self.maintenance_running = true;
                 std::thread::spawn(move || {
+                    let mut restored = Vec::new();
+                    let quit = options.removes_app_data();
                     let result = (|| -> Result<(), String> {
-                        if options.restore_game { crate::patcher::uninstall::restore(&base, &game)?; }
+                        for group in options.selected_patches() {
+                            crate::patcher::uninstall::restore_group(&base, &game, group, &decals, &patcher, options.patch_groups[3])?;
+                            restored.push(group);
+                        }
                         if options.certificate { crate::maintenance::remove_certificate()?; }
                         #[cfg(windows)]
                         if options.application || options.certificate { crate::recovery_tasks::uninstall_legacy()?; }
-                        crate::maintenance::launch_uninstall(&base, &options)
+                        if quit { crate::maintenance::launch_uninstall(&base, &options)?; }
+                        Ok(())
                     })();
-                    let _ = tx.send(AppMsg::MaintenanceFinished { result });
+                    let _ = tx.send(AppMsg::MaintenanceFinished { result, restored, quit });
                     ctx.request_repaint();
                 });
             }
@@ -6148,6 +6498,27 @@ impl HebnixApp {
         if !self.colour_admin_prompt_open {
             return;
         }
+        // Linux never relaunches as root: the game files just need to be
+        // writable by the user, so say that instead of offering a restart
+        #[cfg(target_os = "linux")]
+        {
+            let mut close = false;
+            egui::Window::new("Game files not writable")
+                .id(egui::Id::new("colour-files-not-writable"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Your user can't write to Rocket League's TAGame.upk. Make the game folder writable by your user (for example `chown -R $USER` on it), then apply again.");
+                    ui.add_space(8.0);
+                    close = ui.button("OK").clicked();
+                });
+            if close {
+                self.colour_admin_prompt_open = false;
+            }
+            return;
+        }
+        #[allow(unreachable_code)]
         let mut relaunch = false;
         let mut cancel = false;
         egui::Window::new(t("admin-prompt-administrator-required"))
@@ -6347,6 +6718,56 @@ impl HebnixApp {
         }
     }
 
+    /// Linux, outside Hyprland: shown once on the first start. Overlays and
+    /// the show/hide hotkey were tuned on Hyprland; elsewhere the fix is
+    /// usually one of the Settings > System options.
+    #[cfg(target_os = "linux")]
+    fn render_desktop_notice(&mut self, ctx: &egui::Context) {
+        if self.config.settings.desktop_notice_shown || winutil::is_hyprland() {
+            return;
+        }
+        let mut open_settings = false;
+        let mut close = false;
+        egui::Window::new("Overlays and the hotkey")
+            .id(egui::Id::new("desktop-notice"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                let hotkey = self.config.settings.hotkey.to_uppercase();
+                ui.label(format!(
+                    "If the overlays don't show or update properly, or {hotkey} doesn't hide and show \
+                     Hebnix, open Settings > System and try changing:"
+                ));
+                ui.add_space(4.0);
+                ui.label("• Minimize to Tray");
+                ui.label("• Overlay refresh rate");
+                ui.label("• Overlay rendering (Automatic, Hardware or Software)");
+                ui.add_space(4.0);
+                ui.weak("Hebnix already picked the settings known to work best on your desktop.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open Settings").clicked() {
+                        open_settings = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(t("tray-close")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+        if open_settings {
+            self.tab = Tab::Settings;
+            self.hebnix_settings_tab = HebnixSettingsTab::System;
+        }
+        if open_settings || close {
+            self.config.settings.desktop_notice_shown = true;
+            self.save_config();
+        }
+    }
+
     fn render_update_modal(&mut self, ctx: &egui::Context) {
         let Some(info) = self.update_info.clone() else {
             return;
@@ -6397,6 +6818,65 @@ impl HebnixApp {
                     });
                 }
             });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn render_appimage_banner(&mut self, ctx: &egui::Context) {
+        let Some(banner) = self.appimage_update.as_mut() else {
+            return;
+        };
+        let mut dismiss = false;
+        let mut start = false;
+        egui::Window::new(t("appimage-update-title"))
+            .id(egui::Id::new("appimage_update_window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+            .show(ctx, |ui| {
+                if banner.done {
+                    ui.label(t("appimage-update-done"));
+                    dismiss = ui.button(t("tray-close")).clicked();
+                    return;
+                }
+                ui.label(t_args(
+                    "appimage-update-text",
+                    &[("version", banner.version.as_str().into())],
+                ));
+                if let Some(err) = &banner.error {
+                    ui.colored_label(egui::Color32::from_rgb(0xe7, 0x4c, 0x3c), err);
+                }
+                if banner.downloading {
+                    ui.add_enabled(false, egui::Button::new(t("update-downloading")));
+                    crate::update::render_progress(ui, &self.update_progress);
+                } else {
+                    ui.horizontal(|ui| {
+                        start = ui
+                            .add(
+                                egui::Button::new(t("update-button"))
+                                    .fill(egui::Color32::from_rgb(0x2e, 0xcc, 0x71)),
+                            )
+                            .clicked();
+                        dismiss = ui.button(t("appimage-update-later")).clicked();
+                    });
+                }
+            });
+        if start {
+            banner.downloading = true;
+            banner.error = None;
+            let version = banner.version.clone();
+            let progress = self.update_progress.clone();
+            *progress.lock().unwrap() = Default::default();
+            let tx = self.tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let result = crate::update::download_appimage(&version, &progress);
+                let _ = tx.send(AppMsg::AppImageUpdateDone { result });
+                ctx.request_repaint();
+            });
+        }
+        if dismiss {
+            self.appimage_update = None;
+        }
     }
 
     fn render_changelog_popup(&mut self, ctx: &egui::Context) {
@@ -6486,20 +6966,8 @@ impl HebnixApp {
                 );
                 ui.radio_value(
                     &mut self.rl_launch_draft.mode,
-                    RlLaunchMode::SteamShortcutToHeroic,
-                    t("rl-launch-setup-non-steam-shortcut-that-opens-heroic"),
-                );
-                if self.rl_launch_draft.mode == RlLaunchMode::SteamShortcutToHeroic {
-                    ui.label(
-                        egui::RichText::new(t("rl-launch-setup-non-steam-shortcuts-can-t-pass"))
-                            .size(11.0)
-                            .color(egui::Color32::from_rgb(0xe6, 0xa8, 0x3c)),
-                    );
-                }
-                ui.radio_value(
-                    &mut self.rl_launch_draft.mode,
-                    RlLaunchMode::HeroicDirect,
-                    t("rl-launch-setup-heroic-directly-no-steam-or-epic"),
+                    RlLaunchMode::SteamShortcut,
+                    t("settings-rl-mode-steam-shortcut"),
                 );
                 ui.add_space(8.0);
 
@@ -6509,61 +6977,54 @@ impl HebnixApp {
                         ui.label(t("rl-launch-setup-steam-app-id-252950-is-rocket"));
                         ui.text_edit_singleline(&mut self.rl_launch_draft.steam_id);
                     }
-                    RlLaunchMode::SteamShortcutToHeroic => {
-                        if ui
-                            .button(t("rl-launch-setup-scan-steam-shortcuts-for-heroic"))
-                            .clicked()
-                        {
-                            self.rl_launch_shortcut_candidates =
-                                crate::rl_launch::find_heroic_shortcuts();
+                    RlLaunchMode::SteamShortcut => {
+                        if ui.button(t("rl-launch-setup-scan-steam-shortcuts")).clicked() {
+                            let mut found = crate::rl_launch::find_steam_shortcuts();
+                            // likely Rocket League launchers first, then by name
+                            found.sort_by_cached_key(|candidate| {
+                                (
+                                    !likely_rocket_league_shortcut(candidate),
+                                    candidate.app_name.to_lowercase(),
+                                )
+                            });
+                            self.rl_launch_shortcut_candidates = found;
                         }
                         if self.rl_launch_shortcut_candidates.is_empty() {
                             ui.small(t("rl-launch-setup-no-candidates-found-yet-click-scan"));
                         } else {
-                            for candidate in &self.rl_launch_shortcut_candidates {
-                                if ui
-                                    .button(format!("{}  ({})", candidate.app_name, candidate.exe))
-                                    .clicked()
-                                {
-                                    self.rl_launch_draft.steam_id = candidate.rungameid.to_string();
-                                    // the shortcut's own target IS Heroic's binary - almost every
-                                    // Steam shortcut that opens Heroic points straight at it, with
-                                    // the actual game picked by the shortcut's launch options, so
-                                    // there's nothing left to type in by hand here.
-                                    self.rl_launch_draft.heroic_binary =
-                                        candidate.exe.trim().trim_matches('"').to_string();
-                                }
-                            }
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.rl_launch_shortcut_search)
+                                    .hint_text(t("rl-launch-setup-search-shortcuts")),
+                            );
+                            let query = self.rl_launch_shortcut_search.trim().to_lowercase();
+                            egui::ScrollArea::vertical()
+                                .id_salt("rl-launch-shortcut-list")
+                                .max_height(6.0 * ui.spacing().interact_size.y * 1.4)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    for candidate in &self.rl_launch_shortcut_candidates {
+                                        if !query.is_empty()
+                                            && !candidate.app_name.to_lowercase().contains(&query)
+                                            && !candidate.exe.to_lowercase().contains(&query)
+                                        {
+                                            continue;
+                                        }
+                                        if ui
+                                            .button(format!("{}  ({})", candidate.app_name, candidate.exe))
+                                            .clicked()
+                                        {
+                                            self.rl_launch_draft.steam_id =
+                                                candidate.rungameid.to_string();
+                                            self.rl_launch_draft.shortcut_exe =
+                                                candidate.exe.trim().trim_matches('"').to_string();
+                                        }
+                                    }
+                                });
                         }
                         ui.add_space(4.0);
                         ui.label(t("rl-launch-setup-steam-shortcut-id"));
                         ui.text_edit_singleline(&mut self.rl_launch_draft.steam_id);
-                        if !self.rl_launch_draft.heroic_binary.is_empty() {
-                            ui.add_space(4.0);
-                            ui.label(t_args(
-                                "rl-launch-setup-heroic-binary-rl-launch-draft",
-                                &[(
-                                    "heroic_binary",
-                                    self.rl_launch_draft.heroic_binary.to_string().into(),
-                                )],
-                            ));
-                        }
                     }
-                    RlLaunchMode::HeroicDirect => {
-                        ui.label(t("rl-launch-setup-heroic-binary-path-e-g-the"));
-                        ui.text_edit_singleline(&mut self.rl_launch_draft.heroic_binary);
-                    }
-                }
-
-                if matches!(
-                    self.rl_launch_draft.mode,
-                    RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect
-                ) {
-                    ui.add_space(4.0);
-                    ui.label(t("rl-launch-setup-epic-catalog-app-name-sugar-is"));
-                    ui.text_edit_singleline(&mut self.rl_launch_draft.heroic_app_name);
-                    ui.label(t("rl-launch-setup-runner"));
-                    ui.text_edit_singleline(&mut self.rl_launch_draft.heroic_runner);
                 }
 
                 ui.add_space(12.0);
@@ -7141,7 +7602,11 @@ impl HebnixApp {
         if webview_wants {
             if let Some(webview) = &mut self.webview {
                 if let Some((hwnd, _)) = self.overlay.webview_target() {
-                    webview.tick(hwnd, size, true);
+                    // Linux: the pages live in a full-monitor layer-shell
+                    // surface above every normal window, so they are only
+                    // shown while the game itself is focused (as in 2.2.6);
+                    // otherwise they sit on top of Hebnix and the desktop.
+                    webview.tick(hwnd, size, cfg!(not(target_os = "linux")) || focused);
                 }
             }
             self.report_webview_error();
@@ -7427,6 +7892,16 @@ impl eframe::App for HebnixApp {
             ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
+        // exempt_own_window_decorations() (main.rs) is a map-time window rule
+        // set before our window exists; re-apply float/no-blur/no-border to
+        // the live window once, in case the rule didn't take (2.2.6 did this)
+        #[cfg(target_os = "linux")]
+        {
+            static REASSERTED: std::sync::Once = std::sync::Once::new();
+            REASSERTED.call_once(|| {
+                hebnix_sdk::process::reassert_own_window_decorations(std::process::id());
+            });
+        }
         crate::maintenance::acknowledge_update();
         ctx.request_repaint_after(Duration::from_secs(30));
         self.title_patcher.poll();
@@ -7435,11 +7910,16 @@ impl eframe::App for HebnixApp {
         }
         self.check_game_update(ctx);
         let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
-        if !self.recovery_running() {
+        self.chat_test.tick();
+        self.plugin_mgr.shared.borrow_mut().local_chat_enabled =
+            !self.recovery_running() && !self.chat_test.busy()
+                && crate::patcher::chat_test::enabled(&cooked.join("Backups"));
+        if !self.recovery_running() && !self.maintenance_running {
             self.instant_suite.tick(&cooked, &cooked.join("Backups"), &self.config.game_mods.instant_suite_mode, &self.config.game_mods.instant_suite_map);
             if self.instant_suite.busy() {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
+
             self.replay_history_patch.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
             self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
             self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
@@ -7625,6 +8105,10 @@ impl eframe::App for HebnixApp {
             self.render_fullscreen_notice(ctx);
             self.render_launch_path_notice(ctx);
             self.render_changelog_popup(ctx);
+            #[cfg(target_os = "linux")]
+            self.render_appimage_banner(ctx);
+            #[cfg(target_os = "linux")]
+            self.render_desktop_notice(ctx);
             let repair_was_running = self.epic_repair.running;
             self.epic_repair.show(ctx);
             if !repair_was_running && self.epic_repair.running {
@@ -8357,12 +8841,17 @@ impl HebnixApp {
                 } else if mode == ItemsMode::MenuTextures {
                     self.render_menu_textures_page(ui);
                 } else if mode == ItemsMode::GoalExplosion {
+                    let locked = self.any_patch_busy();
                     crate::i18n::layout::bordered_panel(ui, |ui| {
-                        self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
+                        ui.add_enabled_ui(!locked || self.goal_explosion.busy(), |ui| {
+                            self.goal_explosion.render(ui, &cooked_pc, &backups_dir);
+                        });
                     });
                     ui.add_space(8.0);
                     crate::i18n::layout::bordered_panel(ui, |ui| {
-                        self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
+                        ui.add_enabled_ui(!locked || self.goal_explosion_volume.busy(), |ui| {
+                            self.goal_explosion_volume.render(ui, &cooked_pc, &backups_dir);
+                        });
                     });
                 } else if mode == ItemsMode::WheelAlignment {
                     if self.catalogs_loading {
@@ -8555,3 +9044,19 @@ impl HebnixApp {
 }
 
 mod network;
+
+/// Is Hebnix's own window focused? On Linux `foreground_window_is_ours` is a
+/// constant false on Hyprland/KDE/niri, which made the "only from Hebnix or
+/// Rocket League" hotkey restriction swallow every press made from Hebnix, so
+/// the compositor is asked directly. Only called on a hotkey press.
+fn own_window_focused() -> bool {
+    // a compositor that can't be asked (GNOME) can't enforce the restriction
+    #[cfg(target_os = "linux")]
+    {
+        !hebnix_sdk::process::can_query_focus() || winutil::hebnix_window_focused()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        winutil::foreground_window_is_ours()
+    }
+}

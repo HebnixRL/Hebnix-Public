@@ -246,7 +246,8 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 #[cfg(target_os = "linux")]
 fn main() -> eframe::Result {
     unsafe {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        // GPU-rendered HTML overlay unless forced/fallen back to software
+        crate::webview::render_mode::init();
         if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()) {
             std::env::set_var("GDK_BACKEND", "wayland");
         }

@@ -31,6 +31,14 @@ const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_RATE: Duration = Duration::from_millis(100);
 /// how long the panel takes to slide in
 const SLIDE: Duration = Duration::from_millis(220);
+/// Linux: when the panel's window is re-sent its spot after `enter`, measured from then
+#[cfg(target_os = "linux")]
+const SETTLE: [Duration; 4] = [
+    Duration::from_millis(60),
+    Duration::from_millis(150),
+    Duration::from_millis(300),
+    Duration::from_millis(600),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PadEvent {
@@ -228,11 +236,14 @@ pub struct Panel {
     /// D-pad moves waiting for a frame: egui takes one focus move per frame
     pub pending_nav: Vec<PadEvent>,
     last_focus: Option<egui::Id>,
-    /// the up/down just issued, the widget it started from and that widget's rect
-    check: Option<(PadEvent, egui::Id, egui::Rect)>,
     saved: Option<(egui::Pos2, egui::Vec2)>,
     /// the slide-in under way: when it started, where from and where to
     slide: Option<(Instant, egui::Pos2, egui::Pos2)>,
+    /// Linux: the docked spot and size, re-sent a few times after `enter` because the
+    /// window is often still unmapped then and the compositor drops moves for it.
+    /// Holds when `enter` ran, the next `SETTLE` step, and the spot and size.
+    #[cfg(target_os = "linux")]
+    settle: Option<(Instant, usize, egui::Pos2, egui::Vec2)>,
 }
 
 /// Put the window at `pos` with `size` (points). On Linux the compositor does the
@@ -271,9 +282,10 @@ impl Panel {
             pending_list_page: 0,
             pending_nav: Vec::new(),
             last_focus: None,
-            check: None,
             saved: None,
             slide: None,
+            #[cfg(target_os = "linux")]
+            settle: None,
         }
     }
 
@@ -296,7 +308,15 @@ impl Panel {
         let pos = if look.left { area_min } else { egui::pos2(area_min.x + area_size.x - width, area_min.y) };
         // slides in from the edge it docks to
         let from = egui::pos2(if look.left { pos.x - width } else { pos.x + width }, pos.y);
-        self.slide = (look.animate && !self.active).then(|| (Instant::now(), from, pos));
+        // Not on Linux: the compositor animates each move itself, the steps are lost while
+        // the window is still unmapped, and a window moved off screen stops getting frames,
+        // so the slide stalls there. Placing it straight away still animates on Hyprland.
+        let animate = look.animate && cfg!(not(target_os = "linux"));
+        self.slide = (animate && !self.active).then(|| (Instant::now(), from, pos));
+        #[cfg(target_os = "linux")]
+        {
+            self.settle = Some((Instant::now(), 0, pos, size));
+        }
         if !self.active {
             // Wayland does not report the window's position: fall back to a centred window
             let fallback_size = egui::vec2(
@@ -321,6 +341,19 @@ impl Panel {
 
     /// Move the window one step along the slide-in, if one is under way.
     fn step_slide(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        if let Some((start, next, pos, size)) = self.settle {
+            let elapsed = start.elapsed();
+            let mut next = next;
+            if elapsed >= SETTLE[next] {
+                place(ctx, pos, Some(size));
+                next += 1;
+            }
+            self.settle = SETTLE.get(next).map(|&due| {
+                ctx.request_repaint_after(due.saturating_sub(elapsed));
+                (start, next, pos, size)
+            });
+        }
         let Some((start, from, to)) = self.slide else { return };
         let t = (start.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).min(1.0);
         // ease out: fast at first, settling into place like a drawer
@@ -333,41 +366,27 @@ impl Panel {
         }
     }
 
-    /// Start of a panel frame: note whether focus moved last frame, check that an up or down
-    /// really went up or down, then take one queued move.
-    /// Moves go through `move_focus` instead of arrow keys, because a text box keeps the arrow
-    /// keys for itself and the pad could never leave it. Egui's own up/down search sometimes
-    /// skips a widget or wraps to the top in these layouts, so when it lands anywhere but
-    /// above/below where we were, the move is redone in reading order from the old widget.
+    /// Start of a panel frame: note whether focus moved last frame, then take one queued move.
+    /// Moves go through egui's focus instead of arrow keys, because a text box keeps the arrow
+    /// keys for itself and the pad could never leave it. Up and down pick the next row
+    /// themselves: egui's own search only looks in a narrow cone, so it skips widgets that sit
+    /// off to one side and can't reach the rest of the page.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.step_slide(ctx);
-        let rect_of = |id: egui::Id| ctx.read_response(id).map(|response| response.rect);
-        let mut focused = ctx.memory(|m| m.focused());
-        if let Some((direction, from, from_rect)) = self.check.take() {
-            let went_right_way = focused != Some(from)
-                && focused.and_then(rect_of).is_some_and(|now| match direction {
-                    PadEvent::Up => now.center().y < from_rect.center().y - 1.0,
-                    _ => now.center().y > from_rect.center().y + 1.0,
-                });
-            if !went_right_way {
-                let order = if direction == PadEvent::Up {
-                    egui::FocusDirection::Previous
-                } else {
-                    egui::FocusDirection::Next
-                };
-                ctx.memory_mut(|m| {
-                    m.request_focus(from);
-                    m.move_focus(order);
-                });
-                focused = Some(from);
-            }
-        }
+        let focused = ctx.memory(|m| m.focused());
         FOCUS_MOVED.store(focused != self.last_focus, Ordering::Relaxed);
         self.last_focus = focused;
         if self.pending_nav.is_empty() {
             return;
         }
         let event = self.pending_nav.remove(0);
+        if let (PadEvent::Up | PadEvent::Down, Some(from)) = (event, focused) {
+            if let Some(target) = row_neighbour(ctx, from, event == PadEvent::Down) {
+                ctx.memory_mut(|m| m.request_focus(target));
+            }
+            ctx.request_repaint();
+            return;
+        }
         let direction = match (event, focused) {
             (_, None) => egui::FocusDirection::Next,
             (PadEvent::Up, _) => egui::FocusDirection::Up,
@@ -375,9 +394,6 @@ impl Panel {
             (PadEvent::Left, _) => egui::FocusDirection::Left,
             _ => egui::FocusDirection::Right,
         };
-        if let (PadEvent::Up | PadEvent::Down, Some(from)) = (event, focused) {
-            self.check = rect_of(from).map(|rect| (event, from, rect));
-        }
         ctx.memory_mut(|m| m.move_focus(direction));
         ctx.request_repaint();
     }
@@ -388,6 +404,10 @@ impl Panel {
         }
         self.active = false;
         self.slide = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.settle = None;
+        }
         self.pad.set_active(false);
         #[cfg(not(target_os = "linux"))]
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
@@ -399,6 +419,57 @@ impl Panel {
             place(ctx, pos, Some(size));
         }
     }
+}
+
+/// Two spans share a row when they overlap by at least half of the shorter one.
+fn same_row(a: egui::Rangef, b: egui::Rangef) -> bool {
+    a.intersection(b).span() >= 0.5 * a.span().min(b.span())
+}
+
+/// The focusable widget on the next row below (or above) `from`, the one closest to it
+/// sideways, from last frame's widgets on `from`'s layer. None at the end of the page.
+fn row_neighbour(ctx: &egui::Context, from: egui::Id, down: bool) -> Option<egui::Id> {
+    let candidates: Vec<(egui::Id, egui::Rect)> = ctx.viewport(|viewport| {
+        let widgets = &viewport.prev_pass.widgets;
+        let Some(current) = widgets.get(from) else {
+            return Vec::new();
+        };
+        let layer = current.layer_id;
+        let mut found = vec![(from, current.rect)];
+        found.extend(
+            widgets
+                .get_layer(layer)
+                .filter(|w| w.id != from && w.enabled && w.sense.is_focusable() && w.rect.is_positive())
+                .map(|w| (w.id, w.rect)),
+        );
+        found
+    });
+    let (&(_, from_rect), others) = candidates.split_first()?;
+    pick_row_neighbour(from_rect, others, down)
+}
+
+fn pick_row_neighbour(from: egui::Rect, others: &[(egui::Id, egui::Rect)], down: bool) -> Option<egui::Id> {
+    let beyond = |rect: &egui::Rect| {
+        !same_row(rect.y_range(), from.y_range())
+            && if down { rect.center().y > from.center().y } else { rect.center().y < from.center().y }
+    };
+    // the nearest row: the closest widget past this one, and everything sharing its row
+    let nearest = others
+        .iter()
+        .filter(|(_, rect)| beyond(rect))
+        .min_by(|(_, a), (_, b)| {
+            let (a, b) = if down { (a.center().y, b.center().y) } else { (-a.center().y, -b.center().y) };
+            a.total_cmp(&b)
+        })?
+        .1;
+    others
+        .iter()
+        .filter(|(_, rect)| beyond(rect) && same_row(rect.y_range(), nearest.y_range()))
+        .min_by(|(_, a), (_, b)| {
+            let gap = |rect: &egui::Rect| (rect.center().x - from.center().x).abs();
+            gap(a).total_cmp(&gap(b))
+        })
+        .map(|(id, _)| *id)
 }
 
 /// Turn pad moves into key events before egui starts its frame, and tell egui the window is
@@ -463,4 +534,46 @@ pub fn feed(
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
     }
     (page, back, list_page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+    }
+
+    #[test]
+    fn up_and_down_reach_widgets_off_to_the_side() {
+        let id = |n: u64| egui::Id::new(n);
+        // "Choose map file", then a row of key field, Show, Get a key, then the link field
+        let from = rect(15.0, 328.0, 152.0, 40.0);
+        let others = [
+            (id(1), rect(136.0, 514.0, 260.0, 23.0)),
+            (id(2), rect(406.0, 506.0, 58.0, 40.0)),
+            (id(3), rect(474.0, 516.0, 66.0, 19.0)),
+            (id(4), rect(164.0, 564.0, 360.0, 23.0)),
+            (id(5), rect(8.0, 124.0, 120.0, 40.0)),
+            (id(6), rect(138.0, 124.0, 96.0, 40.0)),
+        ];
+        assert_eq!(pick_row_neighbour(from, &others, true), Some(id(1)));
+        assert_eq!(pick_row_neighbour(others[1].1, &others, true), Some(id(4)));
+        assert_eq!(pick_row_neighbour(others[3].1, &others, false), Some(id(1)));
+        assert_eq!(pick_row_neighbour(from, &others, false), Some(id(5)));
+        assert_eq!(pick_row_neighbour(others[3].1, &others, true), None);
+    }
+
+    #[test]
+    fn down_keeps_the_column_in_a_grid() {
+        let id = |n: u64| egui::Id::new(n);
+        let others = [
+            (id(1), rect(10.0, 0.0, 200.0, 40.0)),
+            (id(2), rect(260.0, 0.0, 200.0, 40.0)),
+            (id(3), rect(10.0, 100.0, 200.0, 40.0)),
+            (id(4), rect(260.0, 100.0, 200.0, 40.0)),
+        ];
+        assert_eq!(pick_row_neighbour(others[1].1, &others, true), Some(id(4)));
+        assert_eq!(pick_row_neighbour(others[2].1, &others, false), Some(id(1)));
+    }
 }

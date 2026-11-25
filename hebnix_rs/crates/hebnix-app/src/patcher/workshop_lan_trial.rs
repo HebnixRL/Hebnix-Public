@@ -160,18 +160,44 @@ fn patched(p: &UpkPackage, path: &str, original: &[u8]) -> Result<Vec<u8>, Strin
     Ok(result)
 }
 
-/// patch only the two LAN functions, preserving all other uncommitted features
-pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
+/// A LAN mode change made to a package in memory. The receipt still has to be
+/// written around the package write: `persist_originals` before it replaces
+/// TAGame.upk and `commit` after.
+pub(super) struct StagedMode {
+    receipt: serde_json::Value,
+    path: PathBuf,
+    mode: String,
+}
+
+impl StagedMode {
+    /// Save the original function bodies before the game package is written.
+    pub(super) fn persist_originals(&self) -> Result<(), String> {
+        fs::create_dir_all(self.path.parent().unwrap()).map_err(|e| e.to_string())?;
+        fs::write(&self.path, self.receipt.to_string()).map_err(|e| e.to_string())
+    }
+
+    /// Record the new mode once the package is in place.
+    pub(super) fn commit(mut self) -> Result<(), String> {
+        let old_mode = self.receipt["mode"].clone();
+        self.receipt["mode"] = self.mode.into();
+        fs::write(&self.path, self.receipt.to_string()).map_err(|error| {
+            format!("package saved but trial mode could not be recorded (was {old_mode}): {error}")
+        })
+    }
+}
+
+/// Apply `mode` to the two LAN functions of a loaded TAGame.upk. Returns None
+/// when nothing needs writing. Every check runs before the package is changed,
+/// so an error leaves `p` untouched.
+pub(super) fn stage_mode(
+    p: &mut UpkPackage,
+    cooked: &Path,
+    mode: &str,
+) -> Result<Option<StagedMode>, String> {
     if !["off", "labels", "join"].contains(&mode) {
         return Err("mode must be off, labels or join".into());
     }
-    let _guard = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
-    if hebnix_sdk::process::is_rocket_league_running() {
-        return Err("Close Rocket League before changing the Workshop LAN patch.".into());
-    }
-    let live = cooked.join("TAGame.upk");
     let receipt_path = cooked.join("Backups").join(RECEIPT);
-    let mut p = UpkPackage::load(&live)?;
     let mut receipt = if receipt_path.exists() {
         serde_json::from_slice::<serde_json::Value>(
             &fs::read(&receipt_path).map_err(|e| e.to_string())?,
@@ -179,12 +205,12 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?
     } else {
         if mode == "off" {
-            return Ok(());
+            return Ok(None);
         }
         let mut exports = serde_json::Map::new();
         for path in [TITLE, JOIN] {
-            let original = payload(&p, path)?;
-            let changed = patched(&p, path, &original)?;
+            let original = payload(p, path)?;
+            let changed = patched(p, path, &original)?;
             exports.insert(
                 path.into(),
                 serde_json::json!({"original": original, "patched": changed}),
@@ -193,15 +219,16 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
         serde_json::json!({"version": 1, "mode": "off", "exports": exports})
     };
     let mut needs_write = false;
+    let mut replacements = Vec::new();
     for path in [TITLE, JOIN] {
         let original: Vec<u8> =
             serde_json::from_value(receipt["exports"][path]["original"].clone())
                 .map_err(|e| e.to_string())?;
         let stored: Vec<u8> = serde_json::from_value(receipt["exports"][path]["patched"].clone())
             .map_err(|e| e.to_string())?;
-        let current = payload(&p, path)?;
+        let current = payload(p, path)?;
         // rebuild so a newer build replaces the code an older build saved in the receipt
-        let changed = patched(&p, path, &original)?;
+        let changed = patched(p, path, &original)?;
         if current != original && current != stored && current != changed {
             return Err(format!(
                 "{path} was changed by another patch; leaving it alone"
@@ -212,19 +239,37 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
             needs_write = true;
         }
         let enabled = mode != "off" && (path == TITLE || mode == "join");
-        let bytes = if enabled { &changed } else { &original };
-        if current != *bytes {
-            p.replace_export_payload(object(&p, path)? as usize - 1, bytes)?;
+        let bytes = if enabled { changed } else { original };
+        if current != bytes {
+            replacements.push((object(p, path)? as usize - 1, bytes));
             needs_write = true;
         }
     }
     if !needs_write && receipt["mode"] == mode {
-        return Ok(());
+        return Ok(None);
     }
+    for (index, bytes) in replacements {
+        p.replace_export_payload(index, &bytes)?;
+    }
+    Ok(Some(StagedMode { receipt, path: receipt_path, mode: mode.into() }))
+}
+
+/// patch only the two LAN functions, preserving all other uncommitted features
+pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
+    if !["off", "labels", "join"].contains(&mode) {
+        return Err("mode must be off, labels or join".into());
+    }
+    let _guard = super::profile_pictures::PACKAGE_EDIT.lock().map_err(|error| error.to_string())?;
+    if hebnix_sdk::process::is_rocket_league_running() {
+        return Err("Close Rocket League before changing the Workshop LAN patch.".into());
+    }
+    let live = cooked.join("TAGame.upk");
+    let mut p = UpkPackage::load(&live)?;
+    let Some(staged) = stage_mode(&mut p, cooked, mode)? else {
+        return Ok(());
+    };
     // persist the originals before writing the game package
-    fs::create_dir_all(receipt_path.parent().unwrap()).map_err(|e| e.to_string())?;
-    let old_mode = receipt["mode"].clone();
-    fs::write(&receipt_path, receipt.to_string()).map_err(|e| e.to_string())?;
+    staged.persist_originals()?;
     let temp = cooked.join("TAGame.lan-trial.tmp");
     p.save_fast(&temp)?;
     let check = UpkPackage::load(&temp)?;
@@ -235,13 +280,7 @@ pub fn set_mode(cooked: &Path, mode: &str) -> Result<(), String> {
     }
     fs::rename(&temp, &live).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(temp);
-    receipt["mode"] = mode.into();
-    if let Err(error) = fs::write(&receipt_path, receipt.to_string()) {
-        return Err(format!(
-            "package saved but trial mode could not be recorded (was {old_mode}): {error}"
-        ));
-    }
-    Ok(())
+    staged.commit()
 }
 
 pub fn enabled(cooked: &Path) -> bool {
@@ -251,14 +290,19 @@ pub fn enabled(cooked: &Path) -> bool {
         .is_some_and(|r| r["mode"] == "labels" || r["mode"] == "join")
 }
 
-pub fn reapply(cooked: &Path) -> Result<(), String> {
-    let mode = fs::read(cooked.join("Backups").join(RECEIPT))
+/// The recorded LAN mode when it is on ("labels" or "join").
+pub(super) fn enabled_mode(cooked: &Path) -> Option<String> {
+    fs::read(cooked.join("Backups").join(RECEIPT))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|receipt| receipt["mode"].as_str().map(str::to_owned));
-    match mode.as_deref() {
-        Some(mode @ ("labels" | "join")) => set_mode(cooked, mode),
-        _ => Ok(()),
+        .and_then(|receipt| receipt["mode"].as_str().map(str::to_owned))
+        .filter(|mode| mode == "labels" || mode == "join")
+}
+
+pub fn reapply(cooked: &Path) -> Result<(), String> {
+    match enabled_mode(cooked) {
+        Some(mode) => set_mode(cooked, &mode),
+        None => Ok(()),
     }
 }
 

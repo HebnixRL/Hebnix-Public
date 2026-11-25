@@ -1,17 +1,12 @@
-//! Heroic-launcher support for RlLaunchMode::SteamShortcutToHeroic and
-//! HeroicDirect (see config.rs) - ported from the Linux port's rl_launch.rs,
-//! which needed all three (real Steam, a non-Steam shortcut pointed at
-//! Heroic, and Heroic with no Steam at all) since Rocket League has no
-//! official Linux/Steam listing. Steam and Epic dispatch stay in winutil.rs,
-//! which already had them; this module only adds what's new.
+//! Non-Steam shortcut support for RlLaunchMode::SteamShortcut (see
+//! config.rs): finds the shortcuts in Steam's shortcuts.vdf so the setup
+//! wizard can offer them. Steam and Epic dispatch stay in sys/windows.rs.
 
 use std::path::PathBuf;
 
-use crate::config::RlLaunchCfg;
 
-/// a Steam non-Steam-shortcut found in shortcuts.vdf whose target looks like
-/// Heroic - offered in the setup wizard so the user doesn't have to dig the
-/// numeric ID out by hand.
+/// a Steam non-Steam-shortcut found in shortcuts.vdf - offered in the setup
+/// wizard so the user doesn't have to dig the numeric ID out by hand.
 pub struct ShortcutCandidate {
     pub app_name: String,
     pub exe: String,
@@ -93,20 +88,22 @@ fn parse_map(data: &[u8], mut i: usize) -> Option<(Vec<(String, VdfValue)>, usiz
 enum VdfValue {
     Map(Vec<(String, VdfValue)>),
     Str(String),
-    #[allow(dead_code)]
     Int(i32),
 }
 
-/// non-Steam shortcuts whose target executable looks like Heroic, for the
-/// setup wizard to offer as auto-detected candidates.
-pub fn find_heroic_shortcuts() -> Vec<ShortcutCandidate> {
+/// every non-Steam shortcut, for the setup wizard to offer.
+pub fn find_steam_shortcuts() -> Vec<ShortcutCandidate> {
     let Some(path) = shortcuts_vdf_path() else {
         return Vec::new();
     };
     let Ok(data) = std::fs::read(&path) else {
         return Vec::new();
     };
-    let Some((root, _)) = parse_map(&data, 0) else {
+    parse_shortcuts(&data)
+}
+
+fn parse_shortcuts(data: &[u8]) -> Vec<ShortcutCandidate> {
+    let Some((root, _)) = parse_map(data, 0) else {
         return Vec::new();
     };
     let Some((_, VdfValue::Map(shortcuts))) = root.into_iter().find(|(k, _)| k == "shortcuts")
@@ -121,20 +118,24 @@ pub fn find_heroic_shortcuts() -> Vec<ShortcutCandidate> {
         };
         let mut app_name = None;
         let mut exe = None;
+        let mut appid = None;
         for (key, value) in &fields {
-            match (key.as_str(), value) {
-                ("AppName", VdfValue::Str(s)) => app_name = Some(s.clone()),
-                ("Exe", VdfValue::Str(s)) => exe = Some(s.clone()),
+            match (key.to_ascii_lowercase().as_str(), value) {
+                ("appname", VdfValue::Str(s)) => app_name = Some(s.clone()),
+                ("exe", VdfValue::Str(s)) => exe = Some(s.clone()),
+                ("appid", VdfValue::Int(id)) => appid = Some(*id),
                 _ => {}
             }
         }
         let (Some(app_name), Some(exe)) = (app_name, exe) else {
             continue;
         };
-        if !exe.to_ascii_lowercase().contains("heroic") {
-            continue;
-        }
-        let rungameid = compute_shortcut_id(&exe, &app_name);
+        // Current Steam stores the shortcut's own ID; only shortcuts made by
+        // old Steam versions lack it and use the CRC scheme.
+        let rungameid = match appid {
+            Some(id) => ((id as u32 as u64) << 32) | 0x0200_0000,
+            None => compute_shortcut_id(&exe, &app_name),
+        };
         candidates.push(ShortcutCandidate {
             app_name,
             exe,
@@ -142,37 +143,4 @@ pub fn find_heroic_shortcuts() -> Vec<ShortcutCandidate> {
         });
     }
     candidates
-}
-
-/// launches Heroic directly via its own deep-link URI (same
-/// `heroic://launch?appName=..&runner=..` scheme Heroic uses on every
-/// platform), bypassing Steam entirely. Used for HeroicDirect always, and
-/// for SteamShortcutToHeroic's Workshop LAN -multihome relaunch specifically
-/// (steam://run's launch-argument override doesn't work on non-Steam
-/// shortcuts - verified live, "Game configuration unavailable").
-pub fn heroic_launch(cfg: &RlLaunchCfg, multihome: Option<&str>) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let mut uri = format!(
-        "heroic://launch?appName={}&runner={}",
-        cfg.heroic_app_name, cfg.heroic_runner
-    );
-    if let Some(address) = multihome {
-        uri.push_str(&format!("&arg=-multihome%3D{address}"));
-    }
-    tracing::info!(
-        "rl_launch: spawning '{}' --no-gui --no-sandbox {uri}",
-        cfg.heroic_binary
-    );
-    std::process::Command::new(&cfg.heroic_binary)
-        .args(["--no-gui", "--no-sandbox", &uri])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| {
-            let message = format!("could not run '{}': {error}", cfg.heroic_binary);
-            tracing::warn!("rl_launch: {message}");
-            message
-        })
 }

@@ -379,22 +379,17 @@ fn is_steam_path(game_path: &std::path::Path) -> bool {
     path.contains("steamapps") || path.contains("steam\\common") || path.contains("steam/library")
 }
 
-/// steam://... or com.epicgames.launcher://... for the modes that just need
-/// a URI opened via `cmd /C start` - everything except Heroic, which spawns
-/// its own binary directly (see rl_launch::heroic_launch).
+/// steam://... or com.epicgames.launcher://..., opened via `cmd /C start`.
 fn simple_launch_uri(cfg: &crate::config::RlLaunchCfg, game_path: &std::path::Path) -> String {
     use crate::config::RlLaunchMode;
     match cfg.mode {
-        // a non-Steam shortcut still gets a plain restart THROUGH Steam
-        // (steam overlay/input/presence all work here) - only Workshop
-        // LAN's -multihome relaunch has to bypass Steam for this mode,
-        // since steam://run's argument override refuses non-Steam
-        // shortcuts outright.
-        RlLaunchMode::SteamNative | RlLaunchMode::SteamShortcutToHeroic => {
+        // a non-Steam shortcut gets a plain restart through Steam (steam
+        // overlay/input/presence all work here)
+        RlLaunchMode::SteamNative | RlLaunchMode::SteamShortcut => {
             format!("steam://rungameid/{}", cfg.steam_id)
         }
         RlLaunchMode::EpicDirect => EPIC_LAUNCH_URI.to_string(),
-        RlLaunchMode::Unconfigured | RlLaunchMode::HeroicDirect => {
+        RlLaunchMode::Unconfigured => {
             if is_steam_path(game_path) {
                 "steam://rungameid/252950".to_string()
             } else {
@@ -408,14 +403,9 @@ pub fn start_rocket_league(
     cfg: &crate::config::RlLaunchCfg,
     game_path: &std::path::Path,
 ) -> std::io::Result<()> {
-    use crate::config::RlLaunchMode;
     #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    if cfg.mode == RlLaunchMode::HeroicDirect {
-        return crate::rl_launch::heroic_launch(cfg, None).map_err(std::io::Error::other);
-    }
 
     let launch = simple_launch_uri(cfg, game_path);
     std::process::Command::new("cmd")
@@ -429,7 +419,6 @@ pub fn restart_rocket_league(
     cfg: &crate::config::RlLaunchCfg,
     game_path: &std::path::Path,
 ) -> std::io::Result<()> {
-    use crate::config::RlLaunchMode;
     #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -448,10 +437,6 @@ use std::os::windows::process::CommandExt;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-
-    if cfg.mode == RlLaunchMode::HeroicDirect {
-        return crate::rl_launch::heroic_launch(cfg, None).map_err(std::io::Error::other);
     }
 
     let launch = simple_launch_uri(cfg, game_path);
@@ -480,18 +465,18 @@ use std::os::windows::process::CommandExt;
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
-    if matches!(
-        cfg.mode,
-        RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect
-    ) {
-        return crate::rl_launch::heroic_launch(cfg, Some(address));
+    if cfg.mode == RlLaunchMode::SteamShortcut {
+        return Err(
+            "A non-Steam shortcut can't pass -multihome: Steam won't add arguments to it"
+                .to_string(),
+        );
     }
 
     let is_steam = match cfg.mode {
         RlLaunchMode::SteamNative => true,
         RlLaunchMode::EpicDirect => false,
         RlLaunchMode::Unconfigured => is_steam_path(game_path),
-        RlLaunchMode::SteamShortcutToHeroic | RlLaunchMode::HeroicDirect => unreachable!(),
+        RlLaunchMode::SteamShortcut => unreachable!(),
     };
     if is_steam {
         let steam_id = if cfg.mode == RlLaunchMode::SteamNative {

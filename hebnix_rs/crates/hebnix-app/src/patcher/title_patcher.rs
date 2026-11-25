@@ -297,6 +297,22 @@ fn titles_patch_end_game_menu_package() {
 
 #[cfg(test)]
 #[test]
+#[ignore = "requires an installed game's HUD and title restore snapshots"]
+fn installed_hud_title_restore() {
+    let cooked = PathBuf::from(std::env::var_os("HEBNIX_HUD_COOKED").unwrap());
+    let root = folder(&crate::config::base_dir(), &cooked, "title_upk");
+    let manifest = load_manifest(&root).unwrap();
+    let file = "GFX_Hud_SF.upk";
+    let entries: Vec<_> = manifest.entries.iter().filter(|entry| entry.file == file).collect();
+    assert!(!entries.is_empty());
+    let package = UpkPackage::load(&cooked.join(file)).unwrap();
+    let (restored, _) = baseline(package, &root, &root.join(format!("{file}.original")), &entries).unwrap();
+    let rules = manifest.rules.unwrap();
+    assert!(rewrite_export(&restored, entries[0].export, |_, raw| movie::patch(raw, &rules)).unwrap().is_some());
+}
+
+#[cfg(test)]
+#[test]
 fn team_ring_round_trips_real_hud_and_preserves_title_exports() {
     let Some(original) = std::env::var_os("HEBNIX_BOOST_HUD_FIXTURE").map(PathBuf::from) else {
         return;
@@ -482,8 +498,8 @@ pub(super) fn rebase_hud_movie(
     };
     let matches_title_patch = hash(data(&package, index)?) == entry.patched
         || without_ring.as_ref().or(with_ring.as_ref()).is_some_and(|payload| hash(payload) == entry.patched);
-    if manifest.build != backup_guard::build_id(cooked)? || !matches_title_patch {
-        return Err("The HUD differs from its Titles restore record. Reapply Titles before changing Chat Paste.".into());
+    if manifest.build != backup_guard::build_id(cooked)? {
+        return Err("The HUD Titles restore record belongs to a different Rocket League build.".into());
     }
     let original = match read_snapshot(&root, &entry.original)? {
         Some(bytes) => bytes,
@@ -492,7 +508,12 @@ pub(super) fn rebase_hud_movie(
     if hash(&original) != entry.original {
         return Err("The HUD Titles baseline failed verification.".into());
     }
-    package.replace_title_export(index, &original)?;
+    if matches_title_patch {
+        package.replace_title_export(index, &original)?;
+    } else {
+        let path = root.join(format!("{BOOST_HUD}.original"));
+        (package, _) = baseline(package, &root, &path, &[entry])?;
+    }
     let rules = manifest.rules.as_deref().unwrap_or(fallback_rules);
     if manifest.rules.is_none() {
         let replay = rewrite_movie_export(&package, index, &|raw| movie::patch(raw, rules))?;
@@ -726,10 +747,10 @@ fn run(
             if !valid_file(&entry.file) {
                 return Err("Invalid UI backup filename".into());
             }
-            if !inspected.insert(entry.file.clone()) || !cooked.join(&entry.file).is_file() {
+            if !inspected.insert(entry.file.clone()) || !crate::patcher::game_path::resolve(&cooked, &entry.file).is_file() {
                 continue;
             }
-            let current = UpkPackage::load(&cooked.join(&entry.file))?;
+            let current = UpkPackage::load(&crate::patcher::game_path::resolve(&cooked, &entry.file))?;
             if previous
                 .entries
                 .iter()
@@ -786,7 +807,7 @@ fn run(
         let mut entries = Vec::new();
         let mut methods = 0;
         for file in files {
-            let live = cooked.join(&file);
+            let live = crate::patcher::game_path::resolve(&cooked, &file);
             let live_hash = hash(&fs::read(&live).map_err(|e| e.to_string())?);
             let file_stage = stage.join(&file);
             let backup = root.join(format!("{file}.original"));

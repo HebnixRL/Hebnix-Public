@@ -130,11 +130,13 @@ pub fn note_foreground() {
     );
 }
 
-/// hand focus back to RL. no portable way to force-focus another app's
-/// window from a Wayland client, so this is a no-op that just reports
-/// whether it *would* apply (kept so callers' control flow is unchanged).
+/// hand focus back to RL when Hebnix was opened from the game. A Wayland
+/// client can't focus another app's window itself, so the compositor does it
+/// (Hyprland, KWin and niri; elsewhere this does nothing).
 pub fn restore_foreground() -> bool {
-    CAME_FROM_GAME.load(Ordering::Relaxed) && hebnix_sdk::process::rocket_league_hwnd().is_some()
+    CAME_FROM_GAME.load(Ordering::Relaxed)
+        && hebnix_sdk::process::rocket_league_hwnd().is_some()
+        && hebnix_sdk::process::focus_rocket_league()
 }
 
 /// Hyprland-only: pops our window on top of a fullscreened RL, on RL's own
@@ -165,6 +167,13 @@ pub fn take_show_request() -> bool {
 /// should be driven from this flag at the call site.
 pub fn set_main_window_invisible(invisible: bool) {
     MAIN_HIDDEN.store(invisible, Ordering::Relaxed);
+}
+
+/// Hyprland is the desktop the Linux defaults were tuned on (GPU-rendered
+/// overlays, plain hide on the hotkey); everything else gets the KDE Plasma
+/// defaults (software overlays, Minimize to Tray)
+pub fn is_hyprland() -> bool {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|value| !value.is_empty())
 }
 
 // "Minimize to Tray" setting, mirrored here so the hotkey and tray threads

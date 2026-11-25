@@ -27,13 +27,13 @@ impl HebnixApp {
 
     pub(super) fn http_spoofer_ready(&self) -> bool {
         self.http_spoofer_features()
-            .can_run(spoofer::is_admin(), self.spoofer_cert_installed)
+            .can_run(!spoofer::http_needs_elevated_relaunch(), self.spoofer_cert_installed)
     }
 
     pub(super) fn prompt_for_missing_spoofer_certificate(&mut self) {
         self.spoofer_cert_installed = spoofer::ca::is_current_installed(&self.base_dir);
         let requested = self.http_spoofer_features();
-        if requested.any() && !spoofer::is_admin() {
+        if requested.any() && spoofer::http_needs_elevated_relaunch() {
             let mut pending = self.pending_spoofer_features.unwrap_or_default();
             pending.username |= requested.username;
             pending.friends |= requested.friends;
@@ -51,11 +51,11 @@ impl HebnixApp {
     }
 
     pub(super) fn install_spoofer_certificate(&mut self) {
-        if !spoofer::is_admin() {
+        if spoofer::http_needs_elevated_relaunch() {
             self.admin_prompt_open = true;
             return;
         }
-        match spoofer::ca::install(&self.base_dir) {
+        match spoofer::install_certificate(&self.base_dir) {
             Ok(()) => {
                 self.spoofer_cert_installed = spoofer::ca::is_current_installed(&self.base_dir);
                 if self.spoofer_cert_installed {
@@ -79,8 +79,16 @@ impl HebnixApp {
     }
 
     pub(super) fn render_spoofer_certificate_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Account HTTPS proxy certificate");
-        ui.weak("Name and Friends use the account HTTPS proxy while Rocket League is running. It routes only api.epicgames.dev and leaves Windows proxy settings unchanged. Administrator access and this certificate are required.");
+        #[cfg(not(target_os = "linux"))]
+        {
+            ui.heading("Account HTTPS proxy certificate");
+            ui.weak("Name and Friends use the account HTTPS proxy while Rocket League is running. It routes only api.epicgames.dev and leaves Windows proxy settings unchanged. Administrator access and this certificate are required.");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            ui.heading("HTTP proxy certificate");
+            ui.weak("Name and Friends point Rocket League's Wine prefix at Hebnix's HTTP proxy before the game starts (and put it back after). No administrator restart is needed; installing or removing this certificate asks for your password once.");
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(t("spoofer-certificate-status"));
             ui.label(if self.spoofer_cert_installed {
@@ -90,16 +98,11 @@ impl HebnixApp {
             });
             if self.spoofer_cert_installed {
                 if ui.button(t("spoofer-remove")).clicked() {
-                    if spoofer::is_admin() {
+                    if !spoofer::http_needs_elevated_relaunch() {
                         self.disable_certificate_features();
                         if self.spoofer_mgr.account_redirect_active() {
                             self.console.write("[Spoofer] The account redirect could not be removed. The certificate is retained until cleanup succeeds.");
-                        } else { match {
-                            #[cfg(target_os = "windows")]
-                            { spoofer::ca::uninstall() }
-                            #[cfg(target_os = "linux")]
-                            { spoofer::ca::uninstall(&crate::config::base_dir()) }
-                        } {
+                        } else { match spoofer::uninstall_certificate(&self.base_dir) {
                             Ok(()) => self.console.write("[Spoofer] Certificate removed."),
                             Err(error) => self
                                 .console
@@ -123,7 +126,7 @@ impl HebnixApp {
                 self.evaluate_proxies();
             }
         });
-        if !spoofer::is_admin() {
+        if spoofer::http_needs_elevated_relaunch() {
             ui.weak("Restart as Administrator to install or remove the certificate.");
         }
         ui.horizontal_wrapped(|ui| {

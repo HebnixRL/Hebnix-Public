@@ -38,6 +38,9 @@ pub struct WebviewOverlay {
     active: Vec<PageLayer>,
     visible: bool,
     last_error: Option<String>,
+    /// GPU mode: when the overlay was first shown, until it survived 5 s
+    gpu_shown_since: Option<std::time::Instant>,
+    gpu_confirmed: bool,
 }
 
 /// layer-shell only exists on Wayland; on X11 (i3, Cinnamon, XFCE, ...) the
@@ -108,6 +111,8 @@ impl WebviewOverlay {
             active: Vec::new(),
             visible: false,
             last_error: None,
+            gpu_shown_since: None,
+            gpu_confirmed: false,
         }
     }
 
@@ -199,6 +204,10 @@ impl WebviewOverlay {
         // safely be set here (this runs long after startup, other threads
         // already running).
         let webview = webkit2gtk::WebView::new();
+        tracing::info!(
+            software = render_mode::software(),
+            "html overlay: rendering mode (software when forced in Settings or after a GPU crash)"
+        );
         // WebKit's GPU-accelerated compositing path (DMA-BUF + explicit
         // sync, wp_linux_drm_syncobj_surface_v1) hits a driver bug on at
         // least this system's NVIDIA/Wayland combo -- confirmed live: it
@@ -210,7 +219,11 @@ impl WebviewOverlay {
         if let Some(settings) = webkit2gtk::WebViewExt::settings(&webview) {
             webkit2gtk::SettingsExt::set_hardware_acceleration_policy(
                 &settings,
-                webkit2gtk::HardwareAccelerationPolicy::Never,
+                if render_mode::software() {
+                    webkit2gtk::HardwareAccelerationPolicy::Never
+                } else {
+                    webkit2gtk::HardwareAccelerationPolicy::Always
+                },
             );
             // the host shell is loaded via load_html with a synthetic base
             // URI, and its iframes point at real file:// paths -- without
@@ -369,12 +382,23 @@ impl WebviewOverlay {
                  }}\
                }}\
              }});\
+             {repaint}\
              window.__hebnixDeliver = function(slug, data) {{\
                var el = document.getElementById('frame-' + slug);\
                if (el && el.contentWindow) el.contentWindow.postMessage(data, '*');\
                else console.error('hebnix overlay: no iframe for ' + slug);\
              }};\
-             </script></body></html>"
+             </script></body></html>",
+            repaint = if render_mode::software() {
+                // webkit2gtk 2.54.2's software path only repaints the changed
+                // area into an otherwise blank buffer, so everything but the
+                // moving part vanished (Controller Overlay). Nudging the root's
+                // opacity every frame makes it repaint the whole page.
+                "(function f(t){document.body.style.opacity=(t&1)?'0.999':'1';\
+                 requestAnimationFrame(function(){f(t+1);});})(0);"
+            } else {
+                ""
+            },
         );
         tracing::debug!(html, "html overlay: host page");
         // real file:// base (not a synthetic scheme) so the file:// iframe
@@ -408,6 +432,10 @@ impl WebviewOverlay {
         }
         if let Some(window) = &self.window {
             tracing::info!("html overlay: show (Rocket League focused)");
+            if !render_mode::software() && !self.gpu_confirmed && self.gpu_shown_since.is_none() {
+                render_mode::gpu_starting();
+                self.gpu_shown_since = Some(std::time::Instant::now());
+            }
             if is_wayland_session() {
                 // restore full click-through input region
                 let empty_region = cairo::Region::create();
@@ -422,6 +450,19 @@ impl WebviewOverlay {
                 window.show_all();
             }
             self.visible = true;
+        }
+    }
+
+    /// Call once a frame while shown: once the GPU-rendered overlay has been on
+    /// screen for a few seconds without taking the process down, clear the
+    /// crash marker so the next start keeps GPU rendering.
+    pub fn tick_visible(&mut self) {
+        if let Some(since) = self.gpu_shown_since {
+            if self.visible && since.elapsed() >= std::time::Duration::from_secs(5) {
+                render_mode::gpu_ok();
+                self.gpu_shown_since = None;
+                self.gpu_confirmed = true;
+            }
         }
     }
 
@@ -473,51 +514,218 @@ mod page_url_tests {
     }
 }
 
+/// How the HTML overlay is rendered. GPU by default on Hyprland, software
+/// elsewhere (the GPU-rendered overlay updates far too slowly on KDE Plasma).
+/// Settings can force either one; `HEBNIX_WEBVIEW_SOFTWARE` forces software.
+/// A GPU start that died while the overlay was coming up switches to software
+/// (older NVIDIA drivers abort the whole process with a "Missing acquire
+/// timeline" Wayland protocol error).
+pub mod render_mode {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SOFTWARE: AtomicBool = AtomicBool::new(false);
+
+    fn state_dir() -> PathBuf {
+        crate::config::base_dir().join("state")
+    }
+
+    fn forced_marker() -> PathBuf {
+        state_dir().join("webview-software")
+    }
+
+    fn pending_marker() -> PathBuf {
+        state_dir().join("webview-gpu-pending")
+    }
+
+    /// set in Settings: GPU rendering where software is the default
+    fn gpu_marker() -> PathBuf {
+        state_dir().join("webview-gpu")
+    }
+
+    /// GPU rendering is only the default where it is known to keep up
+    pub fn default_software() -> bool {
+        !crate::winutil::is_hyprland()
+    }
+
+    /// the Settings choice; takes effect at the next start
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Choice {
+        /// hardware on Hyprland, software elsewhere
+        Auto,
+        Hardware,
+        Software,
+    }
+
+    /// Decide once, from `main()` before any other thread exists (it may set
+    /// `WEBKIT_DISABLE_COMPOSITING_MODE`).
+    ///
+    /// # Safety
+    /// Must run while the process is still single-threaded.
+    pub unsafe fn init() {
+        let software = if std::env::var_os("HEBNIX_WEBVIEW_SOFTWARE").is_some() {
+            tracing::info!("html overlay: software rendering (HEBNIX_WEBVIEW_SOFTWARE)");
+            true
+        } else if forced_marker().exists() {
+            tracing::info!("html overlay: software rendering (Settings or an earlier GPU crash)");
+            true
+        } else if pending_marker().exists() {
+            tracing::warn!(
+                "html overlay: the last start died while the GPU-rendered overlay was coming up, \
+                 switching to software rendering (turn it back off in Settings to retry)"
+            );
+            let _ = std::fs::create_dir_all(state_dir());
+            let _ = std::fs::write(forced_marker(), "set automatically: GPU overlay crashed\n");
+            let _ = std::fs::remove_file(pending_marker());
+            true
+        } else if gpu_marker().exists() {
+            false
+        } else if default_software() {
+            tracing::info!("html overlay: software rendering (default outside Hyprland)");
+            true
+        } else {
+            false
+        };
+        SOFTWARE.store(software, Ordering::Relaxed);
+        if software {
+            unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1") };
+        }
+    }
+
+    pub fn software() -> bool {
+        SOFTWARE.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn gpu_starting() {
+        let _ = std::fs::create_dir_all(state_dir());
+        let _ = std::fs::write(pending_marker(), b"");
+    }
+
+    pub(super) fn gpu_ok() {
+        let _ = std::fs::remove_file(pending_marker());
+    }
+
+    pub fn choice() -> Choice {
+        if forced_marker().exists() {
+            Choice::Software
+        } else if gpu_marker().exists() {
+            Choice::Hardware
+        } else {
+            Choice::Auto
+        }
+    }
+
+    pub fn set_choice(choice: Choice) -> std::io::Result<()> {
+        fn remove(path: PathBuf) -> std::io::Result<()> {
+            match std::fs::remove_file(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            }
+        }
+        let _ = std::fs::remove_file(pending_marker());
+        remove(forced_marker())?;
+        remove(gpu_marker())?;
+        let marker = match choice {
+            Choice::Auto => return Ok(()),
+            Choice::Hardware => gpu_marker(),
+            Choice::Software => forced_marker(),
+        };
+        std::fs::create_dir_all(state_dir())?;
+        std::fs::write(marker, "set in Settings\n")
+    }
+
+    /// what `choice` gives at the next start
+    pub fn choice_is_software(choice: Choice) -> bool {
+        match choice {
+            Choice::Auto => default_software(),
+            Choice::Hardware => false,
+            Choice::Software => true,
+        }
+    }
+}
+
 pub mod runtime {
-    // no WebView2 on Linux
+    /// The Linux HTML overlay is a webkit2gtk window (`WebviewOverlay`), so
+    /// there is no WebView2 runtime to install or wait for.
     pub fn is_available() -> bool {
-        false
+        true
     }
 
     pub fn ensure_present() {}
 }
 
-/// Windows composes the plugin pages into the overlay window; here the pages
-/// go through `WebviewOverlay` instead, so this is never constructed.
+/// Same surface the Windows `WebviewHost` has, backed by `WebviewOverlay` so
+/// `app.rs` drives both platforms through one code path.
 pub mod host {
-    pub struct WebviewHost;
+    use super::{PageLayer, WebviewOverlay};
+    use std::path::PathBuf;
+
+    pub struct WebviewHost {
+        overlay: WebviewOverlay,
+    }
 
     impl WebviewHost {
         pub fn new(_visual: ()) -> Self {
-            Self
+            Self {
+                overlay: WebviewOverlay::new(),
+            }
         }
 
-        pub fn sync_pages<T>(&mut self, _pages: &[T]) {}
+        pub fn sync_pages(&mut self, pages: &[(String, Option<String>, PathBuf, bool)]) {
+            let layers: Vec<PageLayer> = pages
+                .iter()
+                .filter_map(|(slug, page, assets_dir, _)| {
+                    page.as_ref()
+                        .map(|page| (slug.clone(), page.clone(), assets_dir.clone()))
+                })
+                .collect();
+            self.overlay.sync_pages(&layers);
+        }
 
-        pub fn deliver<T>(&self, _slug: &str, _data: T) -> Result<(), String> {
+        pub fn deliver(&self, slug: &str, data: serde_json::Value) -> Result<(), String> {
+            if !self.overlay.is_active() {
+                return Err("html overlay is not running".to_string());
+            }
+            self.overlay.deliver(slug, &data);
             Ok(())
         }
 
         pub fn status(&self) -> String {
-            "unsupported".into()
+            if self.overlay.is_active() {
+                format!(
+                    "webkit2gtk overlay, {} plugin page(s), {}",
+                    self.overlay.active.len(),
+                    if self.overlay.visible { "shown" } else { "hidden" }
+                )
+            } else {
+                "webkit2gtk overlay not created".to_string()
+            }
         }
 
+        /// plugin pages are click-through HUDs
         pub fn wants_input(&self) -> bool {
             false
         }
 
         pub fn wants_overlay(&self) -> bool {
-            false
+            self.overlay.is_active() && !self.overlay.active.is_empty()
         }
 
         pub fn is_ready(&self) -> bool {
-            false
+            self.overlay.is_active()
         }
 
-        pub fn tick(&mut self, _target: (), _size: (u32, u32), _visible: bool) {}
+        pub fn tick(&mut self, _target: (), _size: (u32, u32), visible: bool) {
+            if visible {
+                self.overlay.show();
+                self.overlay.tick_visible();
+            } else {
+                self.overlay.hide();
+            }
+        }
 
         pub fn take_error(&mut self) -> Option<String> {
-            None
+            self.overlay.take_error()
         }
     }
 }

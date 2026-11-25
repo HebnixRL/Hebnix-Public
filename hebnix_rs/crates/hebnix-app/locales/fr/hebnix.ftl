@@ -60,12 +60,11 @@ settings-not-found = Introuvable
 settings-set-value = Définir { $value }
 settings-ini-restart-note = Les modifications du fichier ini s'appliquent après le redémarrage de Rocket League.
 settings-rl-launch-heading = Lancement de Rocket League
-settings-rl-launch-desc = Indique à Hebnix comment redémarrer Rocket League - utilisé par le bouton de redémarrage et par Héberger/Rejoindre du LAN Workshop. Laissez sur détection automatique sauf si vous utilisez Heroic.
+settings-rl-launch-desc = Indique à Hebnix comment redémarrer Rocket League - utilisé par le bouton de redémarrage et par Héberger/Rejoindre du LAN Workshop. Laissez sur détection automatique sauf si vous le lancez via un raccourci non-Steam.
 settings-rl-mode-unconfigured = Détection automatique (Steam ou Epic)
 settings-rl-mode-steam-native = Jeu Steam officiel
 settings-rl-mode-epic-direct = Epic Games Launcher
-settings-rl-mode-steam-shortcut = Raccourci non-Steam vers Heroic
-settings-rl-mode-heroic-direct = Heroic directement
+settings-rl-mode-steam-shortcut = Raccourci non-Steam (n’importe quel lanceur, p. ex. Slipstream)
 settings-rl-current-setup = Configuration actuelle : { $mode }
 settings-rl-launch-setup-button = Configurer le lancement de Rocket League...
 discord-enable = Activer Discord Rich Presence
@@ -79,6 +78,7 @@ discord-custom = Personnalisé
 discord-custom-hint = Message personnalisé
 discord-custom-disabled-note = Le message personnalisé est désactivé tant que « État du jeu » est sélectionné.
 system-start-with-windows = Lancer avec Windows :
+system-start-with-linux = Lancer avec Linux :
 console-startup-failed = Échec de la mise à jour de l'entrée de démarrage : { $error }
 system-start-in-tray = Démarrer dans la zone de notification :
 system-close-to-tray = Réduire dans la zone de notification :
@@ -213,17 +213,13 @@ fullscreen-notice-rocket-league-is-set-to-fullscreen =
     Rocket League est en plein écran, l'overlay ne s'affichera donc pas par-dessus.
     Passez les paramètres vidéo du jeu en mode sans bordure ou fenêtré.
 fullscreen-notice-never-show-again = Ne plus afficher
-rl-launch-setup-how-do-you-actually-launch-rocket = Comment lancez-vous réellement Rocket League ? Cela détermine le fonctionnement du bouton de redémarrage et de Héberger/Rejoindre du LAN Workshop. La détection automatique (par défaut) fonctionne déjà pour les installations Steam et Epic Games Launcher classiques - ne choisissez autre chose ici que si vous utilisez Heroic.
+rl-launch-setup-how-do-you-actually-launch-rocket = Comment lancez-vous réellement Rocket League ? Cela détermine le fonctionnement du bouton de redémarrage et de Héberger/Rejoindre du LAN Workshop. La détection automatique (par défaut) fonctionne déjà pour les installations Steam et Epic Games Launcher classiques - ne choisissez autre chose ici que si vous le lancez via un raccourci non-Steam.
 rl-launch-setup-auto-detect-steam-or-epic-games = Détection automatique (Steam ou Epic Games Launcher)
-rl-launch-setup-non-steam-shortcut-that-opens-heroic = Raccourci non-Steam qui ouvre Heroic
-rl-launch-setup-heroic-directly-no-steam-or-epic = Heroic directement, sans Steam ni Epic Games Launcher
 rl-launch-setup-steam-app-id-252950-is-rocket = ID d'application Steam (252950 est l'entrée officielle de Rocket League) :
-rl-launch-setup-scan-steam-shortcuts-for-heroic = Rechercher Heroic dans les raccourcis Steam
 rl-launch-setup-no-candidates-found-yet-click-scan = Aucun candidat trouvé pour l'instant - cliquez sur Rechercher ou saisissez l'ID manuellement ci-dessous.
+rl-launch-setup-scan-steam-shortcuts = Chercher les raccourcis Steam
+rl-launch-setup-search-shortcuts = Rechercher des raccourcis…
 rl-launch-setup-steam-shortcut-id = ID du raccourci Steam :
-rl-launch-setup-heroic-binary-path-e-g-the = Chemin de l'exécutable Heroic (par ex. le chemin complet de Heroic.exe) :
-rl-launch-setup-epic-catalog-app-name-sugar-is = Nom d'application du catalogue Epic (Sugar correspond à Rocket League, identique pour tous) :
-rl-launch-setup-runner = Runner :
 rl-launch-setup-save = Enregistrer
 install-modal-plugin-archives = Archives de plugins
 hebnix-install-back = < Retour
@@ -282,7 +278,6 @@ owned-proxy-prompt-enable-owned-item-catalog = Activer le catalogue des objets p
 fullscreen-notice-overlay-unavailable = Overlay indisponible
 launch-path-notice-rocket-league = Rocket League
 rl-launch-setup-rocket-league-launch-setup = Configuration du lancement de Rocket League
-rl-launch-setup-non-steam-shortcuts-can-t-pass = Les raccourcis non-Steam ne peuvent pas transmettre d'arguments de lancement (limitation de Steam). Le redémarrage -multihome du LAN Workshop lancera Heroic directement à la place, en contournant Steam pour cette session.
 install-modal-install-from-hebnix =
     ☁
     Installer depuis Hebnix
@@ -516,7 +511,6 @@ statsapi-notice-couldn-t-write-the-file-err =
     Impossible d'écrire le fichier :
     { $err }
 plugin-delete-prompt-are-you-sure-you-want-to = Voulez-vous vraiment supprimer { $plugin_name } ?
-rl-launch-setup-heroic-binary-rl-launch-draft = Exécutable Heroic : { $heroic_binary }
 hebnix-install-by-author = par { $author }
 hebnix-install-page-display-page-of-total-pages = Page { $display_page } sur { $total_pages }
 plugin-windows-window-error-e = erreur de fenêtre : { $e }

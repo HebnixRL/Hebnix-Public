@@ -3,7 +3,15 @@
 use std::fs;
 use std::path::Path;
 
-pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
+pub fn restore_group(
+    base: &Path,
+    game: &Path,
+    group: crate::maintenance::PatchGroup,
+    decals: &[(String, Option<String>)],
+    patcher: &crate::config::PatcherCfg,
+    also_remove_custom: bool,
+) -> Result<(), String> {
+    use crate::maintenance::PatchGroup;
     if hebnix_sdk::process::is_rocket_league_running() {
         return Err("Close Rocket League before restoring game changes.".into());
     }
@@ -15,74 +23,119 @@ pub fn restore(base: &Path, game: &Path) -> Result<(), String> {
     if super::backup_guard::update_required(&cooked)? {
         return Err("Rocket League changed since the backups were made. Run repatch in the Hebnix Console before uninstalling.".into());
     }
-    if crate::replay_history_patch::installed(game).unwrap_or(false) {
-        crate::replay_history_patch::set_enabled(game, false)?;
+    let heatseeker_backup = backups.join("Mutators_Balls_SF.upk.heatseeker-glow.bak");
+    if patcher.active_ball.is_some()
+        && heatseeker_backup.is_file()
+        && (group == PatchGroup::Custom || (group == PatchGroup::GameMods && !also_remove_custom))
+    {
+        return Err("The Heatseeker glow and custom ball share a package. Select Game Mod Patches and Custom Patches together to restore both.".into());
     }
-    let background = base.join("state/background_changer");
-    if background.join("background_swaps.json").exists() {
-        super::background_merger::run("reset", &cooked, &background, None, None)?;
+    if group == PatchGroup::Custom
+        && patcher.active_ball.is_some()
+        && !super::ball_visual::active(&backups)?.is_empty()
+    {
+        return Err(
+            "Remove the active ball visual swaps before restoring the custom ball patch.".into(),
+        );
     }
-    if super::menu_map::active(&cooked)?.is_some() {
-        super::menu_map::restore(&cooked)?;
-    }
-    let scoreboard = super::profile_pictures::scoreboard::installed(game);
-    if scoreboard.is_ok_and(|options| options.show_mmr || options.unanonymize) {
-        super::profile_pictures::scoreboard::set_options(game, Default::default())?;
-    }
-    if super::profile_pictures::name_bridge::recorded(game) {
-        super::profile_pictures::name_bridge::set_enabled(game, false)?;
-    }
-    if super::profile_pictures::status(game).is_ok_and(|(enabled, _)| enabled) {
-        super::profile_pictures::set_enabled(game, false)?;
-    }
-    super::title_patcher::restore_for_uninstall(base, &cooked)?;
-    if !backups.exists() {
-        return Ok(());
-    }
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    super::swapper::SwapperState::new(base).restore_all_active(&cooked, &backups, &tx)?;
-    super::wheel_alignment::restore_for_uninstall(&cooked)?;
-    for swap in super::ball_visual::active(&backups)? {
-        super::ball_visual::restore(&cooked, &backups, swap.source)?;
-    }
-    for language in super::item_name::languages(&cooked) {
-        if !super::item_name::load(&backups, &language)?
-            .patches
-            .is_empty()
-        {
-            super::item_name::rename(&cooked, &backups, &language, "", None)?;
+    match group {
+        PatchGroup::Swaps => {
+            if !backups.is_dir() {
+                return Ok(());
+            }
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            super::swapper::SwapperState::new(base).restore_all_active(&cooked, &backups, &tx)?;
+            super::wheel_alignment::restore_for_uninstall(&cooked)?;
+            for swap in super::ball_visual::active(&backups)?.into_iter().rev() {
+                super::ball_visual::restore(&cooked, &backups, swap.source)?;
+            }
+            for language in super::item_name::languages(&cooked) {
+                if !super::item_name::load(&backups, &language)?
+                    .patches
+                    .is_empty()
+                {
+                    super::item_name::rename(&cooked, &backups, &language, "", None)?;
+                }
+            }
+            super::colours::restore_for_uninstall(&cooked, &backups)?;
+        }
+        PatchGroup::GameMods => {
+            if crate::replay_history_patch::installed(game)? {
+                crate::replay_history_patch::set_enabled(game, false)?;
+            }
+            if super::profile_pictures::scoreboard::installed(game)
+                .is_ok_and(|options| options.show_mmr || options.unanonymize)
+            {
+                super::profile_pictures::scoreboard::set_options(game, Default::default())?;
+            }
+            if super::profile_pictures::name_bridge::recorded(game) {
+                super::profile_pictures::name_bridge::set_enabled(game, false)?;
+            }
+            if super::profile_pictures::status(game).is_ok_and(|(enabled, _)| enabled) {
+                super::profile_pictures::set_enabled(game, false)?;
+            }
+            super::title_patcher::restore_for_uninstall(base, &cooked)?;
+            if !backups.is_dir() {
+                return Ok(());
+            }
+            super::goal_explosion::restore(&cooked, &backups)?;
+            super::goal_explosion_volume::restore(&cooked, &backups)?;
+            super::forfeit_command::restore(&cooked, &backups)?;
+            super::celebration::restore(&cooked, &backups)?;
+            super::bots_freeplay::restore(&cooked, &backups)?;
+            let _ = super::celebration::unbind();
+            let _ = super::bots_freeplay::unbind();
+            let _ = super::forfeit_command::unbind();
+            super::chat_export::restore(&cooked, &backups)?;
+            super::chat_test::restore(&cooked, &backups)?;
+            super::lan_commands::restore(&cooked, &backups)?;
+            super::instant_suite::restore(&cooked, &backups)?;
+            super::heatseeker::restore(&cooked, &backups)?;
+            super::chat_paste::restore(&cooked, &backups)?;
+        }
+        PatchGroup::Workshop => {
+            if super::workshop_host::freeplay_ready(&cooked) {
+                super::workshop_host::set_freeplay_patch(&cooked, false)?;
+            }
+            if super::workshop_host::ready(&cooked) {
+                super::workshop_host::restore(&cooked)?;
+            }
+            if super::workshop_menu::status(&cooked)? {
+                super::workshop_menu::restore(&cooked, &backups)?;
+            }
+        }
+        PatchGroup::Custom => {
+            let background = base.join("state/background_changer");
+            if background.join("background_swaps.json").exists() {
+                super::background_merger::run("reset", &cooked, &background, None, None)?;
+            }
+            if super::menu_map::active(&cooked)?.is_some() {
+                super::menu_map::restore(&cooked)?;
+            }
+            if !backups.is_dir() {
+                return Ok(());
+            }
+            super::thumbnail_patcher::restore_all(&cooked, &backups)?;
+            super::decal_patcher::restore_uninstall_targets(decals, &cooked, &backups, base)?;
+            if patcher.active_ball.is_some() {
+                restore_ball_regions(&backups, &cooked)?;
+                restore_packages_matching(
+                    &backups,
+                    &cooked,
+                    super::patch_core::gameinfo::is_ball_upk,
+                )?;
+            }
+            if patcher.active_boost.is_some() {
+                super::boost_patcher::restore_for_uninstall(&cooked, &backups)?;
+            }
+            if !patcher.active_cars.is_empty() {
+                restore_packages(&backups.join("CarPatcher"), &cooked)?;
+            }
+            if !patcher.active_anthems.is_empty() {
+                restore_packages(&backups.join("Anthems"), &cooked)?;
+            }
         }
     }
-    super::goal_explosion::restore(&cooked, &backups)?;
-    super::goal_explosion_volume::restore(&cooked, &backups)?;
-    super::forfeit_command::restore(&cooked, &backups)?;
-    super::celebration::restore(&cooked, &backups)?;
-    let _ = super::celebration::unbind();
-    super::bots_freeplay::restore(&cooked, &backups)?;
-    let _ = super::bots_freeplay::unbind();
-    let _ = super::forfeit_command::unbind();
-    super::chat_export::restore(&cooked, &backups)?;
-    super::lan_commands::restore(&cooked, &backups)?;
-    super::instant_suite::restore(&cooked, &backups)?;
-    if super::workshop_host::freeplay_ready(&cooked) {
-        super::workshop_host::set_freeplay_patch(&cooked, false)?;
-    }
-    super::colours::restore_for_uninstall(&cooked, &backups)?;
-    if super::workshop_menu::status(&cooked).unwrap_or(false) {
-        super::workshop_menu::restore(&cooked, &backups)?;
-    }
-    // Nested feature snapshots may include older changes to the same package.
-    // Restore them before the shared pristine package snapshots at the root.
-    super::thumbnail_patcher::restore_all(&cooked, &backups)?;
-    for name in ["CarPatcher", "Anthems"] {
-        restore_packages(&backups.join(name), &cooked)?;
-    }
-    super::decal_patcher::restore_for_uninstall(&cooked, &backups)?;
-    super::heatseeker::restore(&cooked, &backups)?;
-    restore_ball_regions(&backups, &cooked)?;
-    restore_packages_matching(&backups, &cooked, |file| !file.eq_ignore_ascii_case("TAGame.upk"))?;
-    // the boost backup may have been taken with the patched HUD movie in it
-    super::chat_paste::restore(&cooked, &backups)?;
     Ok(())
 }
 
