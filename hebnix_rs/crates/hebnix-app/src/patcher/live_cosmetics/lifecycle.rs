@@ -201,8 +201,15 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
         assert!(cooked.canonicalize().unwrap().starts_with(root.canonicalize().unwrap()), "test writes must stay inside its isolated copy");
     }
     let _process_lock = lock()?;
+    let _movie_lock = super::super::title_patcher::UI_PATCH_LOCK.lock().map_err(|e| e.to_string())?;
     let _package_lock = super::super::profile_pictures::PACKAGE_EDIT.lock().map_err(|e| e.to_string())?;
     allowed(owner)?;
+    // Retire the old literal-scale patch before this function enters the live journal.
+    // This is idempotent: an interrupted migration resumes from its existing backup.
+    if install && super::super::goal_explosion::current(&cooked.join("Backups")).is_some() {
+        super::super::goal_explosion::restore(cooked, &cooked.join("Backups"))?;
+        allowed(owner)?;
+    }
     let live = cooked.join("TAGame.upk");
     let raw = fs::read(&live).map_err(|e| e.to_string())?;
     let current_hash = hash(&raw);
@@ -226,7 +233,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
             }
         }
     } else if !install { return Ok(()); }
-    let mut package = UpkPackage::load(&live)?;
+    let mut package = UpkPackage::from_bytes(raw)?;
     let previous_payloads: std::collections::HashMap<_, _> = runtime::TARGETS.iter().copied()
         .chain(super::game_mods::TARGETS.iter().copied())
         .chain(["GFxData_PRI_TA.UpdatePlayerName", "GFxData_PRI_TA.UpdatePRIData", "GFxData_PRI_TA.SetPlayerTitle"])
@@ -330,6 +337,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
     for f in &r.functions {
         if payload(&check, &f.path)?.1 != if install { &f.after[..] } else { &f.before[..] } { return Err("Staged live cosmetic verification failed".into()); }
     }
+    drop(check); // Do not retain a second decompressed package while packing the restore variant.
     for f in &r.functions {
         let (index, _) = payload(&package, &f.path)?;
         package.replace_export_payload(index, if install { &f.before } else { &f.after })?;
@@ -350,7 +358,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
 fn reconcile_movies(r: &mut Receipt, install: bool, owner: u32) -> Result<(), String> {
     for index in 0..r.attachments.len() {
         allowed(owner)?;
-        let a = r.attachments[index].clone();
+        let mut a = r.attachments[index].clone();
         if !super::movies::FILES.iter().any(|(file, path)| *file == a.file && *path == a.path) { return Err("Unknown live movie recovery target".into()); }
         let live = super::super::game_path::resolve(&r.cooked, &a.file);
         let raw = fs::read(&live).map_err(|e| e.to_string())?;
@@ -374,13 +382,28 @@ fn reconcile_movies(r: &mut Receipt, install: bool, owner: u32) -> Result<(), St
         let wanted = if install { &a.after } else { &a.before };
         if &current_hash == wanted { continue; }
         if current_hash != a.before && current_hash != a.after && !a.older.contains(&current_hash) {
-            return Err(format!("{} has other movie edits. Recovery kept them untouched", a.file));
+            let before = read_blob(&a.before)?;
+            let after = read_blob(&a.after)?;
+            let (rebased_before, rebased_after) = super::movies::rebase_owned(&mut p, &a.file, &before, &after)
+                .map_err(|error| format!("{} has conflicting movie edits: {error}. Recovery kept them untouched", a.file))?;
+            let mut known = vec![a.before.clone(), a.after.clone(), current_hash.clone()];
+            known.retain(|value| !a.older.contains(value));
+            a.older.extend(known);
+            a.before = blob(&rebased_before)?;
+            a.after = blob(&rebased_after)?;
+            a.before_hash.clear(); a.after_hash.clear();
+            r.attachments[index] = a.clone();
+            // Commit provenance before touching the game. A failed/stopped
+            // recovery can recognise the old export and resume this exact pair.
+            save(r)?;
         }
+        let wanted = if install { &a.after } else { &a.before };
         let desired = read_blob(wanted)?;
         p.replace_export_payload(slot, &desired)?;
         let bytes = p.repacked_fast()?;
         let check = UpkPackage::from_bytes(bytes.clone())?;
         if payload(&check, &a.path)?.1 != desired { return Err("Live movie staging verification failed".into()); }
+        drop(check);
         p.replace_export_payload(slot, &read_blob(if install { &a.before } else { &a.after })?)?;
         let opposite = p.repacked_fast()?;
         let (disabled, enabled) = if install { (&opposite, &bytes) } else { (&bytes, &opposite) };

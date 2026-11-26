@@ -421,7 +421,7 @@ impl State {
 
     pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool, key: String, pad: String) {
         if super::live_cosmetics::managed() {
-            self.status = super::live_cosmetics::set_mod(cooked, "forfeit", want, Some((&key, &pad))).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            self.status = super::live_cosmetics::set_mod(cooked, "forfeit", want, Some((&key, &pad))).map(|()| String::new()).unwrap_or_else(|e| e);
             return;
         }
         use crate::i18n::t;

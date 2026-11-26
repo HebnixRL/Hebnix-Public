@@ -14,6 +14,7 @@ mod view;
 
 struct Settings {
     rl_path: String,
+    owned_items_only: bool,
 }
 struct Config {
     settings: Settings,
@@ -92,6 +93,7 @@ fn fixture() -> HebnixApp {
         config: Config {
             settings: Settings {
                 rl_path: String::new(),
+                owned_items_only: true,
             },
         },
         base_dir: PathBuf::new(),

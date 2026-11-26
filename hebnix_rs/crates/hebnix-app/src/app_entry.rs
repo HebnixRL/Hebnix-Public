@@ -1,5 +1,4 @@
 mod app;
-mod decal_app;
 mod auto_upload_replays;
 mod replay_metadata;
 mod replay_scan;
@@ -247,9 +246,6 @@ fn dcomp_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 
 #[cfg(target_os = "linux")]
 fn main() -> eframe::Result {
-    if env!("CARGO_BIN_NAME") == "decal-studio" {
-        return decal_app::run();
-    }
     unsafe {
         crate::webview::render_mode::init();
         if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty()) {
@@ -326,9 +322,6 @@ fn main() -> eframe::Result {
 
 #[cfg(target_os = "windows")]
 fn main() -> eframe::Result {
-    if env!("CARGO_BIN_NAME") == "decal-studio" {
-        return decal_app::run();
-    }
     if let Some(parent_pid) = watchdog::parent_pid() {
         watchdog::run(parent_pid);
         return Ok(());

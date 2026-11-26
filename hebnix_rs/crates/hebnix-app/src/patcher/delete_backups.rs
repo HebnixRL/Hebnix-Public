@@ -46,7 +46,7 @@ impl State {
                 self.error = None;
             }
         });
-        ui.label(egui::RichText::new(t("delete-backups-note")).weak());
+
         if let Some(error) = &self.error {
             ui.colored_label(egui::Color32::RED, error);
         }

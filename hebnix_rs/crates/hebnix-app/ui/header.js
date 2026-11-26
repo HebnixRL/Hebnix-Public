@@ -63,6 +63,7 @@ field("primary").addEventListener("click", () => {
   if (state?.actions.length) send({ type: "run", action: state.actions[0].action });
 });
 field("more").addEventListener("click", () => panel("actions"));
+field("settings").addEventListener("click", () => panel("settings"));
 field("network").addEventListener("click", () => panel("network"));
 field("notifications").addEventListener("click", () => panel("notifications"));
 field("close").addEventListener("click", () => panel(null));
@@ -218,6 +219,27 @@ function networkPanel() {
 
 function renderPanel() {
   body.replaceChildren();
+  if (state.panel === "settings") {
+    const label = element("label", "quick-owned-row mb-3", "Owned Items");
+    const accounts = element("select", "form-select form-select-sm");
+    accounts.setAttribute("aria-label", "Owned Items");
+    const data = state.inventory;
+    if (!data.accounts.length) accounts.append(new Option(data.loading ? "Loading accounts…" : "No accounts found", ""));
+    data.accounts.forEach(account => accounts.append(new Option(account.label, account.id, false, account.selected)));
+    accounts.disabled = data.loading || !data.accounts.length;
+    accounts.addEventListener("change", () => send({type: "owned_account", account: accounts.value}));
+    const refresh=button("↻",()=>send({type:"refresh_save"}),data.loading,"btn btn-sm btn-outline-secondary ui-icon-button");
+    refresh.title="Refresh save";refresh.setAttribute("aria-label","Refresh save");
+    label.append(accounts,refresh);
+    const owned = element("label", "d-flex gap-2 align-items-center mb-3", "Show only owned items");
+    const check = element("input", "form-check-input mt-0");
+    check.type = "checkbox"; check.checked = state.ownedOnly;
+    check.addEventListener("change", () => send({type: "owned_only", enabled: check.checked}));
+    owned.prepend(check);
+    const more=button("⚙ More Settings",()=>send({type:"more_settings"}),false,"btn btn-outline-secondary w-100");
+    body.append(label,owned,more);
+    if (data.error) body.append(element("p", "small text-warning", data.error));
+  }
   if (state.panel === "notifications") notifications();
   if (state.panel === "network") networkPanel();
   if (state.panel === "actions") state.actions.slice(1).forEach(action => {
@@ -236,17 +258,12 @@ window.showHeader = (data) => {
   field("page-warning").textContent = data.page_warning || "";
   field("page-warning").title = data.page_warning || "";
   field("page-warning").hidden = !data.page_warning;
-  field("actions").hidden = !data.actions.length;
+  field("actions").hidden = !data.show_action_button || !data.actions.length;
   field("primary").textContent = data.actions[0]?.label || "";
   field("more").hidden = data.actions.length < 2;
-  const status = data.connected ? data.status.replace(/^✔\s*/, "") : data.status;
-  field("rl-status").textContent = status;
-  field("rl-status").title = status;
-  field("rl-status-check").hidden = !data.connected;
-  field("rl-status-group").classList.toggle("is-connected", data.connected);
   field("unread").textContent = data.unread || "";
   field("unread").hidden = !data.unread;
-  ["network", "notifications", "more"].forEach(id => field(id).setAttribute("aria-expanded", String(data.panel === (id === "more" ? "actions" : id))));
+  ["settings", "network", "notifications", "more"].forEach(id => field(id).setAttribute("aria-expanded", String(data.panel === (id === "more" ? "actions" : id))));
   if (previousPanel !== data.panel) field("panel").classList.remove("is-closing");
   field("panel").hidden = !data.panel;
   field("panel").dataset.kind = data.panel || "";
@@ -254,8 +271,8 @@ window.showHeader = (data) => {
   field("panel").style.setProperty("--action-width", (data.action_width || 180) + "px");
   field("panel-heading").classList.toggle("d-none", data.panel === "actions");
   syncActionAnchor();
-  field("panel-title").textContent = { actions: "Actions", network: "Network", notifications: data.notifications_label }[data.panel] || "";
-  const next = JSON.stringify([data.panel, data.notifications, data.network, data.panel === "actions" ? data.actions : null]);
+  field("panel-title").textContent = { settings: "Settings", actions: "Actions", network: "Network", notifications: data.notifications_label }[data.panel] || "";
+  const next = JSON.stringify([data.panel, data.inventory, data.ownedOnly, data.notifications, data.network, data.panel === "actions" ? data.actions : null]);
   if (signature !== next) { signature = next; renderPanel(); }
 };
 field("panel-back").addEventListener("click", () => window.ipc.postMessage(JSON.stringify({ type: "panel_back" })));

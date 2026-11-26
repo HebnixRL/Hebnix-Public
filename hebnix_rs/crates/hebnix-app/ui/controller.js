@@ -1,3 +1,13 @@
+let tabTransition;
+window.animateHebnixTab = () => {
+  tabTransition?.cancel();
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  tabTransition = document.body.animate(
+    [{ opacity: .6 }, { opacity: 1 }],
+    { duration: 150, easing: "ease-out" },
+  );
+};
+
 window.applyHebnixTheme = theme => {
   const root = document.documentElement;
   root.dataset.bsTheme = theme?.mode || "dark";

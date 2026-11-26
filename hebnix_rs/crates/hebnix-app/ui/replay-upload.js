@@ -39,8 +39,8 @@ function renderHistory(entries) {
   field("history").replaceChildren(...entries.map((entry) => {
     const item = textElement("li", "list-group-item px-0 bg-transparent", "");
     const heading = textElement("div", "d-flex flex-wrap align-items-center gap-2", "");
-    heading.append(textElement("span", "text-break font-monospace small", entry.guid),
-      textElement("span", "badge text-bg-secondary", entry.outcome));
+    const colour=/fail|error/i.test(entry.outcome)?"warning":/upload/i.test(entry.outcome)?"success":"secondary";
+    heading.append(textElement("strong","text-break",entry.title || "Replay"),textElement("span","badge text-bg-"+colour,entry.outcome));
     if (entry.has_link) {
       const link = textElement("button", "btn btn-link p-0", "Open on ballchasing.com");
       link.type = "button";
@@ -48,7 +48,8 @@ function renderHistory(entries) {
       heading.append(link);
     }
     item.append(heading);
-    if (entry.title) item.append(textElement("div", "text-body-secondary", entry.title));
+    const details=textElement("details","small text-body-secondary mt-2","");
+    details.append(textElement("summary","","Replay ID"),textElement("span","font-monospace text-break",entry.guid));item.append(details);
     if (entry.warning) item.append(textElement("div", "text-warning small", entry.warning));
     return item;
   }));
@@ -60,6 +61,7 @@ window.showReplayUpload = (state) => {
     if (input.type === "checkbox") input.checked = state[key];
     else if (document.activeElement !== input) input.value = state[key];
   });
+  field("upload-options").hidden = !state.upload_enabled;
   field("enabled").checked = state.enabled;
   field("enabled").disabled = !state.can_toggle;
   field("save_locally").disabled = !state.options_available;

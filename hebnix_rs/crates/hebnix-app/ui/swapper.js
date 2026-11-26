@@ -66,6 +66,7 @@ function itemCard(item, selected) {
     caption.append(label);
   }
   if (mode === "active") {
+    tile.classList.add("swapper-restore-tile");
     tile.disabled = state.game_running;
     tile.setAttribute("aria-label", "Restore " + item.target);
     const restore = document.createElement("small");
@@ -106,6 +107,7 @@ function renderEditor() {
   field("source-search").hidden = choosingReplacement;
   field("target-search").hidden = !choosingReplacement;
   field("car-fields").hidden = !state.decals || choosingReplacement;
+  field("match-car-label").hidden = !state.decals;
   field("back").hidden = !choosingReplacement;
   field("choose-replacement").hidden = choosingReplacement;
   field("choose-replacement").disabled = !source;
@@ -124,7 +126,7 @@ function renderPicker(items, selected, emptyText) {
   grid.hidden = items.length === 0;
   field("picker-empty").hidden = items.length > 0;
   field("picker-empty").textContent = emptyText;
-  const measured = Math.max(1, Math.min(12, Math.floor((grid.clientWidth + 10) / 164)));
+  const measured = Math.max(1, Math.min(12, Math.floor((grid.clientWidth + 10) / 164) - 1));
   if (grid.clientWidth) columns = measured;
   grid.style.setProperty("--swapper-columns", columns);
   const pageSize = columns * 3;
@@ -145,7 +147,7 @@ function renderPicker(items, selected, emptyText) {
   }
   const category = mode === "active" ? null : currentCategory;
   const request = JSON.stringify([category, ids]);
-  if (requestedPreviews !== request && category !== undefined) {
+  if ((requestedPreviews !== request || ids.some(id => !(state.preview_ids || []).includes(id))) && category !== undefined) {
     requestedPreviews = request;
     send({ type: "previews", category, ids });
   }
@@ -167,8 +169,7 @@ new ResizeObserver(() => { if (state) renderCurrent(); }).observe(grid);
 
 field("category").addEventListener("change", () => send({ type: "category", index: Number(field("category").value) }));
 field("reload").addEventListener("click", () => send({ type: "reload" }));
-field("account").addEventListener("change", () => send({ type: "inventory", account: field("account").value || null }));
-field("refresh").addEventListener("click", () => send({ type: "inventory", account: null }));
+field("owned").addEventListener("change", () => window.ipc.postMessage(JSON.stringify({type: "header", action: {type: "owned_only", enabled: field("owned").checked}})));
 ["owned", "car", "match-car", "source-search", "target-search"].forEach(id =>
   field(id).addEventListener("input", () => { page = 0; renderEditor(); }));
 field("choose-replacement").addEventListener("click", () => { choosingReplacement = true; page = 0; renderEditor(); });
@@ -191,6 +192,8 @@ field("restore-all").addEventListener("click", () => send({ type: "restore", key
 window.showSwapper = (snapshot) => {
   state = snapshot;
   const nextMode = state.mode === "active" ? "active" : "swapper";
+  document.querySelector("main").classList.toggle("swapper-category-layout", nextMode !== "active");
+  document.querySelector("main").classList.toggle("swapper-active-layout", nextMode === "active");
   if (mode !== nextMode) {
     mode = nextMode;
     page = 0;
@@ -212,7 +215,7 @@ window.showSwapper = (snapshot) => {
     renderActive();
     return;
   }
-  field("category-title").hidden = false;
+  field("category-title").hidden = true;
   const category = state.categories.find(row => row[2])?.[0];
   if (currentCategory !== category) {
     currentCategory = category;
@@ -224,12 +227,18 @@ window.showSwapper = (snapshot) => {
   }
   options(field("category"), state.categories.map(([id, label]) => [id, label]), category);
   field("category-title").textContent = state.category_label;
-  const accounts = state.inventory.accounts;
-  options(field("account"), accounts.map(account => [account.id, account.label]), accounts.find(account => account.selected)?.id, accounts.length ? "" : "Latest local account");
-  field("account").disabled = state.inventory.loading || !accounts.length;
-  field("refresh").disabled = state.inventory.loading;
-  field("inventory-status").textContent = state.inventory.error || (state.inventory.loading ? "Reading save inventory…" : "");
-  field("inventory-status").hidden = !field("inventory-status").textContent;
+  field("owned").checked = !!state.ownedOnly;
+  const navigation = field("category-navigation");
+  navigation.replaceChildren(...state.categories.map(([id, label, active]) => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "btn btn-sm btn-" + (active ? "primary" : "outline-secondary");
+    button.textContent = label;
+    button.addEventListener("click", () => { field("category").value = id; field("category").dispatchEvent(new Event("change")); });
+    return button;
+  }));
+
+  field("catalog-status").textContent = state.inventory.error || (state.inventory.loading ? "Reading save inventory…" : "");
+  field("catalog-status").hidden = !field("catalog-status").textContent;
   field("editor").hidden = !state.catalog?.items;
   field("reload").hidden = state.loading || !(state.catalog_error || state.catalog?.failed);
   field("catalog-status").textContent = state.catalog_error || state.catalog?.status || (state.loading ? "Loading item catalogs…" : "");

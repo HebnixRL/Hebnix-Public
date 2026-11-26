@@ -38,7 +38,25 @@ function teamCard(team, columns) {
   return card;
 }
 
+const runDashboardAction = action => window.ipc.postMessage(JSON.stringify({type: "header", action: {type: "run", action}}));
+let dashboardRunning = false;
+field("dashboard-start").addEventListener("click", () => runDashboardAction(dashboardRunning ? "close_rocket_league" : "start_rocket_league"));
 window.showLiveMatch = (state) => {
+  document.querySelector(".live-summary").hidden = !state.dashboard;
+  document.querySelector(".live-columns").hidden = !!state.dashboard;
+  field("dashboard-actions").hidden = !state.dashboard;
+  dashboardRunning = state.running;
+  const launch = field("dashboard-start");
+  launch.replaceChildren(document.createTextNode(state.running ? "Stop Rocket League" : "Start Rocket League"));
+  const symbol = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  symbol.setAttribute("viewBox", "0 0 16 16");
+  symbol.setAttribute("aria-hidden", "true");
+  symbol.classList.add("dashboard-action-icon");
+  const shape = document.createElementNS(symbol.namespaceURI, "path");
+  shape.setAttribute("d", state.running ? "M3 3h10v10H3Z" : "M4 2l10 6-10 6Z");
+  symbol.append(shape);
+  launch.append(symbol);
+  launch.className = "btn " + (state.running ? "btn-outline-danger" : "btn-primary");
   field("running").textContent = state.running_label;
   field("running").classList.toggle("text-success", state.running);
   field("connection").textContent = state.connection_label;
@@ -54,8 +72,9 @@ window.showLiveMatch = (state) => {
     cosmetics.parentElement.append(error);
   }
   error.hidden = state.live_cosmetics.label !== "Error";
-  error.textContent = error.hidden ? "" : state.live_cosmetics.detail;
+  error.textContent = error.hidden ? "" : state.live_cosmetics.detail.replace(/^Error:\s*/i, "");
   const game = state.game;
+  field("match-heading").hidden = !game;
   field("match-clock").hidden = !game;
   field("clock").textContent = game?.clock || "";
   field("arena").textContent = game?.arena || "";

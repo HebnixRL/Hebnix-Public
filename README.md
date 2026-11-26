@@ -17,10 +17,16 @@ You can get a key by requesting one on our [Discord Server](https://discord.gg/y
 
 ## Build
 
-Install Rust with the MSVC toolchain, then run:
+Install stable Rust with the MSVC toolchain, Visual Studio Build Tools with the **Desktop development with C++** workload and Windows SDK, then run:
 
     cd hebnix_rs
-    cargo build --release
+    cargo build --locked --release --bin hebnix
+
+The repository contains everything needed to build the application; local game files, private keys and Decal Studio testing payloads are not build prerequisites. Missing service keys disable only the corresponding authenticated services.
+
+For the Lite executable, run `cargo build --locked --release --bin hebnix-lite --features lite`. To check both executables without producing release binaries, run `cargo check --locked -p hebnix-app --bins --features lite`.
+
+The Modern UI requires the Microsoft Edge WebView2 Runtime on Windows.
 
 RLAPI uses the existing captured Rocket League WebSocket session; no Go build is required.
 

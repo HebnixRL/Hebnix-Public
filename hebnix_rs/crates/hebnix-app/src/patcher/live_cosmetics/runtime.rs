@@ -1,7 +1,9 @@
 //! Independently assembled UnrealScript hooks. No new native-backed fields.
 use super::super::{script_patch::{Script, function_payload}, upk_package::UpkPackage};
 // Bump whenever generated hooks or their Game Mods/scoreboard dependencies change.
-pub const REVISION: u32 = 6;
+pub const REVISION: u32 = 10;
+#[path = "boost.rs"]
+mod boost;
 // ECastToken values, distinct from the game's remapped expression tokens.
 const STRING_TO_FLOAT: u8 = 0x4c;
 const FLOAT_TO_STRING: u8 = 0x55;
@@ -12,6 +14,9 @@ pub const TARGETS: &[&str] = &[
     "GFxShell_TA.GetKeyForAction",
     "Ball_God_TA.GetMaxSpeedColor", "Ball_God_TA.GetActiveTeamColor",
     "Team_TA.GetColors", // Retire the earlier lookup hook during upgrades.
+    "Team_TA.SetDefaultColors",
+    "Ball_TA.SetExplosionFXActor",
+    "FXActor_Boost_TA.HandleUpdatedPaintSettings",
 ];
 type R<T> = Result<T, String>;
 thread_local! {
@@ -306,16 +311,17 @@ fn heatseeker_getter(p: &UpkPackage, path: &str, rainbow_only: bool) -> R<Vec<u8
     script.append(&Script::from_parts(bytes, original.refs()));
     function_payload(before, &script)
 }
-fn team_colours(p: &UpkPackage, base: usize) -> R<Script> {
+fn team_colours(p: &UpkPackage, base: usize, owner: &str) -> R<Script> {
     let mut body = Script::new();
-    for (group, out) in [("stadium", "Team_TA.UpdateColors.NewColors"), ("hud", "Team_TA.UpdateColors.NewFontColor")] {
+    for (group, local) in [("stadium", "NewColors"), ("hud", "NewFontColor")] {
+        let out = format!("{owner}.{local}");
         let enabled = flag(p, &format!("{group}.enabled"))?;
         let outer_base = base + body.mem_size();
         let mut teams = Script::new();
         for (index, team) in [(0, "blue"), (1, "orange")] {
             let matches = native(0x9a, &[var(p, 0x01, "Engine.TeamInfo.TeamIndex")?, int(index)]);
             let color = rgb(p, &format!("{group}.{team}"))?;
-            let output = var(p, 0x2b, out)?;
+            let output = var(p, 0x2b, &out)?;
             let mut apply = Script::new();
             if group == "stadium" {
                 let mut length = raw(&[0x57, 0x01]); length.append(&output);
@@ -347,13 +353,31 @@ fn update_team_colours(p: &UpkPackage) -> R<Vec<u8>> {
     let offset = 20;
     let refs = 2;
     let mut lookup = Script::from_parts(bytes[..offset].to_vec(), refs);
-    let overrides = team_colours(p, lookup.mem_size())?;
+    let overrides = team_colours(p, lookup.mem_size(), path)?;
     validate(&overrides, lookup.mem_size())?;
     lookup.append(&overrides);
     // The stock remainder has no absolute branches; all original notifications
     // and material updates remain in their original order.
     lookup.append(&Script::from_parts(original.bytes()[offset..].to_vec(), original.refs() - refs));
     function_payload(before, &lookup)
+}
+fn default_team_colours(p: &UpkPackage) -> R<Vec<u8>> {
+    let path = "Team_TA.SetDefaultColors";
+    let e = &p.exports[obj(p, path)? as usize - 1];
+    let before = &p.image[e.serial_offset..e.serial_offset + e.serial_size];
+    let original = Script::of_function(before)?;
+    // The menu updates team archetypes through SetDefaultColors rather than
+    // UpdateColors. Preserve its stock lookup, texture and shader updates.
+    const STOCK: &[u8] = &[0x1b,0x29,0x53,0,0,0,0,0,0,0x5b,0x0b,0x2b,0xa1,0x62,0,0,0x5b,0x0b,0x2b,0xa0,0x62,0,0,0x16,0x1c,0x9e,0x62,0,0,0x2b,0xa0,0x62,0,0,0x48,0x16,0x1c,0xd8,0x62,0,0,0x01,0x70,0xf2,0xff,0xff,0x2b,0xa0,0x62,0,0,0x16,0x04,0x0b,0x4c];
+    if original.bytes() != STOCK || original.mem_size() != 83 {
+        return Err("Menu team colour function changed. Refusing to overwrite it".into());
+    }
+    let mut script = Script::from_parts(original.bytes()[..24].to_vec(), 2);
+    let overrides = team_colours(p, script.mem_size(), path)?;
+    validate(&overrides, script.mem_size())?;
+    script.append(&overrides);
+    script.append(&Script::from_parts(original.bytes()[24..].to_vec(), original.refs() - 2));
+    function_payload(before, &script)
 }
 fn shell_bridge(p: &UpkPackage) -> R<Vec<u8>> {
     let path = TARGETS[6];
@@ -398,7 +422,16 @@ fn tick(p: &UpkPackage, base: usize, menu: bool) -> R<Script> {
     let mut refresh = raw(&[0x0e]); refresh.object(obj(p, "UISavedValues_TA.Get.ReturnValue")?).append(&get(p, "HbxLive.refresh")?);
     poll.append(&refresh);
     let poll_base = base + body.mem_size() + 3 + condition.mem_size();
-    if !menu {
+    if menu {
+        // Refresh once per file change or menu-world change, including disable
+        // and malformed-file fallback. Do not disturb match team instances.
+        let world = var(p, 0x01, "Engine.Actor.WorldInfo")?;
+        let signature = native(0xf8, &[cast(0x56, world), get(p, "HbxLiveCache")?]);
+        let changed = native(0xc0, &[get(p, "HbxMenuTeamColoursApplied")?, signature.clone()]);
+        let mut update = static_call(p, "GameData_TA", call(p, "GameData_TA.SetDefaultTeamColors", &[])?, None)?;
+        update.append(&set_dynamic(p, text("HbxMenuTeamColoursApplied"), signature)?);
+        poll.append(&guard(poll_base + poll.mem_size(), changed, update)?);
+    } else {
         let event = dynamic(p, "GameEvent_Team_TA", call(p, "PlayerController_TA.GetGameEvent", &[])?)?;
         let teams = field(p, event.clone(), "GameEvent_Team_TA.Teams")?;
         let signature = native(0xf8, &[cast(0x56, event), get(p, "HbxLiveCache")?]);
@@ -465,6 +498,8 @@ fn tick(p: &UpkPackage, base: usize, menu: bool) -> R<Script> {
         render.append(&guard(start, condition, update)?);
     }
     render.append(&set_dynamic(p, text("HbxWheelColourPass"), text("0"))?);
+    let boost_base = base + body.mem_size() + 3 + render_condition.mem_size() + render.mem_size();
+    render.append(&boost::refresh(p, boost_base, car_mesh, menu)?);
     body.append(&guard(base + body.mem_size(), render_condition, render)?);
     Ok(body)
 }
@@ -489,12 +524,21 @@ pub fn generate(p: &UpkPackage) -> R<Vec<(String, Vec<u8>)>> {
     out.push((TARGETS[8].into(), heatseeker_getter(p, TARGETS[8], true)?));
     let retired = &p.exports[obj(p, TARGETS[9])? as usize - 1];
     out.push((TARGETS[9].into(), p.image[retired.serial_offset..retired.serial_offset + retired.serial_size].to_vec()));
+    out.push((TARGETS[10].into(), default_team_colours(p)?));
+    out.push((TARGETS[12].into(), append_original(p, TARGETS[12], |base| boost::actor(p, base))?));
+    out.push((TARGETS[11].into(), append_original(p, TARGETS[11], |base| {
+        let actor = var(p, 0x2b, "Ball_TA.SetExplosionFXActor.ExplosionFX")?;
+        let scale = value(p, "goal-explosion.scale", 0.1, 10.)?;
+        // With no override (including unreadable settings), retain the original actor scale.
+        let apply = context(p, actor, call(p, "Engine.Actor.SetDrawScale", &[scale])?, None)?;
+        guard(base, flag(p, "goal-explosion.enabled")?, apply)
+    })?));
     Ok(out)
 }
 
 pub fn prepare_names(p: &mut UpkPackage) -> R<Vec<(usize, String, String)>> {
     let mut used = vec![false; p.names.len()];
-    let wanted = ["LoadFileToString", "InStr", "Left", "Mid", "FClamp", "SetBind", "GetBind", "bApplyRotation", "bAddRotation", "bApplyTranslation", "bAddTranslation", "BoneRotationSpace", "BoneTranslationSpace", "BoneRotation", "BoneTranslation"];
+    let wanted = ["ParticleSysParam", "ParamType", "InstanceParameters", "FXAttachment", "CreationTime", "ColorParams", "VectorParams", "ColorParamPair", "VectorParamPair", "Value", "Key", "Parameters", "SetLinearColorParameter", "SetVectorParameter", "Caps", "LoadFileToString", "InStr", "Left", "Mid", "FClamp", "SetBind", "GetBind", "bApplyRotation", "bAddRotation", "bApplyTranslation", "bAddTranslation", "BoneRotationSpace", "BoneTranslationSpace", "BoneRotation", "BoneTranslation"];
     for (i, name) in p.names.iter().enumerate() {
         if wanted.contains(&name.as_str()) || name.starts_with("Hbx") || name.starts_with("HBX")
             || ["TransformedLeftX", "SpecialEventData", "TargetFind", "ImportJSON"].contains(&name.as_str())
@@ -556,6 +600,7 @@ pub fn prepare_imports(p: &mut UpkPackage) -> R<Vec<(usize, Vec<u8>, Vec<u8>)>> 
         let (before, after) = p.bind_native_field(slot, outer, kind, name)?;
         edits.push((slot, before, after));
     }
+    edits.extend(boost::prepare_imports(p)?);
     Ok(edits)
 }
 
@@ -594,6 +639,20 @@ mod tests {
         println!("BLANK IMPORTS {}", package.empty_import_slots().len());
         prepare_imports(&mut package).unwrap();
         let generated = generate(&package).unwrap();
+        // Active boost actors are owned separately from the generic mesh FX list.
+        // This catches a refresh that assembles successfully but never reaches them.
+        for (function, fields) in [
+            ("PlayerController_TA.PlayerTick", &["Vehicle_TA.BoostComponent", "CarComponent_TA.FXActor"][..]),
+            ("PlayerController_Menu_TA.PlayerTick", &["CarPreviewMeshComponent_TA.BoostFX"][..]),
+        ] {
+            let bytes = &generated.iter().find(|(path, _)| path == function).unwrap().1;
+            let script = Script::of_function(bytes).unwrap();
+            for field in fields {
+                let mut reference = vec![0x01];
+                reference.extend_from_slice(&package.find_object(field).unwrap().to_le_bytes());
+                assert!(script.bytes().windows(reference.len()).any(|w| w == reference), "{function} must refresh {field}");
+            }
+        }
         let originals: Vec<_> = generated.iter().map(|(path, _)| {
             let index = package.find_object(path).unwrap() as usize - 1;
             let e = &package.exports[index];

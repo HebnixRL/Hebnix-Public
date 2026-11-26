@@ -21,7 +21,7 @@ pub(super) const STUDIO_APPEARANCE: &[(super::ItemsMode, &str)] = &[
     (super::ItemsMode::BallAppearance, "nav-ball-shape"),
     (super::ItemsMode::WheelAlignment, "app-wheel-alignment"),
     (super::ItemsMode::SpeedPatch, "app-speed-patch"),
-    (super::ItemsMode::GoalExplosion, "nav-goal-explosion-scale"),
+    (super::ItemsMode::GoalExplosion, "goal-explosion-volume-title"),
     (
         super::ItemsMode::MenuTextures,
         "nav-menu-textures-experimental",
@@ -80,7 +80,7 @@ impl HebnixApp {
             Tab::Spoofer => true,
             Tab::Settings => true,
             Tab::Freeplay => true,
-            Tab::GameMods => true,
+            Tab::GameMods | Tab::LiveEditor => true,
             Tab::Replays => self.replays_subtab == super::ReplaysSubTab::ReplayTimeline,
             Tab::Patcher => matches!(
                 self.items_mode,
@@ -90,7 +90,7 @@ impl HebnixApp {
             Tab::Workshop => matches!(self.workshop.view, crate::ui::workshop::WorkshopView::InGameMenu | crate::ui::workshop::WorkshopView::Import | crate::ui::workshop::WorkshopView::Multiplayer | crate::ui::workshop::WorkshopView::MenuMap),
             Tab::Items => matches!(
                 self.items_subtab,
-                super::ItemsSubTab::Loadouts | super::ItemsSubTab::Presets
+                super::ItemsSubTab::Loadouts | super::ItemsSubTab::PresetCreator | super::ItemsSubTab::Presets
                     | super::ItemsSubTab::Colours
             ),
             _ => false,
@@ -101,7 +101,8 @@ impl HebnixApp {
         if !self.has_modern_manager() {
             return false;
         }
-        let data = match self.tab {
+        self.config.patcher.decal_only_owned = self.config.settings.owned_items_only;
+        let mut data = match self.tab {
             Tab::About => self.web_maintenance(),
             Tab::Spoofer if self.spoofer_subtab == SpooferSubTab::Titles => self.web_titles_data(ui.ctx()),
             Tab::Spoofer => self.web_player_data(),
@@ -133,21 +134,20 @@ impl HebnixApp {
                 } else if self.items_mode == super::ItemsMode::WheelAlignment {
                     let cooked = self.swapper_cooked_path();
                     let mut model = self.wheel_alignment.web_snapshot(&cooked, ui.ctx());
-                    model["catalogLoading"] = json!(self.catalogs_loading);
+                model["catalogLoading"] = json!(self.catalogs_loading);
                     model["catalogError"] = json!(self.catalogs_error);
                     model
                 } else if self.items_mode == super::ItemsMode::GoalExplosion {
                     let backups = self.swapper_cooked_path().join("Backups");
                     json!({ "page": "goal-explosion", "panels": [
-                        self.goal_explosion.web_snapshot(ui.ctx(), &backups),
                         self.goal_explosion_volume.web_snapshot(ui.ctx(), &backups),
                     ] })
                 } else {
                     self.speed_patch
                         .web_snapshot(&self.config.speed_patch, ui.ctx(), &self.tx)
                 };
-                if matches!(self.items_mode, super::ItemsMode::GameColours | super::ItemsMode::WheelAlignment) {
-                    model["live"] = crate::patcher::live_cosmetics::snapshot();
+                if self.items_mode == super::ItemsMode::GameColours {
+                    model["liveManaged"] = json!(crate::patcher::live_cosmetics::managed());
                 }
                 let mut pages: Vec<_> = STUDIO_APPEARANCE
                     .iter()
@@ -165,10 +165,21 @@ impl HebnixApp {
                 let cooked = self.swapper_cooked_path();
                 self.workshop.menu_web_snapshot(&cooked, ui.ctx())
             }
-            Tab::Freeplay => self
+            Tab::LiveEditor => {
+                let backups = self.swapper_cooked_path().join("Backups");
+                let mut model = self.colours.web_snapshot(false, &backups);
+                model["page"] = json!(match self.live_editor_page {
+                    super::LiveEditorPage::Colours => "live-colours",
+                    super::LiveEditorPage::Wheels => "live-wheels",
+                    super::LiveEditorPage::GoalExplosion => "live-goal-explosion",
+                });
+                model["live"] = crate::patcher::live_cosmetics::snapshot();
+                model
+            }
+            Tab::Freeplay if self.freeplay_page == super::FreeplayPage::Practice => self
                 .freeplay
                 .web_snapshot(&self.config.settings.rl_path, ui.ctx()),
-            Tab::GameMods => self.web_game_mods(ui.ctx()),
+            Tab::GameMods | Tab::Freeplay => self.web_game_mods(ui.ctx()),
             Tab::Replays => {
                 let folder = self.configured_replay_folder();
                 self.replay_timeline.web_snapshot(folder, &self.ws_stats, ui.ctx())
@@ -181,12 +192,18 @@ impl HebnixApp {
             }
             Tab::Items => {
                 let cooked = self.swapper_cooked_path();
+                let selected_save = self.owned_inventory.selected_save().map(std::path::Path::to_path_buf);
+                self.loadouts.sync_global_save(selected_save.as_deref(), false);
                 let mut model = self.loadouts.web_snapshot(
                     &mut self.swapper,
                     self.catalogs_loading,
                     &cooked,
                     ui.ctx(),
                 );
+                if self.items_subtab == super::ItemsSubTab::PresetCreator {
+                    model["page"] = json!("preset-creator");
+                    model["creator"] = self.loadouts.creator_snapshot(&mut self.swapper, &cooked, ui.ctx());
+                }
                 model["catalogLoading"] = json!(self.catalogs_loading);
                 model["catalogError"] = json!(self.catalogs_error);
                 model
@@ -194,6 +211,7 @@ impl HebnixApp {
             Tab::Plugins if self.plugins_subtab == PluginsSubTab::Settings => self.web_plugin_settings(ui.ctx()),
             _ => self.modern_plugins_data(ui.ctx()),
         };
+        data["globalOwnedOnly"] = json!(self.config.settings.owned_items_only);
         let Some(navigation) = self.modern_navigation.as_mut() else {
             return false;
         };
@@ -326,6 +344,7 @@ impl HebnixApp {
         });
         json!({
             "page": "recolour", "catalog": model, "categories": categories, "inventory": self.owned_inventory.web_snapshot(),
+            "preview_ids": self.swapper_preview_ids,
             "emptyInventory": self.owned_inventory.ids.is_empty(), "running": self.last_rl_open, "loading": self.catalogs_loading,
             "catalogError": self.catalogs_error, "status": self.swapper.web_recolour_status(),
             "paint": SwapPaint::ALL.map(|paint| paint.label()), "labels": labels,
@@ -429,9 +448,11 @@ impl HebnixApp {
             self.celebration.web_snapshot(ctx, &backups, &cfg.celebration_key, &cfg.celebration_pad),
             self.bots_freeplay.web_snapshot(ctx, &backups, &cfg.bots_freeplay_key, &cfg.bots_freeplay_pad),
         ];
+        let rows: Vec<_> = mods.into_iter()
+            .filter(|row| row["id"].as_str().is_some_and(|id| self.game_mod_visible(id)))
+            .collect();
         json!({
-            "page": "game-mods", "rows": mods, "capturing": capturing,
-            "live": crate::patcher::live_cosmetics::snapshot(),
+            "page": "game-mods", "rows": rows, "capturing": capturing,
             "labels": {
                 "pad": t("game-mod-controller-button"), "press": t("game-mod-press-a-button"),
                 "none": t("game-mod-no-controller-button"), "bind": t("game-mod-bind-controller"),
@@ -519,8 +540,7 @@ impl HebnixApp {
             RlLaunchMode::Unconfigured => "settings-rl-mode-unconfigured",
             RlLaunchMode::SteamNative => "settings-rl-mode-steam-native",
             RlLaunchMode::EpicDirect => "settings-rl-mode-epic-direct",
-            RlLaunchMode::SteamShortcutToHeroic => "settings-rl-mode-steam-shortcut",
-            RlLaunchMode::HeroicDirect => "settings-rl-mode-heroic-direct",
+            RlLaunchMode::SteamShortcut => "settings-rl-mode-steam-shortcut",
         });
         let paths = [
             (
@@ -574,19 +594,15 @@ impl HebnixApp {
                 "warning": t("rl-launch-setup-non-steam-shortcuts-can-t-pass"),
                 "steam": t("rl-launch-setup-steam-app-id-252950-is-rocket"),
                 "shortcut": t("rl-launch-setup-steam-shortcut-id"),
-                "scan": t("rl-launch-setup-scan-steam-shortcuts-for-heroic"),
+                "scan": t("rl-launch-setup-scan-steam-shortcuts"),
                 "empty": t("rl-launch-setup-no-candidates-found-yet-click-scan"),
-                "binary": t("rl-launch-setup-heroic-binary-path-e-g-the"),
-                "app": t("rl-launch-setup-epic-catalog-app-name-sugar-is"),
-                "runner": t("rl-launch-setup-runner"),
                 "save": t("rl-launch-setup-save"), "cancel": t("spawner-enable-prompt-cancel"),
             });
             let modes = [
                 (RlLaunchMode::Unconfigured, t("rl-launch-setup-auto-detect-steam-or-epic-games")),
                 (RlLaunchMode::SteamNative, t("settings-rl-mode-steam-native")),
                 (RlLaunchMode::EpicDirect, t("settings-rl-mode-epic-direct")),
-                (RlLaunchMode::SteamShortcutToHeroic, t("rl-launch-setup-non-steam-shortcut-that-opens-heroic")),
-                (RlLaunchMode::HeroicDirect, t("rl-launch-setup-heroic-directly-no-steam-or-epic")),
+                (RlLaunchMode::SteamShortcut, t("settings-rl-mode-steam-shortcut")),
             ];
             let candidates: Vec<_> = self.rl_launch_shortcut_candidates.iter().map(|item| format!("{}  ({})", item.app_name, item.exe)).collect();
             json!({"draft": self.rl_launch_draft, "modes": modes, "labels": labels, "candidates": candidates})
@@ -799,6 +815,7 @@ impl HebnixApp {
     }
 
     fn web_system_settings(&self) -> Value {
+        if self.maintenance.tab { return self.web_maintenance(); }
         let cfg = &self.config.settings;
         let rows: Vec<_> = [
             ("startup", "system-start-with-windows", self.startup_enabled, ""),
@@ -1083,12 +1100,13 @@ impl HebnixApp {
                 .profile_pictures
                 .web_snapshot(std::path::Path::new(&self.config.settings.rl_path)),
             SpooferSubTab::TitleRank => {
-                let rows: Vec<_> = super::RANK_SPOOF_PLAYLISTS.iter().map(|&(id, name, _)| {
+                let rows: Vec<_> = super::RANK_SPOOF_PLAYLISTS.iter().enumerate().map(|(icon, &(id, name, _))| {
                     let rank = self.spoofer_ranks.entry(id).or_default();
-                    json!({ "id": id, "name": name, "enabled": rank.enabled, "rank": rank.rank, "division": rank.division, "mmr": rank.mmr })
+                    json!({ "id": id, "name": name, "icon": icon, "enabled": rank.enabled, "rank": rank.rank, "division": rank.division, "mmr": rank.mmr })
                 }).collect();
                 json!({
                     "page": "player-rank", "rows": rows, "ranks": (0..=22).map(super::rank_name).collect::<Vec<_>>(),
+                    "rankDefaults": (0..=22).map(|rank| (super::default_mu_for_tier(rank) * 20.0 + 100.0) as u32).collect::<Vec<_>>(),
                     "ready": self.web_rank_ready(), "busy": self.rank_patch.busy(), "status": self.rank_patch.status,
                     "apply": t("spoofer-apply-ranks"), "restore": t("spoofer-restore-ranks"), "mmr": t("spoofer-mmr"),
                 })
@@ -1113,6 +1131,7 @@ impl HebnixApp {
                 .collect()
         };
         json!({
+            "showInHeader": self.config.action_button.show_in_header,
             "page": "action-button", "intro": t("action-settings-intro"), "hint": t("action-settings-hint"),
             "keepOne": t("action-keep-one"), "openLabel": t("action-state-open"), "closedLabel": t("action-state-closed"),
             "open": rows(&self.config.action_button.rocket_league_open),
@@ -1198,7 +1217,7 @@ impl HebnixApp {
             return;
         }
         match action {
-            ManageAction::Maintenance { key, enabled } if self.tab == Tab::About && self.maintenance.tab => {
+            ManageAction::Maintenance { key, enabled } if (self.tab == Tab::About || (self.tab == Tab::Settings && self.hebnix_settings_tab == HebnixSettingsTab::System)) && self.maintenance.tab => {
                 match (key.as_str(), enabled) {
                     ("back", _) => {
                         self.maintenance.tab = false;
@@ -1303,8 +1322,7 @@ impl HebnixApp {
             ManageAction::WheelSelect { index } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::WheelAlignment => {
                 self.wheel_alignment.web_select(index);
             }
-            ManageAction::LiveCosmetics { settings } if self.tab == Tab::Patcher
-                && matches!(self.items_mode, super::ItemsMode::WheelAlignment | super::ItemsMode::GameColours) => {
+            ManageAction::LiveCosmetics { settings } if self.tab == Tab::LiveEditor => {
                 let cooked = self.swapper_cooked_path();
                 if let Err(error) = crate::patcher::live_cosmetics::update(&cooked, settings) {
                     self.console.write(format!("[Live Cosmetics] {error}"));
@@ -1343,8 +1361,10 @@ impl HebnixApp {
                 self.plugins_subtab = PluginsSubTab::Installed;
             }
             ManageAction::RecolourCategory { index } if self.on_recolour_page() => {
-                self.swapper.web_recolour_category(Some(index));
-                self.swapper_preview_ids.clear();
+                let before = self.swapper.web_recolour_category(None);
+                if self.swapper.web_recolour_category(Some(index)) != before {
+                    self.swapper_preview_ids.clear();
+                }
             }
             ManageAction::RecolourPreviews { ids } if self.on_recolour_page() => self.swapper_preview_ids = ids.into_iter().take(72).collect(),
             ManageAction::RecolourInventory { id } if self.on_recolour_page() => self.owned_inventory.refresh_web(ctx, id.as_deref()),
@@ -1359,7 +1379,7 @@ impl HebnixApp {
             ManageAction::StudioRestore { kind, target } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::Manage => {
                 self.web_restore_patch(kind.as_deref(), target.as_deref(), ctx);
             }
-            ManageAction::GameMod { id, key, value } if self.tab == Tab::GameMods => self.web_game_mod(&id, &key, value, ctx),
+            ManageAction::GameMod { id, key, value } if self.game_mod_visible(&id) => self.web_game_mod(&id, &key, value, ctx),
             ManageAction::AddMaps { action } if self.tab == Tab::Workshop && self.workshop.view == crate::ui::workshop::WorkshopView::Import => {
                 self.workshop.add_maps_web_action(action, ctx);
             }
@@ -1368,11 +1388,11 @@ impl HebnixApp {
             {
                 if let Some(draft) = draft { self.rl_launch_draft = draft; }
                 match key.as_str() {
-                    "scan" => self.rl_launch_shortcut_candidates = crate::rl_launch::find_heroic_shortcuts(),
+                    "scan" => self.rl_launch_shortcut_candidates = crate::rl_launch::find_steam_shortcuts(),
                     "candidate" => {
                         if let Some(item) = candidate.and_then(|index| self.rl_launch_shortcut_candidates.get(index)) {
                             self.rl_launch_draft.steam_id = item.rungameid.to_string();
-                            self.rl_launch_draft.heroic_binary = item.exe.trim().trim_matches('"').to_string();
+                            self.rl_launch_draft.shortcut_exe = item.exe.trim().trim_matches('"').to_string();
                         }
                     }
                     "save" => {
@@ -1422,7 +1442,8 @@ impl HebnixApp {
                     && self.hebnix_settings_tab == HebnixSettingsTab::System =>
             {
                 match key.as_str() {
-                    "repair" if !self.epic_repair.running => {
+                    "uninstall" => self.maintenance.tab = true,
+                "repair" if !self.epic_repair.running => {
                         self.epic_repair.begin(ctx);
                         if self.epic_repair.running {
                             self.spoofer_mgr.shutdown();
@@ -1447,9 +1468,8 @@ impl HebnixApp {
                 let cooked = self.swapper_cooked_path();
                 if volume {
                     self.goal_explosion_volume.web_run(&cooked, value, restore);
-                } else {
-                    self.goal_explosion.web_run(&cooked, value, restore);
                 }
+                // Scale is exclusively file-backed now. Ignore stale one-time scale actions.
             }
             ManageAction::SpeedItems { enabled }
                 if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::SpeedPatch =>
@@ -1562,12 +1582,13 @@ impl HebnixApp {
                 self.reload_catalogs(ctx);
             }
             ManageAction::Loadouts { action }
-                if self.tab == Tab::Items && self.items_subtab == super::ItemsSubTab::Loadouts =>
+                if self.tab == Tab::Items && matches!(self.items_subtab, super::ItemsSubTab::Loadouts | super::ItemsSubTab::PresetCreator) =>
             {
+                let refresh_inventory = action.refreshes_inventory();
                 let cooked = self.swapper_cooked_path();
                 if let Some(name) =
                     self.loadouts
-                        .web_action(action, &self.swapper, &cooked, &mut self.presets, ctx)
+                        .web_action(action, &mut self.swapper, &cooked, &mut self.presets, ctx)
                     && let Some(index) = self
                         .presets
                         .presets
@@ -1577,6 +1598,7 @@ impl HebnixApp {
                     self.presets.selected = index;
                     self.apply_selected_preset(&cooked, &cooked.join("Backups"), ctx);
                 }
+                if refresh_inventory { self.owned_inventory.refresh_web(ctx, None); }
             }
             ManageAction::FreeplayToggle { enabled } if self.tab == Tab::Freeplay => {
                 self.freeplay
@@ -1653,6 +1675,10 @@ impl HebnixApp {
                 {
                     self.save_config();
                 }
+            }
+            ManageAction::ActionButtonVisibility { enabled } if self.tab == Tab::Settings => {
+                self.config.action_button.show_in_header = enabled;
+                self.save_config();
             }
             ManageAction::ActionButtonToggle {
                 running,
@@ -1757,6 +1783,10 @@ impl HebnixApp {
                     self.save_config();
                 }
                 "refresh" => self.fetch_hebnix_plugin(),
+                "refresh_installed" => {
+                    self.plugin_mgr.refresh(&mut self.config, true);
+                    self.save_config();
+                }
                 "zip" => {
                     let dialog = rfd::FileDialog::new()
                         .add_filter(t("install-modal-plugin-archives"), &["zip"]);

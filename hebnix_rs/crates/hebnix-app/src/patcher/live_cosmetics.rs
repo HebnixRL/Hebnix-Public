@@ -38,11 +38,14 @@ impl Default for TeamColours {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub alignment: Alignment,
+    /// Zero means leave the game's original scale untouched.
+    pub goal_explosion_scale: f32,
     pub primary: Paint,
     pub secondary: Paint,
     pub heatseeker: Paint,
     pub trim: Paint,
     pub wheels: Paint,
+    pub boost: Paint,
     pub scoreboard_mmr: bool,
     pub scoreboard_names: bool,
     pub stadium: TeamColours,
@@ -58,12 +61,18 @@ impl Settings {
         for (value, limit) in [(self.alignment.camber, 30.), (self.alignment.vertical, 15.), (self.alignment.lateral, 15.)] {
             if !value.is_finite() || value.abs() > limit { return Err("Live alignment is outside its slider limits".into()); }
         }
+        if !self.goal_explosion_scale.is_finite() || (self.goal_explosion_scale != 0. && !(0.1..=10.).contains(&self.goal_explosion_scale)) {
+            return Err("Goal explosion scale must be default or between 0.1 and 10".into());
+        }
         Ok(())
     }
     fn encode(&self) -> Result<String, String> {
         self.validate()?;
-        let mut text = format!("\nHbxLive.version=1\nHbxLive.camber={}\nHbxLive.vertical={}\nHbxLive.lateral={}\n", self.alignment.camber, self.alignment.vertical, self.alignment.lateral);
-        for (key, paint) in [("primary", &self.primary), ("secondary", &self.secondary), ("heatseeker", &self.heatseeker), ("trim", &self.trim), ("wheels", &self.wheels)] {
+        // UI camber/track-width directions oppose the game's wheel-bone axes.
+        // Translate on write so existing installed hooks get the correction live.
+        let mut text = format!("\nHbxLive.version=1\nHbxLive.camber={}\nHbxLive.vertical={}\nHbxLive.lateral={}\n", -self.alignment.camber, self.alignment.vertical, -self.alignment.lateral);
+        text.push_str(&format!("HbxLive.goal-explosion.enabled={}\nHbxLive.goal-explosion.scale={}\n", u8::from(self.goal_explosion_scale != 0.), self.goal_explosion_scale));
+        for (key, paint) in [("primary", &self.primary), ("secondary", &self.secondary), ("heatseeker", &self.heatseeker), ("trim", &self.trim), ("wheels", &self.wheels), ("boost", &self.boost)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(paint.enabled)));
             text.push_str(&format!("HbxLive.{key}.rainbow={}\n", u8::from(paint.rainbow)));
             for (channel, value) in ["r", "g", "b"].into_iter().zip(paint.rgb) {
@@ -190,7 +199,9 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
             changed |= ui.add(eframe::egui::Slider::new(&mut settings.alignment.lateral, -15.0..=15.0).step_by(0.5).text("Track width")).changed();
             if ui.button("Reset alignment").clicked() { settings.alignment = Alignment::default(); changed = true; }
         } else {
-            for (label, paint) in [("Primary paint", &mut settings.primary), ("Secondary paint", &mut settings.secondary), ("Heatseeker ball", &mut settings.heatseeker), ("Trim colour", &mut settings.trim), ("Wheel colour", &mut settings.wheels)] {
+            ui.strong("Car Colours");
+            for (label, paint) in [("Primary paint", &mut settings.primary), ("Secondary paint", &mut settings.secondary), ("Trim colour", &mut settings.trim), ("Wheel colour", &mut settings.wheels), ("Boost colour", &mut settings.boost), ("Heatseeker ball", &mut settings.heatseeker)] {
+                if label == "Heatseeker ball" { ui.separator(); ui.strong("Heatseeker Ball"); }
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut paint.enabled, label).changed();
                     ui.add_enabled_ui(!paint.rainbow, |ui| { changed |= ui.color_edit_button_srgb(&mut paint.rgb).changed(); });
@@ -198,7 +209,19 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
                 });
             }
         }
-
+        if !alignment {
+            for (label, colours) in [("Stadium team colours", &mut settings.stadium), ("HUD team colours", &mut settings.hud)] {
+                changed |= ui.checkbox(&mut colours.enabled, label).changed();
+                if colours.enabled {
+                    ui.horizontal(|ui| {
+                        ui.label("Blue");
+                        changed |= ui.color_edit_button_srgb(&mut colours.blue).changed();
+                        ui.label("Orange");
+                        changed |= ui.color_edit_button_srgb(&mut colours.orange).changed();
+                    });
+                }
+            }
+        }
     });
     if changed { if let Err(e) = update(cooked, settings) { status(e); } }
 }
@@ -219,5 +242,53 @@ mod tests {
         assert!(invalid.encode().is_err());
         invalid.alignment.camber = 31.;
         assert!(invalid.encode().is_err());
+    }
+}
+
+pub fn render_goal_explosion(ui: &mut eframe::egui::Ui, cooked: &Path) {
+    let mut settings = values();
+    let mut enabled = settings.goal_explosion_scale != 0.;
+    let mut changed = ui.checkbox(&mut enabled, "Custom goal explosion scale").changed();
+    if changed { settings.goal_explosion_scale = if enabled { 1. } else { 0. }; }
+    if enabled {
+        changed |= ui.add(eframe::egui::Slider::new(&mut settings.goal_explosion_scale, 0.1..=10.).step_by(0.1).text("x")).changed();
+    }
+    ui.label("Default preserves the game's original scale. Changes apply to the next goal explosion.");
+    if changed { if let Err(error) = update(cooked, settings) { status(error); } }
+}
+
+#[cfg(test)]
+mod goal_scale_tests {
+    use super::*;
+    #[test]
+    fn old_preferences_preserve_stock_scale() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.goal_explosion_scale, 0.);
+        assert!(settings.encode().unwrap().contains("HbxLive.goal-explosion.enabled=0\n"));
+    }
+    #[test]
+    fn boost_defaults_and_rainbow_round_trip() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.boost.enabled && !settings.boost.rainbow);
+        assert!(settings.encode().unwrap().contains("HbxLive.boost.enabled=0\n"));
+        settings.boost = Paint { enabled: true, rgb: [255, 0, 128], rainbow: true };
+        let saved = serde_json::to_vec(&settings).unwrap();
+        let loaded: Settings = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.boost.rgb, [255, 0, 128]);
+        let encoded = loaded.encode().unwrap();
+        assert!(encoded.contains("HbxLive.boost.enabled=1\n"));
+        assert!(encoded.contains("HbxLive.boost.rainbow=1\n"));
+        assert!(encoded.contains("HbxLive.boost.r=1.0000000\n"));
+        assert!(encoded.contains("HbxLive.boost.g=0.0000000\n"));
+    }
+    #[test]
+    fn scale_rejects_invalid_values() {
+        let mut settings = Settings::default();
+        for value in [f32::NAN, f32::INFINITY, -1., 0.05, 10.1] {
+            settings.goal_explosion_scale = value;
+            assert!(settings.validate().is_err());
+        }
+        settings.goal_explosion_scale = 1.;
+        assert!(settings.encode().unwrap().contains("HbxLive.goal-explosion.enabled=1\n"));
     }
 }

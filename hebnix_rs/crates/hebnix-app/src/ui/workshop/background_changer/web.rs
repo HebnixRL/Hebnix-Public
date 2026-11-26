@@ -5,7 +5,7 @@ use eframe::egui;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 

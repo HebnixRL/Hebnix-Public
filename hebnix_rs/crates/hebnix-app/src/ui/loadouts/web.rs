@@ -3,6 +3,9 @@ use super::*;
 #[derive(serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WebAction {
+    DismissMessage,
+    StockEngine { team: usize, product: i32 },
+    Creator { action: super::creator::Action },
     Previews {
         positions: Vec<usize>,
     },
@@ -50,9 +53,16 @@ pub(crate) enum WebAction {
     },
 }
 
-const SLOTS: &[u8] = &[0, 1, 2, 3, 4, 5, 13, 14, 15, 18];
+impl WebAction {
+    pub(crate) fn refreshes_inventory(&self) -> bool {
+        matches!(self, Self::Confirm { .. } | Self::SaveImport { .. } | Self::Import { .. }
+            | Self::Creator { action: super::creator::Action::Finish { .. } })
+    }
+}
 
-fn category(slot: u8) -> Option<SwapCategory> {
+pub(super) const SLOTS: &[u8] = &[0, 1, 2, 3, 4, 5, 13, 14, 15];
+
+pub(super) fn category(slot: u8) -> Option<SwapCategory> {
     if slot == 0 {
         Some(SwapCategory::Bodies)
     } else {
@@ -61,6 +71,20 @@ fn category(slot: u8) -> Option<SwapCategory> {
 }
 
 impl LoadoutsPanel {
+    pub(crate) fn sync_global_save(&mut self, path: Option<&Path>, refresh: bool) {
+        let initial = !self.loaded;
+        if initial { self.loaded = true; self.refresh_accounts(); }
+        let changed = path.is_some_and(|path| self.save.as_deref() != Some(path));
+        if changed {
+            self.save = path.map(Path::to_path_buf);
+            self.creator = None;
+            self.dialog = None; self.code = None; self.mode = SaveMode::New;
+            self.base = 0; self.target = 0;
+        }
+        if refresh { self.refresh_accounts(); if let Some(path) = path { self.save = Some(path.to_path_buf()); } }
+        if initial || changed || refresh { self.reload(); }
+    }
+
     pub(crate) fn web_snapshot(
         &mut self,
         swapper: &mut SwapperState,
@@ -155,6 +179,7 @@ impl LoadoutsPanel {
         );
         json!({
             "page": "loadouts", "rows": rows, "account": account,
+            "preview_positions": self.web_previews, "creatorAttempt": self.creator_attempt,
             "accounts": self.accounts.iter().map(|account| &account.display_name).collect::<Vec<_>>(),
             "closed": !hebnix_sdk::process::is_rocket_league_running(),
             "input": self.input, "message": self.message, "dialog": dialog,
@@ -246,9 +271,10 @@ impl LoadoutsPanel {
                     }).collect();
                     choices.sort_unstable();
                     let label = choices.iter().find(|(_, _, selected)| *selected).map(|(label, _, _)| label.clone())
-                        .or_else(|| swapper.product_name(category, product as i64)).unwrap_or_else(|| format!("#{product}"));
+                        .or_else(|| swapper.product_name(category, product as i64)).unwrap_or_else(|| if product==0 {if slot==13 {"Default".into()} else {"None".into()}} else {format!("#{product}")});
                     let image = swapper.web_loadout_preview(ctx, category, cooked, product as i64);
-                    Some(json!({ "slot": slot, "name": slot_name(slot), "current": label, "choices": choices, "image": image, "product": product }))
+                    let engines:Vec<_>=if slot==13 {swapper.owned_engine_audio_ids().iter().filter_map(|&id|Some(json!({"product":i32::try_from(id).ok()?,"label":swapper.product_name(category,id)?}))).collect()} else {Vec::new()};
+                    Some(json!({ "engines":engines,"slot": slot, "name": slot_name(slot), "current": label, "choices": choices, "image": image, "product": product }))
                 }).collect();
                 json!({ "kind": "edit", "position": position, "name": name, "team": team, "slots": slots, "palette": palette,
                     "primary": paint.team_color, "secondary": paint.custom_color })
@@ -259,15 +285,23 @@ impl LoadoutsPanel {
     pub(crate) fn web_action(
         &mut self,
         action: WebAction,
-        swapper: &SwapperState,
+        swapper: &mut SwapperState,
         cooked: &Path,
         presets: &mut PresetStore,
         ctx: &egui::Context,
     ) -> Option<String> {
         let closed = !hebnix_sdk::process::is_rocket_league_running();
         match action {
+            WebAction::DismissMessage => self.message.clear(),
+            WebAction::StockEngine {team,product} if team<2 && swapper.owned_engine_audio_ids().contains(&(product as i64)) => {
+                if let Some((_,LoadoutDialog::Edit{preset,changes,..}))=&mut self.dialog {
+                    preset.teams[team].products[13]=product;preset.teams[team].items[13]=None;
+                    changes.retain(|(t,s,_,_)| *t!=team || *s!=13);
+                }
+            }
+            WebAction::Creator { action } => return self.creator_action(action, swapper, cooked, presets, ctx),
             WebAction::Previews { positions } => {
-                self.web_previews = positions.into_iter().take(24).collect()
+                self.web_previews = positions.into_iter().take(96).collect()
             }
             WebAction::Account { index } => {
                 let before = self.save.clone();
@@ -439,6 +473,7 @@ impl LoadoutsPanel {
                         name: name
                             .map(|name| name.trim().to_owned())
                             .filter(|name| !name.is_empty())?,
+                        stock_engines: std::array::from_fn(|team| (preset.teams[team].products[13]!=expected.teams[team].products[13] && preset.teams[team].items[13].is_none() && !changes.iter().any(|(t,s,_,_)| *t==team && *s==13)).then_some(preset.teams[team].products[13])),
                         expected: expected.clone(),
                         changes: changes.clone(),
                         colours: preset

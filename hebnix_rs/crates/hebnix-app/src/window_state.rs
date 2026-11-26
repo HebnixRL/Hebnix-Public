@@ -11,10 +11,12 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, PostMessageW,
-    SW_HIDE, SW_RESTORE, SW_SHOW, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WM_PAINT,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, GetWindowLongW, IsWindow, LWA_ALPHA, PostMessageW,
+    SetLayeredWindowAttributes, SetWindowLongW, WM_PAINT,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+#[cfg(test)]
+use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, WS_EX_TRANSPARENT};
 
 // Store the address, rather than HWND's non-Send raw pointer. The window remains
 // owned by eframe's UI thread; readers only use it with Win32 window APIs.
@@ -55,30 +57,16 @@ pub fn main_window() -> Option<HWND> {
 /// Show so a stale alpha-zero surface cannot cover the rendered client area.
 pub fn apply_window_visibility(hwnd: HWND, hidden: bool) {
     unsafe {
-        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let hidden_bits =
-            (WS_EX_LAYERED.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0)
-                as i32;
-        let desired = if hidden {
-            style | hidden_bits
-        } else {
-            style & !hidden_bits
-        };
-        if desired != style {
-            SetWindowLongW(hwnd, GWL_EXSTYLE, desired);
-        }
+        let away=(WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as i32;
+        let style=GetWindowLongW(hwnd,GWL_EXSTYLE);
         if hidden {
-            // Alpha alone can leave DirectComposition's non-client frame over
-            // the game. Remove the complete native window from composition.
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            if let Err(error) = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA) {
-                tracing::warn!(%error, "could not apply main window hidden alpha");
-            }
-        } else if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        } else if !IsWindowVisible(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_SHOW);
+            SetWindowLongW(hwnd,GWL_EXSTYLE,style | WS_EX_LAYERED.0 as i32 | away);
+            let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),0,LWA_ALPHA);
+        } else {
+            SetWindowLongW(hwnd,GWL_EXSTYLE,style & !away);
+            let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),255,LWA_ALPHA);
         }
+        set_taskbar_button(hwnd,!hidden);
     }
 }
 
@@ -97,7 +85,14 @@ pub fn wake_ui(ctx: &eframe::egui::Context) {
 }
 
 unsafe fn post_control_wake(hwnd: HWND) -> windows::core::Result<()> {
-    unsafe { PostMessageW(Some(hwnd), WM_PAINT, WPARAM(0), LPARAM(0)) }
+    use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_INTERNALPAINT, RDW_INVALIDATE};
+    unsafe {
+        // Mark a real update region as well as posting the fallback paint.
+        // Merely posting WM_PAINT can be consumed without a lasting redraw
+        // when Winit is buffering events while the game owns the foreground.
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_INTERNALPAINT | RDW_INVALIDATE);
+        PostMessageW(Some(hwnd), WM_PAINT, WPARAM(0), LPARAM(0))
+    }
 }
 
 pub fn set_taskbar_button(hwnd: HWND, shown: bool) -> u64 {

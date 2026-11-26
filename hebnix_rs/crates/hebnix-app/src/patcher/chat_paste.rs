@@ -265,7 +265,7 @@ impl State {
 
     pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool, rules: Vec<TitleOverride>) {
         if super::live_cosmetics::managed() {
-            self.status = super::live_cosmetics::set_mod(cooked, "chat-paste", want, None).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            self.status = super::live_cosmetics::set_mod(cooked, "chat-paste", want, None).map(|()| String::new()).unwrap_or_else(|e| e);
             return;
         }
         use crate::i18n::t;
@@ -299,7 +299,7 @@ impl State {
     }
 
     #[cfg(windows)]
-    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path, cooked: &Path, mut report: impl FnMut(&str)) -> serde_json::Value {
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path, cooked: &Path, report: impl FnMut(&str)) -> serde_json::Value {
         use crate::i18n::t;
         self.poll(ctx, report);
         let on = self.upgrade_if_needed(cooked, backups);

@@ -88,15 +88,12 @@ pub fn set_main_window_topmost(topmost: bool) {
 /// window, so launching twice isn't a silent no-op.
 pub fn focus_existing_instance() {
     unsafe {
-        for title in ["Hebnix", crate::decal_app::WINDOW_TITLE] {
-            let name = wide(title);
-            if let Ok(hwnd) = FindWindowW(None, PCWSTR(name.as_ptr())) {
-                if !IsWindowVisible(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_SHOW);
-                }
-                let _ = SetForegroundWindow(hwnd);
-                break;
+        let name = wide("Hebnix");
+        if let Ok(hwnd) = FindWindowW(None, PCWSTR(name.as_ptr())) {
+            if !IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_SHOW);
             }
+            let _ = SetForegroundWindow(hwnd);
         }
     }
 }

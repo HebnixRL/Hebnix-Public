@@ -1023,6 +1023,61 @@ fn changed_colour_exports(
     Ok(changes)
 }
 
+/// Palette-only edits change the final grayscale row of three existing
+/// exports. Build those small payloads directly rather than compressing and
+/// decompressing an entire intermediate TAGame package to discover the diff.
+fn palette_only_exports(
+    original: &super::upk_package::UpkPackage,
+    settings: &ColourSettings,
+    cars: Option<&CarColours>,
+) -> Result<Option<std::collections::HashMap<usize, Vec<u8>>>, String> {
+    if settings.stadium_colours || settings.hud_colours || settings.heatseeker_glow || cars.is_some() {
+        return Ok(None);
+    }
+    let mut changes = std::collections::HashMap::new();
+    if !settings.extended_palette { return Ok(Some(changes)); }
+    let mut valid = 0;
+    for path in ["CarColors.BlueTeamV3", "CarColors.OrangeTeamV3", "CarColors.CustomTeam"] {
+        let Some(index) = original.find_object(path).filter(|i| *i > 0) else { continue; };
+        let index = index as usize - 1;
+        let export = &original.exports[index];
+        let (props, _) = original.serialized_props(export)?;
+        let property = |name: &str, kind: &str| props.iter().find(|p| p.name == name && p.tag_type == kind);
+        let (Some(hue), Some(values), Some(colours)) = (property("HueCount", "IntProperty"),
+            property("ValueCount", "IntProperty"), property("Colors", "ArrayProperty")) else { continue; };
+        let baseline = colour_payload(original, index)?;
+        let hue_count = usize_from_i32(read_i32(baseline, hue.value_offset)?, "hue count")?;
+        let value_count = usize_from_i32(read_i32(baseline, values.value_offset)?, "value count")?;
+        let count = usize_from_i32(read_i32(baseline, colours.value_offset)?, "colour count")?;
+        if hue_count == 0 || value_count <= 1 || hue_count.checked_mul(value_count) != Some(count)
+            || count.checked_mul(16).and_then(|n| n.checked_add(4)) != Some(colours.size) {
+            continue;
+        }
+        let row = colours.value_offset + 4 + (count - hue_count) * 16;
+        let end = row.checked_add(hue_count * 16).ok_or("Palette size overflow")?;
+        if end > baseline.len() { return Err("Truncated extended palette export".into()); }
+        let mut payload = baseline.to_vec();
+        for index in 0..hue_count {
+            let value = 1.0 - index as f32 / (hue_count - 1).max(1) as f32;
+            let at = row + index * 16;
+            for channel in 0..3 { payload[at + channel * 4..at + channel * 4 + 4].copy_from_slice(&value.to_le_bytes()); }
+            payload[at + 12..at + 16].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        valid += 1;
+        if payload != baseline { changes.insert(index, payload); }
+    }
+    Ok((valid > 0).then_some(changes))
+}
+fn desired_colour_exports(
+    original: &super::upk_package::UpkPackage,
+    original_bytes: &[u8],
+    settings: &ColourSettings,
+    cars: Option<&CarColours>,
+) -> Result<std::collections::HashMap<usize, Vec<u8>>, String> {
+    if let Some(changes) = palette_only_exports(original, settings, cars)? { return Ok(changes); }
+    changed_colour_exports(original, render_colour_exports(original_bytes, settings, cars)?)
+}
+
 fn edit_live_colours(
     cooked: &Path,
     backups: &Path,
@@ -1036,13 +1091,13 @@ fn edit_live_colours(
     let (original_bytes, previous) = colour_source(cooked, backups, &before)?;
     let original = UpkPackage::from_bytes(original_bytes.clone())?;
     let desired = match settings {
-        Some((settings, cars)) => changed_colour_exports(&original, render_colour_exports(&original_bytes, settings, cars)?)?,
+        Some((settings, cars)) => desired_colour_exports(&original, &original_bytes, settings, cars)?,
         None => Default::default(),
     };
     let previous = match previous {
         Some(previous) => {
             let cars = previous.applied_car_colours.clone().or_else(|| previous.car_colours_patch());
-            changed_colour_exports(&original, render_colour_exports(&original_bytes, &previous, cars.as_ref())?)?
+            desired_colour_exports(&original, &original_bytes, &previous, cars.as_ref())?
         }
         None => Default::default(),
     };
@@ -1090,6 +1145,7 @@ fn edit_live_colours(
         }
         changed = true;
     }
+    drop(original); // Baseline payloads have been merged; release the decompressed archive before packing.
     if settings.is_some() {
         super::upk_history::replace(&backups.join(BACKUP_NAME), &original_bytes)?;
     }
@@ -1099,6 +1155,7 @@ fn edit_live_colours(
     let stage = cooked.join(format!("TAGame.colours-{:016x}.tmp", rand::random::<u64>()));
     let result = (|| {
         package.save_fast(&stage)?;
+        drop(package);
         let output = fs::read(&stage).map_err(|error| error.to_string())?;
         UpkPackage::from_bytes(output.clone())?;
         if hebnix_sdk::process::is_rocket_league_running() {
@@ -2597,4 +2654,18 @@ fn usize_from_i32(value: i32, label: &str) -> Result<usize, String> {
 
 fn usize_from_i64(value: i64, label: &str) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("Invalid negative {label}"))
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires HEBNIX_PALETTE_PROBE pointing to a clean TAGame package"]
+fn direct_extended_palette_matches_the_existing_package_transform() {
+    let raw = std::fs::read(std::env::var_os("HEBNIX_PALETTE_PROBE").expect("clean TAGame path")).unwrap();
+    let original = super::upk_package::UpkPackage::from_bytes(raw.clone()).unwrap();
+    let settings = ColourSettings { extended_palette: true, stadium_colours: false, hud_colours: false,
+        heatseeker_glow: false, car_colours: false, ..Default::default() };
+    let fast = palette_only_exports(&original, &settings, None).unwrap().unwrap();
+    let previous = changed_colour_exports(&original, render_colour_exports(&raw, &settings, None).unwrap()).unwrap();
+    assert_eq!(fast, previous);
+    assert!(fast.len() <= 3);
 }

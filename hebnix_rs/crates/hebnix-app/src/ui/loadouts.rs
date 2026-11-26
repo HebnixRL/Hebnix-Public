@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 
 #[cfg(windows)]
 pub(crate) mod web;
+#[cfg(windows)]
+mod creator;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum SaveMode {
@@ -80,6 +82,10 @@ pub struct LoadoutsPanel {
     plan: Option<(PlanKey, Result<Plan, String>)>,
     #[cfg(windows)]
     web_previews: Vec<usize>,
+    #[cfg(windows)]
+    creator: Option<creator::Creator>,
+    #[cfg(windows)]
+    creator_attempt: u64,
 }
 
 enum LoadoutDialog {
@@ -111,7 +117,7 @@ impl LoadoutsPanel {
     }
 
     fn finish(&mut self, result: Result<(), String>) {
-        self.message = result.err().unwrap_or_default();
+        self.message = result.err().map(|error| if error.contains("Cannot delete the last loadout") { "Cannot delete the last loadout. Keep at least one preset.".into() } else { error }).unwrap_or_default();
         self.reload();
     }
 
@@ -734,6 +740,16 @@ impl LoadoutsPanel {
                                                     ui.add(egui::TextEdit::singleline(search).hint_text(t("loadouts-search-items")));
                                                     let query = search.trim().to_lowercase();
                                                     egui::ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
+                                                        if slot==13 {
+                                                            let mut engines:Vec<_>=swapper.owned_engine_audio_ids().iter().filter_map(|&id|Some((swapper.product_name(SwapCategory::Engines,id)?,id))).collect();
+                                                            engines.sort_unstable();
+                                                            for (label,id) in engines {
+                                                                if label.to_lowercase().contains(&query) && ui.selectable_label(product as i64==id,label).clicked() {
+                                                                    preset.teams[*team].products[13]=id as i32;preset.teams[*team].items[13]=None;
+                                                                    changes.retain(|(t,s,_,_)| *t!=*team || *s!=13);
+                                                                }
+                                                            }
+                                                        }
                                                         let mut choices: Vec<_> = owned.iter().filter_map(|&(id, upper, lower, paint)| {
                                                             if !swapper.loadout_item_compatible(category, id as i64, preset.teams[*team].products[0] as i64) { return None; }
                                                             let mut label = swapper.product_name(category, id as i64)?;
@@ -762,7 +778,7 @@ impl LoadoutsPanel {
                                 );
                                 if !name.is_empty() && save.clicked() {
                                     let colours = preset.teams.each_ref().map(|team| [team.team_color, team.custom_color]);
-                                    edit = Some(Edit::Update { position, name: name.to_owned(), changes: changes.clone(), colours, expected: expected.clone() });
+                                    edit = Some(Edit::Update { position, name: name.to_owned(), changes: changes.clone(), colours, stock_engines:std::array::from_fn(|team|(preset.teams[team].products[13]!=expected.teams[team].products[13] && preset.teams[team].items[13].is_none() && !changes.iter().any(|(t,s,_,_)| *t==team && *s==13)).then_some(preset.teams[team].products[13])), expected: expected.clone() });
                                 }
                                 cancel = ui.button(t("loadouts-cancel")).clicked();
                             });

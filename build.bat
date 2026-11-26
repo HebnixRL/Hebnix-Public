@@ -46,13 +46,13 @@ if "%TARGET%"=="package" (
     exit /b !BUILD_ERR!
 )
 echo Building hebnix-app (release)...
-cargo build --release --bin hebnix
+cargo build --locked --release --bin hebnix
 if errorlevel 1 (
     popd
     exit /b 1
 )
 echo Building hebnix-lite (release)...
-cargo build --release --bin hebnix-lite --features lite
+cargo build --locked --release --bin hebnix-lite --features lite
 set "BUILD_ERR=!errorlevel!"
 popd
 if !BUILD_ERR! neq 0 exit /b !BUILD_ERR!

@@ -404,7 +404,7 @@ impl State {
 
     pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool) {
         if super::live_cosmetics::managed() {
-            self.status = super::live_cosmetics::set_mod(cooked, "chat-export", want, None).map(|()| "Live settings saved".to_string()).unwrap_or_else(|e| e);
+            self.status = super::live_cosmetics::set_mod(cooked, "chat-export", want, None).map(|()| String::new()).unwrap_or_else(|e| e);
             return;
         }
         use crate::i18n::t;

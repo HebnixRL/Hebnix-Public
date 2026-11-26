@@ -546,6 +546,23 @@ fn set_enabled_checked(
             .into());
         }
     }
+    let cache_scope = format!("profile-pictures-v{PATCH_VERSION}-{on}");
+    if !upgrading {
+        if let Some(saved) = &receipt {
+            let wanted = if on { &saved.enabled_sha256 } else { &saved.disabled_sha256 };
+            if let Some(bytes) = super::package_cache::get(&cache_scope, &source_digest)
+                .filter(|bytes| wanted.as_ref().is_some_and(|wanted| hex::encode(Sha256::digest(bytes)) == *wanted)) {
+                ensure_closed()?;
+                if file_digest(&source)? != source_digest { return Err("Game package changed during cached avatar preparation".into()); }
+                let mut saved = saved.clone(); saved.active = Some(on);
+                super::upk_history::replace(&receipt_path(game), &serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?)?;
+                ensure_closed()?;
+                super::upk_history::replace(&source, &bytes)?;
+                timing("restored verified cached package", started);
+                return Ok(if on { "Native profile pictures enabled." } else { "Native profile pictures disabled." }.into());
+            }
+        }
+    }
     let mut package = UpkPackage::load(&source)?;
     timing("load and index", started);
     if let Some(saved) = &receipt {
@@ -685,12 +702,12 @@ fn set_enabled_checked(
     }
     let path = receipt_path(game);
     fs::create_dir_all(path.parent().ok_or("Invalid receipt path")?).map_err(|e| e.to_string())?;
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    fs::copy(&temporary, &source).map_err(|e| e.to_string())?;
+    super::upk_history::replace(&path, &serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?)?;
+    let staged = fs::read(&temporary).map_err(|e| e.to_string())?;
+    super::package_cache::remember(&cache_scope, &source_digest, &staged);
+    ensure_closed()?;
+    if file_digest(&source)? != source_digest { return Err("Game package changed while caching avatar preparation".into()); }
+    super::upk_history::replace(&source, &staged)?;
     let _ = fs::remove_file(temporary);
     timing("complete", started);
     Ok(if on {

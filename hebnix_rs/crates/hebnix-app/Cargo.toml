@@ -12,10 +12,6 @@ name = "hebnix"
 path = "src/main.rs"
 
 [[bin]]
-name = "decal-studio"
-path = "src/decal_main.rs"
-
-[[bin]]
 name = "hebnix-lite"
 path = "src/lite_main.rs"
 required-features = ["lite"]

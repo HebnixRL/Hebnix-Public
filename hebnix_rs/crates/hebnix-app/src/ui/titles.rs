@@ -273,6 +273,7 @@ impl HebnixApp {
             self.spoofer_title_enabled = true;
             self.save_config();
         }
+        self.title_only_owned = self.config.settings.owned_items_only;
         let owned = &self.owned_inventory.title_ids;
         let catalog: Vec<_> = self.title_catalog.iter().map(|entry| {
             let [r, g, b, _] = entry.game_color().to_array();

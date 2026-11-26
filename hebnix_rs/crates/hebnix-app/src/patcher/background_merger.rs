@@ -690,11 +690,7 @@ fn host_sky_patches(package: &UpkPackage, preserve_sky: bool) -> Result<Vec<Patc
             let off = e.serial_offset + p.value_offset;
             let reference = package.read_int(off)?;
             let mesh_name = package.obj_name(reference);
-            let in_replaced_scope = if preserve_sky {
-                is_backdrop(&mesh_name) || is_atmosphere_visual(&mesh_name)
-            } else {
-                host_background_scope(&mesh_name)
-            };
+            let in_replaced_scope = replaced_host_mesh(&mesh_name, preserve_sky);
             if reference != 0 && in_replaced_scope {
                 patches.push((off, vec![0; 4]))
             }
@@ -909,6 +905,13 @@ fn host_background_scope(mesh: &str) -> bool {
         return false;
     }
     is_core_background(mesh) || is_extended_scenery(mesh)
+}
+
+fn replaced_host_mesh(mesh: &str, preserve_sky: bool) -> bool {
+    // A donor without a sky still replaces the entire exterior. Previously this
+    // path only removed distant backdrops, leaving the host's trees, buildings,
+    // terrain and roads in front of the incoming scenery.
+    host_background_scope(mesh) && !(preserve_sky && is_sky(mesh))
 }
 
 fn is_core_background(mesh: &str) -> bool {
@@ -1265,6 +1268,17 @@ fn friendly(name: &str) -> String {
 #[cfg(test)]
 mod arena_roundtrip {
     use super::*;
+
+    #[test]
+    fn skyless_donor_replaces_nearby_scenery_but_keeps_sky_and_playfield() {
+        for mesh in ["Park_Tree_Poplar", "Park_Building_01", "Park_Terrain", "Park_Road", "Park_CityGround", "Park_Fog"] {
+            assert!(replaced_host_mesh(mesh, true), "left host scenery visible: {mesh}");
+        }
+        for mesh in ["SkyDome", "SkySphere", "CloudLayer", "Field_Wall", "GrassField", "Goal", "BoostPad", "Collision"] {
+            assert!(!replaced_host_mesh(mesh, true), "removed protected mesh: {mesh}");
+        }
+        assert!(replaced_host_mesh("SkyDome", false));
+    }
 
     /// HBNX_COOKED=<CookedPCConsole> HBNX_WORK=<scratch folder>
     /// cargo test -p hebnix-app arena_roundtrip -- --ignored --nocapture

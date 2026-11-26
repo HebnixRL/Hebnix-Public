@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod browser;
+mod engine_ownership;
 mod item_name;
 mod thumbnail_patcher;
 #[cfg(windows)]
@@ -101,7 +102,7 @@ impl SwapCategory {
     /// Catalogue `paintable` describes official inventory variants, not whether
     /// a visual asset can accept a local material colour override.
     pub fn supports_recolour(self) -> bool {
-        !matches!(self, Self::Engines | Self::Anthems)
+        !matches!(self, Self::Engines | Self::Anthems | Self::Finishes)
     }
 }
 
@@ -470,6 +471,7 @@ pub struct SwapperState {
     walkthrough_applied_at: Option<Instant>,
     owned_only: bool,
     thumbnails: HashMap<String, Option<Arc<[u8]>>>,
+    engine_ownership: engine_ownership::State,
     failed_thumbnails: HashMap<String, String>,
     thumbnail_jobs: Sender<(String, PathBuf, String, egui::Context)>,
     thumbnail_results: Receiver<(String, Result<Arc<[u8]>, String>)>,
@@ -586,6 +588,7 @@ impl SwapperState {
             walkthrough_applied_at: None,
             owned_only: false,
             thumbnails: HashMap::new(),
+            engine_ownership: engine_ownership::State::default(),
             failed_thumbnails: HashMap::new(),
             thumbnail_jobs,
             thumbnail_results,
@@ -1980,7 +1983,7 @@ impl SwapperState {
                 continue;
             };
             let find = |id: i64| items.iter().find(|item| item.product_id == Some(id));
-            let (Some(source), Some(target)) = (find(pick.stock_product), find(pick.product)) else {
+            let (Some(source), Some(target)) = (find(pick.product), find(pick.stock_product)) else {
                 skipped.push(format!(
                     "{}: product {} or stock {} is not in the catalog",
                     pick.category.slug(),
@@ -3169,6 +3172,22 @@ mod recolour_tests {
         SwapperState::parse_catalog(category, &json!({category.slug(): [
             {"name":"Test item", "upk_path":file, "id":123, "paintable":false, "audio_bnk":"unchanged.bnk"}
         ]}), &Value::Null).unwrap().remove(0)
+    }
+
+    #[test]
+    fn preset_swaps_copy_the_wanted_item_over_the_owned_replacement() {
+        let mut wanted=catalog_item(SwapCategory::Bodies,"wanted_SF.upk");
+        wanted.name="Wanted car".into(); wanted.product_id=Some(456);
+        let mut owned=catalog_item(SwapCategory::Bodies,"owned_SF.upk");
+        owned.name="Owned car".into(); owned.product_id=Some(123);
+        let mut state=SwapperState::new(Path::new("nonexistent-preset-direction-test"));
+        state.catalogs.insert(SwapCategory::Bodies,Arc::new(vec![wanted,owned]));
+        let (swaps,skipped)=state.bakkes_preset_swaps(&[SwapPick {category:SwapCategory::Bodies,stock_product:123,product:456,paint:0}]);
+        assert!(skipped.is_empty()); assert_eq!(swaps.len(),1);
+        assert_eq!(swaps[0]["source_product"],456);
+        assert_eq!(swaps[0]["target_product"],123);
+        assert_eq!(swaps[0]["source_name"],"Wanted car");
+        assert_eq!(swaps[0]["target_name"],"Owned car");
     }
 
     #[test]

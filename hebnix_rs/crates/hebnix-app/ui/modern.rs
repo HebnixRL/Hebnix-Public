@@ -6,6 +6,56 @@ use wry::{
     http::{Method, Response, StatusCode, header::CONTENT_TYPE},
 };
 
+
+fn rank_asset(path: &str) -> Option<(&'static str, Cow<'static, [u8]>)> {
+    const PLAYLISTS: [&[u8]; 10] = [
+        include_bytes!("../assets/ingame-rank/Playlists/0.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/1.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/2.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/3.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/4.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/5.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/6.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/7.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/8.png"),
+        include_bytes!("../assets/ingame-rank/Playlists/9.png"),
+    ];
+    const TIERS: [&[u8]; 23] = [
+        include_bytes!("../assets/ingame-rank/Tiers/0.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/1.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/2.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/3.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/4.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/5.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/6.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/7.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/8.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/9.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/10.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/11.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/12.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/13.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/14.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/15.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/16.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/17.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/18.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/19.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/20.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/21.png"),
+        include_bytes!("../assets/ingame-rank/Tiers/22.png"),
+    ];
+    let name = path.strip_prefix("/rank-icons/")?.strip_suffix(".png")?;
+    let (kind, index) = name.split_once('-')?;
+    let index = index.parse::<usize>().ok()?;
+    let bytes = match kind {
+        "playlist" => PLAYLISTS.get(index),
+        "tier" => TIERS.get(index),
+        _ => None,
+    }?;
+    Some(("image/png", Cow::Borrowed(*bytes)))
+}
+
 pub(crate) const SIDEBAR_WIDTH: f32 = 216.0;
 
 pub(crate) fn styled_controls(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui)) {
@@ -181,6 +231,7 @@ pub(crate) struct About {
 #[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HeaderPanel {
+    Settings,
     Actions,
     Notifications,
     Network,
@@ -191,6 +242,7 @@ impl HeaderPanel {
         match self {
             Self::Actions => HEADER_HEIGHT + 14.0 + 36.0 * action_count as f32,
             Self::Notifications | Self::Network => 382.0,
+            Self::Settings => 250.0,
         }
     }
 
@@ -199,6 +251,7 @@ impl HeaderPanel {
             Self::Actions => f32::from(action_width),
             Self::Notifications => 360.0,
             Self::Network => 400.0,
+            Self::Settings => 360.0,
         }
     }
 }
@@ -220,6 +273,10 @@ pub(crate) enum HeaderAction {
     Run {
         action: crate::config::ActionButtonAction,
     },
+    OwnedAccount { account: String },
+    RefreshSave,
+    OwnedOnly { enabled: bool },
+    MoreSettings,
     ClearNotifications,
     Network {
         action: crate::app::network::WebAction,
@@ -290,6 +347,7 @@ pub(crate) enum ManageAction {
     FriendName { id: String, enabled: Option<bool>, name: Option<String> },
     RevertFriendNames,
     Scoreboard { key: String, value: serde_json::Value },
+    ActionButtonVisibility { enabled: bool },
     ActionButtonToggle { running: bool, index: usize, enabled: bool },
     ActionButtonMove { running: bool, from: usize, to: usize },
     PluginPreviews { ids: Vec<String> },
@@ -453,6 +511,8 @@ struct ContentView {
     surface: WebSurface,
 }
 
+type TabSelection = (usize, Option<usize>, Option<usize>);
+
 struct WebSurface {
     webview: WebView,
     ready: bool,
@@ -471,7 +531,8 @@ pub(crate) struct Navigation {
     messages: crossbeam_channel::Receiver<String>,
     shown: bool,
     ready: bool,
-    selected: Option<(usize, Option<usize>, Option<usize>)>,
+    selected: Option<TabSelection>,
+    content_selection: Option<TabSelection>,
     size: Option<PhysicalSize<u32>>,
     content: Option<ContentView>,
     cached_content: Vec<ContentView>,
@@ -512,6 +573,7 @@ impl Navigation {
             shown: false,
             ready: false,
             selected: None,
+            content_selection: None,
             size: None,
             content,
             cached_content,
@@ -688,6 +750,7 @@ impl Navigation {
                             "text/javascript; charset=utf-8",
                             Cow::Owned(script.as_bytes().to_vec()),
                         )),
+                        (&Method::GET, path) => rank_asset(path),
                         _ => None,
                     };
                 match asset {
@@ -845,7 +908,7 @@ impl Navigation {
     pub(crate) fn show(
         &mut self,
         ctx: &egui::Context,
-        selected: (usize, Option<usize>, Option<usize>),
+        selected: TabSelection,
     ) -> wry::Result<()> {
         let scale = ctx.pixels_per_point();
         let height = ctx.input(|input| {
@@ -1088,6 +1151,7 @@ impl Navigation {
             return Ok(true);
         }
         content.surface.apply_theme(&self.theme)?;
+        let was_shown = content.surface.shown;
         content.surface.present(
             ui.ctx(),
             self.workspace
@@ -1096,6 +1160,10 @@ impl Navigation {
             data,
         )?;
         if content.surface.shown {
+            if !was_shown || self.content_selection != self.selected {
+                content.surface.webview.evaluate_script("window.animateHebnixTab()")?;
+                self.content_selection = self.selected;
+            }
             for previous in &mut self.cached_content { previous.surface.hide(); }
         }
         Ok(true)

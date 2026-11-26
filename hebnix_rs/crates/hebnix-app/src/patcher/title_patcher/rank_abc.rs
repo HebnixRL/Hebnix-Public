@@ -1,5 +1,5 @@
 //! Local display getters in the game’s Scaleform movies. Menu rows key off
-//! the playlist ID. Scoreboard rows use the match size when available.
+//! the playlist ID, including scoreboard and promotion display rows.
 use super::{
     Abc, RankPick, Reader, Result, TitleIdSource, Trait, bind, branch, native_player_value, op,
     prologue_len, put, skip_debug,
@@ -112,14 +112,11 @@ pub(in crate::patcher::title_patcher) fn patch(
     let abc = Abc::parse(data)?;
     let event = abc.classes.iter().find_map(|class| {
         (abc.name(class.name).ok()?.full == "tagame.api:GameEvent")
-            .then(|| getter(&abc, &class.statics, "MaxPlayers"))
+            .then(|| getter(&abc, &class.statics, "PlaylistId"))
             .flatten()
-            .map(|max| (class.name, max))
+            .map(|playlist| (class.name, playlist))
     });
-    let strongest = picks
-        .iter()
-        .max_by_key(|pick| (pick.tier, pick.mmr))
-        .ok_or("No rank overrides selected")?;
+    if picks.is_empty() { return Err("No rank overrides selected".into()); }
     let mut replacements = Vec::new();
     for class in &abc.classes {
         let owner = abc.name(class.name)?.full.as_str();
@@ -216,11 +213,11 @@ pub(in crate::patcher::title_patcher) fn patch(
                     continue;
                 }
                 let mut fallbacks = Vec::new();
-                if let Some((class, max_players)) = event {
+                if let Some((class, playlist_id)) = event {
                     for pick in picks {
                         op(&mut output, 0x60, class);
-                        op(&mut output, 0x66, max_players);
-                        output.extend([0x24, pick.players]);
+                        op(&mut output, 0x66, playlist_id);
+                        output.extend([0x24, pick.playlist]);
                         let mismatch = branch(&mut output, 0x14);
                         fallbacks.extend(player_block(
                             &mut output,
@@ -235,15 +232,9 @@ pub(in crate::patcher::title_patcher) fn patch(
                         bind(&mut output, mismatch, end)?;
                     }
                 }
-                fallbacks.extend(player_block(
-                    &mut output,
-                    field,
-                    strongest,
-                    selector,
-                    row,
-                    native_tier,
-                    &change,
-                )?);
+                // Unknown/unselected playlists must keep their native rank.
+                // Match size cannot distinguish Doubles, Hoops and Heatseeker;
+                // a strongest-rank fallback also leaked into unrelated modes.
                 let end = output.len();
                 for fallback in fallbacks {
                     bind(&mut output, fallback, end)?;
@@ -284,4 +275,44 @@ pub(in crate::patcher::title_patcher) fn patch(
     output.extend(&data[at..]);
     Abc::parse(&output)?;
     Ok(Some((output, count)))
+}
+
+#[cfg(test)]
+#[test]
+fn equal_size_playlists_use_distinct_ids_and_retain_native_fallback() {
+    // An extracted, unmodified SWF/GFx movie; read only, never a game write.
+    let Some(path) = std::env::var_os("HEBNIX_RANK_MOVIE_FIXTURE") else { return };
+    let raw = std::fs::read(path).unwrap();
+    let picks = [
+        RankPick { playlist: 11, tier: 10, division: 1, mmr: 900, players: 4 },
+        RankPick { playlist: 63, tier: 22, division: 0, mmr: 1800, players: 4 },
+    ];
+    let checked = std::cell::Cell::new(0);
+    super::super::movie::rewrite(&raw, &|data| {
+        let original = Abc::parse(data)?;
+        let Some((patched, _)) = patch(data, &picks)? else { return Ok(None) };
+        let after = Abc::parse(&patched)?;
+        let Some(event) = after.classes.iter().find(|class| after.name(class.name).is_ok_and(|name| name.full == "tagame.api:GameEvent")) else { return Ok(None) };
+        let playlist = getter(&after, &event.statics, "PlaylistId").unwrap();
+        let Some(player) = after.classes.iter().find(|class| after.name(class.name).is_ok_and(|name| name.full == "tagame.api:PlayerInfoRow")) else { return Ok(None) };
+        for entry in &player.fields {
+            let field = after.name(entry.name)?.local.as_str();
+            if entry.kind != 2 || !PLAYER_FIELDS.contains(&field) { continue }
+            let body = after.bodies.iter().find(|body| Some(body.id) == entry.method).unwrap();
+            let before = original.bodies.iter().find(|before| before.id == body.id).unwrap();
+            let code = &patched[body.code.clone()];
+            let stock = &data[before.code.clone()];
+            for pick in picks {
+                let mut selector = Vec::new();
+                op(&mut selector, 0x60, event.name);
+                op(&mut selector, 0x66, playlist);
+                selector.extend([0x24, pick.playlist, 0x14]);
+                assert!(code.windows(selector.len()).any(|window| window == selector));
+            }
+            assert!(code.ends_with(&stock[prologue_len(stock)?..]), "missing native fallback for {field}");
+            checked.set(checked.get() + 1);
+        }
+        Ok(None)
+    }).unwrap();
+    assert!(checked.get() >= PLAYER_FIELDS.len());
 }

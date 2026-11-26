@@ -1,5 +1,5 @@
 use super::{
-    HebnixApp, HebnixSettingsTab, ItemsSubTab, PatcherSubTab, PluginsSubTab, ReplaysSubTab,
+    FreeplayPage, LiveEditorPage, MatchToolsPage, HebnixApp, HebnixSettingsTab, ItemsSubTab, PatcherSubTab, PluginsSubTab, ReplaysSubTab,
     SpooferSubTab, StudioSection, Tab, home::HomeTab, t,
 };
 use crate::modern_ui::{
@@ -20,12 +20,16 @@ pub(super) enum Subtab {
     Replays(ReplaysSubTab),
     Plugins(PluginsSubTab),
     Settings(HebnixSettingsTab),
+    MatchTools(MatchToolsPage),
+    Freeplay(FreeplayPage),
+    LiveEditor(LiveEditorPage),
 }
 
 pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
     use Subtab::*;
     match tab {
         Tab::Home => &[
+            (Home(HomeTab::Dashboard), "home-dashboard"),
             (Home(HomeTab::LiveMatch), "home-live-match"),
             (Home(HomeTab::Tracker), "home-tracker"),
         ],
@@ -47,6 +51,7 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
             (Items(ItemsSubTab::Active), "nav-active"),
             (Items(ItemsSubTab::Presets), "presets-presets"),
             (Items(ItemsSubTab::Loadouts), "loadouts-title"),
+            (Items(ItemsSubTab::PresetCreator), "nav-preset-creator"),
         ],
         Tab::Patcher => &[
             (Studio(StudioSection::CustomAssets), "studio-custom-assets"),
@@ -90,7 +95,21 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
                 "settings-nav-action-button",
             ),
         ],
-        Tab::Freeplay | Tab::GameMods | Tab::Console | Tab::About => &[],
+        Tab::GameMods => &[
+            (MatchTools(MatchToolsPage::PAGES[0].0), MatchToolsPage::PAGES[0].1),
+            (MatchTools(MatchToolsPage::PAGES[1].0), MatchToolsPage::PAGES[1].1),
+            (MatchTools(MatchToolsPage::PAGES[2].0), MatchToolsPage::PAGES[2].1),
+        ],
+        Tab::Freeplay => &[
+            (Freeplay(FreeplayPage::PAGES[0].0), FreeplayPage::PAGES[0].1),
+            (Freeplay(FreeplayPage::PAGES[1].0), FreeplayPage::PAGES[1].1),
+        ],
+        Tab::LiveEditor => &[
+            (LiveEditor(LiveEditorPage::PAGES[0].0), LiveEditorPage::PAGES[0].1),
+            (LiveEditor(LiveEditorPage::PAGES[1].0), LiveEditorPage::PAGES[1].1),
+            (LiveEditor(LiveEditorPage::PAGES[2].0), LiveEditorPage::PAGES[2].1),
+        ],
+        Tab::Console | Tab::About => &[],
     }
 }
 
@@ -213,6 +232,7 @@ impl HebnixApp {
     }
 
     pub(super) fn render_modern_header(&mut self, ui: &mut egui::Ui) -> bool {
+        self.owned_inventory.poll(ui.ctx());
         use serde_json::json;
         if ui.input(|input| input.pointer.any_pressed())
             && let Some(navigation) = &mut self.modern_navigation
@@ -268,6 +288,9 @@ impl HebnixApp {
             .map_or(180, |nav| nav.action_width);
         let data = json!({
             "title": page_title,
+            "show_action_button": self.config.action_button.show_in_header,
+            "inventory": self.owned_inventory.web_snapshot(),
+            "ownedOnly": self.config.settings.owned_items_only,
             "controller": self.panel.active,
             "page_warning": (self.tab == Tab::Items
                 && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active)
@@ -317,6 +340,7 @@ impl HebnixApp {
                 action_width,
             } => {
                 navigation.header_panel = panel;
+                if panel == Some(HeaderPanel::Settings) { self.owned_inventory.refresh_web(ctx, None); }
                 if panel == Some(HeaderPanel::Actions) {
                     navigation.action_inset = action_inset;
                     navigation.action_width = action_width.clamp(100, 720);
@@ -332,9 +356,28 @@ impl HebnixApp {
                 if navigation.header_panel == Some(HeaderPanel::Actions) {
                     navigation.header_panel = None;
                 }
-                if self.enabled_action_button_actions().contains(&action) {
+                if self.enabled_action_button_actions().contains(&action) || (self.tab == Tab::Home && self.home.tab == HomeTab::Dashboard
+                    && matches!(action, crate::config::ActionButtonAction::StartRocketLeague | crate::config::ActionButtonAction::CloseRocketLeague)) {
                     self.execute_action_button_action(action, ctx);
                 }
+            }
+            HeaderAction::OwnedAccount { account } => {
+                self.owned_inventory.refresh_web(ctx, Some(&account));
+            }
+            HeaderAction::RefreshSave => {
+                self.owned_inventory.refresh_web(ctx, None);
+                let path = self.owned_inventory.selected_save().map(std::path::Path::to_path_buf);
+                self.loadouts.sync_global_save(path.as_deref(), true);
+            }
+            HeaderAction::OwnedOnly { enabled } => {
+                self.config.settings.owned_items_only = enabled;
+                self.config.patcher.decal_only_owned = enabled;
+                self.save_config();
+            }
+            HeaderAction::MoreSettings => {
+                navigation.header_panel = None;
+                self.tab = Tab::Settings;
+                self.hebnix_settings_tab = HebnixSettingsTab::Interface;
             }
             HeaderAction::ClearNotifications
                 if navigation.header_panel == Some(HeaderPanel::Notifications) =>
@@ -358,7 +401,7 @@ impl HebnixApp {
             Tab::Workshop if self.arena_page().is_some() => Some(ContentPage::Arena),
             Tab::About => Some(if self.maintenance.tab { ContentPage::Manage } else { ContentPage::About }),
             Tab::Console => Some(ContentPage::Console),
-            Tab::Plugins | Tab::Spoofer | Tab::Settings | Tab::Freeplay | Tab::GameMods | Tab::Items | Tab::Workshop | Tab::Patcher | Tab::Replays if self.has_modern_manager() => Some(ContentPage::Manage),
+            Tab::Plugins | Tab::Spoofer | Tab::Settings | Tab::Freeplay | Tab::GameMods | Tab::LiveEditor | Tab::Items | Tab::Workshop | Tab::Patcher | Tab::Replays if self.has_modern_manager() => Some(ContentPage::Manage),
             Tab::Items
                 if matches!(
                     self.items_subtab,
@@ -380,6 +423,7 @@ impl HebnixApp {
             let data = serde_json::json!({
                 "mode": "active",
                 "catalog": self.swapper.web_active_catalog(ui.ctx(), &cooked, &self.swapper_preview_ids),
+                "preview_ids": self.swapper_preview_ids,
                 "game_running": self.last_rl_open,
                 "status": self.modern_swapper_status(),
             });
@@ -408,11 +452,13 @@ impl HebnixApp {
             serde_json::Value::Null
         };
         let data = serde_json::json!({
+            "ownedOnly": self.config.settings.owned_items_only,
             "categories": categories,
             "category_label": category.label(),
             "decals": category == SwapCategory::Skins,
             "goals": category == SwapCategory::Goals,
             "catalog": catalog,
+            "preview_ids": self.swapper_preview_ids,
             "loading": self.catalogs_loading,
             "catalog_error": self.catalogs_error,
             "inventory": self.owned_inventory.web_snapshot(),
@@ -483,9 +529,9 @@ impl HebnixApp {
         match action {
             SwapperAction::Category { index } => {
                 if let Some(category) = crate::swapper::web_category(index) {
+                    if self.swapper_subtab != PatcherSubTab::Swapper(category) { self.swapper_preview_ids.clear(); }
                     self.swapper_subtab = PatcherSubTab::Swapper(category);
                     self.swapper_web_status = None;
-                    self.swapper_preview_ids.clear();
                 }
             }
             SwapperAction::Reload => self.reload_catalogs(ctx),
@@ -718,6 +764,9 @@ impl HebnixApp {
                 self.maybe_fetch_plugin_catalog(previous);
             }
             Subtab::Settings(value) => self.hebnix_settings_tab = value,
+            Subtab::MatchTools(value) => self.match_tools_page = value,
+            Subtab::Freeplay(value) => self.freeplay_page = value,
+            Subtab::LiveEditor(value) => self.live_editor_page = value,
         }
         let options = Self::modern_leaf_options(page);
         if let Some(&(fallback, _)) = options.first() {
@@ -725,7 +774,7 @@ impl HebnixApp {
             let leaf = self.config.settings.navigation_memory.get(&key).copied().filter(|index| options.iter().any(|(id, _)| id == index)).unwrap_or(fallback);
             self.select_modern_leaf(child.unwrap_or(0), leaf);
         }
-        self.save_config();
+        self.config.save_navigation_memory(&self.base_dir);
     }
 
     fn modern_leaf_options(page: Subtab) -> Vec<(usize, String)> {
@@ -761,7 +810,7 @@ impl HebnixApp {
             }
             _ => {}
         }
-        self.save_config();
+        self.config.save_navigation_memory(&self.base_dir);
     }
 
     pub(super) fn modern_tab_selection(&self) -> (usize, Option<usize>) {
@@ -778,6 +827,9 @@ impl HebnixApp {
             Subtab::Replays(value) => self.replays_subtab == *value,
             Subtab::Plugins(value) => self.plugins_subtab == *value,
             Subtab::Settings(value) => self.hebnix_settings_tab == *value,
+            Subtab::MatchTools(value) => self.match_tools_page == *value,
+            Subtab::Freeplay(value) => self.freeplay_page == *value,
+            Subtab::LiveEditor(value) => self.live_editor_page == *value,
         });
         (tab, child)
     }

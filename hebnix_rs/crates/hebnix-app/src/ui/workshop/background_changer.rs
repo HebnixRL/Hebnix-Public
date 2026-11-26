@@ -312,10 +312,7 @@ impl BackgroundChangerState {
                         Self::message_name(host),
                         Self::message_name(donor)
                     ),
-                    ("undo", Some(host), _) => format!(
-                        "Restored {}'s original background.",
-                        Self::message_name(host)
-                    ),
+                    ("undo", _, _) => String::new(),
                     _ => helper_message,
                 },
             );

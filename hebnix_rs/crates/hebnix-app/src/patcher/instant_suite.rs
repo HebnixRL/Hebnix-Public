@@ -359,9 +359,7 @@ pub fn restore(cooked: &Path, backups: &Path) -> Result<(), String> {
             switch_existing_hook(cooked, false)?;
         }
     }
-    if !super::live_decals::status(cooked).unwrap_or(false) {
-        install_bridge(cooked, false)?;
-    }
+    install_bridge(cooked, false)?;
     let _ = std::fs::remove_file(command_path(cooked));
     match std::fs::remove_file(backups.join(ENABLED)) {
         Ok(()) => Ok(()),
@@ -443,7 +441,7 @@ impl State {
     pub(crate) fn web_toggle(&mut self, cooked: &Path, want: bool) {
         if super::live_cosmetics::managed() {
             match super::live_cosmetics::set_mod(cooked, "instant-suite", want, None) {
-                Ok(()) => { self.on = Some(want); self.status = "Live settings saved".into(); },
+                Ok(()) => { self.on = Some(want); self.status.clear(); },
                 Err(e) => self.status = e,
             }
             return;
@@ -629,7 +627,7 @@ impl State {
         if want != on {
             if super::live_cosmetics::managed() {
                 match super::live_cosmetics::set_mod(cooked, "instant-suite", want, None) {
-                    Ok(()) => { self.on = Some(want); self.status = "Live settings saved".into(); },
+                    Ok(()) => { self.on = Some(want); self.status.clear(); },
                     Err(error) => self.status = error,
                 }
             } else {

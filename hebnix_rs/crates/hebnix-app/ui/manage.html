@@ -8,7 +8,10 @@
 <body class="tracker-body">
   <main class="container-fluid tracker-page">
     <div id="controls" class="d-flex flex-wrap gap-2 align-items-center mb-3"></div>
-    <input id="query" class="form-control mb-3" type="search" aria-label="Search" placeholder="Search" hidden>
+    <div id="plugin-search-row" class="plugin-search-row mb-3" hidden>
+      <input id="query" class="form-control" type="search" aria-label="Search" placeholder="Search" hidden>
+      <div id="plugin-refresh"></div>
+    </div>
     <p id="status" class="text-body-secondary" role="status" hidden></p>
     <section id="rows" class="d-grid gap-2"></section>
   </main>

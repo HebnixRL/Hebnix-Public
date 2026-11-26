@@ -14,11 +14,16 @@
       <div class="tracker-person"><div><small>Rocket League</small><strong id="running"></strong></div></div>
       <div class="tracker-metric"><small>Stats API</small><strong id="connection"></strong></div>
       <div class="tracker-metric"><small>Live Cosmetics</small><strong id="live-cosmetics" role="status"></strong></div>
-      <div class="tracker-metric" id="match-clock" hidden><strong class="tracker-number" id="clock"></strong><small id="arena"></small></div>
-      <div class="tracker-metric" id="match-status" hidden><small id="details"></small></div>
+    </section>
+    <section id="dashboard-actions" class="tracker-detail p-3 d-flex gap-2" hidden>
+      <button id="dashboard-start" type="button" class="btn btn-primary">Start Rocket League</button>
     </section>
     <div class="live-columns">
       <div id="scoreboard">
+        <div class="d-flex gap-3 align-items-center mb-3" id="match-heading" hidden>
+      <div class="tracker-metric" id="match-clock" hidden><strong class="tracker-number" id="clock"></strong><small id="arena"></small></div>
+      <div class="tracker-metric" id="match-status" hidden><small id="details"></small></div>
+        </div>
         <p class="tracker-detail p-3 mb-0" id="waiting" role="status" hidden></p>
         <div class="d-grid gap-3" id="teams"></div>
         <p class="tracker-detail p-3 mt-3 mb-0" id="spectators" hidden></p>

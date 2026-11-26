@@ -34,7 +34,7 @@ fn cached_rl_pid() -> Option<u32> {
                         .name()
                         .to_string_lossy()
                         .to_ascii_lowercase()
-                        .contains("rocketleague")
+                        .eq("rocketleague.exe")
                         .then_some(pid.as_u32())
                 }))
             })

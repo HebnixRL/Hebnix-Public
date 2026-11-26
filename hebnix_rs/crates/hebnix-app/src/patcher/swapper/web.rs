@@ -29,6 +29,7 @@ impl SwapperState {
                 self.recolour_status = None;
             }
         }
+        if !self.recolour_category.supports_recolour() { self.recolour_category = SwapCategory::Bodies; }
         self.recolour_category
     }
 
@@ -160,6 +161,8 @@ impl SwapperState {
                 }
                 json!({
                 "id": id,
+                "product": item.product_id,
+                "universal": item.car_name.as_deref().is_some_and(is_universal_car),
                 "label": item_label(category, item),
                 "package": item.upk,
                 "kind": item.upk_type,

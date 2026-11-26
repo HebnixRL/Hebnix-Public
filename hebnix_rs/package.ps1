@@ -32,12 +32,12 @@ try {
     # check the real exit code.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    cargo build --release --bin hebnix
+    cargo build --locked --release --bin hebnix
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prev
     if ($code -ne 0) { throw "cargo build failed ($code)" }
     $ErrorActionPreference = 'Continue'
-    cargo build --release --bin hebnix-lite --features lite
+    cargo build --locked --release --bin hebnix-lite --features lite
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prev
     if ($code -ne 0) { throw "lite build failed ($code)" }

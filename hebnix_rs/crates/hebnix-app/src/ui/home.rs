@@ -10,6 +10,7 @@ use std::{
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum HomeTab {
     #[default]
+    Dashboard,
     LiveMatch,
     Tracker,
 }
@@ -404,6 +405,7 @@ impl HebnixApp {
             "home-shots",
         ].map(|key| t(key));
         json!({
+            "dashboard": self.home.tab == HomeTab::Dashboard,
             "running": running,
             "connected": connected,
             "live_cosmetics": crate::patcher::live_cosmetics::status_snapshot(),
@@ -431,6 +433,7 @@ impl HebnixApp {
         if !modern_navigation {
             ui.horizontal_wrapped(|ui| {
                 for (tab, key) in [
+                    (HomeTab::Dashboard, "home-dashboard"),
                     (HomeTab::LiveMatch, "home-live-match"),
                     (HomeTab::Tracker, "home-tracker"),
                 ] {
@@ -440,7 +443,7 @@ impl HebnixApp {
             ui.separator();
         }
         match self.home.tab {
-            HomeTab::LiveMatch => {
+            HomeTab::Dashboard => {
                 let green = if ui.visuals().dark_mode {
                     egui::Color32::LIGHT_GREEN
                 } else {
@@ -489,8 +492,16 @@ impl HebnixApp {
                     });
                 });
                 ui.add_space(8.0);
-                live_match(ui, &self.home, connected, self.last_rl_open);
+                let running = self.last_rl_open;
+                if ui.button(if running { "Stop Rocket League  ■" } else { "Start Rocket League  ▶" }).clicked() {
+                    self.execute_action_button_action(if running {
+                        crate::config::ActionButtonAction::CloseRocketLeague
+                    } else {
+                        crate::config::ActionButtonAction::StartRocketLeague
+                    }, ui.ctx());
+                }
             }
+            HomeTab::LiveMatch => live_match(ui, &self.home, connected, self.last_rl_open),
             HomeTab::Tracker => self.home_tracker.show(ui),
         }
     }

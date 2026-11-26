@@ -66,16 +66,13 @@ function updateArtwork(card) {
   }
 }
 
-function fitColumns(grid) {
-  const labels = [...document.querySelectorAll(".arena-grid .swapper-tile-caption > span")];
-  if (!labels.length) return;
-  const context = document.createElement("canvas").getContext("2d");
-  if (!context) return;
-  const font = getComputedStyle(labels[0]);
-  context.font = [font.fontStyle, font.fontWeight, font.fontSize, font.fontFamily].join(" ");
-  let width = 120;
-  for (const label of labels) width = Math.max(width, Math.ceil(context.measureText(label.textContent).width) + 30);
-  for (const side of sideNames) field(side + "s").style.setProperty("--arena-tile-width", width + "px");
+function fitColumns() {
+  for (const side of sideNames) {
+    const picker=field(side+"s");
+    const available=picker.clientWidth-8;
+    const columns=Math.max(2,Math.min(5,Math.floor((available+8)/128)));
+    picker.style.gridTemplateColumns=`repeat(${columns},minmax(0,1fr))`;
+  }
 }
 
 function refreshPickers() {
@@ -179,13 +176,14 @@ window.showArenaEditor = next => {
   }
   state = next;
   Object.assign(previews, state.previews);
-  field("map-instructions").hidden = !state.full;
+  field("map-instructions").hidden = false;
+  field("map-instructions").textContent = state.full ? "Choose the map you want to play, then choose the arena it will replace entirely." : "Choose the arena you want to play, then choose the fog, sky, and background to borrow.";
   field("donor-label").textContent = state.full ? "Map you want" : "Background you want";
   field("donor-search").placeholder = state.full ? "Search maps" : "Search backgrounds";
   field("folder").hidden = field("bulk").hidden = state.full;
   field("bulk-warning").textContent = state.bulk_warning;
   field("status").textContent = state.running ? "Close Rocket League before applying or restoring changes."
-    : state.full && !state.changed ? "" : state.status;
+    : !state.changed || /^Restored .+original background\./.test(state.status || "") ? "" : state.status;
   field("active").hidden = !state.active.length;
   field("restore-all").disabled = state.running || state.busy;
   field("active-list").replaceChildren(...state.active.map(([id, name, donor]) => {
@@ -205,4 +203,5 @@ window.showArenaEditor = next => {
   refreshPickers();
 };
 
+new ResizeObserver(() => { if (state) fitColumns(field("hosts")); }).observe(field("hosts"));
 window.ipc.postMessage(JSON.stringify({ type: "arena_ready" }));

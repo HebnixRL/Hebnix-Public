@@ -15,7 +15,7 @@ window.showAbout = (about) => {
   version.textContent = about.version
     .replace(/^(Version\s+\S+)\s+/, "$1\n\n")
     .replace(/\s+(Press\s)/, "\n\n$1");
-  maintenance.textContent = about.maintenance;
+  maintenance.hidden = true;
   const card = document.querySelector(".about-card");
   card.classList.remove("enter");
   requestAnimationFrame(() => card.classList.add("enter"));

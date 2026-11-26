@@ -42,6 +42,26 @@ function icon(symbol, label, action, disabled = false, style) {
   return node;
 }
 
+function pluginAction(kind, label, action, disabled = false) {
+  const paths = {
+    folder: "M3 7V5h6l2 2h10v12H3Z",
+    zip: "M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4",
+    reload: "M20 7v5h-5M20 12a8 8 0 1 0-2 6",
+    refresh: "M20 3v6h-6M4 21v-6h6M20 9a8 8 0 0 0-14-3M4 15a8 8 0 0 0 14 3",
+  };
+  const control = button("", action, disabled);
+  control.classList.add("plugin-labelled-action");
+  const icon = element("span", "plugin-labelled-icon");
+  icon.setAttribute("aria-hidden", "true");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  const path = document.createElementNS(svg.namespaceURI, "path");
+  path.setAttribute("d", paths[kind]);
+  svg.append(path); icon.append(svg);
+  control.append(icon, element("span", "plugin-labelled-text", label));
+  return control;
+}
+
 function command(key) {
   send({ type: "plugin_command", key });
 }
@@ -203,6 +223,7 @@ function pluginSettings() {
     return;
   }
   const layout = element("div", "loadout-layout plugin-settings-layout");
+  layout.dataset.plugin = state.selected;
   const navigation = element("nav", "tracker-detail p-2 d-grid gap-1");
   for (const [id, label] of state.plugins) {
     navigation.append(button(label, () => send({ type: "plugin_settings_select", id }), false,
@@ -382,7 +403,6 @@ function friendNames() {
 }
 
 function scoreboard() {
-  if (state.live) rows.append(element("div", "alert alert-info small py-2", "Live setup: " + (state.live.status || "Starting…")));
   const labels = state.labels;
   const set = (key, value) => send({ type: "scoreboard", key, value });
   const names = panel(), ratings = panel();
@@ -417,6 +437,7 @@ function scoreboard() {
 
 function actionButtons() {
   const card = panel();
+  card.append(toggle("Show action button in header", state.showInHeader, enabled => send({type: "action_button_visibility", enabled})));
   card.append(element("p", "mb-1", state.intro), element("p", "text-body-secondary small", state.hint));
   for (const running of [false, true]) {
     const entries = running ? state.open : state.closed;
@@ -762,7 +783,6 @@ function replayLibrary() {
 }
 
 function gameMods() {
-  if (state.live) rows.append(element("div", "alert alert-info small py-2", "Live setup: " + (state.live.status || "Starting…")));
   for (const mod of state.rows) {
     const card = panel();
     const update = (key, value = null) => send({ type: "game_mod", id: mod.id, key, value });
@@ -809,6 +829,24 @@ function gameMods() {
 let multiplayerSearch = "";
 let ownSlotsOpen = false;
 let blockedPlayersOpen = false;
+function multiplayerIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 64 48");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("multiplayer-icon");
+  for (const [tag, attributes] of [
+    ["circle", {cx: 43, cy: 14, r: 8, opacity: .55}],
+    ["path", {d: "M29 40a14 14 0 0 1 28 0Z", opacity: .55}],
+    ["circle", {cx: 24, cy: 11, r: 8}],
+    ["path", {d: "M10 37a14 14 0 0 1 28 0Z"}],
+  ]) {
+    const node = document.createElementNS(svg.namespaceURI, tag);
+    for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+    svg.append(node);
+  }
+  return svg;
+}
+
 function multiplayer() {
   const action = (type, data = {}) => send({ type: "multiplayer", action: { type, ...data } });
   const { connection, options, labels } = state;
@@ -818,10 +856,10 @@ function multiplayer() {
   preferences.append(preference("close", "Disconnect when Hebnix closes"), preference("toasts", labels.toasts));
   if (!connection.started) {
     const intro = panel();
-    intro.classList.add("multiplayer-intro");
+    intro.classList.add("multiplayer-intro", "multiplayer-centered");
     const privacy = preference("relay", labels.relay);
     privacy.title = labels.relayHint;
-    intro.append(element("p", "text-body-secondary", labels.intro), privacy,
+    intro.append(multiplayerIcon(), element("h2", "h4 mb-3", "Workshop Multiplayer"), element("p", "text-body-secondary", labels.intro), privacy,
       button(labels.connect, () => action("connect"), connection.stopping, "primary"), " ", help, preferences);
     if (connection.status) intro.append(element("p", "small", connection.status));
     rows.append(intro);
@@ -829,6 +867,7 @@ function multiplayer() {
   }
   const layout = element("div", "multiplayer-layout");
   const setup = panel();
+  setup.classList.add("multiplayer-centered");
   setup.append(element("h2", "h6", labels.setup), element("p", "", connection.setup));
   if (connection.checking) setup.append(element("p", "text-body-secondary small", labels.checking));
   if (connection.close) setup.append(button(labels.closeGame, () => action("close_game")));
@@ -841,21 +880,24 @@ function multiplayer() {
   setup.append(setupActions, preferences);
 
   const players = panel();
-  players.append(element("h2", "h6", !connection.ready ? connection.setup : state.rows.length ? state.heading : labels.empty));
-  if (connection.ready && !state.rows.length) players.append(element("p", "text-body-secondary", "Invite another Hebnix player to connect to Workshop Multiplayer."));
+  const heading = element("header", "multiplayer-heading multiplayer-centered");
+  heading.append(multiplayerIcon());
+  players.append(heading);
+  heading.append(element("h2", "h5", !connection.ready ? connection.setup : state.rows.length ? state.heading : labels.empty));
+  if (connection.ready && !state.rows.length) heading.append(element("p", "text-body-secondary", "Invite another Hebnix player to connect to Workshop Multiplayer."));
   const list = element("div", "multiplayer-players");
   const filter = value => {
     list.replaceChildren();
     const term = value.trim().toLowerCase();
     const visible = state.rows.filter(peer => peer.name.toLowerCase().includes(term));
     for (const peer of visible) {
-      const card = element("article", "tracker-detail p-2");
-      const heading = element("div", "d-flex justify-content-between gap-2");
+      const card = element("article", "tracker-detail p-3 multiplayer-centered");
+      const heading = element("div", "d-flex justify-content-center flex-wrap gap-2");
       heading.append(element("strong", "", peer.name));
       if (peer.latency !== null) heading.append(element("span", "small", Math.round(peer.latency) + " ms"));
       card.append(heading);
       if (peer.map) {
-        const line = element("div", "d-flex flex-wrap align-items-center gap-2");
+        const line = element("div", "d-flex justify-content-center flex-wrap align-items-center gap-2");
         line.append(element("span", "", peer.map.label));
         if (peer.map.have) line.append(element("span", "text-success", labels.have));
         else line.append(button(labels.download, () => action("download", { peer: peer.peer, map: peer.map.id }), state.busy));
@@ -1163,34 +1205,87 @@ function freeplay() {
   rows.append(setup, columns);
 }
 
+const rankView = { draft: null };
 function playerRank() {
   const card = panel();
   card.append(element("p", "mb-1", "Choose the rank, division and MMR shown locally in Rocket League."),
     element("p", "small text-body-secondary", "Close Rocket League before applying. Untick a playlist and apply to restore its display."));
-  const ranks = state.ranks.map((label, index) => [index, label]);
-  const divisions = ["Division I", "Division II", "Division III", "Division IV"].map((label, index) => [index, label]);
+  const grid = element("div", "rank-playlist-grid");
   for (const playlist of state.rows) {
-    const update = fields => send({ type: "player_rank", id: playlist.id, ...fields });
-    const row = element("div", "player-rank-row");
-    const rank = loadoutSelect(playlist.name + " rank", ranks, playlist.rank, rank => update({ rank: Number(rank) }));
-    const division = loadoutSelect(playlist.name + " division", divisions, playlist.division, division => update({ division: Number(division) }));
-    rank.disabled = state.busy;
-    division.disabled = state.busy || playlist.rank === 0 || playlist.rank === 22;
-    const mmr = element("input", "form-control form-control-sm");
-    mmr.value = playlist.mmr;
-    mmr.placeholder = state.mmr;
-    mmr.setAttribute("aria-label", playlist.name + " " + state.mmr);
-    mmr.disabled = state.busy;
-    mmr.addEventListener("change", () => update({ mmr: mmr.value }));
-    row.append(toggle(playlist.name, playlist.enabled, enabled => update({ enabled }), state.busy), rank, division, mmr);
-    card.append(row);
+    const tile = element("div", "rank-playlist-tile" + (playlist.enabled ? " is-enabled" : ""));
+    const choose = button("", () => { rankView.draft = { ...playlist }; render(); }, state.busy);
+    choose.className = "rank-playlist-open";
+    choose.setAttribute("aria-label", "Edit " + playlist.name + " rank");
+    const icon = element("img", "rank-playlist-icon");
+    icon.src = `/rank-icons/playlist-${playlist.icon}.png`; icon.alt = "";
+    choose.append(icon, element("span", "rank-playlist-name", playlist.name));
+    const details = element("span", "rank-playlist-details");
+    const division = playlist.rank > 0 && playlist.rank < 22
+      ? ["I", "II", "III", "IV"][playlist.division] : "—";
+    for (const [label, value] of [["Rank", state.ranks[playlist.rank] || "—"], ["Div", division], ["MMR", playlist.mmr || "—"]]) {
+      const row = element("span", "rank-playlist-detail");
+      row.append(element("span", "text-body-secondary", label), element("span", "rank-playlist-value", value));
+      details.append(row);
+    }
+    choose.append(details);
+    const enabled = element("input", "form-check-input rank-playlist-enable");
+    enabled.type = "checkbox"; enabled.checked = playlist.enabled; enabled.disabled = state.busy;
+    enabled.setAttribute("aria-label", "Enable " + playlist.name + " rank override");
+    enabled.addEventListener("change", () => send({ type: "player_rank", id: playlist.id, enabled: enabled.checked }));
+    tile.append(choose, enabled); grid.append(tile);
   }
-  const actions = element("div", "d-flex gap-2 mt-3");
+  card.append(grid);
+  const actions = element("div", "d-flex justify-content-center gap-2 mt-3");
   actions.append(button(state.apply, () => send({ type: "player_rank_apply", restore: false }), !state.ready, "primary"),
     button(state.restore, () => send({ type: "player_rank_apply", restore: true }), !state.ready));
   card.append(actions);
   if (state.status) card.append(element("p", "small mt-2 mb-0", state.status));
   rows.append(card);
+  if (rankView.draft) rankDialog();
+}
+function rankDialog() {
+  const draft = rankView.draft;
+  const dialog = element("dialog", "tracker-detail loadout-dialog rank-picker-dialog");
+  const close = () => dismissDialog(dialog, () => { rankView.draft = null; dialog.remove(); });
+  const heading = element("h2", "h5", draft.name); heading.id = "rank-picker-title";
+  dialog.setAttribute("aria-labelledby", heading.id);
+  const header = element("div", "d-flex align-items-center justify-content-between mb-3");
+  const dismiss = button("×", close); dismiss.setAttribute("aria-label", "Close rank picker"); header.append(heading, dismiss);
+  const grid = element("div", "rank-tier-grid");
+  const rankButtons = [];
+  const division = loadoutSelect("Division", ["Division I", "Division II", "Division III", "Division IV"].map((name, id) => [id, name]), draft.division,
+    value => { draft.division = Number(value); });
+  const mmr = element("input", "form-control form-control-sm");
+  mmr.type = "number"; mmr.min = "100"; mmr.max = "9999"; mmr.step = "1"; mmr.value = draft.mmr;
+  mmr.setAttribute("aria-label", "Custom MMR"); mmr.addEventListener("input", () => { draft.mmr = mmr.value; });
+  const recommendation = element("p", "small text-body-secondary mb-0");
+  const update = () => {
+    rankButtons.forEach((tile, id) => { tile.classList.toggle("is-selected", draft.rank === id); tile.setAttribute("aria-pressed", String(draft.rank === id)); });
+    division.disabled = draft.rank === 0 || draft.rank === 22;
+    recommendation.textContent = "Recommended MMR: " + state.rankDefaults[draft.rank] + ". You can enter a custom value.";
+  };
+  state.ranks.forEach((name, id) => {
+    const tile = button("", () => {
+      draft.rank = id; draft.mmr = String(state.rankDefaults[id]); mmr.value = draft.mmr;
+      if (id === 0 || id === 22) { draft.division = 0; division.value = "0"; }
+      update();
+    });
+    tile.className = "rank-tier-tile";
+    const image = element("img", ""); image.src = `/rank-icons/tier-${id}.png`; image.alt = "";
+    tile.append(image, element("span", "", name)); rankButtons.push(tile); grid.append(tile);
+  });
+  const fields = element("div", "rank-picker-fields mt-3");
+  const divisionLabel = element("label", "", "Division"); divisionLabel.append(division);
+  const mmrLabel = element("label", "", "MMR"); mmrLabel.append(mmr); fields.append(divisionLabel, mmrLabel);
+  const save = button("Save", () => {
+    if (!mmr.reportValidity()) return;
+    dismissDialog(dialog, () => {
+      rankView.draft = null; dialog.remove();
+      send({ type: "player_rank", id: draft.id, rank: draft.rank, division: draft.division, mmr: String(draft.mmr) });
+    });
+  }, state.busy, "primary");
+  const footer = element("div", "d-flex justify-content-end gap-2 mt-3"); footer.append(button("Cancel", close), save);
+  dialog.append(header, grid, fields, recommendation, footer); update(); openLoadoutModal(dialog, close);
 }
 
 const titleSearch = { library: "", target: "" };
@@ -1198,17 +1293,9 @@ const titleSearch = { library: "", target: "" };
 function titles() {
   const action = (type, data = {}) => send({ type: "titles", action: { type, ...data } });
   const top = panel();
-  const accounts = state.inventory.accounts;
-  const select = loadoutSelect("Rocket League save", accounts.map(account => [account.id, account.label]),
-    accounts.find(account => account.selected)?.id, id => action("account", { id }));
-  select.disabled = !accounts.length || state.inventory.loading;
-  const save = element("div", "d-flex gap-2 align-items-center flex-wrap");
-  save.append(element("span", "", "Rocket League save"), select,
-    button("Refresh owned items", () => action("account"), state.inventory.loading));
-  top.append(save);
   if (state.inventory.error) top.append(element("p", "text-warning small", state.inventory.error));
   if (state.busy) top.append(element("p", "small text-body-secondary", "Title patch operation in progress. Editing will resume when it finishes."));
-  rows.append(top);
+  if (top.childElementCount) rows.append(top);
 
   const flatten = value => String(value || "").replace(/^#/, "");
   const colour = rgb => rgb.map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -1256,8 +1343,8 @@ function titles() {
   };
   library.append(element("h2", "h6", "Copy Title"), element("p", "small text-body-secondary", "Browse titles and copy one to edit."),
     search("library", "Search titles", showLibrary),
-    loadoutSelect("Title ownership", [["all", "All Titles"], ["owned", "Owned Titles"]],
-      state.owned ? "owned" : "all", value => action("owned", { enabled: value === "owned" })), list);
+    loadoutSelect("Title ownership", [["owned", "Owned Items"], ["all", "All Titles"]],
+      state.owned ? "owned" : "all", value => action("owned", {enabled: value === "owned"})), list);
   if (state.catalogError) library.append(element("p", "text-warning small", state.catalogError),
     button("Refresh title library", () => action("reload"), state.loading));
   if (state.loading) library.append(element("p", "small text-body-secondary", "Loading title library…"));
@@ -1284,6 +1371,7 @@ function titles() {
     const row = element("label", "d-flex align-items-center gap-2");
     const input = element("input", "form-control form-control-color");
     input.type = "color";
+    input.setAttribute("aria-label", glow ? "Glow colour" : "Text colour");
     input.value = "#" + colour(glow ? draft.glow_color : draft.color);
     input.disabled = state.busy || glow && !draft.glow;
     input.addEventListener("change", () => action("colour", {
@@ -1292,14 +1380,17 @@ function titles() {
     row.append(element("span", "", name), input);
     return row;
   };
-  const colours = element("div", "d-flex flex-wrap align-items-center gap-2 mb-2");
+  const colours = element("div", "title-colour-controls mb-2");
   const tokens = Object.keys(state.icons).sort();
   const symbols = loadoutSelect("Add Symbol", [["", "Add Symbol"], ...tokens.map(token => [token, token])], "", token => {
     if (token && [...text.value + token].length <= 64) action("text", { text: text.value + token });
   });
   symbols.disabled = state.busy || !tokens.length;
-  colours.append(paint("Text colour", false), symbols, toggle("Glow", draft.glow, enabled => action("glow", { enabled }), state.busy),
-    paint("Glow colour", true));
+  const textPaint = paint("Text colour", false);
+  const glowPaint = paint("", true);
+  const glow = toggle("Glow", draft.glow, enabled => action("glow", {enabled}), state.busy);
+  glow.classList.remove("mb-2");
+  colours.append(...textPaint.children, symbols, glow, glowPaint.lastElementChild);
   const targets = element("div", "title-target-options");
   const target = element("details", "mb-2");
   const current = state.catalog.find(item => item.id === draft.target);
@@ -1411,7 +1502,7 @@ function profilePictures() {
 }
 
 const loadoutView = { car: null, page: 0, search: "", draft: null, modalKey: "", name: "", previews: "", openSlot: null, itemSearch: "",
-  importOpen: false, importSubmitted: false };
+  importOpen: false, importSubmitted: false, palette: null };
 
 function loadoutAction(type, data = {}) {
   send({ type: "loadouts", action: { type, ...data } });
@@ -1441,6 +1532,7 @@ function loadoutPreview(url, product) {
 
 function loadoutImport(card, labels) {
   if (!state.closed) card.append(element("p", "text-warning small", labels.closed));
+  if (state.account === null) card.append(element("p", "text-warning small", "Select a Rocket League save from the settings cog before importing."));
   if (!state.import) {
     card.append(element("p", "text-body-secondary small", labels.hint));
     const form = element("form", "input-group");
@@ -1461,13 +1553,13 @@ function loadoutImport(card, labels) {
       }
     });
     form.append(input, submit);
-    card.append(form, button(labels.cancel, () => closeLoadoutImport(card)));
+    card.append(form);
     return;
   }
   const plan = state.import;
   card.append(element("p", "mb-2", plan.summary));
   if (!state.rows.length) {
-    card.append(element("p", "text-body-secondary", labels.empty), button(labels.cancel, () => closeLoadoutImport(card)));
+    card.append(element("p", "text-body-secondary", labels.empty));
     return;
   }
   const options = state.rows.map(row => [row.position, row.name]);
@@ -1514,8 +1606,7 @@ function loadoutImport(card, labels) {
     loadoutAction("save_import", { apply });
   };
   actions.append(button(labels.apply, () => save(true), blocked, "primary"),
-    button(labels.importOnly, () => save(false), blocked),
-    button(labels.cancel, () => closeLoadoutImport(card)));
+    button(labels.importOnly, () => save(false), blocked));
   card.append(actions);
 }
 
@@ -1588,18 +1679,18 @@ function loadoutDialog(labels) {
     confirm = () => { if (name.value.trim()) commit({ name: name.value }); else name.focus(); };
     if (model.palette.loading) dialog.append(element("p", "small", "Loading colours…"));
     if (model.palette.error) dialog.append(element("p", "text-warning", model.palette.error));
-    for (const key of ["primary", "secondary"]) {
-      if (!model.palette[key]) continue;
-      const palette = element("div", "loadout-palette mb-2");
-      model.palette[key].forEach(([r, g, b], index) => {
-        const colour = icon("", labels[key] + " " + (index + 1), () =>
-          loadoutAction("colour", { team: model.team, primary: key === "primary", index }));
-        colour.style.backgroundColor = "rgb(" + [r, g, b].join(",") + ")";
-        colour.setAttribute("aria-pressed", String(index === model[key]));
-        palette.append(colour);
+    const colours = element("div", "d-flex gap-2 mt-3");
+    for (const colourKey of ["primary", "secondary"]) {
+      if (!model.palette[colourKey]) continue;
+      const choose = button(labels[colourKey], () => {
+        loadoutView.palette = colourKey;
+        loadoutColourDialog(model, labels);
       });
-      dialog.append(element("p", "small mt-2 mb-1", labels[key]), palette);
+      const swatch = element("span", "loadout-current-colour");
+      swatch.style.backgroundColor = "rgb(" + (model.palette[colourKey][model[colourKey]] || [0,0,0]).join(",") + ")";
+      choose.prepend(swatch); colours.append(choose);
     }
+    dialog.append(colours);
     dialog.append(element("p", "small text-body-secondary mt-3", labels.owned));
     for (const slot of model.slots) {
       const list = element("details", "loadout-slot mb-2");
@@ -1614,8 +1705,10 @@ function loadoutDialog(labels) {
       const choices = element("div", "loadout-choices");
       const filter = () => {
         const term = search.value.trim().toLowerCase();
-        choices.replaceChildren(...slot.choices.filter(([label]) => label.toLowerCase().includes(term)).map(([label, option, selected]) =>
-          button(label, () => loadoutAction("item", { team: model.team, slot: slot.slot, option }), false, selected ? "primary" : "outline-secondary")));
+        const owned=slot.choices.map(([label,option,selected])=>({label,selected,choose:()=>loadoutAction("item",{team:model.team,slot:slot.slot,option})}));
+        for(const engine of slot.engines || []) if(!owned.some(item=>item.label===engine.label)) owned.push({label:engine.label,selected:slot.product===engine.product,choose:()=>loadoutAction("stock_engine",{team:model.team,product:engine.product})});
+        owned.sort((a,b)=>a.label.localeCompare(b.label));
+        choices.replaceChildren(...owned.filter(item=>item.label.toLowerCase().includes(term)).map(item=>button(item.label,item.choose,false,item.selected?"primary":"outline-secondary")));
       };
       search.addEventListener("input", () => {
         loadoutView.itemSearch = search.value;
@@ -1638,6 +1731,151 @@ function loadoutDialog(labels) {
   actions.append(button(submitLabel, confirm, !state.closed, model.kind === "delete" ? "danger" : "primary"));
   dialog.append(actions);
   openLoadoutModal(dialog, cancel);
+  if (loadoutView.palette && model.kind === "edit") loadoutColourDialog(model, labels);
+}
+
+function loadoutColourDialog(model, labels, select) {
+  const key = loadoutView.palette;
+  if (!key || !model.palette[key]) return;
+  const dialog = element("dialog", "tracker-detail loadout-dialog loadout-colour-dialog");
+  dialog.classList.toggle("secondary-palette", key === "secondary");
+  dialog.style.setProperty("--palette-columns", key === "secondary" ? 15 : 10);
+  const close = () => dismissDialog(dialog, () => { loadoutView.palette = null; dialog.remove(); });
+  const header = element("div", "d-flex align-items-center justify-content-between gap-3 mb-3");
+  header.append(element("h2", "h5 mb-0", labels[key]), button("×", close));
+  const palette = element("div", "loadout-palette");
+  model.palette[key].forEach(([r,g,b], index) => {
+    const colour = icon("", labels[key] + " " + (index + 1), () => dismissDialog(dialog, () => {
+      loadoutView.palette = null; dialog.remove();
+      if (select) select(key, index);
+      else loadoutAction("colour", { team: model.team, primary: key === "primary", index });
+    }));
+    colour.style.backgroundColor = `rgb(${r},${g},${b})`;
+    colour.setAttribute("aria-pressed", String(index === model[key]));
+    palette.append(colour);
+  });
+  dialog.append(header, palette, button("Close", close));
+  openLoadoutModal(dialog, close);
+}
+
+const creatorView = { step: 0, name: "", search: "", copy: false, pending: null, replacement: "", requested: "", initialized: false, itemPage: 0 };
+function creatorAction(type, data = {}) { loadoutAction("creator", { action: { type, ...data } }); }
+function presetCreator() {
+  const view = creatorView, draft = state.creator;
+  view.resize?.disconnect();
+  document.body.classList.add("preset-creator-page");
+  const root = element("section", "preset-creator");
+  if (!draft) {
+    const start = element("div", "preset-creator-start");
+
+    if (view.createdUntil > Date.now()) start.append(element("p", "text-success creator-created", "Loadout Created"));
+    else if (state.message && state.message !== "Loadout Created") start.append(element("p", "text-warning", state.message));
+    const begin = copy => { view.step = 0; view.name = ""; view.initialized = false; view.pending = null; view.search = ""; creatorAction("begin", { copy }); };
+    const options = element("div", "preset-creator-start-actions");
+    options.append(button("Create New Preset", () => begin(null), !state.rows.length || !state.closed, "primary"),
+      button("Copy Existing Loadout", () => { view.copy = true; render(); }, !state.rows.length || !state.closed));
+    start.append(options);
+    if (!state.closed) start.append(element("p","small text-warning mt-2 mb-0","Rocket League must be closed."));
+    if (!state.rows.length) start.append(element("p", "small text-body-secondary", "Select an account with a Rocket League loadout from quick settings first."));
+    if (view.copy && state.rows.length) {
+      const choose = loadoutSelect("Loadout to copy", state.rows.map(row => [row.position, row.name]), state.rows[0].position, () => {});
+      const copy = element("div", "d-flex align-items-center justify-content-center gap-2 mt-3");
+      copy.append(choose, button("Continue", () => { view.copy = false; begin(Number(choose.value)); }, !state.closed, "primary"), button("Cancel", () => { view.copy = false; render(); })); start.append(copy);
+    }
+    root.append(start); rows.append(root); return;
+  }
+  if (!view.initialized) { view.name = draft.name || ""; view.initialized = true; }
+  const steps = [{name:"Name"},{name:"Body",slot:0},{name:"Decal",slot:1},{name:"Colours",colours:true},
+    {name:"Wheels",slot:2},{name:"Boost",slot:3},{name:"Antenna",slot:4},{name:"Topper",slot:5},
+    {name:"Trail",slot:14},{name:"Goal Explosion",slot:15},{name:"Engine Audio",slot:13},{name:"Review"}];
+  view.step = Math.min(view.step, steps.length - 1);
+  const step = steps[view.step];
+  const navigate = index => { if (!view.name.trim() && index > 0) { document.getElementById("creator-name")?.focus(); return; } view.step = index; view.search = ""; view.itemPage = 0; view.pending = null; view.requested = ""; if (steps[index].name === "Review") creatorAction("review"); if (steps[index].slot !== undefined) creatorAction("slot", {slot:steps[index].slot}); render(); };
+  const rail = element("nav", "tracker-detail preset-creator-steps");
+  steps.forEach((step,index) => rail.append(button(`${index+1}. ${step.name}`, () => navigate(index), false, index === view.step ? "primary" : "outline-secondary")));
+  const content = panel(); content.classList.add("preset-creator-content");
+  const heading = element("div", "d-flex align-items-center justify-content-between gap-3 mb-3");
+  heading.append(element("h2", "h5 mb-0", step.name));
+
+  content.append(heading);
+  if (state.message && state.message !== "Loadout Created") content.append(element("p", "text-warning", state.message));
+  if (view.step === 0) {
+    const name = element("input", "form-control"); name.id="creator-name"; name.maxLength=64; name.placeholder="Name your preset"; name.value=view.name;
+    name.setAttribute("aria-label","Preset name"); name.addEventListener("input",()=>{view.name=name.value;});
+    content.append(element("p", "text-body-secondary", "Give this preset a name. Your original loadout stays unchanged."), name);
+  } else if (step.colours) {
+    if (draft.palette.loading) content.append(element("p","","Loading colours…"));
+    if (draft.palette.error) content.append(element("p","text-warning",draft.palette.error));
+    const actions=element("div","preset-creator-colours");
+    for (const team of draft.colours || []) {
+      const group=element("section","creator-team-colours");
+      group.append(element("h3","h6",team.team===0?"Blue team":"Orange team"));
+      for (const key of ["primary","secondary"]) if (team.palette?.[key]) {
+        const pick=button(key === "primary" ? "Primary Colour" : "Secondary Colour",()=>{loadoutView.palette=key;loadoutColourDialog(team,state.labels,(key,index)=>creatorAction("colour",{team:team.team,primary:key==="primary",index}));});
+        const swatch=element("span","loadout-current-colour");swatch.style.backgroundColor=`rgb(${(team.palette[key][team[key]]||[0,0,0]).join(",")})`;pick.prepend(swatch);group.append(pick);
+      }
+      actions.append(group);
+    }
+    content.append(actions);
+  } else if (step.slot !== undefined) {
+    const selected=draft.slots.find(slot=>slot.slot===step.slot);
+    content.append(element("p","text-body-secondary", "Selected: " + (selected?.label || "Default")));
+    const search=element("input","form-control form-control-sm mb-3"); search.id="creator-search";search.type="search";search.placeholder="Search all items";search.value=view.search;
+    const grid=element("div","preset-creator-items");
+    const pages=element("nav","d-flex justify-content-center gap-2 align-items-center my-3");
+    const draw=()=>{
+      if(draft.slot !== step.slot) { grid.textContent="Loading items…"; return; }
+      const items=(draft.catalog.items||[]).filter(item=>item.label.toLowerCase().includes(view.search.trim().toLowerCase()));
+      grid.replaceChildren();
+      const optional = ![0,2,3,14,15].includes(step.slot);
+      const defaultTile = optional ? button(step.slot===13?"Default":"None",()=>creatorAction("pick",{product:0,replacement:null})) : null;
+      if(defaultTile) {if(step.slot!==13){const empty=element("span","creator-empty-icon","×");empty.setAttribute("aria-hidden","true");defaultTile.prepend(empty);}defaultTile.className="swapper-tile"+(!selected?.product?" is-selected":"");defaultTile.setAttribute("aria-pressed",String(!selected?.product));grid.append(defaultTile);}
+      const columns=Math.max(1,Math.floor((grid.clientWidth+10)/160));
+      grid.style.setProperty("--creator-columns",columns);
+      const pageSize=Math.max(1,columns*3-(defaultTile?1:0));
+      const pageCount=Math.max(1,Math.ceil(items.length/pageSize));view.itemPage=Math.min(view.itemPage,pageCount-1);
+      const visible=items.slice(view.itemPage*pageSize,(view.itemPage+1)*pageSize);
+      pages.replaceChildren(button("Previous",()=>{view.itemPage--;draw();},view.itemPage===0),element("span","",`${view.itemPage+1} / ${pageCount}`),button("Next",()=>{view.itemPage++;draw();},view.itemPage+1>=pageCount));
+      const ids=visible.map(item=>item.id), signature=JSON.stringify([step.slot,ids]);
+      if(view.requested!==signature || ids.some(id=>!draft.preview_ids.includes(id))) {view.requested=signature;creatorAction("previews",{ids});}
+      for(const item of visible){
+        const tile=button("",()=>{if(item.owned)creatorAction("pick",{product:item.product,replacement:null});else{view.pending=item;view.replacement="";creatorReplacement(draft);}},false, selected?.product===item.product?"primary":"outline-secondary");
+        tile.className="swapper-tile"+(selected?.product===item.product?" is-selected":"");
+        tile.setAttribute("aria-pressed",String(selected?.product===item.product));
+        const art=element("span","swapper-tile-art"), preview=draft.catalog.previews?.[item.id];
+        if(preview?.image){const img=element("img","");img.src=preview.image;img.alt="";art.append(img);}else art.textContent=preview?.status||"";
+        tile.append(art,element("span","swapper-tile-caption",item.label),element("small","text-body-secondary",item.owned?"Owned":"Swap required"));grid.append(tile);
+      }
+    };
+    search.addEventListener("input",()=>{view.search=search.value;view.itemPage=0;draw();});content.append(search,grid,pages);
+    requestAnimationFrame(()=>{if(grid.isConnected){draw();view.resize=new ResizeObserver(()=>{const cols=Math.max(1,Math.floor((grid.clientWidth+10)/160));if(grid.style.getPropertyValue("--creator-columns")!==String(cols))draw();});view.resize.observe(grid);}});
+  } else {
+    content.append(element("h3","h4",view.name),element("p","text-body-secondary","Review each team's selections before creating your preset. Owned replacement items will also change wherever they are used."));
+    for(const slot of draft.slots)content.append(element("p","mb-1",slot.name+": "+slot.label));
+    content.append(element("h3","h6 mt-4","Affected loadouts"));
+    if(!draft.affected?.length)content.append(element("p","text-body-secondary","No existing loadouts use these replacement items."));
+    for(const loadout of draft.affected || []) {
+      const card=element("section","tracker-detail p-3 mb-2");card.append(element("h4","h6",loadout.name));
+      for(const reason of loadout.changes)card.append(element("p","small mb-1",reason));content.append(card);
+    }
+  }
+  const footer=element("footer","preset-creator-footer");
+  footer.append(button("Cancel",()=>{view.copy=false;creatorAction("cancel");}),button("← Back",()=>navigate(view.step-1),view.step===0));
+  if(view.step+1<steps.length)footer.append(button("Next →",()=>navigate(view.step+1),false,"primary"));
+  else footer.append(button("Create Preset",()=>{view.creating=true;view.attempt=state.creatorAttempt;render();requestAnimationFrame(()=>requestAnimationFrame(()=>creatorAction("finish",{name:view.name})));},!state.closed,"primary"));
+  if(!state.closed)footer.append(element("span","text-warning small","Close Rocket League before creating the preset."));
+  content.append(footer);root.append(rail,content);rows.append(root);
+  if(view.creating){root.inert=true;const busy=element("div","creator-busy");busy.setAttribute("role","status");busy.setAttribute("aria-live","polite");busy.append(element("span","spinner-border text-primary"),element("strong","","Creating loadout…"),element("span","small text-body-secondary","Applying item swaps and saving your loadout."));rows.append(busy);}
+  if(view.pending)creatorReplacement(draft);
+}
+function creatorReplacement(draft){
+  const view=creatorView,item=view.pending;if(!item)return;
+  const dialog=element("dialog","tracker-detail loadout-dialog");
+  const close=()=>dismissDialog(dialog,()=>{view.pending=null;dialog.remove();});
+  dialog.append(element("h2","h5","Choose an owned item to replace"),element("p","",item.label+" is not owned. Equip one of your owned items and swap its local appearance."),element("p","small text-warning","This also changes other loadouts that use the same owned item."));
+  const choose=loadoutSelect("Owned replacement",[["","Choose an owned item"],...draft.replacements.map(item=>[item.index,item.label])],view.replacement,value=>{view.replacement=value;apply.disabled=value==="";});
+  const apply=button("Use Replacement",()=>{if(choose.value==="")return;dismissDialog(dialog,()=>{view.pending=null;dialog.remove();creatorAction("pick",{product:item.product,replacement:Number(choose.value)});});},view.replacement==="","primary");
+  dialog.append(choose,element("p","small text-body-secondary mt-2",draft.replacements.length?"":"No compatible owned replacements are available."),button("Cancel",close),apply);openLoadoutModal(dialog,close);
 }
 
 function loadouts() {
@@ -1646,23 +1884,17 @@ function loadouts() {
   if (state.catalogError) controls.append(element("span", "text-warning small", state.catalogError),
     button("Reload catalogs", () => send({ type: "loadouts_reload_catalogs" })));
   const save = panel();
-  const account = element("div", "d-flex align-items-center gap-2 flex-wrap");
-  const accounts = state.accounts.map((name, index) => [index, name]);
-  if (!accounts.length) accounts.push(["", labels.select]);
-  const picker = loadoutSelect(labels.save, accounts, state.account, value => {
-    Object.assign(loadoutView, { car: null, page: 0, search: "", draft: "" });
-    loadoutAction("account", { index: Number(value) });
-  });
-  picker.disabled = !state.accounts.length;
-  const accountActions = element("div", "d-flex gap-2");
-  accountActions.append(button(labels.refresh, () => loadoutAction("account")),
-    button("Import", () => { loadoutView.importOpen = true; render(); }, state.account === null, "primary"));
-  account.append(element("span", "", labels.save), picker, accountActions);
-  save.append(element("p", "small text-body-secondary mb-2", labels.description), account);
+
   if (!state.accounts.length) save.append(element("p", "small text-body-secondary mt-2 mb-0", labels.noSave));
-  if (!loadoutView.importOpen && state.message) save.append(element("p", "small mt-2 mb-0", state.message));
+  if (!loadoutView.importOpen && state.message) {
+    const warning=element("div","d-flex justify-content-between align-items-start gap-3");
+    warning.setAttribute("role","status");
+    warning.append(element("p","small mb-0",state.message),icon("×","Dismiss warning",()=>loadoutAction("dismiss_message")));
+    save.append(warning);
+  }
   const layout = element("div", "loadout-layout");
   const filters = panel();
+  filters.classList.add("loadout-car-panel");
   filters.append(element("h2", "h6", labels.cars));
   const counts = new Map();
   for (const row of state.rows) {
@@ -1677,19 +1909,23 @@ function loadouts() {
   search.value = loadoutView.search;
   search.placeholder = labels.search;
   search.setAttribute("aria-label", labels.search);
-  heading.append(element("h2", "h6 mb-0", labels.list), search);
+  heading.append(element("h2", "h6 mb-0", labels.list), search,
+    pluginAction("zip", "Import", () => { loadoutView.importOpen = true; render(); }));
   const grid = element("div", "loadout-grid");
   const paging = element("nav", "d-flex gap-2 justify-content-center align-items-center mt-3");
   const update = () => {
     const term = loadoutView.search.toLowerCase().trim();
     const matching = state.rows.filter(row => (loadoutView.car === null || row.body === loadoutView.car) && row.name.toLowerCase().includes(term));
-    const pages = Math.max(1, Math.ceil(matching.length / 9));
+    const columns = Math.max(1, Math.floor((grid.clientWidth + 10) / 195));
+    grid.style.setProperty("--loadout-columns", columns);
+    const pageSize = columns * 3;
+    const pages = Math.max(1, Math.ceil(matching.length / pageSize));
     loadoutView.page = Math.min(pages - 1, loadoutView.page);
     grid.replaceChildren();
-    const visible = matching.slice(loadoutView.page * 9, loadoutView.page * 9 + 9);
+    const visible = matching.slice(loadoutView.page * pageSize, (loadoutView.page + 1) * pageSize);
     const positions = visible.map(row => row.position);
     const previewKey = JSON.stringify(positions);
-    if (loadoutView.previews !== previewKey) {
+    if (loadoutView.previews !== previewKey || positions.some(position => !(state.preview_positions || []).includes(position))) {
       loadoutView.previews = previewKey;
       loadoutAction("previews", { positions });
     }
@@ -1722,7 +1958,7 @@ function loadouts() {
       element("span", "", (loadoutView.page + 1) + " / " + pages),
       button("Next", () => { loadoutView.page++; update(); }, loadoutView.page + 1 >= pages));
   };
-  const choices = element("div", "d-grid gap-1");
+  const choices = element("div", "d-grid gap-1 loadout-car-list");
   const filter = (body, name) => {
     const option = button(name, () => { loadoutView.car = body; loadoutView.page = 0; render(); },
       false, loadoutView.car === body ? "primary" : "outline-secondary");
@@ -1734,14 +1970,25 @@ function loadouts() {
   filters.append(choices);
   content.append(heading, grid, paging);
   layout.append(filters, content);
-  rows.append(save, layout);
+  if (save.childElementCount) rows.append(save);
+  rows.append(layout);
+  loadoutView.resize?.disconnect();
+  loadoutView.resize = new ResizeObserver(update);
+  loadoutView.resize.observe(grid);
+  loadoutView.carResize?.disconnect();
+  loadoutView.carResize = new ResizeObserver(() => { filters.style.height = content.offsetHeight + "px"; });
+  loadoutView.carResize.observe(content);
   update();
   if (loadoutView.importOpen) {
     const dialog = element("dialog", "tracker-detail loadout-dialog");
     dialog.setAttribute("aria-labelledby", "import-loadout-title");
     const heading = element("h2", "h5", labels.import);
     heading.id = "import-loadout-title";
-    dialog.append(heading);
+    const header = element("div", "d-flex align-items-center justify-content-between gap-3 mb-3");
+    heading.classList.add("mb-0");
+    const close = icon("×", "Close import", () => closeLoadoutImport(dialog));
+    header.append(heading, close);
+    dialog.append(header);
     loadoutImport(dialog, labels);
     if (state.message) dialog.append(element("p", "small mt-2 mb-0", state.message));
     openLoadoutModal(dialog, () => closeLoadoutImport(dialog));
@@ -1766,54 +2013,52 @@ function recolour() {
     const item = byId.get(id);
     if (!item || view.painted && !item.painted || view.applied && !item.recoloured) view.selected.delete(id);
   }
-  const head = panel();
+  const head = element("div", "");
   const header = element("div", "d-flex flex-wrap align-items-center gap-2");
-  const accounts = state.inventory.accounts;
-  const account = loadoutSelect(labels.account, accounts.map(item => [item.id, item.label]),
-    accounts.find(item => item.selected)?.id, id => send({ type: "recolour_inventory", id }));
-  account.disabled = state.inventory.loading || !accounts.length;
-  header.append(loadoutSelect("Category", state.categories.map(([index, label]) => [index, label]), selectedCategory,
-    index => send({ type: "recolour_category", index: Number(index) })), element("span", "", labels.account), account,
-    button(labels.refresh, () => send({ type: "recolour_inventory" }), state.inventory.loading),
-    button(labels.catalog, () => send({ type: "recolour_reload" }), state.loading));
-  const filters = element("div", "d-flex gap-3 flex-wrap mt-2");
+  const categoryList = element("nav", "tracker-detail p-2 category-navigation");
+  for (const [index, label, selected] of state.categories) {
+    categoryList.append(button(label, () => send({type: "recolour_category", index}), false, selected ? "primary" : "outline-secondary"));
+  }
+
+  const filters = element("div", "item-browser-filters");
   const setFilter = (key, value) => { view[key] = value; view.page = 0; render(); };
   filters.append(toggle(labels.applied, view.applied, value => setFilter("applied", value)),
     toggle(labels.painted, view.painted, value => setFilter("painted", value)));
-  head.append(header, filters, element("p", "text-body-secondary small mb-0", labels.hint));
+  categoryList.append(filters);
   if (state.loading || state.inventory.loading) head.append(element("p", "small", "Loading…"));
   for (const message of [state.inventory.error, state.catalogError, state.catalog.status]) {
     if (message) head.append(element("p", "text-body-secondary small mb-0", message));
   }
-  rows.append(head);
+  if (head.childElementCount) rows.append(head);
   if (state.status) rows.append(element("p", state.status.error ? "text-warning" : "text-success", state.status.message));
   if (state.emptyInventory && !state.inventory.loading) rows.append(element("p", "text-body-secondary", labels.noInventory));
 
   const itemsPanel = panel();
-  const search = element("input", "form-control form-control-sm mb-2");
+  const search = element("input", "form-control form-control-sm");
   search.type = "search";
   search.value = view.search;
   search.placeholder = labels.search;
   search.setAttribute("aria-label", labels.search);
-  const grid = element("div", "recolour-grid");
+  const grid = element("div", "swapper-grid");
   const paging = element("div", "d-flex justify-content-center gap-2 align-items-center mt-3");
-  const selection = element("div", "mb-3");
+  const selection = element("div", "swapper-footer-left swapper-paint");
+  const commits = element("div", "swapper-footer-right");
+  const footer = element("footer", "swapper-footer");
+  paging.className = "swapper-pages d-flex gap-2 align-items-center";
+  footer.append(selection, paging, commits);
   const paintControls = () => {
     selection.replaceChildren();
+    commits.replaceChildren();
     if (!view.selected.size) return;
     const selected = [...view.selected].map(id => byId.get(id));
-    selection.append(element("p", "fw-semibold mb-1", selected.length === 1 ? selected[0].label : selected.length + " items selected"));
-    if (selected.length === 1 && selected[0].factory.length) {
-      selection.append(element("p", "small text-body-secondary mb-1", selected[0].factory.join(", ")),
-        element("p", "small text-body-secondary mb-1", labels.copies));
-    }
+    selection.title = selected.length === 1 ? selected[0].label : selected.length + " items selected";
     const actions = element("div", "d-flex flex-wrap align-items-center gap-2");
     const paint = loadoutSelect("Paint", state.paint.map((name, index) => [index, name]), view.paint, value => {
       view.paint = Number(value);
       paintControls();
     });
     actions.append(paint);
-    if (view.paint === state.paint.length - 1) {
+    if (view.paint === 1) {
       const colour = element("input", "form-control form-control-color");
       colour.type = "color";
       colour.value = view.rgb;
@@ -1826,7 +2071,7 @@ function recolour() {
       const rgb = view.rgb.slice(1).match(/.{2}/g).map(byte => parseInt(byte, 16));
       send({ type: "recolour_apply", ids: [...view.selected], paint, rgb });
     };
-    actions.append(button(view.paint ? labels.apply : labels.restoreOriginal, () => apply(view.paint),
+    commits.append(button(view.paint ? labels.apply : labels.restoreOriginal, () => apply(view.paint),
       state.running || !view.paint && !active, "primary"),
       button(labels.restore, () => apply(0), state.running || !active));
     selection.append(actions);
@@ -1835,13 +2080,13 @@ function recolour() {
     const term = view.search.trim().toLowerCase();
     const visible = items.filter(item => (!view.painted || item.painted) && (!view.applied || item.recoloured) &&
       (item.label.toLowerCase().includes(term) || item.package.toLowerCase().includes(term)));
-    const pageSize = Math.max(1, Math.floor((grid.clientWidth + 8) / 130)) * 3;
+    const pageSize = Math.max(1, Math.floor((grid.clientWidth + 10) / 164) - 1) * 3;
     const pages = Math.max(1, Math.ceil(visible.length / pageSize));
     view.page = Math.min(view.page, pages - 1);
     const windowItems = visible.slice(view.page * pageSize, (view.page + 1) * pageSize);
     const previewIds = windowItems.map(item => item.id);
-    const signature = JSON.stringify(previewIds);
-    if (signature !== view.requested) {
+    const signature = JSON.stringify([view.category, previewIds]);
+    if (signature !== view.requested || previewIds.some(id => !(state.preview_ids || []).includes(id))) {
       view.requested = signature;
       send({ type: "recolour_previews", ids: previewIds });
     }
@@ -1882,8 +2127,25 @@ function recolour() {
     paintControls();
   };
   search.addEventListener("input", () => { view.search = search.value; view.page = 0; draw(); });
-  itemsPanel.append(selection, search, grid, paging);
+  itemsPanel.classList.add("swapper-item-panel");
+  itemsPanel.append(element("div", "swapper-picker-banner", labels.hint), search, grid, footer);
   rows.append(itemsPanel);
+  const layout = element("div", "category-page-layout");
+  const contents = element("section", "category-contents d-grid gap-2");
+  contents.append(...rows.children);
+  layout.append(categoryList, contents);
+  rows.append(layout);
+  const resizeTiles = () => {
+    const count = Math.max(1, Math.floor((grid.clientWidth + 10) / 164) - 1);
+    if (grid.style.getPropertyValue("--swapper-columns") !== String(count)) {
+      grid.style.setProperty("--swapper-columns", count);
+      draw();
+    }
+  };
+  view.resize?.disconnect();
+  view.resize = new ResizeObserver(resizeTiles);
+  view.resize.observe(grid);
+  resizeTiles();
   draw();
 }
 
@@ -1939,11 +2201,6 @@ function itemArtwork() {
   const unavailable = state.busy || !state.closed;
   const head = panel();
   const controls = element("div", "d-flex flex-wrap align-items-center gap-2");
-  const accounts = state.inventory.accounts;
-  const account = loadoutSelect("Owned items from save", accounts.map(item => [item.id, item.label]),
-    accounts.find(item => item.selected)?.id, id => cmd("inventory", id));
-  account.disabled = state.inventory.loading || !accounts.length;
-  controls.append(account, button("Refresh owned items", () => cmd("inventory"), state.inventory.loading));
   if (names) controls.append(loadoutSelect("Item language", state.languages.map(file => [file, file.replace(/^Coalesced_|[.]bin$/g, "")]),
     state.language, file => cmd("language", file)));
   controls.append(loadoutSelect("Category", state.categories, state.category, category => cmd("category", category)),
@@ -1954,7 +2211,9 @@ function itemArtwork() {
     "small mb-0 mt-2 " + (state.error ? "text-danger" : "text-body-secondary"),
     state.error || (state.busy ? "Working…" : state.status)));
   const filters = element("div", "d-flex flex-wrap gap-3 mt-2");
-  for (const filter of ["owned", "patched"]) {
+  view.owned = !!state.globalOwnedOnly;
+  if (!names && state.owned !== state.globalOwnedOnly) cmd("owned", !!state.globalOwnedOnly);
+  for (const filter of ["patched"]) {
     filters.append(toggle(labels[filter], names ? view[filter] : state[filter], value => {
       if (names) {
         view[filter] = value;
@@ -2185,14 +2444,9 @@ function anthems() {
   }
   anthems.updateCursor = null;
   const controls = panel();
-  const accounts = state.inventory.accounts;
-  const save = loadoutSelect("Owned items from save", accounts.map(item => [item.id, item.label]),
-    accounts.find(item => item.selected)?.id, id => cmd("inventory", id));
-  save.disabled = state.inventory.loading || !accounts.length;
+  anthemView.owned = !!state.globalOwnedOnly;
   const tools = element("div", "d-flex flex-wrap gap-2 align-items-center");
-  tools.append(element("span", "small", "Owned items from save"), save,
-    button("Refresh owned items", () => cmd("inventory"), state.inventory.loading),
-    button("Refresh", () => cmd("refresh"), state.busy),
+  tools.append(button("Refresh", () => cmd("refresh"), state.busy),
     button("Restore all anthems", () => cmd("restore-all"), state.busy || !state.closed || !state.active, "outline-danger"));
   const filter = element("input", "form-control form-control-sm");
   filter.type = "search";
@@ -2200,7 +2454,7 @@ function anthems() {
   filter.placeholder = "Search anthems";
   filter.setAttribute("aria-label", filter.placeholder);
   const filters = element("div", "d-flex flex-wrap gap-3 mt-2");
-  for (const [key, label] of [["owned", "Show Only Owned Items"], ["patched", "Show patched anthems"]]) {
+  for (const [key, label] of [["patched", "Show patched anthems"]]) {
     filters.append(toggle(label, anthemView[key], value => { anthemView[key] = value; anthemView.page = 0; draw(); }));
   }
   const grid = element("div", "plugin-catalog-grid studio-asset-grid");
@@ -2481,17 +2735,6 @@ function studioAsset() {
     button("Custom", () => action("source", "custom"), false, state.custom ? "primary" : "outline-secondary"),
     button(labels.refresh, () => action("refresh")), button(labels.import, () => action("import"), state.busy),
     button(labels.restore, () => action("restore"), !state.active || state.busy || (decal && Boolean(state.error))));
-  if (decal) {
-    const accounts = state.inventory.accounts;
-    const save = loadoutSelect("Owned items from save", accounts.map(item => [item.id, item.label]),
-      accounts.find(item => item.selected)?.id, id => action("inventory", id));
-    save.disabled = state.inventory.loading || !accounts.length;
-    const inventory = element("div", "d-flex align-items-center flex-wrap gap-2 mb-2");
-    const owned = toggle("Show only owned items", state.ownedOnly, value => action("owned", null, value));
-    owned.classList.remove("mb-2");
-    inventory.append(save, button("Refresh owned items", () => action("inventory"), state.inventory.loading), owned);
-    controls.append(inventory);
-  }
   if (state.kind === "boost") {
     const ring = button(labels.ring, () => action("ring"), state.busy);
     ring.title = labels.ringHint;
@@ -2716,18 +2959,42 @@ function ballAppearance() {
   content.append(editor, status);
 }
 
-function liveCosmeticEditor(kind) {
+function liveGoalExplosion() {
+  const settings = structuredClone(state.live.settings);
+  const section = panel();
+  section.append(element("h2", "h6", "Goal explosion scale"),
+    element("p", "small text-body-secondary", "Changes apply to the next goal explosion. Default preserves the game's original size."));
+  const controls = element("div", "live-alignment-controls");
+  const slider = element("input", "form-range");
+  slider.type = "range"; slider.min = "0.1"; slider.max = "10"; slider.step = "0.1";
+  slider.value = settings.goal_explosion_scale || 1;
+  slider.disabled = !settings.goal_explosion_scale;
+  slider.setAttribute("aria-label", "Goal explosion scale");
+  const output = element("output", "small text-nowrap", slider.disabled ? "Default" : slider.value + "×");
+  let timer;
+  const save = () => { clearTimeout(timer); timer = setTimeout(() => send({type: "live_cosmetics", settings}), 100); };
+  section.append(toggle("Custom scale", !!settings.goal_explosion_scale, on => {
+    slider.disabled = !on;
+    settings.goal_explosion_scale = on ? Number(slider.value) : 0;
+    output.textContent = on ? slider.value + "×" : "Default";
+    save();
+  }));
+  slider.addEventListener("input", () => { settings.goal_explosion_scale = Number(slider.value); output.textContent = slider.value + "×"; save(); });
+  controls.append(slider, output); section.append(controls);
+  return section;
+}
+
+function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings), scheduleSave) {
   const section = panel();
   section.classList.add("live-cosmetics");
-  const settings = structuredClone(state.live.settings);
   let timer;
-  const save = () => {
+  const save = scheduleSave || (() => {
     clearTimeout(timer);
-    timer = setTimeout(() => send({type: "live_cosmetics", settings: { ...state.live.settings,
-      ...(kind === "alignment" ? {alignment: settings.alignment} : {primary: settings.primary, secondary: settings.secondary, heatseeker: settings.heatseeker, trim: settings.trim, wheels: settings.wheels}) }}), 100);
-  };
-  section.append(element("h2", "h6", kind === "alignment" ? "Live Wheel Alignment · All local cars" : "Live Car Colours"),
-    element("p", "small text-body-secondary", "Changes are saved automatically and update in Rocket League. Values remain available while Hebnix is closed."));
+    timer = setTimeout(() => send({type: "live_cosmetics", settings}), 100);
+  });
+  section.append(element("h2", "h6", kind === "alignment" ? "Live Wheel Alignment · All local cars" : "Live Colours"),
+    element("p", "small text-body-secondary", "Changes are saved automatically and update in Rocket League. Values remain available while Hebnix is closed."),
+    element("p", "small text-body-secondary live-setup-status", "Live cosmetics: " + (state.live.status || "Starting…")));
   if (kind === "alignment") {
     for (const [key, label, max, unit] of [["camber", "Camber", 30, "°"], ["vertical", "Up / Down", 15, ""], ["lateral", "Track width", 15, ""]]) {
       const line = element("label", "appearance-row");
@@ -2746,12 +3013,14 @@ function liveCosmeticEditor(kind) {
     }
     section.append(button("Reset alignment", () => {
       settings.alignment = {camber: 0, vertical: 0, lateral: 0};
-      send({type: "live_cosmetics", settings: {...state.live.settings, alignment: settings.alignment}});
+      save();
       document.activeElement?.blur();
     }));
   } else {
-    for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Trim colour"], ["wheels", "Wheel colour"], ["heatseeker", "Heatseeker ball"]]) {
-      const row = element("div", "d-flex gap-3 align-items-center mb-2");
+    for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Trim colour"], ["wheels", "Wheel colour"], ["boost", "Boost colour"], ["heatseeker", "Heatseeker ball"]]) {
+      if (key === "primary") section.append(element("h3", "h6 mt-3 mb-3", "Car Colours"));
+      if (key === "heatseeker") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Heatseeker Ball"));
+      const row = element("div", "live-colour-row mb-3");
       const input = element("input", "form-control form-control-color");
       input.type = "color";
       input.value = "#" + settings[key].rgb.map(b => b.toString(16).padStart(2, "0")).join("");
@@ -2766,8 +3035,7 @@ function liveCosmeticEditor(kind) {
 }
 
 function gameColours() {
-  const content = studioPage();
-  if (state.live) content.append(liveCosmeticEditor("colours"));
+  const content = state.live ? rows : studioPage();
   const { labels } = state;
   const settings = structuredClone(state.settings);
   const liveSettings = state.live && structuredClone(state.live.settings);
@@ -2777,11 +3045,15 @@ function gameColours() {
     settings[key + "_orange"] = liveSettings[key].orange.slice();
   }
   let liveTimer;
+  const saveLiveColours = () => {
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(() => send({type: "live_cosmetics", settings: liveSettings}), 100);
+  };
+  if (liveSettings) content.append(liveCosmeticEditor("colours", liveSettings, saveLiveColours));
   const saveTeamColours = key => {
     if (!liveSettings) return;
     liveSettings[key] = { enabled: settings[key + "_colours"], blue: settings[key + "_blue"].slice(), orange: settings[key + "_orange"].slice() };
-    clearTimeout(liveTimer);
-    liveTimer = setTimeout(() => send({type: "live_cosmetics", settings: {...state.live.settings, stadium: liveSettings.stadium, hud: liveSettings.hud}}), 100);
+    saveLiveColours();
   };
   const controls = element("div", "d-grid gap-2");
   if (liveSettings) controls.classList.add("live-cosmetics");
@@ -2834,9 +3106,16 @@ function gameColours() {
     section.append(options);
   }
   function draw() {
-    controls.replaceChildren(
+    const teamGroups = [
       group(labels.stadium, labels.stadiumOn, labels.stadiumHint, "stadium_colours", section => teamSection(section, "stadium")),
       group(labels.hud, labels.hudOn, labels.hudHint, "hud_colours", section => teamSection(section, "hud")),
+    ];
+    if (liveSettings) {
+      controls.replaceChildren(...teamGroups);
+      return;
+    }
+    controls.replaceChildren(
+      ...(state.liveManaged ? [] : teamGroups),
       group(labels.palette, labels.paletteOn, labels.paletteHint, "extended_palette", () => {}),
       group(labels.car, labels.carOn, labels.carHint, "car_colours", section => {
         settings.custom_colours.forEach((rgb, index) => {
@@ -2847,16 +3126,19 @@ function gameColours() {
         });
         section.append(icon("+", "Add colour", () => { settings.custom_colours.push([255, 0, 0]); draw(); }));
       }),
-      ...(!liveSettings ? [group(labels.heatseeker, labels.heatseekerOn, labels.heatseekerHint, "heatseeker_glow",
+      ...(!state.liveManaged ? [group(labels.heatseeker, labels.heatseekerOn, labels.heatseekerHint, "heatseeker_glow",
         section => section.append(field(labels.maxSpeed, settings.heatseeker_max_speed, rgb => { settings.heatseeker_max_speed = rgb; })))] : []));
   }
   draw();
+  if (liveSettings) {
+    content.append(controls);
+    return;
+  }
   const status = panel();
   const apply = restore => send({ type: "game_colours", settings, restore });
-  status.append(element("h2", "h6", liveSettings ? "Package options" : "Status"),
-    ...(liveSettings ? [element("p", "small text-body-secondary", "Stadium and HUD colours save live. These buttons apply or restore the remaining package options while Rocket League is closed.")] : []),
-    button(liveSettings ? "Apply package options" : labels.apply, () => apply(false), state.busy, "primary"), " ",
-    button(liveSettings ? "Restore package options" : labels.restore, () => apply(true), state.busy || !state.canRestore),
+  status.append(element("h2", "h6", "Status"),
+    button(labels.apply, () => apply(false), state.busy, "primary"), " ",
+    button(labels.restore, () => apply(true), state.busy || !state.canRestore),
     element("p", state.error ? "text-warning mt-2" : "small mt-2", state.status || (state.busy ? "Working…" : "")),
     element("p", "small text-body-secondary mb-0", state.backup));
   content.append(element("p", "text-body-secondary mb-0", labels.description), controls, status);
@@ -2864,7 +3146,6 @@ function gameColours() {
 
 function wheelAlignment() {
   const content = studioPage();
-  if (state.live) content.append(liveCosmeticEditor("alignment"));
   const { labels } = state;
   const editor = panel();
   const search = element("input", "form-control form-control-sm w-auto");
@@ -2936,12 +3217,7 @@ function wheelAlignment() {
   revert.append(list);
   const status = panel();
   status.append(element("h2", "h6", "Status"), element("p", "small mb-0", state.status || (state.busy ? "Working…" : "")));
-  if (state.live) {
-    const offline = element("details", "mt-3");
-    offline.append(element("summary", "mb-3", "Per-car package alignment · Rocket League must be closed"),
-      element("p", "small text-body-secondary", "Existing per-car adjustments are added to the live offsets above."), editor, revert, status);
-    content.append(offline);
-  } else content.append(editor, revert, status);
+  content.append(editor, revert, status);
 }
 
 function goalExplosion() {
@@ -2977,7 +3253,7 @@ function goalExplosion() {
       sync();
     });
     row.append(slider, input, element("span", "", model.suffix), mute);
-    const command = restore => send({ type: "goal_explosion", volume: index === 1, value: Number(input.value), restore });
+    const command = restore => send({ type: "goal_explosion", volume: true, value: Number(input.value), restore });
     card.append(element("h2", "h6", model.title), element("p", "text-body-secondary", model.description),
       row, button(model.apply, () => command(false), model.busy, "primary"), " ",
       button(model.restore, () => command(true), model.busy || !model.active));
@@ -3103,17 +3379,13 @@ function launchSetup(model) {
   function refreshFields() {
     fields.replaceChildren();
     if (draft.mode === "steam_native") fields.append(input("steam_id", labels.steam));
-    if (draft.mode === "steam_shortcut_to_heroic") {
+    if (draft.mode === "steam_shortcut") {
       fields.append(element("p", "small text-warning mb-0", labels.warning),
         button(labels.scan, () => sendSetup("scan")));
       if (!model.candidates.length) fields.append(element("p", "small text-body-secondary mb-0", labels.empty));
       model.candidates.forEach((label, index) => fields.append(button(label, () => sendSetup("candidate", index))));
       fields.append(input("steam_id", labels.shortcut));
-      if (draft.heroic_binary) fields.append(element("p", "small text-break mb-0", draft.heroic_binary));
-    }
-    if (draft.mode === "heroic_direct") fields.append(input("heroic_binary", labels.binary));
-    if (draft.mode === "heroic_direct" || draft.mode === "steam_shortcut_to_heroic") {
-      fields.append(input("heroic_app_name", labels.app), input("heroic_runner", labels.runner));
+      if (draft.shortcut_exe) fields.append(element("p", "small text-break mb-0", draft.shortcut_exe));
     }
   }
   refreshFields();
@@ -3191,15 +3463,17 @@ function systemSettings() {
   const backupAction = key => send({ type: "system_backups", key });
   const command = key => send({ type: "system_command", key });
   const card = panel();
-  card.append(button(backups.label, () => backupAction("open"), false, "outline-danger"),
-    element("p", "small text-body-secondary mt-2", backups.note));
+
   if (backups.error) card.append(element("p", "text-warning", backups.error));
   const options = panel();
   for (const item of state.rows) {
     options.append(toggle(item.label, item.enabled, enabled => send({ type: "system_toggle", key: item.key, enabled })));
     if (item.note) options.append(element("p", "small text-body-secondary", item.note));
   }
-  options.append(button(state.repair, () => command("repair"), state.repairBusy));
+  const maintenanceActions = element("div", "d-flex gap-2 flex-wrap align-items-center mt-3");
+  maintenanceActions.append(button(state.repair, () => command("repair"), state.repairBusy),
+    button("Uninstall", () => command("uninstall"), false, "outline-danger"),
+    button(backups.label, () => backupAction("open"), false, "outline-danger"));
   const fps = element("input", "form-range w-auto");
   const display = element("output", "small");
   fps.type = "range";
@@ -3225,7 +3499,9 @@ function systemSettings() {
   proxy.append(commands);
   if (!certificate.admin) proxy.append(element("p", "small text-body-secondary mt-2", "Restart as Administrator to install or remove the certificate."));
   proxy.append(element("p", "mt-2 mb-0", certificate.proxyLabel + " " + certificate.proxy));
-  rows.append(card, options, proxy);
+  options.append(maintenanceActions);
+  rows.append(options, proxy);
+  if (backups.error) rows.append(card);
   if (backups.confirming) {
     const dialog = element("dialog", "tracker-detail loadout-dialog");
     const title = element("h2", "h5", backups.label);
@@ -3378,11 +3654,42 @@ function presets() {
 }
 
 function render() {
+  const creatorFocus = document.activeElement?.id?.startsWith("creator-") ? document.activeElement : null;
+  const creatorSelection = creatorFocus && creatorFocus.type !== "number" ? [creatorFocus.selectionStart, creatorFocus.selectionEnd] : null;
+  const layout = rows.querySelector(".plugin-settings-layout");
+  const samePlugin = state.page === "plugin-settings" && layout?.dataset.plugin === String(state.selected);
+  const navigationScroll = layout?.firstElementChild.scrollTop || 0;
+  const settingsScroll = samePlugin ? layout.lastElementChild.scrollTop : 0;
+  const focused = samePlugin && layout.contains(document.activeElement) ? document.activeElement : null;
+  const inputs = focused ? [...layout.querySelectorAll("input,select,textarea,button,summary")] : [];
+  const focusIndex = inputs.indexOf(focused);
+  const selection = focused && ["text", "password", "search"].includes(focused.type)
+    ? [focused.selectionStart, focused.selectionEnd] : null;
+  renderContent();
+  if (creatorFocus) { const input = document.getElementById(creatorFocus.id); input?.focus({preventScroll:true}); if (input && creatorSelection) input.setSelectionRange(...creatorSelection); }
+  const next = rows.querySelector(".plugin-settings-layout");
+  if (next) {
+    if (focusIndex >= 0) {
+      const control = next.querySelectorAll("input,select,textarea,button,summary")[focusIndex];
+      control?.focus({preventScroll: true});
+      if (selection && control?.setSelectionRange) control.setSelectionRange(...selection);
+    }
+    next.firstElementChild.scrollTop = navigationScroll;
+    next.lastElementChild.scrollTop = settingsScroll;
+  }
+}
+
+function renderContent() {
   const scroll = rows.querySelector(".loadout-dialog")?.scrollTop;
+  document.body.classList.toggle("preset-creator-page", state.page === "preset-creator");
   controls.replaceChildren();
   rows.replaceChildren();
   controls.classList.add("mb-3");
   query.hidden = state.page !== "installed" && state.page !== "browse";
+  field("plugin-search-row").hidden = query.hidden;
+  field("plugin-refresh").replaceChildren();
+  document.body.classList.toggle("plugin-settings-page", state.page === "plugin-settings");
+  document.body.classList.toggle("category-layout-page", state.page === "recolour");
   const term = query.value.trim().toLowerCase();
   const list = (state.rows || []).filter(plugin => [plugin.name, plugin.author, plugin.description]
     .some(value => typeof value === "string" && value.toLowerCase().includes(term)));
@@ -3400,6 +3707,9 @@ function render() {
   if (state.page === "menu-map") return menuMap();
   if (state.page === "add-maps") return addMaps();
   if (state.page === "game-mods") return gameMods();
+  if (state.page === "live-colours") return gameColours();
+  if (state.page === "live-goal-explosion") return rows.append(liveGoalExplosion());
+  if (state.page === "live-wheels") return rows.append(liveCosmeticEditor("alignment"));
   if (state.page === "replay-library") return replayLibrary();
   if (state.page === "presets") return presets();
   if (state.page === "discord-settings") return discordSettings();
@@ -3425,6 +3735,7 @@ function render() {
   if (state.page === "player-rank") return playerRank();
   if (state.page === "profile-pictures") return profilePictures();
   if (state.page === "titles") return titles();
+  if (state.page === "preset-creator") return presetCreator();
   if (state.page === "loadouts") {
     loadouts();
     const dialog = rows.querySelector(".loadout-dialog");
@@ -3432,14 +3743,18 @@ function render() {
     return;
   }
   if (state.page === "installed") {
-    controls.append(icon("📁", "Open plugins folder", () => command("folder")),
-      icon("⤓", "Install ZIP", () => command("zip")), icon("↻", "Reload plugins", () => command("reload")));
+    controls.append(pluginAction("folder", "Plugins Folder", () => command("folder")),
+      pluginAction("zip", "Install from ZIP", () => command("zip")),
+      pluginAction("reload", "Reload", () => command("reload")));
+    const tools = [...controls.children];
+    controls.replaceChildren();
+    field("plugin-refresh").append(...tools);
     if (state.overlay.length) rows.append(overlayOrder(state.overlay));
     rows.append(...list.map(installedRow));
     return;
   }
 
-  controls.append(icon("↻", "Refresh catalog", () => command("refresh"), state.loading));
+  field("plugin-refresh").append(pluginAction("refresh", "Refresh", () => command("refresh"), state.loading));
   const pages = Math.max(1, Math.ceil(list.length / pageSize));
   page = Math.min(page, pages - 1);
   const visible = list.slice(page * pageSize, (page + 1) * pageSize);
@@ -3503,11 +3818,19 @@ window.showManager = data => {
       return;
     }
   }
+  if (data.page !== "player-rank") rankView.draft = null;
+  const editingRank = state?.page === "player-rank" && data.page === "player-rank" && rankView.draft !== null;
   if (data.page === "loadouts" && state?.page === "loadouts" && state.input && !data.input) loadoutView.draft = null;
+  if (creatorView.creating && data.creatorAttempt !== creatorView.attempt) creatorView.creating=false;
+  if (state?.creator && !data.creator && data.page === "preset-creator" && data.message === "Loadout Created") {
+    creatorView.createdUntil = Date.now() + 10000;
+    clearTimeout(creatorView.createdTimer);
+    creatorView.createdTimer = setTimeout(() => { if (state?.page === "preset-creator" && !state.creator) render(); }, 10000);
+  }
   state = data;
   if (editingLive && data.live) for (const banner of rows.querySelectorAll(".live-setup-status")) {
     banner.textContent = "Live cosmetics: " + (data.live.status || "Starting…");
   }
-  if (!editingName && !editingLive) render();
+  if (!editingName && !editingLive && !editingRank) render();
 };
 window.ipc.postMessage(JSON.stringify({ type: "manage_ready" }));

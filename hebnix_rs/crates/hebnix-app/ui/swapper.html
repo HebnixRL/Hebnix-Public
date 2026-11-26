@@ -9,35 +9,28 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main class="container-fluid p-3 swapper-page">
-    <div class="card workspace-card mb-3" id="inventory">
-      <div class="card-body row g-3 align-items-end">
-        <div class="col-md-4"><label for="category" class="form-label">Category</label><select class="form-select" id="category"></select></div>
-        <div class="col-md-8">
-          <label for="account" class="form-label">Owned items from save</label>
-          <div class="swapper-account">
-            <select class="form-select" id="account"></select>
-            <label class="swapper-owned" title="Show only owned replacements"><input class="form-check-input mt-0" type="checkbox" id="owned" checked> Owned only</label>
-            <button type="button" class="btn btn-outline-secondary text-nowrap" id="refresh">Refresh</button>
-          </div>
-        </div>
-        <div class="col-12 text-body-secondary small" id="inventory-status" role="status" hidden></div>
+  <main class="container-fluid tracker-page swapper-page swapper-category-layout">
+    <aside class="tracker-detail p-2 category-navigation" id="inventory">
+      <select id="category" hidden></select>
+      <nav id="category-navigation" class="category-navigation"></nav>
+      <div class="item-browser-filters">
+        <label><input class="form-check-input mt-0" type="checkbox" id="owned"> Show Owned Swappable Items</label>
+        <label id="match-car-label"><input class="form-check-input mt-0" type="checkbox" id="match-car" checked> Match selected car</label>
       </div>
-    </div>
-    <div class="d-flex align-items-center gap-2 mb-3">
-      <p class="text-body-secondary mb-0" id="catalog-status" role="status" hidden></p>
-      <button type="button" class="btn btn-sm btn-outline-secondary" id="reload" hidden>Reload catalogs</button>
-    </div>
-    <section class="card workspace-card" id="editor" hidden>
-      <div class="card-body d-grid gap-3">
-        <h2 class="h5 mb-0" id="category-title"></h2>
-        <div id="car-fields" hidden>
-          <label for="car" class="form-label">Car</label><select class="form-select" id="car"></select>
-          <div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="match-car" checked><label class="form-check-label" for="match-car">Match selected car</label></div>
+    </aside>
+    <section class="tracker-detail" id="editor" hidden>
+      <div class="card-body p-3 d-grid gap-3">
+        <div class="d-flex align-items-center gap-2">
+          <p class="text-body-secondary mb-0" id="catalog-status" role="status" hidden></p>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="reload" hidden>Reload catalogs</button>
         </div>
+        <h2 class="h5 mb-0" id="category-title" hidden></h2>
         <div class="swapper-picker-banner" id="picker-banner"></div>
-        <input class="form-control" type="search" id="source-search" placeholder="Search items to use" aria-label="Search items to use">
-        <input class="form-control" type="search" id="target-search" placeholder="Search items to replace" aria-label="Search items to replace" hidden>
+        <div id="car-fields" class="swapper-car-fields" hidden>
+          <label for="car" class="form-label mb-0">Car</label><select class="form-select form-select-sm" id="car"></select>
+        </div>
+        <input class="form-control form-control-sm" type="search" id="source-search" placeholder="Search items to use" aria-label="Search items to use">
+        <input class="form-control form-control-sm" type="search" id="target-search" placeholder="Search items to replace" aria-label="Search items to replace" hidden>
         <div class="swapper-grid" id="picker" role="group" aria-labelledby="picker-banner"></div>
         <p class="small text-body-secondary mb-0" id="picker-empty" hidden></p>
         <footer class="swapper-footer">

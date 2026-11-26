@@ -1,7 +1,7 @@
 # Navigation names shared by Hebnix and Hebnix Lite.
 studio-items = Items
 studio-custom-assets = Custom Assets
-studio-appearance = Appearance
+studio-appearance = Visual Patches
 studio-menus = Menus
 studio-player-anthems = Player Anthems
 studio-menu-textures = Menu Textures
@@ -74,3 +74,15 @@ upk-history-restore-original = Restore original
 
 nav-menu-textures-experimental = Menus (experimental)
 nav-map-swapper = Map Swapper
+
+home-dashboard = Dashboard
+
+nav-preset-creator = Preset Creator
+
+nav-match-tools = Match Tools
+nav-match-setup = Match Setup
+nav-match-chat = Chat
+nav-lan-hosting = LAN Hosting
+nav-practice = Practice
+nav-bots-and-podium = Bots & Podium
+nav-live-editor = Live Editor
