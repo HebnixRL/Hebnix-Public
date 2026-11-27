@@ -134,8 +134,8 @@ pub fn filled(cooked: &Path, map: &Path) -> Option<PathBuf> {
     reserved(cooked, map)
 }
 
-/// Incoming slot protection rejects conflicting peers rather than unticking
-/// local maps, so joining never requires an untick-driven menu refresh.
+/// Joining moves a local map out of its slot for the session rather than
+/// unticking it, so joining never requires an untick-driven menu refresh.
 pub fn take_unticked() -> bool {
     false
 }
@@ -255,18 +255,17 @@ pub fn place(cooked: &Path, slot: &str, map: &Path, title: &str) -> Result<Place
     if !is_slot(slot) {
         return Err(format!("{slot} is not a map slot"));
     }
-    let own = local_host_map(cooked, slot);
-    if let Some(host) = &own {
-        // Size/mtime is only a copy freshness hint, not map identity: distinct
-        // packages can have the same length and timestamp.
-        let source = original(&host).and_then(|p| fs::canonicalize(p).ok());
-        if source.is_none() || source != fs::canonicalize(map).ok() {
-            return Err(format!("{slot} is reserved for a local LAN map; untick it before joining a different map in this slot"));
-        }
-    }
+    // A different local map in this slot is moved out for the session; its
+    // copy stays in HbxSlots and release() puts it back. Size/mtime is only a
+    // copy freshness hint, not map identity, so compare the source paths.
+    let local = local_host_map(cooked, slot);
+    let own = local.clone().filter(|host| {
+        let source = original(host).and_then(|p| fs::canonicalize(p).ok());
+        source.is_some() && source == fs::canonicalize(map).ok()
+    });
     let dest = cooked.join(format!("{slot}.upk"));
     let existed = dest.exists();
-    if existed && same_file(&dest, map) {
+    if existed && (own.is_some() || local.is_none()) && same_file(&dest, map) {
         return Ok(if own.is_some() { Placed::Own } else { Placed::Ready });
     }
     let key = format!("slot-{slot}");
@@ -357,7 +356,13 @@ mod tests {
         assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
         release(&cooked, "hbx_slot002");
         assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
-        assert!(place(&cooked, "hbx_slot002", &originals[0], "Conflicting peer").is_err());
+        // a peer's different map in the same slot moves the local one out until release
+        let peer = game.join("peer.udk");
+        fs::write(&peer, b"peer map").unwrap();
+        assert!(matches!(place(&cooked, "hbx_slot002", &peer, "Peer map"), Ok(Placed::Swapped)));
+        assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"peer map");
+        release(&cooked, "hbx_slot002");
+        assert_eq!(fs::read(cooked.join("hbx_slot002.upk")).unwrap(), b"two");
         assert!(!take_unticked());
         assert!(ticked(&cooked).contains(originals[1].to_string_lossy().as_ref()));
         assert_eq!(original(&dir.join("hbx_slot002.udk")), Some(originals[1].clone()));
