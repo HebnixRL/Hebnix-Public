@@ -136,6 +136,23 @@ fn matches(package: &UpkPackage, receipt: &Receipt, on: bool) -> bool {
                 .is_ok_and(|(_, b)| b == if on { &e.patched } else { &e.original })
         })
 }
+/// Name what differs so a report shows which patch owns it.
+fn foreign_edit(package: &UpkPackage, receipt: &Receipt) -> String {
+    let mut drift = Vec::new();
+    for n in &receipt.names {
+        let current = package.names.get(n.index);
+        if current != Some(&n.original) && current != Some(&n.patched) {
+            drift.push(format!("name {} is {:?}", n.index, current));
+        }
+    }
+    for e in &receipt.exports {
+        if !bytes(package, &e.path).is_ok_and(|(_, b)| b == e.original || b == e.patched) {
+            drift.push(format!("{} was edited", e.path));
+        }
+    }
+    let detail = if drift.is_empty() { "the functions are a mix of patched and original code".to_string() } else { drift.join(", ") };
+    format!("The profile picture UI functions were changed by another patch ({detail}). Refusing to overwrite them.")
+}
 fn live_restored_baseline(package: &UpkPackage, receipt: &Receipt) -> bool {
     if !receipt.exports.iter().all(|e| bytes(package, &e.path).is_ok_and(|(_, b)| b == e.original)) { return false; }
     let path = crate::config::base_dir().join("state/live-cosmetics/transaction.json");
@@ -340,7 +357,7 @@ fn workshop_baseline(directory: &Path) -> Result<(UpkPackage, Option<(Receipt, b
     if enabled {
         restore_snapshot(&mut package, &saved)?;
     } else if !matches(&package, &saved, false) && !restored_workshop_variant(&package, &saved) && !live_restored_baseline(&package, &saved) {
-        return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+        return Err(foreign_edit(&package, &saved));
     }
     Ok((package, Some((saved, enabled))))
 }
@@ -583,7 +600,7 @@ fn set_enabled_checked(
                 // preserving its current Workshop author-name setting on undo.
                 upgrading = true;
             } else {
-                return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+                return Err(foreign_edit(&package, saved));
             }
         }
     } else {

@@ -1,4 +1,4 @@
-use crate::patcher::{game_path, title_patcher::{abc, movie}, upk_package::UpkPackage, workshop_menu_ui::Movie};
+use crate::patcher::{game_path, title_patcher::{self, abc, movie}, upk_package::UpkPackage, workshop_menu_ui::Movie};
 use std::path::Path;
 type R<T> = Result<T, String>;
 pub const FILES: &[(&str, &str)] = &[("GFX_Hud_SF.upk", "GFX_Hud.HUD"), ("GFX_WinnerMenu_SF.upk", "GFX_WinnerMenu.WinnerMenu")];
@@ -6,6 +6,10 @@ pub fn prepare(cooked: &Path, file: &str, baseline: Option<&[u8]>) -> R<(String,
     let (_, export) = FILES.iter().find(|(name, _)| *name == file).ok_or("Unknown live movie package")?;
     let mut package = UpkPackage::load(&game_path::resolve(cooked, file))?;
     let index = package.find_object(export).filter(|i| *i > 0).ok_or("Missing live movie export")? as usize - 1;
+    // The journal records the HUD without Titles; recovery puts them back on top.
+    if file == title_patcher::BOOST_HUD {
+        if let Some(titles) = title_patcher::hud_titles(cooked, &package, index)? { package.replace_export_payload(index, &titles.original)?; }
+    }
     if let Some(baseline) = baseline { package.replace_export_payload(index, baseline)?; }
     let entry = &package.exports[index];
     let before = package.image[entry.serial_offset..entry.serial_offset + entry.serial_size].to_vec();

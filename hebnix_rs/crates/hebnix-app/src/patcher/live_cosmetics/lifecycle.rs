@@ -1,4 +1,5 @@
 use super::*;
+use super::super::title_patcher;
 use super::super::upk_package::UpkPackage;
 use sha2::{Digest, Sha256};
 use std::sync::{atomic::{AtomicBool, Ordering}, OnceLock};
@@ -417,7 +418,13 @@ fn reconcile_movies(r: &mut Receipt, install: bool, owner: u32) -> Result<(), St
                 }
             }
         }
+        // Titles sit on top of the HUD. Edit the movie underneath them and put them back.
+        let _ui_patch = (a.file == title_patcher::BOOST_HUD)
+            .then(|| title_patcher::UI_PATCH_LOCK.lock()).transpose().map_err(|_| "UI patch lock unavailable")?;
         let mut p = UpkPackage::from_bytes(raw.clone())?;
+        let slot = payload(&p, &a.path)?.0;
+        let titles = if a.file == title_patcher::BOOST_HUD { title_patcher::hud_titles(&r.cooked, &p, slot)? } else { None };
+        if let Some(titles) = &titles { p.replace_export_payload(slot, &titles.original)?; }
         let (slot, current) = payload(&p, &a.path)?;
         let current_hash = hash(current);
         let wanted = if install { &a.after } else { &a.before };
@@ -441,21 +448,36 @@ fn reconcile_movies(r: &mut Receipt, install: bool, owner: u32) -> Result<(), St
         let wanted = if install { &a.after } else { &a.before };
         let desired = read_blob(wanted)?;
         p.replace_export_payload(slot, &desired)?;
+        let staged = match &titles {
+            Some(titles) => {
+                let titled = title_patcher::retitle_hud(&p, slot, &titles.rules)?;
+                p.replace_export_payload(slot, &titled)?;
+                titled
+            }
+            None => desired.clone(),
+        };
         let bytes = p.repacked_fast()?;
         let check = UpkPackage::from_bytes(bytes.clone())?;
-        if payload(&check, &a.path)?.1 != desired { return Err("Live movie staging verification failed".into()); }
+        if payload(&check, &a.path)?.1 != staged { return Err("Live movie staging verification failed".into()); }
         drop(check);
-        p.replace_export_payload(slot, &read_blob(if install { &a.before } else { &a.after })?)?;
-        let opposite = p.repacked_fast()?;
-        let (disabled, enabled) = if install { (&opposite, &bytes) } else { (&bytes, &opposite) };
-        r.attachments[index].before_hash = hash(disabled);
-        r.attachments[index].after_hash = hash(enabled);
-        super::super::upk_history::replace(&cache(false), disabled)?;
-        super::super::upk_history::replace(&cache(true), enabled)?;
+        if titles.is_some() {
+            // Cached whole-package variants would skip Titles' restore record.
+            r.attachments[index].before_hash.clear();
+            r.attachments[index].after_hash.clear();
+        } else {
+            p.replace_export_payload(slot, &read_blob(if install { &a.before } else { &a.after })?)?;
+            let opposite = p.repacked_fast()?;
+            let (disabled, enabled) = if install { (&opposite, &bytes) } else { (&bytes, &opposite) };
+            r.attachments[index].before_hash = hash(disabled);
+            r.attachments[index].after_hash = hash(enabled);
+            super::super::upk_history::replace(&cache(false), disabled)?;
+            super::super::upk_history::replace(&cache(true), enabled)?;
+        }
         save(r)?;
         allowed(owner)?;
         if fs::read(&live).map_err(|e| e.to_string())? != raw { return Err("A live movie package changed during staging".into()); }
         super::super::upk_history::replace(&live, &bytes)?;
+        if titles.is_some() { title_patcher::sync_hud_titles(&r.cooked, slot, &desired, &staged)?; }
     }
     Ok(())
 }
