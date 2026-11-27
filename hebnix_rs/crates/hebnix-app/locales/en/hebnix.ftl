@@ -193,6 +193,7 @@ system-close-to-tray = Close to Tray:
 system-p2p = P2P File Sharing:
 system-p2p-note = Turning this off stops other players in Workshop multiplayer from downloading maps from your PC. Custom maps that aren't on the Hebnix Workshop can then no longer be downloaded by other players.
 system-suppress-left = Suppress Left Alerts:
+system-console-timestamps = Show Console Timestamps:
 system-fullscreen-warning = Fullscreen Warning:
 system-fullscreen-note = Warns when the game is fullscreen and the overlay can't draw.
 system-allow-draw-focus = Allow Draw on Hebnix Focus:
@@ -557,6 +558,8 @@ render-apply-alignment = Apply alignment
 
 ## ui/console.rs
 render-enter-system-command = Enter system command...
+console-copy = Copy
+console-copy-tooltip = Copy the console output to the clipboard
 
 ## ui/rlapi.rs
 rlapi-enable-before-launching-rocket-league-to = Enable before launching Rocket League to capture its session. Requests share the game's connection.

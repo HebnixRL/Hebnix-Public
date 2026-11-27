@@ -4187,7 +4187,8 @@ impl HebnixApp {
             .iter()
             .map(|p| p.display_name().to_string())
             .collect();
-        let submitted = self.console.render(ui, &plugin_names);
+        let timestamps = self.config.settings.console_timestamps;
+        let submitted = self.console.render(ui, &plugin_names, timestamps);
         if let Some(cmd) = submitted {
             self.execute_command(cmd, ui.ctx());
         }
@@ -5837,6 +5838,7 @@ impl HebnixApp {
                                             t("system-close-to-tray"),
                                             t("system-p2p"),
                                             t("system-suppress-left"),
+                                            t("system-console-timestamps"),
                                             t("system-fullscreen-warning"),
                                             t("system-allow-draw-focus"),
                                             t("system-limit-hotkey"),
@@ -5917,6 +5919,18 @@ impl HebnixApp {
                                         if ui
                                             .checkbox(
                                                 &mut self.config.settings.suppress_left_alerts,
+                                                "",
+                                            )
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-console-timestamps"));
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.settings.console_timestamps,
                                                 "",
                                             )
                                             .changed()
