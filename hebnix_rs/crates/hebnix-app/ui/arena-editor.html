@@ -29,12 +29,14 @@
     <div class="tracker-detail p-3 mt-3" id="bulk-confirm" hidden>
       <p id="bulk-warning"></p><button type="button" class="btn btn-sm btn-primary me-2" id="bulk-apply">Apply to all unchanged maps</button><button type="button" class="btn btn-sm btn-outline-secondary" id="bulk-cancel">Cancel</button>
     </div>
+    <div id="patch-operation-progress"></div>
     <p class="text-body-secondary mt-3" role="status" id="status"></p>
     <section class="tracker-detail p-3 mt-3" id="active" hidden>
       <div class="d-flex justify-content-between align-items-center mb-2"><h2 class="h6 mb-0">Active changes</h2><button type="button" class="btn btn-sm btn-outline-secondary" id="restore-all">Restore all</button></div>
       <div id="active-list"></div>
     </section>
   </main>
+  <script src="/patch-progress.js"></script>
   <script src="/arena-editor.js"></script>
 </body>
 </html>

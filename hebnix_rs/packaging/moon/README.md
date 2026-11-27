@@ -44,7 +44,7 @@ paths the bundle can have:
 ```
 dir=app
 main=app/bin/hebnix
-version=2.2.4
+version=2.4.0
 desktop=desktop/hebnix.desktop
 link=hebnix
 to=app/bin/hebnix

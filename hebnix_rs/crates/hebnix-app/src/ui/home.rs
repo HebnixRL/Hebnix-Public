@@ -487,7 +487,7 @@ impl HebnixApp {
                             Some("danger") => egui::Color32::LIGHT_RED,
                             _ => egui::Color32::YELLOW,
                         };
-                        ui.colored_label(colour, live["label"].as_str().unwrap_or("Pending"))
+                        ui.colored_label(colour, live["label"].as_str().unwrap_or("Installing"))
                             .on_hover_text(live["detail"].as_str().unwrap_or_default());
                     });
                 });

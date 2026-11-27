@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Stamp the release version (from the git tag) into every place that carries it,
-# so nobody bumps versions by hand. Run from anywhere: stamp-version.sh 2.2.7
+# so nobody bumps versions by hand. Run from anywhere: stamp-version.sh 2.4.0
 
 set -euo pipefail
 
