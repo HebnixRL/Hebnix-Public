@@ -60,6 +60,16 @@ enum PaletteLoad {
     Ready(Result<Palettes, String>),
 }
 
+/// shows a colour appended to the game palette before the patched palette is reloaded
+fn show_palette_cell(palettes: &mut Palettes, team: usize, primary: bool, index: u8, rgb: [u8; 3]) {
+    let palette = &mut palettes[if primary { team } else { 2 }];
+    let index = usize::from(index);
+    if palette.len() <= index {
+        palette.resize(index + 1, [0; 3]);
+    }
+    palette[index] = rgb;
+}
+
 #[derive(Default)]
 pub struct LoadoutsPanel {
     accounts: Vec<SaveAccount>,

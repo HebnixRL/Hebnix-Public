@@ -45,6 +45,13 @@ pub(crate) enum Action {
     Finish { name: String },
 }
 impl LoadoutsPanel {
+    pub(super) fn creator_use_palette_colour(&mut self, team: usize, primary: bool, index: u8, rgb: [u8; 3]) {
+        let Some(draft) = self.creator.as_mut() else { return };
+        let PaletteLoad::Ready(Ok(palettes)) = &mut draft.palettes else { return };
+        super::show_palette_cell(palettes, team, primary, index, rgb);
+        if primary { draft.preset.teams[team].team_color = index; } else { draft.preset.teams[team].custom_color = index; }
+    }
+
     pub(crate) fn creator_snapshot(&mut self, swapper: &mut SwapperState, cooked: &Path, ctx: &egui::Context) -> Value {
         let Some(draft) = self.creator.as_mut() else { return Value::Null };
         if let PaletteLoad::Loading(job) = &draft.palettes {

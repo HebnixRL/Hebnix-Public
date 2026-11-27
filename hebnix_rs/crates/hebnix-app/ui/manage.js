@@ -1700,7 +1700,20 @@ function loadoutColourDialog(model, labels, select) {
     colour.setAttribute("aria-pressed", String(index === model[key]));
     palette.append(colour);
   });
-  dialog.append(header, palette, button("Close", close));
+  // any colour: the app appends it to the garage palette and picks that cell
+  const current = model.palette[key][model[key]] || [255, 255, 255];
+  const custom = element("div", "d-flex align-items-center gap-2 mt-3");
+  const picker = element("input", "form-control form-control-color");
+  picker.type = "color";
+  picker.value = "#" + current.map(value => value.toString(16).padStart(2, "0")).join("");
+  picker.setAttribute("aria-label", "Custom " + labels[key]);
+  custom.append(element("span", "", "Any colour"), picker, button("Use colour", () => dismissDialog(dialog, () => {
+    loadoutView.palette = null; dialog.remove();
+    const rgb = picker.value.slice(1).match(/.{2}/g).map(value => parseInt(value, 16));
+    loadoutAction("custom_colour", { team: model.team, primary: key === "primary", rgb });
+  }), !state.closed, "primary"));
+  const note = element("p", "small text-body-secondary mt-2", "A custom colour is added to your garage palette, so Rocket League must be closed. Restart it to see the colour. For rainbow or live colours, use the Colours page.");
+  dialog.append(header, palette, custom, note, button("Close", close));
   openLoadoutModal(dialog, close);
 }
 
@@ -1956,159 +1969,6 @@ function loadouts() {
     loadoutDialog(labels);
   }
 }
-const recolourView = { category: null, selected: new Set(), paint: 0, rgb: "#ffffff",
-  search: "", painted: false, applied: false, page: 0, requested: "" };
-
-function recolour() {
-  const view = recolourView;
-  const labels = state.labels;
-  const selectedCategory = state.categories.find(([, , active]) => active)?.[0];
-  if (view.category !== selectedCategory) {
-    Object.assign(view, { category: selectedCategory, paint: 0, rgb: "#ffffff", page: 0, requested: "" });
-    view.selected.clear();
-  }
-  const items = state.catalog.items || [];
-  const byId = new Map(items.map(item => [item.id, item]));
-  for (const id of view.selected) {
-    const item = byId.get(id);
-    if (!item || view.painted && !item.painted || view.applied && !item.recoloured) view.selected.delete(id);
-  }
-  const head = element("div", "");
-  const header = element("div", "d-flex flex-wrap align-items-center gap-2");
-  const categoryList = element("nav", "tracker-detail p-2 category-navigation");
-  for (const [index, label, selected] of state.categories) {
-    categoryList.append(button(label, () => send({type: "recolour_category", index}), false, selected ? "primary" : "outline-secondary"));
-  }
-
-  const filters = element("div", "item-browser-filters");
-  const setFilter = (key, value) => { view[key] = value; view.page = 0; render(); };
-  filters.append(toggle(labels.applied, view.applied, value => setFilter("applied", value)),
-    toggle(labels.painted, view.painted, value => setFilter("painted", value)));
-  categoryList.append(filters);
-  if (state.loading || state.inventory.loading) head.append(element("p", "small", "Loading…"));
-  for (const message of [state.inventory.error, state.catalogError, state.catalog.status]) {
-    if (message) head.append(element("p", "text-body-secondary small mb-0", message));
-  }
-  if (head.childElementCount) rows.append(head);
-  if (state.status) rows.append(element("p", state.status.error ? "text-warning" : "text-success", state.status.message));
-  if (state.emptyInventory && !state.inventory.loading) rows.append(element("p", "text-body-secondary", labels.noInventory));
-
-  const itemsPanel = panel();
-  const search = element("input", "form-control form-control-sm");
-  search.type = "search";
-  search.value = view.search;
-  search.placeholder = labels.search;
-  search.setAttribute("aria-label", labels.search);
-  const grid = element("div", "swapper-grid");
-  const paging = element("div", "d-flex justify-content-center gap-2 align-items-center mt-3");
-  const selection = element("div", "swapper-footer-left swapper-paint");
-  const commits = element("div", "swapper-footer-right");
-  const footer = element("footer", "swapper-footer");
-  paging.className = "swapper-pages d-flex gap-2 align-items-center";
-  footer.append(selection, paging, commits);
-  const paintControls = () => {
-    selection.replaceChildren();
-    commits.replaceChildren();
-    if (!view.selected.size) return;
-    const selected = [...view.selected].map(id => byId.get(id));
-    selection.title = selected.length === 1 ? selected[0].label : selected.length + " items selected";
-    const actions = element("div", "d-flex flex-wrap align-items-center gap-2");
-    const paint = loadoutSelect("Paint", state.paint.map((name, index) => [index, name]), view.paint, value => {
-      view.paint = Number(value);
-      paintControls();
-    });
-    actions.append(paint);
-    if (view.paint === 1) {
-      const colour = element("input", "form-control form-control-color");
-      colour.type = "color";
-      colour.value = view.rgb;
-      colour.setAttribute("aria-label", "Custom colour");
-      colour.addEventListener("input", () => { view.rgb = colour.value; });
-      actions.append(colour);
-    }
-    const active = selected.some(item => item.active);
-    const apply = paint => {
-      const rgb = view.rgb.slice(1).match(/.{2}/g).map(byte => parseInt(byte, 16));
-      send({ type: "recolour_apply", ids: [...view.selected], paint, rgb });
-    };
-    commits.append(button(view.paint ? labels.apply : labels.restoreOriginal, () => apply(view.paint),
-      state.running || !view.paint && !active, "primary"),
-      button(labels.restore, () => apply(0), state.running || !active));
-    selection.append(actions);
-  };
-  const draw = () => {
-    const term = view.search.trim().toLowerCase();
-    const visible = items.filter(item => (!view.painted || item.painted) && (!view.applied || item.recoloured) &&
-      (item.label.toLowerCase().includes(term) || item.package.toLowerCase().includes(term)));
-    const pageSize = Math.max(1, Math.floor((grid.clientWidth + 10) / 164) - 1) * 3;
-    const pages = Math.max(1, Math.ceil(visible.length / pageSize));
-    view.page = Math.min(view.page, pages - 1);
-    const windowItems = visible.slice(view.page * pageSize, (view.page + 1) * pageSize);
-    const previewIds = windowItems.map(item => item.id);
-    const signature = JSON.stringify([view.category, previewIds]);
-    if (signature !== view.requested || previewIds.some(id => !(state.preview_ids || []).includes(id))) {
-      view.requested = signature;
-      send({ type: "recolour_previews", ids: previewIds });
-    }
-    grid.replaceChildren();
-    for (const item of windowItems) {
-      const tile = button("", event => {
-        if (event.ctrlKey || event.metaKey) {
-          if (view.selected.has(item.id)) view.selected.delete(item.id); else view.selected.add(item.id);
-        } else {
-          view.selected.clear();
-          view.selected.add(item.id);
-          view.paint = item.paint;
-          view.rgb = "#" + item.rgb.map(value => value.toString(16).padStart(2, "0")).join("");
-        }
-        draw();
-      });
-      tile.className = "btn swapper-tile" + (view.selected.has(item.id) ? " active" : "");
-      tile.title = item.label;
-      tile.setAttribute("aria-pressed", String(view.selected.has(item.id)));
-      const art = element("span", "swapper-tile-art");
-      const preview = state.catalog.previews?.[item.id];
-      if (preview?.image) {
-        const img = element("img", "");
-        img.src = preview.image;
-        img.alt = "";
-        art.append(img);
-      } else art.textContent = preview?.status || "Loading…";
-      const caption = element("span", "swapper-tile-caption");
-      caption.append(element("span", "", item.label));
-      tile.append(art, caption);
-      grid.append(tile);
-    }
-    if (!windowItems.length && !state.loading) grid.append(element("p", "text-body-secondary", labels.empty));
-    paging.hidden = pages < 2;
-    paging.replaceChildren(button("Previous", () => { view.page--; draw(); }, view.page === 0),
-      element("span", "", view.page + 1 + " / " + pages),
-      button("Next", () => { view.page++; draw(); }, view.page + 1 >= pages));
-    paintControls();
-  };
-  search.addEventListener("input", () => { view.search = search.value; view.page = 0; draw(); });
-  itemsPanel.classList.add("swapper-item-panel");
-  itemsPanel.append(element("div", "swapper-picker-banner", labels.hint), search, grid, footer);
-  rows.append(itemsPanel);
-  const layout = element("div", "category-page-layout");
-  const contents = element("section", "category-contents d-grid gap-2");
-  contents.append(...rows.children);
-  layout.append(categoryList, contents);
-  rows.append(layout);
-  const resizeTiles = () => {
-    const count = Math.max(1, Math.floor((grid.clientWidth + 10) / 164) - 1);
-    if (grid.style.getPropertyValue("--swapper-columns") !== String(count)) {
-      grid.style.setProperty("--swapper-columns", count);
-      draw();
-    }
-  };
-  view.resize?.disconnect();
-  view.resize = new ResizeObserver(resizeTiles);
-  view.resize.observe(grid);
-  resizeTiles();
-  draw();
-}
-
 function studioActive() {
   const header = panel();
   const actions = element("div", "d-flex align-items-center justify-content-between gap-2");
@@ -3657,7 +3517,6 @@ function renderContent() {
   field("plugin-search-row").hidden = query.hidden;
   field("plugin-refresh").replaceChildren();
   document.body.classList.toggle("plugin-settings-page", state.page === "plugin-settings");
-  document.body.classList.toggle("category-layout-page", state.page === "recolour");
   const term = query.value.trim().toLowerCase();
   const list = (state.rows || []).filter(plugin => [plugin.name, plugin.author, plugin.description]
     .some(value => typeof value === "string" && value.toLowerCase().includes(term)));
@@ -3698,7 +3557,6 @@ function renderContent() {
   if (state.page === "upk-history") return upkHistory();
   if (state.page === "anthems") return anthems();
   if (state.page === "item-artwork") return itemArtwork();
-  if (state.page === "recolour") return recolour();
   if (state.page === "plugin-settings") return pluginSettings();
   if (state.page === "player-rank") return playerRank();
   if (state.page === "profile-pictures") return profilePictures();
