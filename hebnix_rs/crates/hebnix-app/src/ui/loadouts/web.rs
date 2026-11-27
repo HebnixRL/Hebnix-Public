@@ -99,7 +99,7 @@ impl LoadoutsPanel {
         if changed {
             self.save = path.map(Path::to_path_buf);
             self.creator = None;
-            self.dialog = None; self.code = None; self.mode = SaveMode::New;
+            self.dialog = None; self.code = None; self.mode = SaveMode::Replace;
             self.base = 0; self.target = 0;
         }
         if refresh { self.refresh_accounts(); if let Some(path) = path { self.save = Some(path.to_path_buf()); } }
@@ -119,10 +119,13 @@ impl LoadoutsPanel {
             self.reload();
         }
         self.web_plan(swapper);
+        // Rocket League alternates <id>.save and <id>_2.save, so match the account id.
+        let id = self.save.as_deref().and_then(|path| path.file_stem()?.to_str())
+            .map(|stem| stem.split('_').next().unwrap_or(stem).to_ascii_lowercase());
         let account = self
             .accounts
             .iter()
-            .position(|account| Some(&account.path) == self.save.as_ref());
+            .position(|account| Some(&account.path) == self.save.as_ref() || id.as_deref() == Some(account.account_id.as_str()));
         let rows: Vec<_> = self.names.iter().zip(&self.bodies).enumerate().map(|(position, (name, body))| {
             let car = swapper.product_name(SwapCategory::Bodies, *body).unwrap_or_else(|| {
                 t(if catalog_loading { "app-loading-item-catalogs" } else { "loadouts-unknown-car" })
@@ -334,7 +337,7 @@ impl LoadoutsPanel {
                 if self.save != before {
                     self.dialog = None;
                     self.code = None;
-                    self.mode = SaveMode::New;
+                    self.mode = SaveMode::Replace;
                     self.base = 0;
                     self.target = 0;
                 }

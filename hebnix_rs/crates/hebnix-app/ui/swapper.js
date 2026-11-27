@@ -187,6 +187,8 @@ field("apply").addEventListener("click", () => {
     custom_colour: colour, speed: field("speed").value === "" ? 1 : Number(field("speed").value),
   } });
 });
+field("infinium-bakkes").addEventListener("click", () => send({ type: "infinium", bakkes: true }));
+field("infinium-vanilla").addEventListener("click", () => send({ type: "infinium", bakkes: false }));
 field("restore-all").addEventListener("click", () => send({ type: "restore", key: null }));
 
 window.showSwapper = (snapshot) => {
@@ -205,6 +207,7 @@ window.showSwapper = (snapshot) => {
   status.textContent = state.status?.[1] || "";
   status.hidden = !status.textContent;
   status.classList.toggle("text-warning", !!state.status?.[0]);
+  field("infinium-choice").hidden = !state.infinium_choice;
   field("inventory").hidden = mode === "active";
   field("restore-all").hidden = mode !== "active";
   if (mode === "active") {

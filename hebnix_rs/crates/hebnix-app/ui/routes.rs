@@ -465,6 +465,7 @@ impl HebnixApp {
             "speed": self.swapper.speed_enabled,
             "game_running": self.last_rl_open,
             "status": self.modern_swapper_status(),
+            "infinium_choice": self.swapper_web_infinium,
         });
         self.show_modern_swapper(ui, &data)
     }
@@ -559,7 +560,18 @@ impl HebnixApp {
                     &self.owned_inventory.ids,
                     swap,
                 );
+                // The egui prompt is hidden behind the web page, so ask for the choice there.
+                self.swapper_web_infinium |= self.swapper.take_infinium_prompt();
                 self.report_web_swap(result);
+            }
+            SwapperAction::Infinium { bakkes } => {
+                use crate::config::BlackInfinium;
+                let choice = if bakkes { BlackInfinium::Bakkes } else { BlackInfinium::Vanilla };
+                self.config.settings.black_infinium = choice;
+                self.swapper.set_black_infinium(choice);
+                let _ = self.config.save(&self.base_dir);
+                self.swapper_web_infinium = false;
+                self.report_web_swap(Ok(t("infinium-prompt-saved")));
             }
             SwapperAction::Restore { .. } | SwapperAction::Previews { category: None, .. } => {}
         }

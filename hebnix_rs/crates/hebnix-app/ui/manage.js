@@ -1516,7 +1516,8 @@ function loadoutImport(card, labels) {
   const base = element("label", "d-flex align-items-center gap-2 mb-2");
   base.append(labels.base, loadoutSelect(labels.base, options, plan.base, value => update({ base: Number(value) })));
   const mode = element("div", "d-flex align-items-center gap-2 mb-2");
-  mode.append(button(labels.new, () => update({ replace: false }), false, plan.replace ? "outline-secondary" : "primary"),
+  // new preset is hidden for now; imports only replace an existing preset
+  mode.append(// button(labels.new, () => update({ replace: false }), false, plan.replace ? "outline-secondary" : "primary"),
     button(labels.replace, () => update({ replace: true }), false, plan.replace ? "primary" : "outline-secondary"));
   const target = element("label", "d-flex align-items-center gap-2 mb-2");
   if (plan.replace) {
@@ -2832,7 +2833,9 @@ function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings
       document.activeElement?.blur();
     }));
   } else {
-    for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Body / trim"], ["decal", "Decal"], ["wheels", "Wheels"], ["antenna", "Antenna"], ["topper", "Topper"], ["boost", "Boost"], ["trail", "Trail"], ["goal_explosion", "Goal explosion"], ["banner", "Player banner"], ["avatar_border", "Avatar border"], ["heatseeker", "Heatseeker ball"]]) {
+    for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Body / trim"], ["decal", "Decal"], ["wheels", "Wheels"],
+      // ["antenna", "Antenna"],
+      ["topper", "Topper"], ["boost", "Boost"], ["trail", "Trail"], ["goal_explosion", "Goal explosion"], ["banner", "Player banner"], ["avatar_border", "Avatar border"], ["heatseeker", "Heatseeker ball"]]) {
       if (key === "primary") section.append(element("p", "small text-body-secondary", "Colours apply to your currently equipped items."), element("h3", "h6 mt-3 mb-3", "Car Colours"));
       if (key === "boost") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Effects"));
       if (key === "banner") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Player Colours"));
@@ -2927,32 +2930,41 @@ function gameColours() {
       group(labels.stadium, labels.stadiumOn, labels.stadiumHint, "stadium_colours", section => teamSection(section, "stadium")),
       group(labels.hud, labels.hudOn, labels.hudHint, "hud_colours", section => teamSection(section, "hud")),
     ];
+    // the garage palette's custom colours, which loadouts and BakkesMod imports use
+    const carGroup = () => group(labels.car, labels.carOn, labels.carHint, "car_colours", section => {
+      settings.custom_colours.forEach((rgb, index) => {
+        const row = element("div", "d-flex gap-2");
+        row.append(field(labels.custom, rgb, next => { settings.custom_colours[index] = next; }),
+          icon("×", "Remove colour", () => { settings.custom_colours.splice(index, 1); draw(); }));
+        section.append(row);
+      });
+      section.append(icon("+", "Add colour", () => { settings.custom_colours.push([255, 0, 0]); draw(); }));
+    });
     if (liveSettings) {
-      controls.replaceChildren(...teamGroups);
+      controls.replaceChildren(...teamGroups, carGroup());
       return;
     }
     controls.replaceChildren(
       ...(state.liveManaged ? [] : teamGroups),
       group(labels.palette, labels.paletteOn, labels.paletteHint, "extended_palette", () => {}),
-      group(labels.car, labels.carOn, labels.carHint, "car_colours", section => {
-        settings.custom_colours.forEach((rgb, index) => {
-          const row = element("div", "d-flex gap-2");
-          row.append(field(labels.custom, rgb, next => { settings.custom_colours[index] = next; }),
-            icon("×", "Remove colour", () => { settings.custom_colours.splice(index, 1); draw(); }));
-          section.append(row);
-        });
-        section.append(icon("+", "Add colour", () => { settings.custom_colours.push([255, 0, 0]); draw(); }));
-      }),
+      carGroup(),
       ...(!state.liveManaged ? [group(labels.heatseeker, labels.heatseekerOn, labels.heatseekerHint, "heatseeker_glow",
         section => section.append(field(labels.maxSpeed, settings.heatseeker_max_speed, rgb => { settings.heatseeker_max_speed = rgb; })))] : []));
   }
   draw();
+  const apply = restore => send({ type: "game_colours", settings, restore });
   if (liveSettings) {
-    content.append(controls);
+    // palette colours are a game file patch, unlike the live colours above
+    const palette = panel();
+    // the default status covers stadium/HUD too, which are live on this page
+    const status = state.status === labels.choose ? "" : state.status;
+    palette.append(element("p", "small text-body-secondary", "Rocket League must be closed to apply palette colours."),
+      button("Apply palette colours", () => apply(false), state.busy, "primary"),
+      element("p", state.error ? "text-warning mt-2 mb-0" : "small mt-2 mb-0", status || (state.busy ? "Working…" : "")));
+    content.append(controls, palette);
     return;
   }
   const status = panel();
-  const apply = restore => send({ type: "game_colours", settings, restore });
   status.append(element("h2", "h6", "Status"),
     button(labels.apply, () => apply(false), state.busy, "primary"), " ",
     button(labels.restore, () => apply(true), state.busy || !state.canRestore),

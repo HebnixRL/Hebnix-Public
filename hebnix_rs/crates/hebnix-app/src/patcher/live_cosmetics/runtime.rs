@@ -1,7 +1,7 @@
 //! Independently assembled UnrealScript hooks. No new native-backed fields.
 use super::super::{script_patch::{Script, function_payload}, upk_package::UpkPackage};
 // Bump whenever generated hooks or their Game Mods/scoreboard dependencies change.
-pub const REVISION: u32 = 29;
+pub const REVISION: u32 = 38;
 #[path = "boost.rs"]
 mod boost;
 #[path = "items.rs"]
@@ -667,7 +667,8 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
         poll.append(&guard(poll_base + poll.mem_size(), ready,
             context(p, ball, call(p, "Ball_God_TA.UpdateColor", &[])?, None)?)?);
     }
-    poll.append(&super::game_mods::bindings(p, poll_base + poll.mem_size())?);
+    // Game Mod binds are match-only: SetBind on the menu controller's PlayerInput crashes the game.
+    if !menu { poll.append(&super::game_mods::bindings(p, poll_base + poll.mem_size())?); }
     body.append(&guard(base + body.mem_size(), condition, poll)?);
     // A shared file poll must not prevent other local controllers from updating
     // their own car. Each controller gets an independent cosmetic refresh clock.
@@ -804,13 +805,42 @@ pub fn generate_with_paths(p: &UpkPackage, settings: &std::path::Path, report: &
     Ok(out)
 }
 
-pub fn prepare_names(p: &mut UpkPackage) -> R<Vec<(usize, String, String)>> {
+/// Names other Hebnix patches rename slots to. Their code can call them without a
+/// payload reference our scan sees, so they are never slots or size donors.
+pub(super) const RESERVED_NAMES: [&str; 10] = ["TransformedLeftX", "SpecialEventData", "TargetFind", "ImportJSON",
+    "StringToUniqueNetId", "QueueURLForDownload", "IsURLTracked", "AddCallbackToDownload", "OnDownloadComplete", "DownloadNextImage"];
+
+fn size_donor(p: &UpkPackage, used: &[bool], skip: usize, delta: isize) -> Option<usize> {
+    p.names.iter().enumerate().find(|(i, s)| *i != skip && *i > 256 && !used[*i]
+        && s.bytes().all(|b| b.is_ascii_alphanumeric()) && s.len() as isize - delta >= 24).map(|(i, _)| i)
+}
+
+fn donor_name(donor: usize, size: usize) -> String { format!("HbxLiveUnused{donor:0width$}", width = size - 13) }
+
+/// Gives back reserved names older receipts took as size donors, moving the size
+/// difference onto a fresh donor. Returns whether the package changed.
+pub(super) fn release_reserved_names(p: &mut UpkPackage, names: &mut [(usize, String, String)]) -> R<bool> {
+    let mut changed = false;
+    for entry in names.iter_mut() {
+        let (index, before, after) = entry.clone();
+        if !RESERVED_NAMES.contains(&before.as_str()) || !after.starts_with("HbxLiveUnused") || p.names.get(index) != Some(&after) { continue; }
+        let used = used_names(p);
+        let delta = before.len() as isize - after.len() as isize;
+        let donor = size_donor(p, &used, index, delta).ok_or_else(|| format!("No name-size donor to release {before}"))?;
+        let original = p.names[donor].clone();
+        let replacement = donor_name(donor, (original.len() as isize - delta) as usize);
+        p.rename_names_same_size(&[(index, before), (donor, replacement.clone())])?;
+        *entry = (donor, original, replacement);
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn used_names(p: &UpkPackage) -> Vec<bool> {
     let mut used = vec![false; p.names.len()];
-    let wanted = ["GetVectorParameterValue", "SetVectorParameterValue", "VectorParameterValues", "ScalarParameterValues", "TextureParameterValues", "FontParameterValues", "GameEngine", "ObjectReferencers", "SaveStringToFile", "AttachmentActor", "ObjectReferencer", "ReferencedObjects", "IsPendingKill", "FindObject", "PathName", "ParticleSysParam", "ParamType", "InstanceParameters", "FXAttachment", "CreationTime", "ColorParams", "VectorParams", "ColorParamPair", "VectorParamPair", "Value", "Key", "Parameters", "SetLinearColorParameter", "SetVectorParameter", "Caps", "LoadFileToString", "InStr", "Left", "Mid", "FClamp", "SetBind", "GetBind", "bApplyRotation", "bAddRotation", "bApplyTranslation", "bAddTranslation", "BoneRotationSpace", "BoneTranslationSpace", "BoneRotation", "BoneTranslation"];
     for (i, name) in p.names.iter().enumerate() {
-        if wanted.contains(&name.as_str()) || name.starts_with("Hbx") || name.starts_with("HBX")
-            || ["TransformedLeftX", "SpecialEventData", "TargetFind", "ImportJSON"].contains(&name.as_str())
-            || name.eq_ignore_ascii_case("LoadFileToString") { used[i] = true; }
+        if name.starts_with("Hbx") || name.starts_with("HBX") || RESERVED_NAMES.contains(&name.as_str())
+            || name.eq_ignore_ascii_case("LoadFileToString") || name.eq_ignore_ascii_case("DeleteFile") { used[i] = true; }
     }
     for export in &p.exports {
         used[export.object_name.name_index] = true;
@@ -825,6 +855,15 @@ pub fn prepare_names(p: &mut UpkPackage) -> R<Vec<(usize, String, String)>> {
         for part in [&a, &b, &c].into_iter().flat_map(|s| s.split('.')) {
             if let Some(index) = p.names.iter().position(|n| n == super::super::upk_package::strip(part)) { used[index] = true; }
         }
+    }
+    used
+}
+
+pub fn prepare_names(p: &mut UpkPackage) -> R<Vec<(usize, String, String)>> {
+    let mut used = used_names(p);
+    let wanted = ["GetVectorParameterValue", "SetVectorParameterValue", "VectorParameterValues", "ScalarParameterValues", "TextureParameterValues", "FontParameterValues", "GameEngine", "ObjectReferencers", "SaveStringToFile", "AttachmentActor", "ObjectReferencer", "ReferencedObjects", "IsPendingKill", "FindObject", "PathName", "ParticleSysParam", "ParamType", "InstanceParameters", "FXAttachment", "CreationTime", "ColorParams", "VectorParams", "ColorParamPair", "VectorParamPair", "Value", "Key", "Parameters", "SetLinearColorParameter", "SetVectorParameter", "Caps", "LoadFileToString", "InStr", "Left", "Mid", "FClamp", "SetBind", "GetBind", "bApplyRotation", "bAddRotation", "bApplyTranslation", "bAddTranslation", "BoneRotationSpace", "BoneTranslationSpace", "BoneRotation", "BoneTranslation"];
+    for (i, name) in p.names.iter().enumerate() {
+        if wanted.contains(&name.as_str()) { used[i] = true; }
     }
     let mut edits = Vec::new();
     for name in wanted {
@@ -843,11 +882,9 @@ pub fn prepare_names(p: &mut UpkPackage) -> R<Vec<(usize, String, String)>> {
         let delta = name.len() as isize - p.names[index].len() as isize;
         let mut replacements = vec![(index, name.to_string())];
         if delta != 0 {
-            let donor = p.names.iter().enumerate().find(|(i, s)| *i != index && *i > 256 && !used[*i]
-                && s.bytes().all(|b| b.is_ascii_alphanumeric()) && s.len() as isize - delta >= 24)
-                .map(|(i, _)| i).ok_or_else(|| format!("No name-size donor for {name}"))?;
+            let donor = size_donor(p, &used, index, delta).ok_or_else(|| format!("No name-size donor for {name}"))?;
             let size = (p.names[donor].len() as isize - delta) as usize;
-            let replacement = format!("HbxLiveUnused{donor:0width$}", width = size - 13);
+            let replacement = donor_name(donor, size);
             replacements.push((donor, replacement));
             used[donor] = true;
         }
@@ -1120,3 +1157,5 @@ mod tests {
         std::fs::remove_file(staged).unwrap();
     }
 }
+
+

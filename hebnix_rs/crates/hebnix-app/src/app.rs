@@ -689,6 +689,7 @@ pub struct HebnixApp {
     plugin_web_preview_ids: Vec<String>,
     #[cfg(windows)]
     swapper_web_status: Option<Result<String, String>>,
+    swapper_web_infinium: bool,
     #[cfg(windows)]
     swapper_preview_ids: Vec<String>,
     base_dir: PathBuf,
@@ -1112,17 +1113,17 @@ impl HebnixApp {
         let mut hotkey = ToggleHotkey::new();
         if let Some(hk) = &mut hotkey {
             hk.rebind(&config.settings.hotkey);
-            hk.set_restricted(config.settings.restrict_hotkey_to_hebnix_or_rocket_league);
         }
         if let Some(hotkey) = &hotkey {
             let tx = control_tx.clone();
             let ctx = cc.egui_ctx.clone();
-            hotkey.listen_show_hide(move || {
+            hotkey.listen(move || {
                 // a window minimized on Wayland gets no redraws, so the toggle
                 // below would never be handled until it is back
                 #[cfg(target_os = "linux")]
                 winutil::wake_minimized_main_window();
-                crate::ui_work::send_toggle_control(&tx, &ctx, AppMsg::ToggleVisibility);
+                let _ = tx.send(AppMsg::ToggleVisibility);
+                ctx.request_repaint();
             });
         }
 
@@ -1333,6 +1334,7 @@ impl HebnixApp {
             plugin_web_preview_ids: Vec::new(),
             #[cfg(windows)]
             swapper_web_status: None,
+            swapper_web_infinium: false,
             #[cfg(windows)]
             swapper_preview_ids: Vec::new(),
             base_dir: base_dir.clone(),
@@ -1552,7 +1554,6 @@ impl HebnixApp {
     }
 
     fn save_config(&mut self) {
-        if let Some(hotkey) = &self.hotkey { hotkey.set_restricted(self.config.settings.restrict_hotkey_to_hebnix_or_rocket_league); }
         if let Err(e) = self.config.save(&self.base_dir) {
             self.console
                 .write(format!("[Console] Failed to save config: {e}"));
@@ -1987,8 +1988,17 @@ impl HebnixApp {
         if !self.colours.is_busy()
             && let Some(cars) = self.presets.pending_cars.take()
         {
+            // a preset's colours join the custom car colours, so the Colours page
+            // shows them ticked and a later Apply keeps their palette cells
+            self.colours.add_custom_colours(
+                backups_dir,
+                [cars.blue_primary, cars.orange_primary, cars.blue_accent, cars.orange_accent]
+                    .into_iter()
+                    .flatten()
+                    .chain(cars.extra),
+            );
             self.colours.begin(
-                crate::patcher::colours::ColourAction::ApplyCars(cars),
+                crate::patcher::colours::ColourAction::Apply,
                 cooked_pc,
                 backups_dir,
                 &self.tx,
@@ -2780,12 +2790,13 @@ impl HebnixApp {
 
     #[cfg(not(target_os = "linux"))]
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
-        if !crate::visibility::begin_change(ctx, hidden) { return; }
         tracing::info!(hidden, "toggling main window visibility");
         if hidden {
             self.panel.leave(ctx);
             if let Some(navigation) = &mut self.modern_navigation { navigation.hide(); }
         }
+        let rocket_league_had_focus =
+            !hidden && hebnix_sdk::process::is_rocket_league_focused();
         if !hidden {
             winutil::note_foreground();
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2808,14 +2819,15 @@ impl HebnixApp {
                 self.topmost = true;
                 winutil::set_main_window_topmost(true);
             }
-            // An explicit Show must raise the real window even when the key
-            // came from Rocket League; otherwise it remains behind the game.
-            winutil::focus_main_window();
+            let game_fullscreen =
+                self.last_rl_open && self.window_mode == Some(WindowMode::Fullscreen);
+            if !game_fullscreen && !rocket_league_had_focus {
+                winutil::focus_main_window();
+            }
         }
 
         ctx.request_repaint();
         self.plugin_mgr.dispatch_gui_visibility(!hidden);
-        crate::visibility::applied(ctx);
     }
 
     fn handle_toggle_visibility(&mut self, ctx: &egui::Context) {
@@ -2846,9 +2858,13 @@ impl HebnixApp {
         if !self.config.settings.panel_enabled {
             return;
         }
-        // Opening the panel steals focus, so it only opens from Hebnix or Rocket League.
-        // Unlike the show/hide hotkey this ignores restrict_hotkey_to_hebnix_or_rocket_league.
-        if !own_window_focused() && !hebnix_sdk::process::is_rocket_league_focused() {
+        if self
+            .config
+            .settings
+            .restrict_hotkey_to_hebnix_or_rocket_league
+            && !own_window_focused()
+            && !hebnix_sdk::process::is_rocket_league_focused()
+        {
             return;
         }
         self.panel.page = None;

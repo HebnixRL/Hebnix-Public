@@ -27,8 +27,6 @@ const ORANGE_COLOUR_BLIND: &str = "cdcc4c3f6666e63ecdcccc3d0000803f0000803f66662
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColourAction {
     Apply,
-    /// Car colours from a preset, applied with the current stadium and HUD settings.
-    ApplyCars(CarColours),
     Restore,
     ApplyBall {
         source: usize,
@@ -213,7 +211,7 @@ impl ColoursState {
                 ("carOn", "render-apply-custom-car-colours"), ("carHint", "render-custom-car-colours-hint"),
                 ("custom", "colours-custom-colour"), ("heatseeker", "render-heatseeker-ball-glow"),
                 ("heatseekerOn", "render-override-the-maximum-speed-glow-locally"), ("heatseekerHint", "render-changes-the-high-speed-bloom-and"),
-                ("maxSpeed", "colours-max-speed"), ("apply", "render-apply-colours"), ("restore", "ball-restore-original"),
+                ("maxSpeed", "colours-max-speed"), ("apply", "render-apply-colours"), ("restore", "ball-restore-original"), ("choose", "colours-status-choose"),
             ].into_iter().map(|(key, label)| (key.to_owned(), json!(t(label)))).collect();
             json!({
                 "page": "game-colours", "labels": labels, "settings": self.settings, "defaults": ColourSettings::default(),
@@ -226,6 +224,18 @@ impl ColoursState {
         page["status"] = json!(self.status);
         page["error"] = json!(self.error);
         page
+    }
+
+    /// Adds colours to the custom car colours and ticks them on. New colours go at the
+    /// end, so palette cells loadouts already use keep their place.
+    pub(crate) fn add_custom_colours(&mut self, backups_dir: &Path, colours: impl IntoIterator<Item = [u8; 3]>) {
+        self.load_active(backups_dir);
+        for colour in colours {
+            if !self.settings.custom_colours.contains(&colour) {
+                self.settings.custom_colours.push(colour);
+            }
+        }
+        self.settings.car_colours = true;
     }
 
     #[cfg(windows)]
@@ -635,7 +645,7 @@ impl ColoursState {
         self.busy = true;
         self.error = false;
         self.status = match action {
-            ColourAction::Apply | ColourAction::ApplyCars(_) => t("colours-status-applying"),
+            ColourAction::Apply => t("colours-status-applying"),
             ColourAction::Restore => t("colours-status-restoring"),
             ColourAction::ApplyBall { .. } => t("colours-status-preparing-ball"),
             ColourAction::RestoreBall { .. } => t("colours-status-restoring-ball"),
@@ -653,9 +663,6 @@ impl ColoursState {
                 let result = match action.clone() {
                     ColourAction::Apply => {
                         apply(&cooked_pc, &backups_dir, &settings, settings.car_colours_patch())
-                    }
-                    ColourAction::ApplyCars(cars) => {
-                        apply(&cooked_pc, &backups_dir, &settings, Some(cars))
                     }
                     ColourAction::Restore => restore(&cooked_pc, &backups_dir),
                     ColourAction::ApplyBall {
@@ -675,7 +682,7 @@ impl ColoursState {
                 }
                 .map(|_| action);
                 let message = match &result {
-                    Ok(ColourAction::Apply | ColourAction::ApplyCars(_)) => {
+                    Ok(ColourAction::Apply) => {
                         "[Colours] Colours applied. Start Rocket League to see them.".to_string()
                     }
                     Ok(ColourAction::Restore) => "[Colours] Original colours restored.".to_string(),
@@ -704,7 +711,7 @@ impl ColoursState {
         let Ok(result) = rx.try_recv() else { return };
         self.busy = false;
         match result {
-            Ok(ColourAction::Apply | ColourAction::ApplyCars(_)) => {
+            Ok(ColourAction::Apply) => {
                 self.settings.applied = true;
                 self.status = t("colours-status-applied");
                 self.error = false;
@@ -2319,28 +2326,32 @@ pub(crate) fn loadout_palettes(cooked: &Path) -> Result<[Vec<[u8; 3]>; 3], Strin
     Ok(palettes)
 }
 
-/// Palette indices `cars` will have once applied: Blue, Orange and Accent cells for
-/// (blue primary, orange primary, blue accent, orange accent), rendered the way `apply` does.
-pub(crate) fn car_colour_indices(cooked: &Path, cars: &CarColours) -> Result<[Option<u8>; 4], String> {
+/// The custom car colours saved with the last apply (the defaults when there is none).
+pub(crate) fn saved_custom_colours(cooked: &Path) -> Vec<[u8; 3]> {
+    let mut settings: ColourSettings = fs::read(cooked.join("Backups").join(STATE_NAME))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    settings.migrate();
+    settings.custom_colours
+}
+
+/// Palette cells the `wanted` colours land in once `custom` is applied as the custom
+/// car colours, rendered the way Apply does. Palettes: 0 Blue, 1 Orange, 2 Accent.
+pub(crate) fn custom_colour_cells(cooked: &Path, custom: &[[u8; 3]], wanted: &[(usize, [u8; 3])]) -> Result<Vec<u8>, String> {
     let backups = cooked.join("Backups");
     let original = fs::read(backups.join(BACKUP_NAME))
         .or_else(|_| fs::read(super::game_path::resolve(cooked, "TAGame.upk")))
         .map_err(|error| format!("Could not read TAGame.upk: {error}"))?;
     let settings = active_colour_settings(&backups).unwrap_or_default();
-    let rendered = render_colour_exports(&original, &settings, Some(cars))?;
+    let cars = CarColours { extra: custom.to_vec(), ..CarColours::default() };
+    let rendered = render_colour_exports(&original, &settings, Some(&cars))?;
     let palettes = palettes_of(&super::upk_package::UpkPackage::from_bytes(rendered)?)?;
-    let find = |palette: &[[u8; 3]], colour: Option<[u8; 3]>| -> Result<Option<u8>, String> {
-        let Some(colour) = colour else { return Ok(None) };
-        let index = palette.iter().position(|cell| *cell == colour)
+    wanted.iter().map(|&(palette, colour)| {
+        let index = palettes.get(palette).and_then(|cells| cells.iter().position(|cell| *cell == colour))
             .ok_or("A custom car colour is missing from the patched palette")?;
-        u8::try_from(index).map(Some).map_err(|_| "The car palette is too full for this colour".into())
-    };
-    Ok([
-        find(&palettes[0], cars.blue_primary)?,
-        find(&palettes[1], cars.orange_primary)?,
-        find(&palettes[2], cars.blue_accent)?,
-        find(&palettes[2], cars.orange_accent)?,
-    ])
+        u8::try_from(index).map_err(|_| "The car palette is too full for this colour".into())
+    }).collect()
 }
 
 fn palettes_of(package: &super::upk_package::UpkPackage) -> Result<[Vec<[u8; 3]>; 3], String> {
@@ -2701,3 +2712,4 @@ fn direct_extended_palette_matches_the_existing_package_transform() {
     assert_eq!(fast, previous);
     assert!(fast.len() <= 3);
 }
+

@@ -15,13 +15,7 @@ pub fn send_control<T>(tx: &Sender<T>, ctx: &egui::Context, message: T) -> bool 
 
 /// Deliver toggles directly, as in the original hotkey path.
 pub fn send_toggle_control<T>(tx: &Sender<T>, ctx: &egui::Context, message: T) -> bool {
-    #[cfg(target_os = "windows")]
-    let wake = crate::window_state::toggle_wake_target();
-    if tx.send(message).is_err() { return false; }
-    #[cfg(target_os = "windows")]
-    if let Some(hwnd) = wake { crate::window_state::wake_toggle_target(hwnd); }
-    crate::window_state::wake_ui(ctx);
-    true
+    send_control(tx, ctx, message)
 }
 
 #[cfg(test)]

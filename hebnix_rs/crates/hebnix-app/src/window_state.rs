@@ -5,19 +5,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_channel::{Receiver, Sender};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetLayeredWindowAttributes, GetWindowLongW, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
-    LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, PostMessageW, SW_RESTORE, SWP_ASYNCWINDOWPOS,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos,
-    ShowWindowAsync, WM_PAINT,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, GetWindowLongW, GetWindowRect, IsWindow, LWA_ALPHA, PostMessageW,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongW,
+    SetWindowPos, WM_PAINT,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+#[cfg(test)]
+use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, WS_EX_TRANSPARENT};
 
 // Store the address, rather than HWND's non-Send raw pointer. The window remains
 // owned by eframe's UI thread; readers only use it with Win32 window APIs.
@@ -25,6 +25,9 @@ static MAIN_WINDOW: OnceLock<isize> = OnceLock::new();
 static TASKBAR: OnceLock<Option<Sender<TaskbarUpdate>>> = OnceLock::new();
 static TASKBAR_REQUESTED: AtomicU64 = AtomicU64::new(0);
 static TASKBAR_COMPLETED: AtomicU64 = AtomicU64::new(0);
+// Where the window was before it was parked off-screen to hide it.
+static PARKED_FROM: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+const OFFSCREEN: i32 = -32000;
 
 /// An opaque HWND swapchain bypasses DirectComposition for machines where the
 /// transparent visual never appears. Keep the choice stable for every viewport.
@@ -58,57 +61,27 @@ pub fn main_window() -> Option<HWND> {
 /// Show so a stale alpha-zero surface cannot cover the rendered client area.
 pub fn apply_window_visibility(hwnd: HWND, hidden: bool) {
     unsafe {
-        let away=(WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0) as i32;
+        let away=(WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as i32;
         let style=GetWindowLongW(hwnd,GWL_EXSTYLE);
         if hidden {
-            SetWindowLongW(hwnd,GWL_EXSTYLE,(style | away) & !(WS_EX_LAYERED.0 as i32));
-        } else {
-            // Wry/wgpu render through DirectComposition. Leaving WS_EX_LAYERED
-            // installed after hiding can keep that surface invisible, even at
-            // alpha 255. Restore normal composition and input together.
-            SetWindowLongW(hwnd,GWL_EXSTYLE,style & !(away | WS_EX_LAYERED.0 as i32));
-        }
-        // Alpha-zero layered windows do not reliably hide a DirectComposition
-        // host's non-client frame. Cloaking removes the complete window from
-        // composition without destroying/minimizing its WebViews or swapchain.
-        let cloak = windows::core::BOOL::from(hidden);
-        if let Err(error) = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak as *const _ as _, std::mem::size_of_val(&cloak) as u32) {
-            tracing::warn!(%error, hidden, "could not cloak the main window");
-            if hidden {
-                SetWindowLongW(hwnd,GWL_EXSTYLE,style | WS_EX_LAYERED.0 as i32 | away);
-                let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),0,LWA_ALPHA);
+            SetWindowLongW(hwnd,GWL_EXSTYLE,style | WS_EX_LAYERED.0 as i32 | away);
+            let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),0,LWA_ALPHA);
+            // Layered alpha does not hide a DirectComposition surface, which leaves a
+            // ghost of the window behind. Park it off-screen too (SW_HIDE crashes wgpu).
+            let mut parked = PARKED_FROM.lock().unwrap_or_else(|e| e.into_inner());
+            let mut rect = Default::default();
+            if parked.is_none() && GetWindowRect(hwnd,&mut rect).is_ok() && rect.left > OFFSCREEN / 2 {
+                *parked = Some((rect.left, rect.top));
+                let _=SetWindowPos(hwnd,None,OFFSCREEN,OFFSCREEN,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER);
             }
+        } else {
+            if let Some((x, y)) = PARKED_FROM.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _=SetWindowPos(hwnd,None,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER);
+            }
+            SetWindowLongW(hwnd,GWL_EXSTYLE,style & !away);
+            let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),255,LWA_ALPHA);
         }
         set_taskbar_button(hwnd,!hidden);
-    }
-}
-
-pub fn is_cloaked(hwnd: HWND) -> bool {
-    let mut cloaked = 0u32;
-    unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut _ as _, std::mem::size_of_val(&cloaked) as u32).is_ok() && cloaked != 0 }
-}
-
-/// Snapshot before queuing a toggle. A hidden/occluded parent cannot be relied
-/// upon to process the UI frame that would otherwise make it visible again.
-pub fn toggle_wake_target() -> Option<HWND> {
-    let hwnd = main_window()?;
-    unsafe {
-        let mut alpha = 255;
-        let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS::default();
-        let transparent = GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)).is_ok()
-            && flags.contains(LWA_ALPHA) && alpha == 0;
-        (is_cloaked(hwnd) || transparent || IsIconic(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool()).then_some(hwnd)
-    }
-}
-
-pub fn wake_toggle_target(hwnd: HWND) {
-    apply_window_visibility(hwnd, false);
-    unsafe {
-        // Neither call waits for the window's thread. Do not perform this for
-        // Quit or generic background messages: only an explicit Show toggle.
-        let _ = ShowWindowAsync(hwnd, SW_RESTORE);
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
     }
 }
 
@@ -218,26 +191,6 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn toggle_wake_restores_a_transparent_parent_before_ui_delivery() {
-        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP, WS_VISIBLE};
-        use windows::core::w;
-        unsafe {
-            let window = CreateWindowExW(WINDOW_EX_STYLE::default(), w!("STATIC"), w!("Toggle wake check"),
-                WS_POPUP | WS_VISIBLE, -32000, -32000, 1, 1, None, None, None, None).unwrap();
-            apply_window_visibility(window, true);
-            let _ = windows::Win32::Graphics::Dwm::DwmFlush();
-            assert!(is_cloaked(window) || GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0 != 0);
-            wake_toggle_target(window);
-            let _ = windows::Win32::Graphics::Dwm::DwmFlush();
-            assert!(!is_cloaked(window));
-            let flags = GetWindowLongW(window, GWL_EXSTYLE) as u32;
-            assert_eq!(flags & (WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0), 0);
-            assert!(IsWindowVisible(window).as_bool());
-            DestroyWindow(window).unwrap();
-        }
-    }
-
-    #[test]
     fn showing_clears_hidden_layering_after_a_native_style_rewrite() {
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, GetLayeredWindowAttributes,
@@ -282,17 +235,13 @@ mod tests {
                     (preserved.0 | WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0) as i32,
                 );
                 apply_window_visibility(window.0, true);
-                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
                 let mut alpha = 255;
                 let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS::default();
-                if !is_cloaked(window.0) {
-                    GetLayeredWindowAttributes(window.0, None, Some(&mut alpha), Some(&mut flags)).unwrap();
-                    assert_eq!(alpha, 0);
-                    assert!(flags.contains(LWA_ALPHA));
-                }
+                GetLayeredWindowAttributes(window.0, None, Some(&mut alpha), Some(&mut flags))
+                    .unwrap();
+                assert_eq!(alpha, 0);
+                assert!(flags.contains(LWA_ALPHA));
                 apply_window_visibility(window.0, false);
-                let _ = windows::Win32::Graphics::Dwm::DwmFlush();
-                assert!(!is_cloaked(window.0));
                 let style = GetWindowLongW(window.0, GWL_EXSTYLE) as u32;
                 let hidden =
                     WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;

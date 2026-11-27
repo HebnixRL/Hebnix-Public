@@ -68,6 +68,16 @@ fn prepare_movies(cooked: &Path, old: &[Attachment]) -> Result<Vec<Attachment>, 
     }
     Ok(attachments)
 }
+/// True when the package was replaced underneath the receipt: none of our hooks
+/// remain and some hooked function is no longer the code we recorded. Name slots
+/// are not checked, since other Hebnix patches rename some of the same slots.
+fn untouched(package: &UpkPackage, r: &Receipt) -> bool {
+    let current = |f: &Function| payload(package, &f.path).map(|(_, bytes)| bytes.to_vec()).ok();
+    // A hook identical to its original proves nothing about what is installed.
+    r.functions.iter().all(|f| f.after == f.before || current(f).is_none_or(|bytes| bytes != f.after))
+        && r.functions.iter().any(|f| current(f).is_some_and(|bytes| bytes != f.before && !f.older.contains(&bytes)))
+}
+
 fn payload<'a>(p: &'a UpkPackage, path: &str) -> Result<(usize, &'a [u8]), String> {
     let i = p.find_object(path).filter(|i| *i > 0).ok_or_else(|| format!("Missing live cosmetic function: {path}"))? as usize - 1;
     let e = &p.exports[i];
@@ -267,8 +277,11 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
     if saved.as_ref().is_some_and(|r| r.version != 1 || r.cooked != cooked) {
         return Err("Live cosmetic recovery belongs to another game installation. Restore it before changing installations".into());
     }
-    let upgrade = install && saved.as_ref().is_some_and(|r| r.runtime_revision != runtime::REVISION);
-    if let Some(r) = saved.as_mut().filter(|_| !upgrade) {
+    let mut upgrade = install && saved.as_ref().is_some_and(|r| r.runtime_revision != runtime::REVISION);
+    // Older receipts could take another patch's reserved name as a size donor.
+    let mut release = install && saved.as_ref().is_some_and(|r| r.names.iter()
+        .any(|(_, before, after)| runtime::RESERVED_NAMES.contains(&before.as_str()) && after.starts_with("HbxLiveUnused")));
+    if let Some(r) = saved.as_mut().filter(|_| !upgrade && !release) {
         if &current_hash == if install { &r.after_hash } else { &r.before_hash } { return reconcile_movies(r, install, owner); }
         let (expected, variant) = if install { (&r.before_hash, "enabled.upk") } else { (&r.after_hash, "disabled.upk") };
         // The fast path is valid only for this exact package, including other patches.
@@ -284,6 +297,13 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
         }
     } else if !install { return Ok(()); }
     let mut package = UpkPackage::from_bytes(raw)?;
+    // Verifying or reinstalling the game leaves none of our edits behind. The old
+    // journal then describes a package that no longer exists, so install afresh.
+    if install && saved.as_ref().is_some_and(|r| untouched(&package, r)) {
+        saved = None;
+        upgrade = false;
+        release = false;
+    }
     let previous_payloads: std::collections::HashMap<_, _> = runtime::TARGETS.iter().copied()
         .chain(super::game_mods::TARGETS.iter().copied())
         .chain(["GFxData_PRI_TA.UpdatePlayerName", "GFxData_PRI_TA.UpdatePRIData", "GFxData_PRI_TA.SetPlayerTitle"])
@@ -316,7 +336,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
         saved = Some(Receipt { version: 1, cooked: cooked.to_path_buf(), functions, names, imports, attachments, runtime_revision: runtime::REVISION, before_hash: String::new(), after_hash: String::new() });
     }
     let mut r = saved.unwrap();
-    let mut changed = false;
+    let mut changed = release && runtime::release_reserved_names(&mut package, &mut r.names)?;
     if upgrade {
         for f in &r.functions {
             let (index, current) = payload(&package, &f.path)?;
@@ -427,8 +447,7 @@ fn reconcile_movies(r: &mut Receipt, install: bool, owner: u32) -> Result<(), St
             }
         }
         // Titles sit on top of the HUD. Edit the movie underneath them and put them back.
-        let _ui_patch = (a.file == title_patcher::BOOST_HUD)
-            .then(|| title_patcher::UI_PATCH_LOCK.lock()).transpose().map_err(|_| "UI patch lock unavailable")?;
+        // reconcile() already holds UI_PATCH_LOCK; locking it again here deadlocked.
         let mut p = UpkPackage::from_bytes(raw.clone())?;
         let slot = payload(&p, &a.path)?.0;
         let titles = if a.file == title_patcher::BOOST_HUD { title_patcher::hud_titles(&r.cooked, &p, slot)? } else { None };

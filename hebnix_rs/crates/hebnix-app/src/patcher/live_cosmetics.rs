@@ -234,14 +234,17 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
             if ui.button("Reset alignment").clicked() { settings.alignment = Alignment::default(); changed = true; }
         } else {
             ui.strong("Car Colours");
-            for (label, paint) in [("Primary paint", &mut settings.primary), ("Secondary paint", &mut settings.secondary), ("Body / trim", &mut settings.trim), ("Decal", &mut settings.decal), ("Wheels", &mut settings.wheels), ("Antenna", &mut settings.antenna), ("Topper", &mut settings.topper), ("Boost", &mut settings.boost), ("Trail", &mut settings.trail), ("Goal explosion", &mut settings.goal_explosion), ("Player banner", &mut settings.banner), ("Avatar border", &mut settings.avatar_border), ("Heatseeker ball", &mut settings.heatseeker)] {
+            for (label, paint) in [("Primary paint", &mut settings.primary), ("Secondary paint", &mut settings.secondary), ("Body / trim", &mut settings.trim), ("Decal", &mut settings.decal), ("Wheels", &mut settings.wheels),
+                // ("Antenna", &mut settings.antenna),
+                ("Topper", &mut settings.topper), ("Boost", &mut settings.boost), ("Trail", &mut settings.trail), ("Goal explosion", &mut settings.goal_explosion), ("Player banner", &mut settings.banner), ("Avatar border", &mut settings.avatar_border), ("Heatseeker ball", &mut settings.heatseeker)] {
                 if label == "Boost" { ui.separator(); ui.strong("Effects"); }
                 if label == "Player banner" { ui.separator(); ui.strong("Player Colours"); }
                 if label == "Heatseeker ball" { ui.separator(); ui.strong("Heatseeker Ball"); }
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut paint.enabled, label).changed();
                     ui.add_enabled_ui(!paint.rainbow, |ui| { changed |= ui.color_edit_button_srgb(&mut paint.rgb).changed(); });
-                    changed |= ui.checkbox(&mut paint.rainbow, "Rainbow").changed();
+                    // Rainbow only applies to an enabled paint, so ticking it enables the paint too.
+                    if ui.checkbox(&mut paint.rainbow, "Rainbow").changed() { paint.enabled |= paint.rainbow; changed = true; }
                 });
             }
         }

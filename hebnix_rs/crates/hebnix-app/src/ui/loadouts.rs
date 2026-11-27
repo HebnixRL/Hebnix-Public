@@ -23,8 +23,9 @@ mod creator;
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum SaveMode {
-    #[default]
+    // New preset is hidden for now; imports only replace an existing preset
     New,
+    #[default]
     Replace,
 }
 
@@ -202,7 +203,7 @@ impl LoadoutsPanel {
             self.page = 0;
             self.dialog = None;
             self.code = None;
-            self.mode = SaveMode::New;
+            self.mode = SaveMode::Replace;
             self.base = 0;
             self.target = 0;
         }
@@ -356,7 +357,7 @@ impl LoadoutsPanel {
         });
         ui.weak(t("loadouts-bakkes-base-hint"));
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.mode, SaveMode::New, t("loadouts-bakkes-mode-new"));
+            // ui.radio_value(&mut self.mode, SaveMode::New, t("loadouts-bakkes-mode-new"));
             ui.radio_value(&mut self.mode, SaveMode::Replace, t("loadouts-bakkes-mode-replace"));
         });
         match self.mode {
@@ -1117,17 +1118,23 @@ fn save_plan(save: &Path, cooked_pc: &Path, plan: &Plan, presets: &mut PresetSto
     }
     let mut copy = loadout_preset(save, plan.base)?;
     copy.name = plan.name.clone();
-    // The colours are appended to the game palettes, so equip the cells they will land in.
+    // The colours are appended to the custom car colours (and so to the game
+    // palettes) when the preset is applied, so equip the cells they will land in.
     if plan.cars != CarColours::default() {
-        let [blue, orange, blue_accent, orange_accent] =
-            crate::patcher::colours::car_colour_indices(cooked_pc, &plan.cars)?;
-        for (team, primary, accent) in [(0, blue, blue_accent), (1, orange, orange_accent)] {
-            if let Some(index) = primary {
-                copy.teams[team].team_color = index;
+        let mut custom = crate::patcher::colours::saved_custom_colours(cooked_pc);
+        let cells = [(0, 0, true, plan.cars.blue_primary), (1, 1, true, plan.cars.orange_primary),
+            (0, 2, false, plan.cars.blue_accent), (1, 2, false, plan.cars.orange_accent)];
+        let wanted: Vec<_> = cells.iter().filter_map(|&(_, palette, _, colour)| colour.map(|colour| (palette, colour))).collect();
+        for &(_, colour) in &wanted {
+            if !custom.contains(&colour) {
+                custom.push(colour);
             }
-            if let Some(index) = accent {
-                copy.teams[team].custom_color = index;
-            }
+        }
+        let mut indices = crate::patcher::colours::custom_colour_cells(cooked_pc, &custom, &wanted)?.into_iter();
+        for (team, _, primary, colour) in cells {
+            if colour.is_none() { continue; }
+            let Some(index) = indices.next() else { break };
+            if primary { copy.teams[team].team_color = index; } else { copy.teams[team].custom_color = index; }
         }
     }
     apply_loadout_edit(save, &Edit::Import(vec![copy]))?;

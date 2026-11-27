@@ -344,24 +344,11 @@ impl HebnixApp {
             return;
         }
         let cooked = self.swapper_cooked_path();
-        let settings = &mut self.colours.settings;
-        if !settings.custom_colours.contains(&rgb) {
-            settings.custom_colours.push(rgb);
-        }
-        settings.car_colours = true;
-        let mut cars = settings.car_colours_patch().unwrap_or_default();
-        let (cell, slot) = match (team, primary) {
-            (0, true) => (&mut cars.blue_primary, 0),
-            (_, true) => (&mut cars.orange_primary, 1),
-            (0, false) => (&mut cars.blue_accent, 2),
-            (_, false) => (&mut cars.orange_accent, 3),
-        };
-        *cell = Some(rgb);
-        match crate::patcher::colours::car_colour_indices(&cooked, &cars) {
-            Ok(indices) => {
-                if let Some(index) = indices[slot] {
-                    self.loadouts.use_palette_colour(team, primary, index, rgb);
-                }
+        self.colours.add_custom_colours(&cooked.join("Backups"), [rgb]);
+        let palette = if primary { team } else { 2 };
+        match crate::patcher::colours::custom_colour_cells(&cooked, &self.colours.settings.custom_colours, &[(palette, rgb)]) {
+            Ok(cells) => {
+                self.loadouts.use_palette_colour(team, primary, cells[0], rgb);
                 self.web_colour_action(crate::patcher::colours::ColourAction::Apply, ctx);
             }
             Err(error) => self.loadouts.set_message(error),
@@ -1322,7 +1309,8 @@ impl HebnixApp {
                     self.patcher_boost.web_action(&key, id, &cooked, &mut self.config, &self.tx, ctx);
                 }
             }
-            ManageAction::GameColours { settings, restore } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::GameColours => {
+            ManageAction::GameColours { settings, restore }
+                if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::GameColours || self.on_live_colours_page() => {
                 if let Some(mut settings) = settings {
                     if crate::patcher::live_cosmetics::managed() { settings.stadium_colours = false; settings.hud_colours = false; settings.heatseeker_glow = false; }
                     self.colours.web_colour_settings(settings);

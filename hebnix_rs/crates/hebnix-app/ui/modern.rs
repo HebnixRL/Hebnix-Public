@@ -428,6 +428,9 @@ pub(crate) enum SwapperAction {
     Restore {
         key: Option<String>,
     },
+    Infinium {
+        bakkes: bool,
+    },
     Previews {
         category: Option<usize>,
         ids: Vec<String>,
