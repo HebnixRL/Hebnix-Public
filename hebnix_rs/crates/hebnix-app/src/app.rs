@@ -9452,24 +9452,8 @@ impl HebnixApp {
                         &mut self.owned_inventory,
                     );
                 } else if mode == ItemsMode::Recolour {
-                    ui.heading(t("nav-item-colours"));
-                    self.owned_inventory.show_with_actions(ui, |ui| {
-                        self.swapper.render_recolour_controls(ui, &self.tx);
-                    });
-                    if self.catalogs_loading {
-                        ui.spinner();
-                    }
-                    if let Some(error) = &self.catalogs_error {
-                        ui.label(error);
-                    }
-                    self.swapper.render_recolour(
-                        ui,
-                        &cooked_pc,
-                        &backups_dir,
-                        &self.tx,
-                        &self.owned_inventory.ids,
-                        &self.owned_inventory.paints,
-                    );
+                    // the Live Editor's colours: they update in game without patching item files
+                    crate::patcher::live_cosmetics::render(ui, &cooked_pc, false);
                 } else if mode == ItemsMode::SpeedPatch {
                     egui::ScrollArea::vertical()
                         .id_salt("items_speed_patch")

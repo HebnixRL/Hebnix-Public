@@ -2955,7 +2955,7 @@ impl WorkshopState {
 
         let mut result = None;
 
-        let card = egui::Frame::group(ui.style()).show(ui, |ui| {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(230.0);
             ui.vertical_centered(|ui| {
                 // Image

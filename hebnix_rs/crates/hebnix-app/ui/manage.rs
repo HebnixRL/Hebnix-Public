@@ -165,17 +165,7 @@ impl HebnixApp {
                 let cooked = self.swapper_cooked_path();
                 self.workshop.menu_web_snapshot(&cooked, ui.ctx())
             }
-            Tab::LiveEditor => {
-                let backups = self.swapper_cooked_path().join("Backups");
-                let mut model = self.colours.web_snapshot(false, &backups);
-                model["page"] = json!(match self.live_editor_page {
-                    super::LiveEditorPage::Colours => "live-colours",
-                    super::LiveEditorPage::Wheels => "live-wheels",
-                    super::LiveEditorPage::GoalExplosion => "live-goal-explosion",
-                });
-                model["live"] = crate::patcher::live_cosmetics::snapshot();
-                model
-            }
+            Tab::LiveEditor => self.web_live_editor(self.live_editor_page),
             Tab::Freeplay if self.freeplay_page == super::FreeplayPage::Practice => self
                 .freeplay
                 .web_snapshot(&self.config.settings.rl_path, ui.ctx()),
@@ -184,7 +174,7 @@ impl HebnixApp {
                 let folder = self.configured_replay_folder();
                 self.replay_timeline.web_snapshot(folder, &self.ws_stats, ui.ctx())
             }
-            Tab::Items if self.items_subtab == super::ItemsSubTab::Colours => self.web_recolour(ui.ctx()),
+            Tab::Items if self.items_subtab == super::ItemsSubTab::Colours => self.web_live_editor(super::LiveEditorPage::Colours),
             Tab::Items if self.items_subtab == super::ItemsSubTab::Presets => {
                 let cooked = self.swapper_cooked_path();
                 self.process_preset_operations(&cooked, &cooked.join("Backups"), ui.ctx());
@@ -325,34 +315,57 @@ impl HebnixApp {
         })
     }
 
-    fn web_recolour(&mut self, ctx: &egui::Context) -> Value {
-        use crate::patcher::painted_swap::SwapPaint;
-        use crate::swapper::SwapCategory;
-        self.owned_inventory.poll(ctx);
-        let cooked = self.swapper_cooked_path();
-        let category = self.swapper.web_recolour_category(None);
-        let model = self.swapper.web_recolour_catalog(ctx, &cooked, &self.owned_inventory.ids, &self.owned_inventory.paints, &self.swapper_preview_ids);
-        let mut categories: Vec<_> = SwapCategory::ALL.into_iter().enumerate().filter(|(_, value)| value.supports_recolour())
-            .map(|(index, value)| (index, value.label(), value == category)).collect();
-        categories.sort_by_cached_key(|(_, label, _)| label.to_lowercase());
-        let labels = json!({
-            "account": t("swapper-save-account"), "refresh": t("btn-refresh"), "catalog": t("app-reload-catalogs"),
-            "applied": t("recolour-show-recoloured"), "painted": t("recolour-painted-only"), "search": t("recolour-search"),
-            "hint": t("recolour-multi-hint"), "noInventory": t("recolour-no-inventory"),
-            "apply": t("recolour-apply"), "restore": t("app-restore"), "restoreOriginal": t("recolour-restore-original"),
-            "empty": t("recolour-no-matches"), "copies": t("recolour-all-copies"),
+    /// a Live Editor page; Items > Colours shows the Live Editor colours too
+    fn web_live_editor(&mut self, page: super::LiveEditorPage) -> Value {
+        let backups = self.swapper_cooked_path().join("Backups");
+        let mut model = self.colours.web_snapshot(false, &backups);
+        model["page"] = json!(match page {
+            super::LiveEditorPage::Colours => "live-colours",
+            super::LiveEditorPage::Wheels => "live-wheels",
+            super::LiveEditorPage::GoalExplosion => "live-goal-explosion",
         });
-        json!({
-            "page": "recolour", "catalog": model, "categories": categories, "inventory": self.owned_inventory.web_snapshot(),
-            "preview_ids": self.swapper_preview_ids,
-            "emptyInventory": self.owned_inventory.ids.is_empty(), "running": self.last_rl_open, "loading": self.catalogs_loading,
-            "catalogError": self.catalogs_error, "status": self.swapper.web_recolour_status(),
-            "paint": SwapPaint::ALL.map(|paint| paint.label()), "labels": labels,
-        })
+        model["live"] = crate::patcher::live_cosmetics::snapshot();
+        model
     }
 
-    fn on_recolour_page(&self) -> bool {
-        self.tab == Tab::Items && self.items_subtab == super::ItemsSubTab::Colours
+    fn on_live_colours_page(&self) -> bool {
+        self.tab == Tab::LiveEditor || self.tab == Tab::Items && self.items_subtab == super::ItemsSubTab::Colours
+    }
+
+    /// a loadout colour outside the stock palette: add it to the custom car colours,
+    /// pick the cell it lands in, and patch the palette
+    fn web_loadout_custom_colour(&mut self, team: usize, primary: bool, rgb: [u8; 3], ctx: &egui::Context) {
+        if self.colours.is_busy() {
+            self.loadouts.set_message("Colours are still being applied. Try again in a moment.".into());
+            return;
+        }
+        if crate::messages::block_item_action_if_game_running(&self.tx) {
+            self.loadouts.set_message("Close Rocket League before adding a custom colour.".into());
+            return;
+        }
+        let cooked = self.swapper_cooked_path();
+        let settings = &mut self.colours.settings;
+        if !settings.custom_colours.contains(&rgb) {
+            settings.custom_colours.push(rgb);
+        }
+        settings.car_colours = true;
+        let mut cars = settings.car_colours_patch().unwrap_or_default();
+        let (cell, slot) = match (team, primary) {
+            (0, true) => (&mut cars.blue_primary, 0),
+            (_, true) => (&mut cars.orange_primary, 1),
+            (0, false) => (&mut cars.blue_accent, 2),
+            (_, false) => (&mut cars.orange_accent, 3),
+        };
+        *cell = Some(rgb);
+        match crate::patcher::colours::car_colour_indices(&cooked, &cars) {
+            Ok(indices) => {
+                if let Some(index) = indices[slot] {
+                    self.loadouts.use_palette_colour(team, primary, index, rgb);
+                }
+                self.web_colour_action(crate::patcher::colours::ColourAction::Apply, ctx);
+            }
+            Err(error) => self.loadouts.set_message(error),
+        }
     }
 
     fn web_active_patches(&mut self, ctx: &egui::Context) -> Value {
@@ -1322,7 +1335,7 @@ impl HebnixApp {
             ManageAction::WheelSelect { index } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::WheelAlignment => {
                 self.wheel_alignment.web_select(index);
             }
-            ManageAction::LiveCosmetics { settings } if self.tab == Tab::LiveEditor => {
+            ManageAction::LiveCosmetics { settings } if self.on_live_colours_page() => {
                 let cooked = self.swapper_cooked_path();
                 if let Err(error) = crate::patcher::live_cosmetics::update(&cooked, settings) {
                     self.console.write(format!("[Live Cosmetics] {error}"));
@@ -1359,19 +1372,6 @@ impl HebnixApp {
             }
             ManageAction::PluginSettingsInstalled if self.tab == Tab::Plugins && self.plugins_subtab == PluginsSubTab::Settings => {
                 self.plugins_subtab = PluginsSubTab::Installed;
-            }
-            ManageAction::RecolourCategory { index } if self.on_recolour_page() => {
-                let before = self.swapper.web_recolour_category(None);
-                if self.swapper.web_recolour_category(Some(index)) != before {
-                    self.swapper_preview_ids.clear();
-                }
-            }
-            ManageAction::RecolourPreviews { ids } if self.on_recolour_page() => self.swapper_preview_ids = ids.into_iter().take(72).collect(),
-            ManageAction::RecolourInventory { id } if self.on_recolour_page() => self.owned_inventory.refresh_web(ctx, id.as_deref()),
-            ManageAction::RecolourReload if self.on_recolour_page() => self.reload_catalogs(ctx),
-            ManageAction::RecolourApply { ids, paint, rgb } if self.on_recolour_page() => {
-                let cooked = self.swapper_cooked_path();
-                self.swapper.web_apply_recolour(&cooked, ids, &self.owned_inventory.ids, paint, rgb, &self.tx);
             }
             ManageAction::ReplayLibrary { action } if self.tab == Tab::Replays => {
                 self.replay_timeline.web_action(action, &self.ws_stats, ctx);
@@ -1580,6 +1580,11 @@ impl HebnixApp {
                     && self.catalogs_error.is_some() =>
             {
                 self.reload_catalogs(ctx);
+            }
+            ManageAction::Loadouts { action: crate::ui::loadouts::web::WebAction::CustomColour { team, primary, rgb } }
+                if self.tab == Tab::Items && matches!(self.items_subtab, super::ItemsSubTab::Loadouts | super::ItemsSubTab::PresetCreator) && team < 2 =>
+            {
+                self.web_loadout_custom_colour(team, primary, rgb, ctx);
             }
             ManageAction::Loadouts { action }
                 if self.tab == Tab::Items && matches!(self.items_subtab, super::ItemsSubTab::Loadouts | super::ItemsSubTab::PresetCreator) =>

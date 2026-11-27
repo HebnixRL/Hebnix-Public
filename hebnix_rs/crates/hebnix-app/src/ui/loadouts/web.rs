@@ -42,6 +42,12 @@ pub(crate) enum WebAction {
         primary: bool,
         index: u8,
     },
+    /// any RGB: handled by the app, which adds it to the car palette
+    CustomColour {
+        team: usize,
+        primary: bool,
+        rgb: [u8; 3],
+    },
     Item {
         team: usize,
         slot: u8,
@@ -71,6 +77,21 @@ pub(super) fn category(slot: u8) -> Option<SwapCategory> {
 }
 
 impl LoadoutsPanel {
+    pub(crate) fn set_message(&mut self, message: String) {
+        self.message = message;
+    }
+
+    /// picks a colour just added to the car palette at `index`, in the open
+    /// loadout editor or preset creator, and shows it in their swatches
+    pub(crate) fn use_palette_colour(&mut self, team: usize, primary: bool, index: u8, rgb: [u8; 3]) {
+        if let Some((_, LoadoutDialog::Edit { preset, palettes: PaletteLoad::Ready(Ok(palettes)), .. })) = self.dialog.as_mut() {
+            show_palette_cell(palettes, team, primary, index, rgb);
+            if primary { preset.teams[team].team_color = index; } else { preset.teams[team].custom_color = index; }
+        } else {
+            self.creator_use_palette_colour(team, primary, index, rgb);
+        }
+    }
+
     pub(crate) fn sync_global_save(&mut self, path: Option<&Path>, refresh: bool) {
         let initial = !self.loaded;
         if initial { self.loaded = true; self.refresh_accounts(); }
