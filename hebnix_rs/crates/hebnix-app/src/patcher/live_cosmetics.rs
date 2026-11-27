@@ -345,7 +345,8 @@ mod goal_scale_tests {
         assert!(encoded.len() <= 8192);
         for key in ["trim", "decal", "wheels", "boost", "antenna", "topper", "trail", "goal_explosion", "banner", "avatar_border"] {
             assert!(encoded.contains(&format!("HbxLive.{key}.enabled=1\n")), "{key}");
-            assert!(encoded.contains(&format!("HbxLive.{key}.rainbow=1\n")), "{key}");
+            let rainbow = u8::from(key != "goal_explosion");
+            assert!(encoded.contains(&format!("HbxLive.{key}.rainbow={rainbow}\n")), "{key}");
         }
         assert!(encoded.contains("HbxLive.items.enabled=1\n"));
     }
