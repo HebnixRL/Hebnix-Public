@@ -1177,5 +1177,3 @@ infinium-prompt-bakkes = Use BakkesMod Infinium
 infinium-prompt-vanilla = Use vanilla Infinium
 infinium-prompt-saved = Black Infinium choice saved. Apply the swap again.
 swapper-infinium-choose = Choose BakkesMod or vanilla Black Infinium, then apply again.
-rl-launch-setup-non-steam-shortcuts-can-t-pass = A non-Steam shortcut can't pass -multihome: Steam won't add arguments to it
-swapper-save-account = Rocket League account
