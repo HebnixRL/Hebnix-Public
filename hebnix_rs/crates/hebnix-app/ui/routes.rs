@@ -107,7 +107,6 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
         Tab::LiveEditor => &[
             (LiveEditor(LiveEditorPage::PAGES[0].0), LiveEditorPage::PAGES[0].1),
             (LiveEditor(LiveEditorPage::PAGES[1].0), LiveEditorPage::PAGES[1].1),
-            (LiveEditor(LiveEditorPage::PAGES[2].0), LiveEditorPage::PAGES[2].1),
         ],
         Tab::Console | Tab::About => &[],
     }

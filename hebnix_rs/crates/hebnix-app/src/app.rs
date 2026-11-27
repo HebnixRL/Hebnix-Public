@@ -523,8 +523,8 @@ enum LiveEditorPage {
 }
 
 impl LiveEditorPage {
-    const PAGES: [(Self, &'static str); 3] = [
-        (Self::Colours, "nav-colours"),
+    // Colours lives under Items > Colours
+    const PAGES: [(Self, &'static str); 2] = [
         (Self::Wheels, "app-wheel-alignment"),
         (Self::GoalExplosion, "nav-goal-explosion-scale"),
     ];
@@ -1360,7 +1360,7 @@ impl HebnixApp {
             tab: default_tab,
             match_tools_page: MatchToolsPage::MatchSetup,
             freeplay_page: FreeplayPage::Practice,
-            live_editor_page: LiveEditorPage::Colours,
+            live_editor_page: LiveEditorPage::Wheels,
             plugins_subtab: PluginsSubTab::Installed,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
             appearance_subtab: AppearanceSubTab::General,
