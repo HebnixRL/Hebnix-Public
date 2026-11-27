@@ -2172,9 +2172,41 @@ impl Package {
 }
 
 pub(crate) fn loadout_palettes(cooked: &Path) -> Result<[Vec<[u8; 3]>; 3], String> {
-    use super::upk_package::{UpkPackage, strip};
+    let package = super::upk_package::UpkPackage::load(&super::game_path::resolve(cooked, "TAGame.upk"))?;
+    let mut palettes = palettes_of(&package)?;
+    for palette in &mut palettes {
+        palette.truncate(256);
+    }
+    Ok(palettes)
+}
 
-    let package = UpkPackage::load(&super::game_path::resolve(cooked, "TAGame.upk"))?;
+/// Palette indices `cars` will have once applied: Blue, Orange and Accent cells for
+/// (blue primary, orange primary, blue accent, orange accent), rendered the way `apply` does.
+pub(crate) fn car_colour_indices(cooked: &Path, cars: &CarColours) -> Result<[Option<u8>; 4], String> {
+    let backups = cooked.join("Backups");
+    let original = fs::read(backups.join(BACKUP_NAME))
+        .or_else(|_| fs::read(super::game_path::resolve(cooked, "TAGame.upk")))
+        .map_err(|error| format!("Could not read TAGame.upk: {error}"))?;
+    let settings = active_colour_settings(&backups).unwrap_or_default();
+    let rendered = render_colour_exports(&original, &settings, Some(cars))?;
+    let palettes = palettes_of(&super::upk_package::UpkPackage::from_bytes(rendered)?)?;
+    let find = |palette: &[[u8; 3]], colour: Option<[u8; 3]>| -> Result<Option<u8>, String> {
+        let Some(colour) = colour else { return Ok(None) };
+        let index = palette.iter().position(|cell| *cell == colour)
+            .ok_or("A custom car colour is missing from the patched palette")?;
+        u8::try_from(index).map(Some).map_err(|_| "The car palette is too full for this colour".into())
+    };
+    Ok([
+        find(&palettes[0], cars.blue_primary)?,
+        find(&palettes[1], cars.orange_primary)?,
+        find(&palettes[2], cars.blue_accent)?,
+        find(&palettes[2], cars.orange_accent)?,
+    ])
+}
+
+fn palettes_of(package: &super::upk_package::UpkPackage) -> Result<[Vec<[u8; 3]>; 3], String> {
+    use super::upk_package::strip;
+
     let mut palettes = [Vec::new(), Vec::new(), Vec::new()];
     for export in &package.exports {
         if strip(&package.class_of(export)) != "CarColorSet_TA" {
@@ -2195,7 +2227,7 @@ pub(crate) fn loadout_palettes(cooked: &Path) -> Result<[Vec<[u8; 3]>; 3], Strin
             return Err("Invalid car palette layout".into());
         }
         let data = package.image.get(at + 4..at + colours.size).ok_or("Truncated car palette")?;
-        palettes[index] = data.chunks_exact(16).take(256).map(|cell| {
+        palettes[index] = data.chunks_exact(16).map(|cell| {
             std::array::from_fn(|channel| {
                 let offset = channel * 4;
                 let value = f32::from_le_bytes(cell[offset..offset + 4].try_into().unwrap());

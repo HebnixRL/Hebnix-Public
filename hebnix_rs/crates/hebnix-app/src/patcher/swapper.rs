@@ -1948,7 +1948,8 @@ impl SwapperState {
                 continue;
             };
             let find = |id: i64| items.iter().find(|item| item.product_id == Some(id));
-            let (Some(source), Some(target)) = (find(pick.stock_product), find(pick.product)) else {
+            // apply_swap writes the source's look into the target's package, so the stock item is the target.
+            let (Some(source), Some(target)) = (find(pick.product), find(pick.stock_product)) else {
                 skipped.push(format!(
                     "{}: product {} or stock {} is not in the catalog",
                     pick.category.slug(),
