@@ -782,6 +782,8 @@ pub struct HebnixApp {
     forfeit_command: crate::patcher::forfeit_command::State,
     celebration: crate::patcher::celebration::State,
     bots_freeplay: crate::patcher::bots_freeplay::State,
+    menu_access: crate::patcher::menu_access::State,
+    font_glyphs: crate::patcher::font_glyphs::State,
     delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
     chat_test: crate::patcher::chat_test::State,
@@ -1392,6 +1394,8 @@ impl HebnixApp {
             forfeit_command: Default::default(),
             celebration: Default::default(),
             bots_freeplay: Default::default(),
+            menu_access: Default::default(),
+            font_glyphs: Default::default(),
             delete_backups: Default::default(),
             chat_export: Default::default(),
             chat_test: Default::default(),
@@ -1585,7 +1589,7 @@ impl HebnixApp {
         || self.patcher_boost.processing_target.is_some()
         || self.patcher_decal.processing_target.is_some()
         || self.patcher_anthem.busy() || self.colours.busy()
-        || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+        || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.menu_access.busy() || self.font_glyphs.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
         || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
         || self.scoreboard.busy()
         || self.workshop.maintenance_busy()
@@ -1660,6 +1664,18 @@ impl HebnixApp {
                         if self.bots_freeplay.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.bots_freeplay_key, &mut self.config.game_mods.bots_freeplay_pad) {
                             self.save_config();
                         }
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.menu_access.busy(), |ui| {
+                        self.menu_access.render(ui, &cooked_pc, &backups_dir);
+                    });
+                });
+                ui.add_space(8.0);
+                crate::i18n::layout::bordered_panel(ui, |ui| {
+                    ui.add_enabled_ui(!locked || self.font_glyphs.busy(), |ui| {
+                        self.font_glyphs.render(ui, &cooked_pc, &backups_dir);
                     });
                 });
             });

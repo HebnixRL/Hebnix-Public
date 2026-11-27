@@ -2,7 +2,8 @@ use super::{TitleOverride, abc};
 use std::io::{Read, Write};
 
 type Result<T> = std::result::Result<T, String>;
-const MAX_MOVIE: usize = 32 * 1024 * 1024;
+// the all-language glyph merge grows GFX_Fonts_SF's font movie well past 32 MiB
+const MAX_MOVIE: usize = 256 * 1024 * 1024;
 fn u32_at(data: &[u8], at: usize) -> Result<usize> {
     Ok(u32::from_le_bytes(
         data.get(at..at + 4)
@@ -195,4 +196,21 @@ pub(super) fn revert(live: &[u8], before: &[u8], after: &[u8]) -> Result<Option<
         return Err("ABC blocks are missing from shared UI movie".into());
     }
     Ok(result)
+}
+
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_movie_larger_than_32_mib_without_title_code_is_left_alone() {
+        // FWS header, empty RECT, frame rate and count, one 40 MiB tag, End
+        let mut swf = vec![b'F', b'W', b'S', 10, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        swf.extend((2u16 << 6 | 63).to_le_bytes());
+        swf.extend((40u32 << 20).to_le_bytes());
+        swf.resize(swf.len() + (40 << 20), 0);
+        swf.extend([0, 0]);
+        let len = swf.len() as u32;
+        swf[4..8].copy_from_slice(&len.to_le_bytes());
+        assert!(matches!(super::patch(&swf, &[]), Ok(None)));
+    }
 }
