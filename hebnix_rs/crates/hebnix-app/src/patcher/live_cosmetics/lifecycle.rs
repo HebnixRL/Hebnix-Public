@@ -125,6 +125,14 @@ pub fn start(root: &str) {
         status("Error: select a valid Rocket League installation in Settings.");
         return;
     }
+    // Workshop maps crash without this stock package, so fetch it at startup
+    // instead of waiting for a map install
+    let shader_root = root.to_string();
+    std::thread::spawn(move || {
+        if let Err(error) = crate::ui::workshop::ensure_shader_package(&shader_root) {
+            tracing::warn!("could not fetch the Workshop shader package: {error}");
+        }
+    });
     *COOKED.get_or_init(|| Mutex::new(cooked.clone())).lock().unwrap_or_else(|e| e.into_inner()) = cooked.clone();
     let mut settings = values();
     let backups = cooked.join("Backups");

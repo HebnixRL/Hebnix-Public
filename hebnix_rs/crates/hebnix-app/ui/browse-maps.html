@@ -12,13 +12,18 @@
   <main class="container-fluid tracker-page browse-maps-page">
     <section class="tracker-detail p-3 mb-3">
       <div class="d-flex flex-wrap gap-3 align-items-center">
-        <input class="form-control flex-grow-1 maps-search" id="search" type="search">
+        <div class="position-relative flex-grow-1 d-flex">
+          <input class="form-control flex-grow-1 maps-search" id="search" type="search">
+          <button type="button" class="btn-close position-absolute top-50 end-0 translate-middle-y me-2" id="clear-search" aria-label="Clear search" hidden></button>
+        </div>
+        <button type="button" class="btn btn-primary" id="steam-search">Search Steam Workshop</button>
         <label class="form-check-label d-flex gap-2 align-items-center">
           <input class="form-check-input mt-0" id="downloaded" type="checkbox">
           <span id="downloaded-label"></span>
         </label>
       </div>
     </section>
+    <div class="alert alert-info mb-3" id="banner" role="note" hidden></div>
     <p class="text-body-secondary mb-3" id="count" role="status"></p>
     <div id="empty" class="tracker-detail p-3" hidden></div>
     <section class="maps-grid" id="maps" aria-label="Maps"></section>

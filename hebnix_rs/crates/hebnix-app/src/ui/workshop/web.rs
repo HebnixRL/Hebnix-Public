@@ -12,11 +12,11 @@ use super::ingame_menu::WebMenuAction;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum BrowseMapsAction {
     Filter { search: String, downloaded: bool },
+    Search { search: String },
     Page { index: usize },
     Columns { count: usize },
     Load { id: String },
     Unload { id: String },
-    Host { id: String },
     Delete { id: String },
     EnableMenu,
 }
@@ -235,6 +235,10 @@ impl WorkshopState {
         self.ingame_menu.tick(&cooked, ctx);
         self.page_size = self.page_size.clamp(2, 24) / 2 * 2;
         self.page = self.page.min(self.total_pages() - 1);
+        // the next workshop page loads as the player reaches the last one
+        if !self.view_downloaded && self.page + 2 >= self.total_pages() {
+            self.request_steam_page(true, tx, ctx);
+        }
         let indices: Vec<_> = self
             .valid
             .iter()
@@ -296,6 +300,9 @@ impl WorkshopState {
             "search": self.search, "search_label": t("ball-name-or-author"),
             "downloaded": self.view_downloaded, "downloaded_label": t("render-view-downloaded"),
             "page": self.page, "pages": self.total_pages(), "count": self.valid.len(),
+            "steam_total": if self.view_downloaded { 0 } else { self.steam_total },
+            "loading": self.steam_loading,
+            "banner": if !self.view_downloaded && self.steam_query.is_empty() && self.search.trim().is_empty() { super::STEAM_SEARCH_BANNER } else { "" },
             "maps": maps,
             "empty": if self.catalog.is_empty() { self.catalog_status.clone() } else { t("handle-messages-no-maps-found") },
             "menu_disabled": self.ingame_menu.is_enabled() == Some(false),
@@ -317,6 +324,16 @@ impl WorkshopState {
                 self.search = search.chars().take(512).collect();
                 self.view_downloaded = downloaded;
                 self.execute_search(true);
+                if !downloaded && self.search.trim() != self.steam_query {
+                    self.request_steam_page(false, tx, ctx);
+                }
+                return;
+            }
+            BrowseMapsAction::Search { search } => {
+                self.search = search.chars().take(512).collect();
+                self.view_downloaded = false;
+                self.execute_search(true);
+                self.request_steam_page(false, tx, ctx);
                 return;
             }
             BrowseMapsAction::Page { index } => {
@@ -335,7 +352,6 @@ impl WorkshopState {
             }
             BrowseMapsAction::Load { id } => (id, CardAction::InstallOrDownload),
             BrowseMapsAction::Unload { id } => (id, CardAction::Unload),
-            BrowseMapsAction::Host { id } => (id, CardAction::HostLan),
             BrowseMapsAction::Delete { id } => (id, CardAction::DeleteCache),
         };
         if id.is_empty() || self.busy.contains(&id) {

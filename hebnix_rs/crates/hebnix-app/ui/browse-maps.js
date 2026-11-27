@@ -41,10 +41,24 @@ function filter() {
   send({ type: "filter", search: field("search").value, downloaded: field("downloaded").checked });
 }
 field("search").addEventListener("input", () => {
+  field("clear-search").hidden = !field("search").value;
   clearTimeout(filterTimer);
-  filterTimer = setTimeout(filter, 150);
+  filterTimer = setTimeout(filter, 450);
 });
 field("downloaded").addEventListener("change", filter);
+field("clear-search").addEventListener("click", () => {
+  field("search").value = "";
+  field("clear-search").hidden = true;
+  filter();
+  field("search").focus();
+});
+field("steam-search").addEventListener("click", () => {
+  clearTimeout(filterTimer);
+  send({ type: "search", search: field("search").value });
+});
+field("search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") field("steam-search").click();
+});
 field("prev").addEventListener("click", () => send({ type: "page", index: state.page - 1 }));
 field("next").addEventListener("click", () => send({ type: "page", index: state.page + 1 }));
 field("enable-menu").addEventListener("click", () => send({ type: "enable_menu" }));
@@ -80,8 +94,6 @@ function mapCard(map) {
       () => send({ type: map.loaded ? "unload" : "load", id: map.id }), map.busy);
     primary.title = map.primary;
     actions.append(primary);
-    actions.append(button("Host over LAN", "btn btn-sm btn-outline-secondary",
-      () => send({ type: "host", id: map.id }), map.busy));
     if (map.can_delete) actions.append(button("Remove", "btn btn-sm btn-outline-danger",
       () => { deleteId = map.id; renderMaps(); }));
   }
@@ -101,6 +113,9 @@ window.showBrowseMaps = (data) => {
   fitGrid();
   const search = field("search");
   if (document.activeElement !== search) search.value = data.search;
+  field("clear-search").hidden = !search.value;
+  field("banner").hidden = !data.banner;
+  field("banner").textContent = data.banner;
   search.placeholder = data.search_label;
   search.setAttribute("aria-label", data.search_label);
   field("downloaded").checked = data.downloaded;
@@ -113,7 +128,9 @@ window.showBrowseMaps = (data) => {
   field("enable-menu").textContent = data.menu_busy ? data.menu_lock.busy : data.menu_lock.enable;
   field("enable-menu").disabled = data.menu_busy;
   window.patchProgress(field("menu-card"), !!data.menu_busy, null, "Updating Workshop in-game menu");
-  field("count").textContent = data.count.toLocaleString() + (data.count === 1 ? " map" : " maps");
+  field("count").textContent = data.steam_total
+    ? data.steam_total.toLocaleString() + " maps on the Steam Workshop" + (data.loading ? " (loading...)" : "")
+    : data.count.toLocaleString() + (data.count === 1 ? " map" : " maps") + (data.loading ? " (loading...)" : "");
   field("page").textContent = (data.page + 1) + " / " + data.pages;
   field("prev").disabled = data.page === 0;
   field("next").disabled = data.page + 1 >= data.pages;
