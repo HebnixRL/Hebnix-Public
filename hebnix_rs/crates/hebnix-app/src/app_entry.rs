@@ -281,7 +281,6 @@ fn main() -> eframe::Result {
         tracing::warn!("WebSocket proxy cleanup: {error}");
     }
     let _ = watchdog::spawn();
-    watchdog::restore_on_session_end();
 
     hebnix_sdk::process::exempt_own_window_decorations();
 
