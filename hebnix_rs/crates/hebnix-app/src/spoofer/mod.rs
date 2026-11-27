@@ -4,6 +4,7 @@
 pub mod ca;
 pub mod crl;
 pub mod dns;
+#[path = "http_linux.rs"]
 mod http;
 pub mod proxy;
 pub mod rules;
@@ -22,6 +23,8 @@ use crate::spoofer::rules::{NameRule, Rule, TitleSpoofSettings};
 use http::HttpProxy;
 
 pub const PROXY_HOST: &str = "127.0.0.1";
+pub const ACCOUNT_HOST: &str = "api.epicgames.dev";
+const PROXY_PORTS: &[u16] = &[6969, 143, 6970, 6971, 6972, 6973, 0];
 /// bind the first free port of `ports` on PROXY_HOST
 pub(crate) fn bind_local(what: &str, ports: &[u16]) -> Result<std::net::TcpListener, String> {
     let mut last_error = None;
@@ -51,6 +54,37 @@ fn proxy_server(port: u16) -> String {
 
 /// is `server` a proxy setting Hebnix wrote, on any port? Older versions
 /// wrote a bare `127.0.0.1:8080`.
+fn hebnix_proxy_port(server: &str) -> Option<u16> {
+    server
+        .strip_prefix(&format!("http={PROXY_HOST}:"))
+        .and_then(|rest| rest.split_once(';'))
+        .and_then(|(port, _)| port.parse::<u16>().ok())
+        .filter(|port| server == proxy_server(*port))
+}
+
+/// After Hebnix exits while Rocket League is running, the game keeps using the
+/// proxy it started with. Serve that port untouched until the game closes so its
+/// EOS connection survives, then let the caller restore the system proxy.
+pub fn hold_proxy_until_game_exits(base_dir: &Path) {
+    if !marker_path(base_dir).is_file() || !hebnix_sdk::process::is_rocket_league_running() {
+        return;
+    }
+    let Some(port) = read_current_proxy()
+        .proxy_server
+        .as_deref()
+        .and_then(hebnix_proxy_port)
+    else {
+        return;
+    };
+    let Ok(proxy) = http::HttpProxy::start_passthrough(port) else {
+        return;
+    };
+    while hebnix_sdk::process::is_rocket_league_running() {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    proxy.stop();
+}
+
 fn is_hebnix_proxy_server(server: &str) -> bool {
     let port = server
         .strip_prefix(&format!("http={PROXY_HOST}:"))
@@ -97,10 +131,10 @@ pub fn disable_saved_http_features(base_dir: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
-/// Whether the HTTP features (Name, Friends) and certificate controls need
-/// Hebnix itself to run as Administrator first.
+/// The HTTP features use the per-user WinINet proxy and the user certificate
+/// store, so they never need Hebnix to run as Administrator.
 pub fn http_needs_elevated_relaunch() -> bool {
-    !is_admin()
+    false
 }
 
 /// Trust the proxy certificate. The caller has checked
@@ -249,8 +283,11 @@ pub fn restore_if_crashed(base_dir: &Path) {
         tracing::warn!("stale HTTP proxy marker, restoring system proxy");
         restore_legacy_hebnix_proxy(base_dir);
     }
-    if let Err(error) = crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,false) {
-        tracing::warn!("Could not clean up the account HTTP redirect: {error}");
+    // Older versions redirected the account host through the hosts file.
+    if is_admin() {
+        if let Err(error) = crate::hosts_file::set_host_redirect(ACCOUNT_HOST, false) {
+            tracing::warn!("Could not clean up the account HTTP redirect: {error}");
+        }
     }
 }
 
@@ -396,16 +433,12 @@ impl SpooferManager {
     }
 
     fn start_http(&self) -> Result<(), String> {
-        if !is_admin() {
-            return Err("HTTP proxy features require Administrator access.".into());
-        }
         if self.http_running() {
             if !crate::watchdog::is_ready() && !crate::watchdog::spawn() {
                 return Err("HTTP proxy recovery watchdog stopped.".into());
             }
-            self.http_active.store(true,Ordering::Release);
-            self.redirect_active.store(true,Ordering::Release);
-            return crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,true);
+            self.http_active.store(true, Ordering::Release);
+            return Ok(());
         }
         if !ca::is_current_installed(&self.base_dir) {
             return Err(
@@ -439,31 +472,58 @@ impl SpooferManager {
                 })
                 .collect(),
         );
-        let proxy = HttpProxy::start(ca, rules, self.tx.clone())?;
-        // The listener and crash recovery must be ready before publishing a hosts entry.
+        let proxy = HttpProxy::start(ca, rules, self.tx.clone(), PROXY_PORTS)?;
+        // Recovery must be ready before the system proxy points at this listener.
         if !crate::watchdog::spawn() {
             proxy.stop();
             return Err("Could not start HTTP proxy recovery watchdog.".into());
+        }
+        // A marker left by a crash already holds the user's original settings.
+        let marker = marker_path(&self.base_dir);
+        let current = read_current_proxy();
+        let ours = current.proxy_server.as_deref().is_some_and(is_hebnix_proxy_server);
+        if !(ours && marker.is_file()) {
+            let backup = serde_json::to_vec(&current).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(marker.parent().unwrap()).map_err(|e| e.to_string())?;
+            std::fs::write(&marker, backup).map_err(|e| format!("write proxy backup: {e}"))?;
         }
         *self
             .http_proxy
             .lock()
             .map_err(|_| "HTTP proxy lock poisoned")? = Some(proxy);
+        let port = self
+            .http_proxy
+            .lock()
+            .ok()
+            .and_then(|p| p.as_ref().map(HttpProxy::port))
+            .ok_or("HTTP proxy stopped")?;
         self.http_active.store(true, Ordering::Release);
         self.redirect_active.store(true, Ordering::Release);
-        crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,true)?;
-        let _ = self.tx.send(AppMsg::Log(
-            "[Spoofer] Account HTTPS proxy ready for api.epicgames.dev. Windows proxy settings are unchanged. Restart Rocket League to refresh its cached display name.".into(),
-        ));
+        apply_proxy(&ProxyBackup {
+            proxy_enable: Some(1),
+            proxy_server: Some(proxy_server(port)),
+            proxy_override: Some("127.0.0.1;localhost;<local>".into()),
+        })?;
+        let _ = self.tx.send(AppMsg::Log(format!(
+            "[Spoofer] Account HTTPS proxy ready on {PROXY_HOST}:{port} for {ACCOUNT_HOST}. Restart Rocket League to refresh its cached display name."
+        )));
         Ok(())
     }
 
-    fn stop_http(&self) -> Result<(),String> {
+    fn stop_http(&self) -> Result<(), String> {
         self.http_active.store(false, Ordering::Release);
+        // The running game cached this proxy: keep it up (rules are off) until the
+        // game exits. If Hebnix itself exits first, the watchdog takes the port over.
+        if self.redirect_active.load(Ordering::Acquire) && self.game_running() {
+            return Ok(());
+        }
         if self.redirect_active.load(Ordering::Acquire) {
             // If cleanup fails, keep forwarding through the listener until recovery succeeds.
-            crate::hosts_file::set_host_redirect(http::ACCOUNT_HOST,false)?;
-            self.redirect_active.store(false,Ordering::Release);
+            restore_legacy_hebnix_proxy(&self.base_dir);
+            if marker_path(&self.base_dir).is_file() {
+                return Err("could not restore the Windows proxy settings".into());
+            }
+            self.redirect_active.store(false, Ordering::Release);
         }
         if let Ok(mut proxy) = self.http_proxy.lock() {
             if let Some(proxy) = proxy.take() {

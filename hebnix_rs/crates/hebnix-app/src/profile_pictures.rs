@@ -384,7 +384,7 @@ impl State {
                     gallery::remember(&mut self.settings.history, id);
                     self.textures
                         .retain(|id, _| self.settings.history.contains(id));
-                    self.status = "Picture added.".into();
+                    self.status = "Picture added. It is NOT uploaded yet: click it under Recent pictures to upload it.".into();
                     self.save();
                 }
                 Ok(Completion::Uploaded { owner, id }) => {
@@ -579,11 +579,24 @@ impl State {
             ui.label("Open Rocket League to upload");
         }
     }
+    /// The newest picture, when it is not the one uploaded for the selected account.
+    fn awaiting_upload(&self) -> Option<String> {
+        self.owner.as_ref()?;
+        let newest = self.settings.history.first()?;
+        (self.active_picture().as_ref() != Some(newest)).then(|| newest.clone())
+    }
     fn show_recent(&mut self, ui: &mut egui::Ui) {
         let busy = self.pending.is_some();
+        let waiting = self.awaiting_upload().filter(|_| !busy);
+        let pulse = if waiting.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+            (ui.input(|i| i.time) * 3.0).sin() as f32 * 0.5 + 0.5
+        } else {
+            0.0
+        };
         ui.set_max_width(400.0);
         ui.vertical(|ui| {
-            ui.strong("Recent pictures (click one to upload)");
+            ui.strong("Recent pictures: CLICK a picture to upload it");
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(!busy, egui::Button::new("Import picture…"))
@@ -625,7 +638,15 @@ impl State {
                             egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                             egui::Color32::WHITE,
                         );
-                        if active.as_ref() == Some(id) {
+                        let is_waiting = waiting.as_ref() == Some(id);
+                        if is_waiting {
+                            ui.painter().rect_stroke(
+                                rect.shrink(1.0),
+                                5.0,
+                                egui::Stroke::new(2.0 + 2.0 * pulse, ui.visuals().selection.bg_fill.gamma_multiply(0.6 + 0.4 * pulse)),
+                                egui::StrokeKind::Inside,
+                            );
+                        } else if active.as_ref() == Some(id) {
                             ui.painter().rect_stroke(
                                 rect.shrink(1.0),
                                 5.0,
@@ -638,6 +659,27 @@ impl State {
                                 5.0,
                                 ui.visuals().widgets.hovered.bg_stroke,
                                 egui::StrokeKind::Inside,
+                            );
+                        }
+                        let bar = egui::Rect::from_min_max(
+                            egui::pos2(rect.left() + 4.0, rect.bottom() - 26.0),
+                            egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0),
+                        );
+                        let label = if active.as_ref() == Some(id) {
+                            Some(("IN USE", egui::Color32::from_black_alpha(190)))
+                        } else if !busy && self.owner.is_some() && (is_waiting || response.hovered()) {
+                            Some(("CLICK TO UPLOAD", ui.visuals().selection.bg_fill))
+                        } else {
+                            None
+                        };
+                        if let Some((text, fill)) = label {
+                            ui.painter().rect_filled(bar, 4.0, fill);
+                            ui.painter().text(
+                                bar.center(),
+                                egui::Align2::CENTER_CENTER,
+                                text,
+                                egui::FontId::proportional((size / 9.0).clamp(9.0, 13.0)),
+                                egui::Color32::WHITE,
                             );
                         }
                         let close = egui::Rect::from_min_size(
@@ -704,7 +746,21 @@ impl State {
             .show(ui, |ui| crate::panel::followed(ui, |ui| {
                 ui.heading("Profile Pictures");
                 ui.label("Choose a picture to share with other Hebnix players.");
-                ui.label(egui::RichText::new("Click a picture under Recent pictures to upload it as your avatar.").strong());
+                if self.owner.is_none() {
+                    ui.colored_label(ui.visuals().warn_fg_color, "Pick your account on the left first. Without one, pictures cannot be uploaded.");
+                } else if self.awaiting_upload().is_some() && self.pending.is_none() {
+                    egui::Frame::new()
+                        .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
+                        .stroke(egui::Stroke::new(2.0, ui.visuals().selection.bg_fill))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("NOT UPLOADED YET").strong().size(18.0));
+                            ui.label(egui::RichText::new("Click the picture on the right (under Recent pictures). Nobody sees it until you do.").strong());
+                        });
+                } else {
+                    ui.label("Click a picture under Recent pictures to upload it as your avatar.");
+                }
                 ui.add_space(14.0);
                 let busy = self.pending.is_some();
                 let running = hebnix_sdk::process::is_rocket_league_running();

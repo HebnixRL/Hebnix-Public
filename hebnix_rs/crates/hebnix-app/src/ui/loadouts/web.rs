@@ -345,7 +345,7 @@ impl LoadoutsPanel {
                 let (_, Ok(plan)) = self.plan.take()? else {
                     return None;
                 };
-                match save_plan(save, &plan, presets) {
+                match save_plan(save, cooked, &plan, presets) {
                     Ok(mut message) => {
                         if !apply {
                             message.push(' ');

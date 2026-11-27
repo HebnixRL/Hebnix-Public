@@ -282,7 +282,7 @@ impl LoadoutsPanel {
         ui.add_space(8.0);
         let mut apply = None;
         crate::i18n::layout::bordered_panel(ui, |ui| {
-            apply = self.show_import(ui, swapper, presets);
+            apply = self.show_import(ui, swapper, cooked_pc, presets);
             if !self.message.is_empty() {
                 ui.label(&self.message);
             }
@@ -297,6 +297,7 @@ impl LoadoutsPanel {
         &mut self,
         ui: &mut egui::Ui,
         swapper: &SwapperState,
+        cooked_pc: &Path,
         presets: &mut PresetStore,
     ) -> Option<String> {
         ui.heading(t("loadouts-import-title"));
@@ -404,7 +405,7 @@ impl LoadoutsPanel {
         let Some((_, Ok(plan))) = self.plan.take() else {
             return None;
         };
-        match save_plan(save, &plan, presets) {
+        match save_plan(save, cooked_pc, &plan, presets) {
             Ok(mut message) => {
                 if !apply {
                     message.push(' ');
@@ -1096,7 +1097,7 @@ fn show_plan(ui: &mut egui::Ui, plan: &Plan, names: &[String]) {
 
 /// Saves the garage copy of the base, then the swap preset with the same name.
 /// Both names and the preset cap are checked before the save is touched.
-fn save_plan(save: &Path, plan: &Plan, presets: &mut PresetStore) -> Result<String, String> {
+fn save_plan(save: &Path, cooked_pc: &Path, plan: &Plan, presets: &mut PresetStore) -> Result<String, String> {
     let existing = presets.presets.iter().find(|p| p.name == plan.name).cloned();
     if plan.replace.is_none() && existing.is_some() {
         return Err(t("loadouts-bakkes-name-taken"));
@@ -1106,6 +1107,19 @@ fn save_plan(save: &Path, plan: &Plan, presets: &mut PresetStore) -> Result<Stri
     }
     let mut copy = loadout_preset(save, plan.base)?;
     copy.name = plan.name.clone();
+    // The colours are appended to the game palettes, so equip the cells they will land in.
+    if plan.cars != CarColours::default() {
+        let [blue, orange, blue_accent, orange_accent] =
+            crate::patcher::colours::car_colour_indices(cooked_pc, &plan.cars)?;
+        for (team, primary, accent) in [(0, blue, blue_accent), (1, orange, orange_accent)] {
+            if let Some(index) = primary {
+                copy.teams[team].team_color = index;
+            }
+            if let Some(index) = accent {
+                copy.teams[team].custom_color = index;
+            }
+        }
+    }
     apply_loadout_edit(save, &Edit::Import(vec![copy]))?;
     // The copy is appended, so the replaced preset keeps its position until it is removed.
     if let Some(position) = plan.replace {

@@ -53,7 +53,8 @@ pub fn plan(raw: &[u8], edit: &Edit) -> Result<Option<Vec<u8>>, String> {
         },
         Edit::Import(presets) => import(&mut doc, presets)?,
     };
-    if !changed {
+    let marked = mark_orange_loadouts(&mut doc)?;
+    if !changed && !marked {
         return Ok(None);
     }
     let bytes = doc.encode()?;
@@ -473,10 +474,48 @@ fn write_team_paint(data: &mut Vec<u8>, updates: &[(&str, i64)]) -> Result<(), S
     let f = field(&props, "TeamPaint", "StructProperty")?;
     let mut paint = data[f.payload.clone()].to_vec();
     for &(name, value) in updates {
-        put_scalar(&mut paint, name, value)?;
+        if matches!(name, "Team" | "TeamColorID" | "CustomColorID") {
+            put_byte(&mut paint, name, value)?;
+        } else {
+            put_scalar(&mut paint, name, value)?;
+        }
     }
     replace_field(data, f, &paint);
     Ok(())
+}
+
+/// The game marks an orange loadout with `TeamPaint.Team = 1`. Without it the
+/// orange car takes its colours from the blue palette, so every preset's
+/// orange loadout gets the mark, split from blue's when the two are shared.
+fn mark_orange_loadouts(doc: &mut Document) -> Result<bool, String> {
+    let mut changed = false;
+    for set in set_refs(doc)? {
+        let set = set as usize;
+        let mut loadouts = match doc.objects.get(set) {
+            Some(obj) if obj.kind == "TAGame.LoadoutSet_TA" => array_u32(&obj.bytes, "Loadouts")?,
+            _ => continue,
+        };
+        if loadouts.len() != 2 {
+            continue;
+        }
+        let Some(orange) = doc.objects.get(loadouts[1] as usize).filter(|o| o.kind == "TAGame.Loadout_TA") else {
+            continue;
+        };
+        let Ok((_, paint)) = span(&orange.bytes, "TeamPaint") else {
+            continue;
+        };
+        if scalar_or_zero(&orange.bytes[paint], "Team")? == 1 {
+            continue;
+        }
+        if loadouts[0] == loadouts[1] {
+            let bytes = orange.bytes.clone();
+            loadouts[1] = push_object(doc, "TAGame.Loadout_TA", bytes);
+            set_array(&mut doc.objects[set].bytes, "Loadouts", &loadouts)?;
+        }
+        write_team_paint(&mut doc.objects[loadouts[1] as usize].bytes, &[("Team", 1)])?;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 fn scalar_or_zero(data: &[u8], name: &str) -> Result<i64, String> {
@@ -529,6 +568,31 @@ fn put_scalar(data: &mut Vec<u8>, name: &str, value: i64) -> Result<(), String> 
         Ok(v) => insert_property(data, name, "IntProperty", &v.to_le_bytes()),
         Err(_) => insert_property(data, name, "QWordProperty", &value.to_le_bytes()),
     }
+}
+
+/// Like `put_scalar` for byte fields, which the game stores as `ByteProperty`.
+fn put_byte(data: &mut Vec<u8>, name: &str, value: i64) -> Result<(), String> {
+    if span(data, name).is_ok() {
+        return write_scalar(data, name, value);
+    }
+    if value == 0 {
+        return Ok(());
+    }
+    let byte = u8::try_from(value).map_err(|_| format!("{name} out of range"))?;
+    let none = write_ue3("None");
+    if data.len() < none.len() || data[data.len() - none.len()..] != none[..] {
+        return Err("unsupported property stream ending".into());
+    }
+    // The size counts only the value byte, not the enum name before it.
+    let mut property = write_ue3(name);
+    property.extend(write_ue3("ByteProperty"));
+    property.extend_from_slice(&1u32.to_le_bytes());
+    property.extend_from_slice(&0u32.to_le_bytes());
+    property.extend(none.iter().copied());
+    property.push(byte);
+    let at = data.len() - none.len();
+    data.splice(at..at, property);
+    Ok(())
 }
 
 fn put_qword(data: &mut Vec<u8>, name: &str, value: u64) -> Result<(), String> {
@@ -819,6 +883,37 @@ mod tests {
         assert_eq!(read_scalar(paint, "TeamColorID").unwrap(), 19);
         assert_eq!(read_scalar(paint, "CustomColorID").unwrap(), 12);
         assert_eq!(read_scalar(paint, "TeamFinishID").unwrap(), 43);
+    }
+
+    #[test]
+    fn orange_loadouts_are_marked_and_split_from_a_shared_blue_loadout() {
+        let mut profile = empty();
+        append_array(&mut profile, "LoadoutSets", &[1]).unwrap();
+        let mut set = empty();
+        append_array(&mut set, "Loadouts", &[2, 2]).unwrap();
+        let mut paint = empty();
+        put_byte(&mut paint, "TeamColorID", 40).unwrap();
+        let mut loadout = write_ue3("TeamPaint");
+        loadout.extend(write_ue3("StructProperty"));
+        loadout.extend((paint.len() as u32).to_le_bytes());
+        loadout.extend(0u32.to_le_bytes());
+        loadout.extend(write_ue3("TeamPaint"));
+        loadout.extend(paint);
+        loadout.extend(empty());
+        let mut doc = Document { header: vec![], root: empty(), tail: vec![], objects: vec![
+            obj("TAGame.ProfileLoadoutSave_TA", 0, profile),
+            obj("TAGame.LoadoutSet_TA", 1, set),
+            obj("TAGame.Loadout_TA", 2, loadout.clone()),
+        ]};
+        assert!(mark_orange_loadouts(&mut doc).unwrap());
+        assert_eq!(array_u32(&doc.objects[1].bytes, "Loadouts").unwrap(), [2, 3]);
+        assert_eq!(doc.objects[2].bytes, loadout);
+        let orange = &doc.objects[3].bytes;
+        let paint = &orange[span(orange, "TeamPaint").unwrap().1];
+        assert_eq!(span(paint, "Team").unwrap().0, "ByteProperty");
+        assert_eq!(read_scalar(paint, "Team").unwrap(), 1);
+        assert_eq!(read_scalar(paint, "TeamColorID").unwrap(), 40);
+        assert!(!mark_orange_loadouts(&mut doc).unwrap());
     }
 
     #[test]

@@ -17,6 +17,7 @@ path = "src/lite_main.rs"
 required-features = ["lite"]
 
 [dependencies]
+ab_glyph = "0.2"
 aes = "0.8"
 crc32fast = "1"
 crossbeam-channel.workspace = true
@@ -64,6 +65,10 @@ fluent-bundle = "0.16.0"
 unic-langid = "0.9.6"
 sys-locale = "0.3.2"
 sysinfo = "0.38.4"
+# downloads workshop items straight from steam's CDN (MIT/Apache, no .net)
+steamroom = { version = "=0.3.0", features = ["serde"] }
+steamroom-client = "=0.3.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 eframe = "0.35.0"
@@ -88,7 +93,6 @@ wayland-backend = { version = "0.3", features = ["log"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 tiny-skia = "0.11"
 x11rb = { version = "0.13", features = ["shape", "shm"] }
-ab_glyph = "0.2"
 cairo = { version = "=0.18.5", package = "cairo-rs" }
 gdk = "0.18.2"
 gtk = "0.18"

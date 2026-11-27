@@ -83,6 +83,8 @@ pub fn restore_group(
             super::forfeit_command::restore(&cooked, &backups)?;
             super::celebration::restore(&cooked, &backups)?;
             super::bots_freeplay::restore(&cooked, &backups)?;
+            super::menu_access::restore(&cooked, &backups)?;
+            super::font_glyphs::restore(&cooked, &backups)?;
             let _ = super::celebration::unbind();
             let _ = super::bots_freeplay::unbind();
             let _ = super::forfeit_command::unbind();

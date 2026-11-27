@@ -616,6 +616,7 @@ enum AppearanceSubTab {
 enum HebnixSettingsTab {
     Interface,
     Directories,
+    Preferences,
     Discord,
     ActionButton,
     System,
@@ -838,6 +839,7 @@ pub struct HebnixApp {
     spoofer_ranks: HashMap<i32, RankSpoofState>,
     spoofer_cert_installed: bool,
     spoofer_certificate_prompt_open: bool,
+    black_infinium_prompt_open: bool,
     spoofer_friends_enabled: bool,
     spoofer_friends: HashMap<String, FriendSpoofState>,
     friends_search: String,
@@ -857,6 +859,8 @@ pub struct HebnixApp {
     forfeit_command: crate::patcher::forfeit_command::State,
     celebration: crate::patcher::celebration::State,
     bots_freeplay: crate::patcher::bots_freeplay::State,
+    menu_access: crate::patcher::menu_access::State,
+    font_glyphs: crate::patcher::font_glyphs::State,
     delete_backups: crate::patcher::delete_backups::State,
     chat_export: crate::patcher::chat_export::State,
     chat_test: crate::patcher::chat_test::State,
@@ -1468,6 +1472,7 @@ impl HebnixApp {
             spoofer_ranks,
             spoofer_cert_installed: cert_installed,
             spoofer_certificate_prompt_open: false,
+            black_infinium_prompt_open: false,
             spoofer_friends_enabled,
             spoofer_friends,
             friends_search: String::new(),
@@ -1486,6 +1491,8 @@ impl HebnixApp {
             forfeit_command: Default::default(),
             celebration: Default::default(),
             bots_freeplay: Default::default(),
+            menu_access: Default::default(),
+            font_glyphs: Default::default(),
             delete_backups: Default::default(),
             chat_export: Default::default(),
             chat_test: Default::default(),
@@ -1682,7 +1689,7 @@ impl HebnixApp {
         || self.patcher_boost.processing_target.is_some()
         || self.patcher_decal.processing_target.is_some()
         || self.patcher_anthem.busy() || self.colours.busy()
-        || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
+        || self.wheel_alignment.busy() || self.speed_patch.busy() || self.goal_explosion.busy() || self.goal_explosion_volume.busy() || self.forfeit_command.busy() || self.celebration.busy() || self.bots_freeplay.busy() || self.menu_access.busy() || self.font_glyphs.busy() || self.chat_export.busy() || self.chat_test.busy() || self.lan_commands.busy() || self.chat_paste.busy() || self.instant_suite.busy()
         || self.title_patcher.busy() || self.rank_patch.busy() || self.swapper.busy()
         || self.scoreboard.busy()
         || self.workshop.maintenance_busy()
@@ -1704,7 +1711,7 @@ impl HebnixApp {
                 matches!(id, "bots-freeplay" | "celebration")
             }
             Tab::GameMods => match self.match_tools_page {
-                MatchToolsPage::MatchSetup => matches!(id, "forfeit" | "instant-suite"),
+                MatchToolsPage::MatchSetup => matches!(id, "forfeit" | "instant-suite" | "menu-access" | "font-glyphs"),
                 MatchToolsPage::Chat => matches!(id, "chat-export" | "chat-paste" | "chat-test"),
                 MatchToolsPage::LanHosting => id == "lan-commands",
             },
@@ -1794,6 +1801,22 @@ impl HebnixApp {
                             if self.celebration.render(ui, &cooked_pc, &backups_dir, &mut self.config.game_mods.celebration_key, &mut self.config.game_mods.celebration_pad) {
                                 self.save_config();
                             }
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
+                if self.game_mod_visible("menu-access") {
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        ui.add_enabled_ui(!locked || self.menu_access.busy(), |ui| {
+                            self.menu_access.render(ui, &cooked_pc, &backups_dir);
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
+                if self.game_mod_visible("font-glyphs") {
+                    crate::i18n::layout::bordered_panel(ui, |ui| {
+                        ui.add_enabled_ui(!locked || self.font_glyphs.busy(), |ui| {
+                            self.font_glyphs.render(ui, &cooked_pc, &backups_dir);
                         });
                     });
                     ui.add_space(8.0);
@@ -2890,6 +2913,7 @@ impl HebnixApp {
                 &[
                     HebnixSettingsTab::Interface,
                     HebnixSettingsTab::Directories,
+                    HebnixSettingsTab::Preferences,
                     HebnixSettingsTab::Discord,
                     HebnixSettingsTab::ActionButton,
                     HebnixSettingsTab::System,
@@ -3540,22 +3564,12 @@ impl HebnixApp {
                         }
                     }
                 }
-                AppMsg::WorkshopCatalog(result) => match result {
-                    Ok(items) => {
-                        self.workshop.set_catalog(items);
-                        if self.workshop.valid.is_empty() {
-                            self.workshop.catalog_status =
-                                t("handle-messages-no-maps-found").to_string();
-                        }
+                AppMsg::WorkshopSteamPage { generation, more, result } => {
+                    if let Err(e) = &result {
+                        self.console.write(format!("[Core] Failed to fetch maps: {e}"));
                     }
-                    Err(e) => {
-                        self.workshop.merge_local_maps();
-                        self.workshop.catalog_status =
-                            t("handle-messages-failed-to-load-maps").to_string();
-                        self.console
-                            .write(format!("[Core] Failed to fetch maps: {e}"));
-                    }
-                },
+                    self.workshop.add_steam_page(generation, more, result);
+                }
                 AppMsg::WorkshopImage { key, bytes } => {
                     let state = if bytes.is_empty() {
                         ImageState::Failed
@@ -3836,7 +3850,10 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchEnded" => {
-                if !replay_event { self.network.clear_match_presence(); }
+                if !replay_event {
+                    self.network.clear_match_presence();
+                    self.auto_upload_replays.match_over();
+                }
                 if !replay_event && !self.match_ended {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_ended(
@@ -3853,7 +3870,11 @@ impl HebnixApp {
                 self.plugin_mgr.dispatch_game_event(&event);
             }
             "MatchDestroyed" => {
-                if !replay_event { self.network.clear_match_presence(); }
+                if !replay_event {
+                    self.network.clear_match_presence();
+                    // left early: no MatchEnded, but the replay can still be looked for
+                    self.auto_upload_replays.match_over();
+                }
                 if !replay_event {
                     let cooked = Path::new(&self.config.settings.rl_path).join("TAGame/CookedPCConsole");
                     crate::patcher::instant_suite::match_destroyed(&cooked);
@@ -3879,6 +3900,8 @@ impl HebnixApp {
         if !rl_open || !api_open {
             self.home.clear_match();
             self.scoreboard.end_match();
+            // game closed or Stats API lost mid-match: no MatchEnded is coming
+            self.auto_upload_replays.match_over();
         }
         self.home_tracker.set_running(rl_open);
         self.last_rl_open = rl_open;
@@ -4495,7 +4518,8 @@ impl HebnixApp {
             return;
         }
         let plugin_names = self.console_plugin_names();
-        let submitted = self.console.render(ui, &plugin_names);
+        let timestamps = self.config.settings.console_timestamps;
+        let submitted = self.console.render(ui, &plugin_names, timestamps);
         if let Some(cmd) = submitted {
             self.execute_command(cmd, ui.ctx());
         }
@@ -5359,6 +5383,7 @@ impl HebnixApp {
                             let tabs = [
                                 (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
                                 (HebnixSettingsTab::Directories, t("nav-files-folders")),
+                                (HebnixSettingsTab::Preferences, t("settings-nav-preferences")),
                                 (HebnixSettingsTab::System, t("settings-nav-system")),
                                 (HebnixSettingsTab::Discord, t("settings-nav-discord")),
                                 (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
@@ -5381,6 +5406,7 @@ impl HebnixApp {
                             crate::theme::page_heading(ui, match self.hebnix_settings_tab {
                                 HebnixSettingsTab::Interface => t("nav-settings-appearance"),
                                 HebnixSettingsTab::Directories => t("nav-files-folders"),
+                                HebnixSettingsTab::Preferences => t("settings-heading-preferences"),
                                 HebnixSettingsTab::Discord => t("settings-heading-discord"),
                                 HebnixSettingsTab::ActionButton => t("settings-heading-action-button"),
                                 HebnixSettingsTab::System => t("settings-heading-system"),
@@ -6172,6 +6198,23 @@ impl HebnixApp {
                                     self.render_action_button_settings(ui);
                                 }
 
+                                HebnixSettingsTab::Preferences => {
+                                    use crate::config::BlackInfinium;
+                                    ui.label(t("preferences-black-infinium"));
+                                    ui.label(egui::RichText::new(t("preferences-black-infinium-hint")).weak());
+                                    for (value, key) in [
+                                        (BlackInfinium::Ask, "preferences-black-infinium-ask"),
+                                        (BlackInfinium::Bakkes, "preferences-black-infinium-bakkes"),
+                                        (BlackInfinium::Vanilla, "preferences-black-infinium-vanilla"),
+                                    ] {
+                                        if ui
+                                            .radio_value(&mut self.config.settings.black_infinium, value, t(key))
+                                            .changed()
+                                        {
+                                            let _ = self.config.save(&self.base_dir);
+                                        }
+                                    }
+                                }
                                 HebnixSettingsTab::System => {
                                     let cooked_pc = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
                                     if self.maintenance.tab {
@@ -6184,9 +6227,11 @@ impl HebnixApp {
                                         &[
                                             t(START_WITH_SYSTEM_KEY),
                                             t("system-start-in-tray"),
+                                            t("system-run-as-admin"),
                                             t("system-close-to-tray"),
                                             t("system-p2p"),
                                             t("system-suppress-left"),
+                                            t("system-console-timestamps"),
                                             t("system-fullscreen-warning"),
                                             t("system-allow-draw-focus"),
                                             t("system-limit-hotkey"),
@@ -6216,6 +6261,18 @@ impl HebnixApp {
                                         crate::i18n::layout::settings_label(ui, label_w, t("system-start-in-tray"));
                                         if ui
                                             .checkbox(&mut self.config.settings.start_in_tray, "")
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    // main.rs relaunches elevated on the next start when this is on
+                                    #[cfg(target_os = "windows")]
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-run-as-admin"));
+                                        if ui
+                                            .checkbox(&mut self.config.settings.run_as_admin, "")
+                                            .on_hover_text(t("system-run-as-admin-hint"))
                                             .changed()
                                         {
                                             self.save_config();
@@ -6267,6 +6324,18 @@ impl HebnixApp {
                                         if ui
                                             .checkbox(
                                                 &mut self.config.settings.suppress_left_alerts,
+                                                "",
+                                            )
+                                            .changed()
+                                        {
+                                            self.save_config();
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        crate::i18n::layout::settings_label(ui, label_w, t("system-console-timestamps"));
+                                        if ui
+                                            .checkbox(
+                                                &mut self.config.settings.console_timestamps,
                                                 "",
                                             )
                                             .changed()
@@ -7040,6 +7109,42 @@ impl HebnixApp {
             }
         } else if close {
             self.item_action_prompt_open = false;
+        }
+    }
+
+    fn render_black_infinium_prompt(&mut self, ctx: &egui::Context) {
+        use crate::config::BlackInfinium;
+        self.swapper.set_black_infinium(self.config.settings.black_infinium);
+        if self.swapper.take_infinium_prompt() {
+            self.black_infinium_prompt_open = true;
+        }
+        if !self.black_infinium_prompt_open {
+            return;
+        }
+        let mut choice = None;
+        egui::Window::new(t("infinium-prompt-title"))
+            .id(egui::Id::new("black-infinium-choice"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(t("infinium-prompt-body"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(t("infinium-prompt-bakkes")).clicked() {
+                        choice = Some(BlackInfinium::Bakkes);
+                    }
+                    if ui.button(t("infinium-prompt-vanilla")).clicked() {
+                        choice = Some(BlackInfinium::Vanilla);
+                    }
+                });
+            });
+        if let Some(choice) = choice {
+            self.config.settings.black_infinium = choice;
+            self.swapper.set_black_infinium(choice);
+            let _ = self.config.save(&self.base_dir);
+            self.black_infinium_prompt_open = false;
+            self.console.write(t("infinium-prompt-saved"));
         }
     }
 
@@ -8614,6 +8719,7 @@ impl eframe::App for HebnixApp {
                 self.render_install_modal(ctx);
                 self.render_rl_launch_setup(ctx);
             }
+            self.render_black_infinium_prompt(ctx);
             #[cfg(target_os = "linux")]
             self.render_appimage_banner(ctx);
             #[cfg(target_os = "linux")]

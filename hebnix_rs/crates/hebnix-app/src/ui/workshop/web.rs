@@ -25,8 +25,6 @@ pub(crate) enum BrowseMapsAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AddMapsAction {
     Local { key: String, fields: Option<[String; 3]> },
-    Steam { key: String, api: Option<String>, input: Option<String> },
-    Archive { key: String, search: Option<String>, id: Option<usize> },
 }
 
 #[derive(serde::Deserialize)]
@@ -184,10 +182,7 @@ impl WorkshopState {
     }
     pub(crate) fn add_maps_web_snapshot(&mut self) -> Value {
         let local = self.import_wizard.web_snapshot();
-        let (steam, downloaded) = self.steam_downloader.web_snapshot(&self.manager.runtime_dir);
-        let (archive, archived) = self.archive_browser.web_snapshot();
-        for map in [downloaded, archived].into_iter().flatten() { self.add_local_map(map); }
-        json!({ "page": "add-maps", "local": local, "steam": steam, "archive": archive })
+        json!({ "page": "add-maps", "local": local })
     }
 
     pub(crate) fn add_maps_web_action(&mut self, action: AddMapsAction, ctx: &egui::Context) {
@@ -199,8 +194,6 @@ impl WorkshopState {
                     self.add_local_map(map);
                 }
             }
-            AddMapsAction::Steam { key, api, input } => self.steam_downloader.web_action(&key, api, input, cache, runtime, ctx),
-            AddMapsAction::Archive { key, search, id } => self.archive_browser.web_action(&key, search, id, cache, runtime, ctx),
         }
     }
     pub(crate) fn menu_web_snapshot(&mut self, cooked: &Path, ctx: &egui::Context) -> Value {
@@ -284,8 +277,6 @@ impl WorkshopState {
             "page": self.page, "pages": self.total_pages(), "count": self.valid.len(),
             "maps": maps,
             "empty": if self.catalog.is_empty() { self.catalog_status.clone() } else { t("handle-messages-no-maps-found") },
-            "help_title": t("render-can-t-find-a-map"),
-            "help": [t("render-can-t-find-the-map-you"), t("render-no-hubcap-api-key-the-import")],
             "menu_disabled": self.ingame_menu.is_enabled() == Some(false),
             "menu_busy": self.ingame_menu.busy(),
         })

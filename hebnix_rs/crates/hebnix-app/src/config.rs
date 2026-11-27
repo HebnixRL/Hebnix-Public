@@ -58,9 +58,21 @@ impl Default for WindowCfg {
     }
 }
 
+/// What a Black paint on Infinium wheels becomes. BakkesMod applies a plain
+/// #000000, which looks different from the in-game Black finish.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlackInfinium {
+    #[default]
+    Ask,
+    Bakkes,
+    Vanilla,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SettingsCfg {
+    pub black_infinium: BlackInfinium,
     #[serde(default)]
     pub owned_items_only: bool,
     pub hotkey: String,
@@ -130,6 +142,8 @@ pub struct SettingsCfg {
     /// how often the overlay and plugins update while a plugin is reading the
     /// screen (fps). lower saves CPU on slower PCs
     pub overlay_refresh_fps: u32,
+    /// prefix console lines with the local time they were written
+    pub console_timestamps: bool,
 }
 
 impl Default for SettingsCfg {
@@ -168,6 +182,7 @@ impl Default for SettingsCfg {
             panel_width: 0.30,
             panel_animate: true,
             run_as_admin: false,
+            black_infinium: BlackInfinium::Ask,
             discord_rich_presence: true,
             discord_rocket_league_only: false,
             discord_game_state: true,
@@ -177,6 +192,7 @@ impl Default for SettingsCfg {
             discord_custom_message: "Playing Rocket League".to_string(),
             p2p_file_sharing: true,
             overlay_refresh_fps: 30,
+            console_timestamps: true,
         }
     }
 }

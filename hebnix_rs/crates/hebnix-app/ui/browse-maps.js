@@ -105,8 +105,6 @@ window.showBrowseMaps = (data) => {
   search.setAttribute("aria-label", data.search_label);
   field("downloaded").checked = data.downloaded;
   field("downloaded-label").textContent = data.downloaded_label;
-  field("help-title").textContent = data.help_title;
-  field("help").textContent = data.help.join(" ");
   field("menu-warning").hidden = !data.menu_disabled && !data.menu_busy;
   field("enable-menu").disabled = data.menu_busy;
   window.patchProgress(field("menu-warning"), !!data.menu_busy, null, "Updating Workshop in-game menu");
