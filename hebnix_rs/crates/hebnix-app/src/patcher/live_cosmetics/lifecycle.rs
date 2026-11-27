@@ -67,10 +67,12 @@ fn payload<'a>(p: &'a UpkPackage, path: &str) -> Result<(usize, &'a [u8]), Strin
     Ok((i, &p.image[e.serial_offset..e.serial_offset + e.serial_size]))
 }
 fn lock() -> Result<fs::File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
     fs::create_dir_all(directory()).map_err(|e| e.to_string())?;
     // A Windows share lock dies with its process. A stale lock file is harmless.
-    fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0)
+    let mut o = fs::OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
+    #[cfg(windows)] std::os::windows::fs::OpenOptionsExt::share_mode(&mut o, 0);
+    o
         .open(directory().join("operation.lock")).map_err(|e| format!("Live cosmetic operation is busy: {e}"))
 }
 fn allowed(owner: u32) -> Result<(), String> {
