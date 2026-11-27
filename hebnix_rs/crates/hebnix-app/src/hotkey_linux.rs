@@ -46,6 +46,14 @@ impl ToggleHotkey {
         spawn_poller(self.shared_key(), on_press);
     }
 
+    pub fn listen_show_hide<F>(&self, on_press: F)
+    where F: Fn() + Send + 'static,
+    {
+        self.listen(on_press);
+    }
+
+    pub fn set_restricted(&self, _restricted: bool) {}
+
     /// shared handle for the polling thread to read the live key name from.
     pub fn shared_key(&self) -> Arc<Mutex<String>> {
         Arc::clone(&self.current_name)

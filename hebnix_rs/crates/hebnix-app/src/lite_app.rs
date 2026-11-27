@@ -277,11 +277,12 @@ impl LiteApp {
         let mut hotkey = ToggleHotkey::new();
         if let Some(hotkey) = &mut hotkey {
             hotkey.rebind(&config.settings.hotkey);
+            hotkey.set_restricted(config.settings.restrict_hotkey_to_hebnix_or_rocket_league);
         }
         if let Some(hotkey) = &hotkey {
             let tx = control_tx.clone();
             let ctx = cc.egui_ctx.clone();
-            hotkey.listen(move || {
+            hotkey.listen_show_hide(move || {
                 crate::ui_work::send_toggle_control(&tx, &ctx, AppMsg::ToggleVisibility);
             });
         }
@@ -389,6 +390,7 @@ impl LiteApp {
     }
 
     fn save_config(&mut self) {
+        if let Some(hotkey) = &self.hotkey { hotkey.set_restricted(self.config.settings.restrict_hotkey_to_hebnix_or_rocket_league); }
         if let Err(error) = self.config.save(&self.base_dir) {
             self.console
                 .write(format!("[Console] Could not save config: {error}"));

@@ -4,10 +4,12 @@ A small, standalone Rust tool for checking the Fluent (`.ftl`) locale files and 
 
 ## What it checks
 
-- Parses the English Fluent source file and uses its message IDs as the reference.
+- Merges every `en/*.ftl` file and uses their message IDs as the reference.
 - Reads configured locale codes from `locales.toml`.
 - Checks that each configured non-English locale has a directory and at least one `.ftl` file.
 - Parses translated Fluent files and reports malformed Fluent syntax.
+- Merges each translated locale before comparing it to English, so split files do not produce false missing-key warnings.
+- Reports duplicate message IDs within a file or across locale files as errors.
 - Reports translated message IDs that do not exist in English as errors.
 - Reports English message IDs missing from a translation as warnings. The application may fall back to English for these messages.
 - Reports locale directories that are not listed in `locales.toml`.

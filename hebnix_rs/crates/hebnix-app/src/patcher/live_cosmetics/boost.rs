@@ -3,9 +3,6 @@
 use super::*;
 
 fn count(array: Script) -> Script { let mut s = raw(&[0x57, 1]); s.append(&array); s }
-fn index(p: &UpkPackage, key: &str) -> R<Script> {
-    Ok(cast(0x44, cast(STRING_TO_FLOAT, get(p, key)?)))
-}
 fn at(index: Script, array: Script) -> Script {
     let mut s = raw(&[0x57, 0, 0]); s.append(&index).append(&array); s
 }
@@ -16,33 +13,61 @@ fn identity(p: &UpkPackage, target: Script) -> R<Script> {
         var(p, 0x01, "Engine.Actor.CreationTime")?)))
 }
 
-// Counters are temporary saved-value keys, not additions to native class layouts.
+// Counters live in private engine-rooted data, independent of save providers.
 // Absolute branch addresses use Script's in-memory sizes, including object refs.
 fn each(p: &UpkPackage, base: usize, key: &str, array: Script,
     build: impl FnOnce(usize, Script) -> R<Script>) -> R<Script> {
     repeat(p, base, key, count(array.clone()), |base, index| build(base, at(index, array)))
 }
-fn repeat(p: &UpkPackage, base: usize, key: &str, length: Script,
+fn each_owned(p: &UpkPackage, base: usize, key: &str, owner: Script, array: Script,
     build: impl FnOnce(usize, Script) -> R<Script>) -> R<Script> {
-    let mut s = set(p, key, text("0"))?;
-    let start = base + s.mem_size();
-    let condition = native(0x96, &[index(p, key)?, length]);
-    let mut body = build(start + 3 + condition.mem_size(), index(p, key)?)?;
-    body.append(&set(p, key, cast(FLOAT_TO_STRING,
-        native(0xae, &[cast(STRING_TO_FLOAT, get(p, key)?), float(1.)])))?);
+    let valid = native(0xce, &[owner, raw(&[0x2a])]);
+    let body = each(p, base + 3 + valid.mem_size(), key, array, build)?;
+    guard(base, valid, body)
+}
+pub(super) fn repeat(p: &UpkPackage, base: usize, key: &str, length: Script,
+    build: impl FnOnce(usize, Script) -> R<Script>) -> R<Script> {
+    // Save providers can disappear during startup/teardown. A saved counter
+    // then reads zero forever. Bootstrap once and skip safely if unavailable.
+    let missing = native(0xcf, &[super::items::loop_state(p)?, raw(&[0x2a])]);
+    let mut init = raw(&[0x0e]);
+    init.object(obj(p, "UISavedValues_TA.Get.ReturnValue")?).append(&get(p, "HbxControl.init")?);
+    let mut s = guard(base, missing, init)?;
+    let ready = native(0xce, &[super::items::loop_state(p)?, raw(&[0x2a])]);
+    let at = base + s.mem_size();
+    let mut loop_body = assign(super::items::loop_counter(p, key, true)?, float(0.));
+    let start = at + 3 + ready.mem_size() + loop_body.mem_size();
+    let index = cast(0x44, super::items::loop_counter(p, key, false)?);
+    let condition = native(0x96, &[index.clone(), length]);
+    let mut body = build(start + 3 + condition.mem_size(), index)?;
+    body.append(&assign(super::items::loop_counter(p, key, true)?,
+        native(0xae, &[super::items::loop_counter(p, key, false)?, float(1.)])));
     let mut back = raw(&[0x06]);
     back.raw(&u16::try_from(start).map_err(|_| "Boost loop address overflow")?.to_le_bytes());
     body.append(&back);
-    s.append(&guard(start, condition, body)?);
+    loop_body.append(&guard(start, condition, body)?);
+    s.append(&guard(at, ready, loop_body)?);
     Ok(s)
 }
 
 pub(super) fn refresh(p: &UpkPackage, base: usize, mesh: Script, menu: bool) -> R<Script> {
-    let mut s = set(p, "HbxBoostLocalPass", text("1"))?;
-    // Boost FX live on their owning boost component, outside the mesh's generic
-    // FXActors list. Garage preview meshes have a separate dedicated BoostFX.
+    let valid = native(0xce, &[mesh.clone(), raw(&[0x2a])]);
+    // Native boost updates can reset parameters without replacing the actor.
+    // Keep this bounded by the controller's 10 Hz refresh, not a colour stamp.
+    let body = refresh_inner(p, base + 3 + valid.mem_size(), mesh, menu)?;
+    guard(base, valid, body)
+}
+fn refresh_inner(p: &UpkPackage, base: usize, mesh: Script, menu: bool) -> R<Script> {
+    let mut s = transition(p, base, mesh.clone(), menu)?;
+    s.append(&set(p, "HbxBoostLocalPass", text("1"))?);
+    // Shift's live update path uses the preview actor's effect in the garage,
+    // and the boost component's effect in a match. The preview mesh's effect is
+    // a separate auxiliary target and is only a fallback.
     let actor = if menu {
-        field(p, dynamic(p, "CarPreviewMeshComponent_TA", mesh.clone())?, "CarPreviewMeshComponent_TA.BoostFX")?
+        let preview = preview_actor(p)?;
+        let effect = field(p, preview, "CarPreviewActor_TA.BoostFX")?;
+        let fallback = field(p, dynamic(p, "CarPreviewMeshComponent_TA", mesh.clone())?, "CarPreviewMeshComponent_TA.BoostFX")?;
+        super::items::choose(native(0xce, &[effect.clone(), raw(&[0x2a])]), effect, fallback)?
     } else {
         let boost = field(p, var(p, 0x01, "PlayerController_TA.Car")?, "Vehicle_TA.BoostComponent")?;
         field(p, boost, "CarComponent_TA.FXActor")?
@@ -50,13 +75,35 @@ pub(super) fn refresh(p: &UpkPackage, base: usize, mesh: Script, menu: bool) -> 
     s.append(&context(p, dynamic(p, "FXActor_Boost_TA", actor)?,
         call(p, "FXActor_Boost_TA.HandleUpdatedPaintSettings", &[mesh.clone()])?, None)?);
     let actors = field(p, mesh.clone(), "CarMeshComponentBase_TA.FXActors")?;
-    s.append(&each(p, base + s.mem_size(), "HbxBoostActorIndex", actors, |_, actor| {
+    s.append(&each_owned(p, base + s.mem_size(), "HbxBoostActorIndex", mesh.clone(), actors, |_, actor| {
         let boost = dynamic(p, "FXActor_Boost_TA", actor)?;
         // Context safely skips None and FX actors of other kinds.
         context(p, boost, call(p, "FXActor_Boost_TA.HandleUpdatedPaintSettings", &[mesh])?, None)
     })?);
     s.append(&set(p, "HbxBoostLocalPass", text("0"))?);
     Ok(s)
+}
+fn transition(p: &UpkPackage, base: usize, mesh: Script, menu: bool) -> R<Script> {
+    let key = join(text("HbxBoostMode."), cast(0x56, mesh));
+    let was_enabled = native(0xcc, &[get_dynamic(p, key.clone())?, text("1")]);
+    let enabled = flag(p, "boost.enabled")?;
+    let changed = super::items::choose(enabled.clone(), native(0x81, &[was_enabled.clone()]), was_enabled)?;
+    let start = base + 3 + changed.mem_size();
+    let mut reset = Script::new();
+    if menu {
+        let preview = preview_actor(p)?;
+        let effect = field(p, preview.clone(), "CarPreviewActor_TA.BoostFX")?;
+        let present = native(0xce, &[effect, raw(&[0x2a])]);
+        let disabled = native(0x81, &[enabled.clone()]);
+        let mut rebuild = context(p, preview.clone(), call(p, "CarPreviewActor_TA.ClearBoostFX", &[])?, None)?;
+        rebuild.append(&context(p, preview, call(p, "CarPreviewActor_TA.InitBoostFX", &[])?, None)?);
+        reset.append(&guard(start, disabled.clone(), guard(start + 3 + disabled.mem_size(), present, rebuild)?)?);
+    } else {
+        let component = field(p, var(p, 0x01, "PlayerController_TA.Car")?, "Vehicle_TA.BoostComponent")?;
+        reset.append(&context(p, component, call(p, "CarComponent_TA.ReInitFX", &[])?, None)?);
+    }
+    reset.append(&set_dynamic(p, key, super::items::choose(enabled, text("1"), text("0"))?)?);
+    guard(base, changed, reset)
 }
 
 fn parameter(p: &UpkPackage, base: usize, pair: Script, vector: bool, dispenser: Script, particle: bool) -> R<Script> {
@@ -116,23 +163,19 @@ pub(super) fn actor(p: &UpkPackage, base: usize) -> R<Script> {
     let start = active_base + 3 + active.mem_size();
     let mut body = Script::new();
     let mut colour = Script::new();
-    for channel in ["R", "G", "B"] {
+    for (index, channel) in ["R", "G", "B"].into_iter().enumerate() {
         colour.append(&set(p, &format!("HbxBoostLive.{channel}"), cast(FLOAT_TO_STRING,
-            member(p, "Core.Object.LinearColor", channel, paint_rgb(p, "boost")?, false)?))?);
+            paint_channel(p, "boost", index)?))?);
     }
     body.append(&guard(start, enabled.clone(), colour)?);
-    body.append(&repeat(p, start + body.mem_size(), "HbxBoostMeshIndex", int(2), |base, mesh| {
-      let mut group = Script::new();
-      for vector in [false, true] {
-        let main = var(p, 0x01, "ProjectX.FXActor_X.Parameters")?;
-        let child = field(p, var(p, 0x01, "FXActor_Boost_TA.BoostMesh")?, "ProjectX.FXActor_X.Parameters")?;
-        let mut dispenser = raw(&[0x45]);
-        dispenser.append(&native(0x9a, &[mesh.clone(), int(0)]))
-            .raw(&(main.mem_size() as u16).to_le_bytes()).append(&main)
-            .raw(&(child.mem_size() as u16).to_le_bytes()).append(&child);
+    // BoostMesh_TA is a Core.Object, not an FXActor_X. Its animated materials
+    // are painted by BoostMesh_TA.ApplyPaint through the native paint route;
+    // interpreting its memory as an FX parameter dispenser corrupts the VM.
+    for vector in [false, true] {
+        let dispenser = var(p, 0x01, "ProjectX.FXActor_X.Parameters")?;
         let array = field(p, dispenser.clone(), if vector { "ProjectX.ParameterDispenser_X.VectorParams" }
             else { "ProjectX.ParameterDispenser_X.ColorParams" })?;
-        group.append(&each(p, base + group.mem_size(), "HbxBoostParamIndex", array, |base, pair| {
+        body.append(&each_owned(p, start + body.mem_size(), "HbxBoostParamIndex", dispenser.clone(), array, |base, pair| {
             if !vector { return parameter(p, base, pair, false, dispenser.clone(), false); }
             // Vector parameters also carry positions and velocities. Touch colour/tint only.
             let key = member(p, "ProjectX.ParameterDispenser_X.VectorParamPair", "Key", pair.clone(), false)?;
@@ -148,9 +191,7 @@ pub(super) fn actor(p: &UpkPackage, base: usize) -> R<Script> {
             let inner = parameter(p, base + 3 + condition.mem_size(), pair, true, dispenser.clone(), false)?;
             guard(base, condition, inner)
         })?);
-      }
-      Ok(group)
-    })?);
+    }
     // Several stock boosts keep colour vectors on the PSC rather than the dispenser.
     // Read only existing instance parameters so disabling never leaves a new override behind.
     let attachments = var(p, 0x01, "ProjectX.FXActor_X.Attachments")?;
@@ -158,7 +199,7 @@ pub(super) fn actor(p: &UpkPackage, base: usize) -> R<Script> {
         let component = member(p, "ProjectX.FXActor_X.FXAttachment", "Component", attachment, false)?;
         let psc = dynamic(p, "Engine.ParticleSystemComponent", component)?;
         let array = field(p, psc.clone(), "Engine.ParticleSystemComponent.InstanceParameters")?;
-        each(p, base, "HbxBoostParamIndex", array, |base, pair| {
+        each_owned(p, base, "HbxBoostParamIndex", psc.clone(), array, |base, pair| {
             let kind = member(p, "Engine.ParticleSystemComponent.ParticleSysParam", "ParamType", pair.clone(), false)?;
             // PSPT_Vector = 3. Scalar, random-vector, actor and material parameters stay intact.
             let vector = native(0x9a, &[cast(0x3a, kind), int(3)]);

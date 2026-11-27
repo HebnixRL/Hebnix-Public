@@ -182,7 +182,7 @@ impl SwapperState {
                     "id": id,
                     "label": label,
                     "universal": is_universal_car(label),
-                    "owned": product.is_some_and(|id| owned.contains(&id)),
+                    "owned": super::decal_body_is_owned(label, *product, owned),
                 })
             })
             .collect();

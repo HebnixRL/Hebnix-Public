@@ -2,6 +2,8 @@ use super::*;
 use super::web::{SLOTS, category};
 use std::collections::{BTreeMap, HashSet};
 
+const REQUIRED_SLOTS: &[u8] = &[0, 2, 3, 14, 15];
+
 pub(super) struct Creator {
     preset: loadout_code::Preset,
     owned: Vec<(i32, u64, u64, i64)>,
@@ -15,6 +17,22 @@ pub(super) struct Creator {
     review: bool,
     affected: Option<Vec<Value>>,
 }
+impl Creator {
+    fn equipped(&self, team: usize, slot: u8) -> i64 {
+        self.preset.teams[team].products[slot as usize] as i64
+    }
+
+    fn desired(&self, team: usize, slot: u8) -> i64 {
+        self.swaps.get(&(team, slot)).copied().unwrap_or_else(|| self.equipped(team, slot))
+    }
+
+    fn missing_required(&self) -> Vec<u8> {
+        REQUIRED_SLOTS.iter().copied().filter(|&slot| {
+            (0..self.preset.teams.len()).any(|team| self.equipped(team, slot) <= 0)
+        }).collect()
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Action {
@@ -39,16 +57,20 @@ impl LoadoutsPanel {
         draft.stock_engines.extend(swapper.owned_engine_audio_ids().iter().filter_map(|&id|i32::try_from(id).ok()));
         draft.stock_engines.sort_unstable();draft.stock_engines.dedup();
         let team = draft.team;
-        let body = draft.preset.teams[team].products[0] as i64;
+        let equipped_body = draft.equipped(team, 0);
+        let desired_body = draft.desired(team, 0);
         let cat = category(draft.slot).unwrap();
         let mut owned_ids: HashSet<_> = draft.owned.iter().map(|item| item.0 as i64).collect();
         if cat==SwapCategory::Engines { owned_ids.extend(draft.stock_engines.iter().map(|&id|id as i64)); }
+        if cat == SwapCategory::Skins {
+            owned_ids.retain(|&id| swapper.loadout_item_compatible(cat, id, equipped_body));
+        }
         let mut catalog = swapper.web_catalog(ctx, cat, cooked, &owned_ids, &draft.previews);
         if let Some(items) = catalog["items"].as_array_mut() {
-            items.retain(|item| item["product"].as_i64().is_some_and(|id| swapper.loadout_item_compatible(cat, id, body)));
+            items.retain(|item| item["product"].as_i64().is_some_and(|id| swapper.loadout_item_compatible(cat, id, desired_body)));
         }
         let mut replacements: Vec<_> = draft.owned.iter().enumerate().filter_map(|(index, &(id, _, _, paint))| {
-            if !swapper.loadout_item_compatible(cat, id as i64, body) { return None }
+            if !swapper.loadout_item_compatible(cat, id as i64, equipped_body) { return None }
             let mut label = swapper.product_name(cat, id as i64)?;
             if paint > 0 { label.push_str(&format!(" ({})", crate::patcher::painted_swap::factory_paint_label(paint))); }
             Some(json!({"index":index,"label":label,"product":id}))
@@ -65,9 +87,10 @@ impl LoadoutsPanel {
             items.sort_by_cached_key(|item| (cat==SwapCategory::Skins && item["universal"].as_bool().unwrap_or(false),item["label"].as_str().unwrap_or("").to_lowercase()));
         }
         let slots: Vec<_> = SLOTS.iter().map(|&slot| {
-            let equipped = draft.preset.teams[team].products[slot as usize] as i64;
-            let wanted = draft.swaps.get(&(team, slot)).copied().unwrap_or(equipped);
+            let equipped = draft.equipped(team, slot);
+            let wanted = draft.desired(team, slot);
             json!({"slot":slot,"name":slot_name(slot),"product":wanted,"equipped":equipped,
+                "equipped_label":category(slot).and_then(|cat| swapper.product_name(cat,equipped)),
                 "label":category(slot).and_then(|cat| swapper.product_name(cat,wanted)).unwrap_or_else(|| if slot==13 {"Default".into()} else {"None".into()})})
         }).collect();
         let palette = match &draft.palettes {
@@ -102,7 +125,8 @@ impl LoadoutsPanel {
         }
         if draft.review && draft.affected.is_none() { draft.affected=Some(affected); }
         let affected=draft.affected.as_deref().unwrap_or(&[]);
-        json!({"name":draft.preset.name,"slot":draft.slot,"team":team,"slots":slots,"catalog":catalog,
+        let missing_required: Vec<_> = draft.missing_required().into_iter().map(slot_name).collect();
+        json!({"missing_required":missing_required,"name":draft.preset.name,"slot":draft.slot,"team":team,"slots":slots,"catalog":catalog,
             "replacements":replacements,"palette":palette,"colours":colours,"affected":affected,"primary":draft.preset.teams[team].team_color,
             "secondary":draft.preset.teams[team].custom_color,"preview_ids":draft.previews})
     }
@@ -118,7 +142,7 @@ impl LoadoutsPanel {
                     if copy.is_none() {
                         preset.name.clear();
                         for team in &mut preset.teams {
-                            for &slot in SLOTS.iter().filter(|&&slot| slot != 0) {
+                            for &slot in SLOTS.iter() {
                                 team.products[slot as usize] = 0; team.items[slot as usize] = None;
                             }
                         }
@@ -167,44 +191,52 @@ impl LoadoutsPanel {
                     refresh_inventory(draft, loadout_owned_instances(save)?)?;
                     let replacement = replacement_key.and_then(|key| draft.owned.iter().position(|item| *item == key));
                     let slot = draft.slot; let team = draft.team; let cat = category(slot).unwrap();
+                    let equipped_body = draft.equipped(team, 0);
+                    let desired_body = draft.desired(team, 0);
                     if cat==SwapCategory::Engines && (draft.stock_engines.contains(&(product as i32)) || replacement_stock.is_some()) {
                         let stock=if draft.stock_engines.contains(&(product as i32)) {product as i32} else {replacement_stock.unwrap()};
                         draft.preset.teams[team].products[slot as usize]=stock;draft.preset.teams[team].items[slot as usize]=None;
                         draft.swaps.remove(&(team,slot));
                         if stock as i64!=product {draft.swaps.insert((team,slot),product);}
-                    } else if product == 0 && ![0,2,3,14,15].contains(&slot) {
+                    } else if product == 0 && !REQUIRED_SLOTS.contains(&slot) {
                         draft.preset.teams[team].products[slot as usize]=0; draft.preset.teams[team].items[slot as usize]=None; draft.swaps.remove(&(team,slot));
                     } else {
-                        if !swapper.loadout_item_compatible(cat,product,draft.preset.teams[team].products[0] as i64) || swapper.product_name(cat,product).is_none() { return Err("This item is not compatible with the selected body".into()) }
-                        let direct = draft.owned.iter().position(|item| item.0 as i64 == product);
-                        let index = direct.or(replacement).ok_or("Choose an owned item to replace")?;
+                        if !swapper.loadout_item_compatible(cat, product, desired_body) || swapper.product_name(cat,product).is_none() { return Err("This item is not compatible with the selected body".into()) }
+                        let direct = draft.owned.iter().position(|item| {
+                            item.0 as i64 == product
+                                && swapper.loadout_item_compatible(cat, product, equipped_body)
+                        });
+                        let index = replacement.or(direct).ok_or("Choose an owned item to replace")?;
                         let &(id, upper, lower, _) = draft.owned.get(index).ok_or("Owned item is no longer available")?;
-                        if !swapper.loadout_item_compatible(cat,id as i64,draft.preset.teams[team].products[0] as i64) { return Err("Choose a compatible owned replacement".into()) }
+                        if !swapper.loadout_item_compatible(cat, id as i64, equipped_body) { return Err("Choose a compatible owned replacement".into()) }
                         let item_index = draft.preset.items.len();
                         draft.preset.items.push(loadout_code::Item { product_id:id,instance_upper:upper,instance_lower:lower,..Default::default() });
                         draft.preset.teams[team].products[slot as usize]=id;
                         draft.preset.teams[team].items[slot as usize]=Some(item_index);
                         draft.swaps.remove(&(team,slot));
-                        if direct.is_none() { draft.swaps.insert((team,slot), product); }
-                        if slot == 0 && !swapper.loadout_item_compatible(SwapCategory::Skins,draft.preset.teams[team].products[1] as i64,product) {
-                            draft.preset.teams[team].products[1]=0; draft.preset.teams[team].items[1]=None; draft.swaps.remove(&(team,1));
-                        }
+                        if id as i64 != product { draft.swaps.insert((team,slot), product); }
                     }
                     draft.inherited.remove(&(team,slot as usize,draft.preset.teams[team].products[slot as usize]));
                     let other = 1 - team;
                     draft.preset.teams[other].products[slot as usize] = draft.preset.teams[team].products[slot as usize];
                     draft.preset.teams[other].items[slot as usize] = draft.preset.teams[team].items[slot as usize];
-                    if slot == 0 {
-                        for paint in &mut draft.preset.teams {
-                            if !swapper.loadout_item_compatible(SwapCategory::Skins,paint.products[1] as i64,product) {
-                                paint.products[1]=0;paint.items[1]=None;
-                            }
-                        }
-                        draft.swaps.retain(|&(_,s),_| s != 1);
-                    }
                     draft.inherited.retain(|&(t,s,_)| !((t==team || t==other) && s==slot as usize));
                     draft.swaps.remove(&(other,slot));
                     if let Some(&wanted)=draft.swaps.get(&(team,slot)) { draft.swaps.insert((other,slot),wanted); }
+                    if slot == 0 {
+                        for team in 0..draft.preset.teams.len() {
+                            let equipped_decal = draft.equipped(team, 1);
+                            let desired_decal = draft.desired(team, 1);
+                            if equipped_decal != 0 && (
+                                !swapper.loadout_item_compatible(SwapCategory::Skins, equipped_decal, draft.equipped(team, 0))
+                                || !swapper.loadout_item_compatible(SwapCategory::Skins, desired_decal, draft.desired(team, 0))
+                            ) {
+                                draft.preset.teams[team].products[1] = 0;
+                                draft.preset.teams[team].items[1] = None;
+                                draft.swaps.remove(&(team, 1));
+                            }
+                        }
+                    }
                     // Remove unused references so only real, equipped inventory items are imported.
                     let old = draft.preset.items.clone(); let mut compact = Vec::new();
                     for paint in &mut draft.preset.teams { for index in paint.items.iter_mut().flatten() { let item=old[*index].clone(); let next=compact.iter().position(|saved| saved == &item).unwrap_or_else(|| { compact.push(item); compact.len()-1 }); *index=next; } }
@@ -214,6 +246,11 @@ impl LoadoutsPanel {
                     if hebnix_sdk::process::is_rocket_league_running() { return Err("Close Rocket League before creating a preset".into()) }
                     let save=self.save.as_deref().ok_or("Select a Rocket League save first")?;
                     let draft=self.creator.as_mut().ok_or("Start a preset first")?;
+                    let missing = draft.missing_required();
+                    if !missing.is_empty() {
+                        let names = missing.into_iter().map(slot_name).collect::<Vec<_>>();
+                        return Err(format!("Select the required items: {}", names.join(", ")));
+                    }
                     let name=name.trim();
                     if name.is_empty() || name.chars().count()>64 { return Err("Enter a name between 1 and 64 characters".into()) }
                     if self.names.iter().any(|n| n.eq_ignore_ascii_case(name)) || presets.presets.iter().any(|p| p.name.eq_ignore_ascii_case(name)) { return Err("That preset name already exists".into()) }
@@ -287,6 +324,28 @@ mod tests {
         preset.teams[0].products[0]=23; preset.teams[0].items[0]=Some(0);
         Creator {preset,owned:Vec::new(),swaps:BTreeMap::new(),palettes:PaletteLoad::Ready(Err(String::new())),slot:0,team:0,previews:Vec::new(),inherited:HashSet::new(),stock_engines:Vec::new(),review:false,affected:None}
     }
+    #[test]
+    fn a_body_swap_keeps_the_equipped_and_displayed_bodies_separate() {
+        let mut draft = draft();
+        draft.swaps.insert((0, 0), 42);
+        assert_eq!(draft.equipped(0, 0), 23);
+        assert_eq!(draft.desired(0, 0), 42);
+    }
+
+    #[test]
+    fn all_required_slots_must_be_equipped_on_both_teams() {
+        let mut draft = draft();
+        assert_eq!(draft.missing_required(), REQUIRED_SLOTS);
+        for team in &mut draft.preset.teams {
+            for &slot in REQUIRED_SLOTS {
+                team.products[slot as usize] = 23;
+            }
+        }
+        assert!(draft.missing_required().is_empty());
+        draft.preset.teams[1].products[14] = 0;
+        assert_eq!(draft.missing_required(), vec![14]);
+    }
+
     #[test]
     fn inherited_stale_instances_remain_stock_without_importing_inventory() {
         let mut draft=draft();draft.inherited.insert((0,0,23));

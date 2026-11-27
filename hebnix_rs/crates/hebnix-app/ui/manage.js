@@ -1748,6 +1748,10 @@ function presetCreator() {
     content.append(actions);
   } else if (step.slot !== undefined) {
     const selected=draft.slots.find(slot=>slot.slot===step.slot);
+    if (step.slot === 1) {
+      const body = draft.slots.find(slot => slot.slot === 0);
+      if (body?.product) content.append(element("p", "text-body-secondary", "Choose a decal for " + body.label + "."));
+    }
     content.append(element("p","text-body-secondary", "Selected: " + (selected?.label || "Default")));
     const search=element("input","form-control form-control-sm mb-3"); search.id="creator-search";search.type="search";search.placeholder="Search all items";search.value=view.search;
     const grid=element("div","preset-creator-items");
@@ -1791,7 +1795,11 @@ function presetCreator() {
   const footer=element("footer","preset-creator-footer");
   footer.append(button("Cancel",()=>{view.copy=false;creatorAction("cancel");}),button("← Back",()=>navigate(view.step-1),view.step===0));
   if(view.step+1<steps.length)footer.append(button("Next →",()=>navigate(view.step+1),false,"primary"));
-  else footer.append(button("Create Preset",()=>{view.creating=true;view.attempt=state.creatorAttempt;render();requestAnimationFrame(()=>requestAnimationFrame(()=>creatorAction("finish",{name:view.name})));},!state.closed,"primary"));
+  else {
+    const missing = draft.missing_required;
+    footer.append(button("Create Preset",()=>{view.creating=true;view.attempt=state.creatorAttempt;render();requestAnimationFrame(()=>requestAnimationFrame(()=>creatorAction("finish",{name:view.name})));},!state.closed || missing.length > 0,"primary"));
+    if (missing.length) footer.append(element("span", "text-warning small", "Required: " + missing.join(", ")));
+  }
   if(!state.closed)footer.append(element("span","text-warning small","Close Rocket League before creating the preset."));
   content.append(footer);root.append(rail,content);rows.append(root);
   if(view.creating){root.inert=true;const busy=element("div","creator-busy");busy.setAttribute("role","status");busy.setAttribute("aria-live","polite");busy.append(element("span","spinner-border text-primary"),element("strong","","Creating loadout…"),element("span","small text-body-secondary","Applying item swaps and saving your loadout."));rows.append(busy);}
@@ -1801,7 +1809,13 @@ function creatorReplacement(draft){
   const view=creatorView,item=view.pending;if(!item)return;
   const dialog=element("dialog","tracker-detail loadout-dialog");
   const close=()=>dismissDialog(dialog,()=>{view.pending=null;dialog.remove();});
-  dialog.append(element("h2","h5","Choose an owned item to replace"),element("p","",item.label+" is not owned. Equip one of your owned items and swap its local appearance."),element("p","small text-warning","This also changes other loadouts that use the same owned item."));
+  const body = draft.slots.find(slot => slot.slot === 0);
+  const hint = draft.slot === 1 && body?.equipped
+    ? "Choose an owned decal compatible with " + (body.equipped_label || "the body you'll equip in Rocket League") + "."
+    : "Choose the owned item you'll equip in Rocket League.";
+  dialog.append(element("h2","h5","Choose an owned item to replace"),
+    element("p","",hint + " It will appear as " + item.label + "."),
+    element("p","small text-warning","This also changes other loadouts that use the same owned item."));
   const choose=loadoutSelect("Owned replacement",[["","Choose an owned item"],...draft.replacements.map(item=>[item.index,item.label])],view.replacement,value=>{view.replacement=value;apply.disabled=value==="";});
   const apply=button("Use Replacement",()=>{if(choose.value==="")return;dismissDialog(dialog,()=>{view.pending=null;dialog.remove();creatorAction("pick",{product:item.product,replacement:Number(choose.value)});});},view.replacement==="","primary");
   dialog.append(choose,element("p","small text-body-secondary mt-2",draft.replacements.length?"":"No compatible owned replacements are available."),button("Cancel",close),apply);openLoadoutModal(dialog,close);
@@ -2946,8 +2960,10 @@ function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings
       document.activeElement?.blur();
     }));
   } else {
-    for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Trim colour"], ["wheels", "Wheel colour"], ["boost", "Boost colour"], ["heatseeker", "Heatseeker ball"]]) {
-      if (key === "primary") section.append(element("h3", "h6 mt-3 mb-3", "Car Colours"));
+    for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Body / trim"], ["decal", "Decal"], ["wheels", "Wheels"], ["antenna", "Antenna"], ["topper", "Topper"], ["boost", "Boost"], ["trail", "Trail"], ["goal_explosion", "Goal explosion"], ["banner", "Player banner"], ["avatar_border", "Avatar border"], ["heatseeker", "Heatseeker ball"]]) {
+      if (key === "primary") section.append(element("p", "small text-body-secondary", "Colours apply to your currently equipped items."), element("h3", "h6 mt-3 mb-3", "Car Colours"));
+      if (key === "boost") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Effects"));
+      if (key === "banner") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Player Colours"));
       if (key === "heatseeker") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Heatseeker Ball"));
       const row = element("div", "live-colour-row mb-3");
       const input = element("input", "form-control form-control-color");

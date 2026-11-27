@@ -146,3 +146,56 @@ fn rejects_missing_locale_configuration() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Could not read locale configuration"));
 }
+
+#[test]
+fn combines_all_english_and_translated_files() {
+    let repo = TestRepo::new();
+    fs::write(repo.locales.join("en/navigation.ftl"), "nav-home = Home\n").unwrap();
+    fs::write(
+        repo.locales.join("de/navigation.ftl"),
+        "nav-home = Startseite\n",
+    )
+    .unwrap();
+    let output = repo.run();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("missing"));
+}
+
+#[test]
+fn checks_syntax_in_secondary_english_files() {
+    let repo = TestRepo::new();
+    fs::write(repo.locales.join("en/navigation.ftl"), "broken = { $name\n").unwrap();
+    let output = repo.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("navigation.ftl"));
+}
+
+#[test]
+fn rejects_duplicate_keys_across_locale_files() {
+    let repo = TestRepo::new();
+    fs::write(
+        repo.locales.join("de/navigation.ftl"),
+        "hello = Noch einmal\n",
+    )
+    .unwrap();
+    let output = repo.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate message ID 'hello'"));
+}
+
+#[test]
+fn rejects_duplicate_keys_in_one_file() {
+    let repo = TestRepo::new();
+    fs::write(
+        repo.locales.join("en/hebnix.ftl"),
+        "hello = Hello\nhello = Again\n",
+    )
+    .unwrap();
+    let output = repo.run();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate message ID 'hello'"));
+}

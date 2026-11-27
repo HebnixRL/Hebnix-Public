@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - "hebnix_rs/**"
+      - "tools/i18n-validator/**"
       - "build.bat"
       - ".github/workflows/build.yml"
   workflow_dispatch:
@@ -22,9 +23,11 @@ jobs:
         with:
           workspaces: hebnix_rs -> target
 
+      - name: test translation validator
+        run: cargo test --locked --manifest-path tools/i18n-validator/Cargo.toml
+
       - name: check translations
-        run: cargo test -p hebnix-app i18n
-        working-directory: hebnix_rs
+        run: cargo run --locked --manifest-path tools/i18n-validator/Cargo.toml -- .
 
       - name: build hebnix
         run: cargo build --locked --release --bin hebnix
@@ -94,9 +97,11 @@ jobs:
         with:
           workspaces: hebnix_rs -> target
 
+      - name: test translation validator
+        run: cargo test --locked --manifest-path tools/i18n-validator/Cargo.toml
+
       - name: check translations
-        run: cargo test -p hebnix-app i18n
-        working-directory: hebnix_rs
+        run: cargo run --locked --manifest-path tools/i18n-validator/Cargo.toml -- .
 
       - name: build hebnix
         run: cargo build --locked --release --bin hebnix

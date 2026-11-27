@@ -46,6 +46,13 @@ pub struct Settings {
     pub trim: Paint,
     pub wheels: Paint,
     pub boost: Paint,
+    pub decal: Paint,
+    pub antenna: Paint,
+    pub topper: Paint,
+    pub trail: Paint,
+    pub goal_explosion: Paint,
+    pub banner: Paint,
+    pub avatar_border: Paint,
     pub scoreboard_mmr: bool,
     pub scoreboard_names: bool,
     pub stadium: TeamColours,
@@ -72,7 +79,7 @@ impl Settings {
         // Translate on write so existing installed hooks get the correction live.
         let mut text = format!("\nHbxLive.version=1\nHbxLive.camber={}\nHbxLive.vertical={}\nHbxLive.lateral={}\n", -self.alignment.camber, self.alignment.vertical, -self.alignment.lateral);
         text.push_str(&format!("HbxLive.goal-explosion.enabled={}\nHbxLive.goal-explosion.scale={}\n", u8::from(self.goal_explosion_scale != 0.), self.goal_explosion_scale));
-        for (key, paint) in [("primary", &self.primary), ("secondary", &self.secondary), ("heatseeker", &self.heatseeker), ("trim", &self.trim), ("wheels", &self.wheels), ("boost", &self.boost)] {
+        for (key, paint) in [("primary", &self.primary), ("secondary", &self.secondary), ("heatseeker", &self.heatseeker), ("trim", &self.trim), ("wheels", &self.wheels), ("boost", &self.boost), ("decal", &self.decal), ("antenna", &self.antenna), ("topper", &self.topper), ("trail", &self.trail), ("goal_explosion", &self.goal_explosion), ("banner", &self.banner), ("avatar_border", &self.avatar_border)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(paint.enabled)));
             text.push_str(&format!("HbxLive.{key}.rainbow={}\n", u8::from(paint.rainbow)));
             for (channel, value) in ["r", "g", "b"].into_iter().zip(paint.rgb) {
@@ -82,6 +89,8 @@ impl Settings {
                 text.push_str(&format!("HbxLive.{key}.{channel}={value:.7}\n"));
             }
         }
+        let item_paints = [&self.trim, &self.wheels, &self.boost, &self.decal, &self.antenna, &self.topper, &self.trail, &self.goal_explosion];
+        text.push_str(&format!("HbxLive.items.enabled={}\n", u8::from(item_paints.iter().any(|paint| paint.enabled))));
         for (key, group) in [("stadium", &self.stadium), ("hud", &self.hud)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(group.enabled)));
             for (team, rgb) in [("blue", group.blue), ("orange", group.orange)] {
@@ -102,6 +111,7 @@ impl Settings {
         }
         text.push_str(&format!("HbxLive.instant.mode={}\nHbxLive.instant.private={}\nHbxLive.instant.tournaments={}\n", self.instant_mode.min(4), u8::from(self.instant_private), u8::from(self.instant_tournaments)));
         text.push_str(&format!("HbxLive.scoreboard.mmr={}\nHbxLive.scoreboard.names={}\nHbxLive.end=1\n", u8::from(self.scoreboard_mmr), u8::from(self.scoreboard_names)));
+        if text.len() > 8192 { return Err("Live cosmetic settings exceed the runtime file limit".into()); }
         Ok(text)
     }
 }
@@ -111,7 +121,30 @@ fn values() -> Settings {
     slot.get_or_insert_with(|| fs::read(preferences()).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or_default()).clone()
 }
 pub fn snapshot() -> serde_json::Value {
-    serde_json::json!({"settings": values(), "status": STATUS.lock().map(|s| s.clone()).unwrap_or_default(), "running": hebnix_sdk::process::is_rocket_league_running()})
+    let running = hebnix_sdk::process::is_rocket_league_running();
+    serde_json::json!({"settings": values(), "status": STATUS.lock().map(|s| s.clone()).unwrap_or_default(), "running": running,
+        "runtime": if running { runtime_report() } else { serde_json::Value::Null }})
+}
+fn parse_runtime_report(text: &str) -> Option<serde_json::Value> {
+    if text.len() > 8192 || !text.ends_with("HbxLiveRuntime.end=1\n") { return None; }
+    let lines: std::collections::HashMap<_, _> = text.lines().filter_map(|line| line.split_once('=')).collect();
+    let revision: u32 = lines.get("HbxLiveRuntime.version")?.parse().ok()?;
+    let mut channels = serde_json::Map::new();
+    for key in ["trim", "decal", "wheels", "boost", "antenna", "topper", "trail", "goal_explosion", "banner", "avatar_border"] {
+        let boolean = |suffix| match lines.get(format!("{key}.{suffix}").as_str()).copied() {
+            Some("1") => serde_json::Value::Bool(true), Some("0") => serde_json::Value::Bool(false), _ => serde_json::Value::Null,
+        };
+        channels.insert(key.into(), serde_json::json!({"found": boolean("found"), "applied": boolean("applied")}));
+    }
+    Some(serde_json::json!({"revision": revision, "current": revision == runtime::REVISION, "channels": channels}))
+}
+fn runtime_report() -> serde_json::Value {
+    (|| {
+        let path = lifecycle::runtime_report_path()?;
+        let metadata = fs::metadata(&path).ok()?;
+        if metadata.len() > 8192 || metadata.modified().ok()?.elapsed().ok()?.as_secs() > 4 { return None; }
+        parse_runtime_report(&fs::read_to_string(path).ok()?.replace('\r', ""))
+    })().unwrap_or(serde_json::Value::Null)
 }
 pub fn status_snapshot() -> serde_json::Value {
     let detail = STATUS.lock().map(|s| s.clone()).unwrap_or_default();
@@ -200,7 +233,9 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
             if ui.button("Reset alignment").clicked() { settings.alignment = Alignment::default(); changed = true; }
         } else {
             ui.strong("Car Colours");
-            for (label, paint) in [("Primary paint", &mut settings.primary), ("Secondary paint", &mut settings.secondary), ("Trim colour", &mut settings.trim), ("Wheel colour", &mut settings.wheels), ("Boost colour", &mut settings.boost), ("Heatseeker ball", &mut settings.heatseeker)] {
+            for (label, paint) in [("Primary paint", &mut settings.primary), ("Secondary paint", &mut settings.secondary), ("Body / trim", &mut settings.trim), ("Decal", &mut settings.decal), ("Wheels", &mut settings.wheels), ("Antenna", &mut settings.antenna), ("Topper", &mut settings.topper), ("Boost", &mut settings.boost), ("Trail", &mut settings.trail), ("Goal explosion", &mut settings.goal_explosion), ("Player banner", &mut settings.banner), ("Avatar border", &mut settings.avatar_border), ("Heatseeker ball", &mut settings.heatseeker)] {
+                if label == "Boost" { ui.separator(); ui.strong("Effects"); }
+                if label == "Player banner" { ui.separator(); ui.strong("Player Colours"); }
                 if label == "Heatseeker ball" { ui.separator(); ui.strong("Heatseeker Ball"); }
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut paint.enabled, label).changed();
@@ -229,6 +264,17 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_report_distinguishes_missing_and_unsupported_channels() {
+        assert!(parse_runtime_report("HbxLiveRuntime.version=11\nboost.found=1\n").is_none());
+        let report = parse_runtime_report(&format!("HbxLiveRuntime.version={}\nboost.found=1\nboost.applied=1\ntrail.found=0\nHbxLiveRuntime.end=1\n", runtime::REVISION)).unwrap();
+        assert_eq!(report["current"], true);
+        assert_eq!(report["channels"]["boost"]["applied"], true);
+        assert_eq!(report["channels"]["trail"]["found"], false);
+        assert!(report["channels"]["decal"]["found"].is_null());
+        let old = parse_runtime_report("HbxLiveRuntime.version=9\nHbxLiveRuntime.end=1\n").unwrap();
+        assert_eq!(old["current"], false);
+    }
     #[test]
     fn config_is_bounded_numeric_and_defaults_disable_overrides() {
         let text = Settings::default().encode().unwrap();
@@ -280,6 +326,27 @@ mod goal_scale_tests {
         assert!(encoded.contains("HbxLive.boost.rainbow=1\n"));
         assert!(encoded.contains("HbxLive.boost.r=1.0000000\n"));
         assert!(encoded.contains("HbxLive.boost.g=0.0000000\n"));
+    }
+    #[test]
+    fn equipped_item_colours_are_opt_in_and_fit_the_runtime_file() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        for paint in [&mut settings.trim, &mut settings.decal, &mut settings.wheels,
+            &mut settings.boost, &mut settings.antenna, &mut settings.topper,
+            &mut settings.trail, &mut settings.goal_explosion, &mut settings.banner, &mut settings.avatar_border] {
+            assert!(!paint.enabled && !paint.rainbow);
+            paint.enabled = true;
+            paint.rainbow = true;
+            paint.rgb = [35, 120, 200];
+        }
+        let saved = serde_json::to_vec(&settings).unwrap();
+        let loaded: Settings = serde_json::from_slice(&saved).unwrap();
+        let encoded = loaded.encode().unwrap();
+        assert!(encoded.len() <= 8192);
+        for key in ["trim", "decal", "wheels", "boost", "antenna", "topper", "trail", "goal_explosion", "banner", "avatar_border"] {
+            assert!(encoded.contains(&format!("HbxLive.{key}.enabled=1\n")), "{key}");
+            assert!(encoded.contains(&format!("HbxLive.{key}.rainbow=1\n")), "{key}");
+        }
+        assert!(encoded.contains("HbxLive.items.enabled=1\n"));
     }
     #[test]
     fn scale_rejects_invalid_values() {

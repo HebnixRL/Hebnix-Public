@@ -183,6 +183,27 @@ fn item_identity(item: &SwapItem) -> String {
     )
 }
 
+fn decal_body_is_owned(label: &str, product: Option<i64>, owned: &HashSet<i64>) -> bool {
+    // Stock Octane is available without a separate OnlineProduct instance.
+    // Keep it in the body selector when the owned-items filter is enabled.
+    label.trim().eq_ignore_ascii_case("Octane")
+        || product.is_some_and(|id| owned.contains(&id))
+}
+
+#[cfg(test)]
+mod decal_body_ownership_tests {
+    use super::*;
+    #[test]
+    fn stock_octane_does_not_require_an_online_inventory_instance() {
+        let empty = HashSet::new();
+        assert!(decal_body_is_owned("Octane", Some(23), &empty));
+        assert!(decal_body_is_owned("OCTANE", None, &empty));
+        assert!(!decal_body_is_owned("Octane ZSR", Some(1568), &empty));
+        assert!(!decal_body_is_owned("Fennec", Some(4284), &empty));
+        assert!(decal_body_is_owned("Fennec", Some(4284), &HashSet::from([4284])));
+    }
+}
+
 fn can_recolour_owned(category: SwapCategory, item: &SwapItem, owned_ids: &HashSet<i64>) -> bool {
     category.supports_recolour() && item.product_id.is_some_and(|id| owned_ids.contains(&id))
 }
@@ -2721,7 +2742,7 @@ impl SwapperState {
             let car_allowed = |car: &(String, String, Option<i64>)| {
                 !self.owned_only
                     || is_universal_car(&car.1)
-                    || car.2.is_some_and(|id| owned_ids.contains(&id))
+                    || decal_body_is_owned(&car.1, car.2, owned_ids)
             };
             if self.selected_car.as_ref().is_some_and(|selected| {
                 !cars

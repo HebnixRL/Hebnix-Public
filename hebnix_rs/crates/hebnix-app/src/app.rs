@@ -872,6 +872,7 @@ pub struct HebnixApp {
     colours: crate::patcher::colours::ColoursState,
     colour_admin_prompt_open: bool,
     admin_prompt_open: bool,
+    live_setup_pending: bool,
     item_action_prompt_open: bool,
     plugin_delete_prompt: Option<String>,
     presets: crate::presets::PresetStore,
@@ -1111,17 +1112,17 @@ impl HebnixApp {
         let mut hotkey = ToggleHotkey::new();
         if let Some(hk) = &mut hotkey {
             hk.rebind(&config.settings.hotkey);
+            hk.set_restricted(config.settings.restrict_hotkey_to_hebnix_or_rocket_league);
         }
         if let Some(hotkey) = &hotkey {
             let tx = control_tx.clone();
             let ctx = cc.egui_ctx.clone();
-            hotkey.listen(move || {
+            hotkey.listen_show_hide(move || {
                 // a window minimized on Wayland gets no redraws, so the toggle
                 // below would never be handled until it is back
                 #[cfg(target_os = "linux")]
                 winutil::wake_minimized_main_window();
-                let _ = tx.send(AppMsg::ToggleVisibility);
-                ctx.request_repaint();
+                crate::ui_work::send_toggle_control(&tx, &ctx, AppMsg::ToggleVisibility);
             });
         }
 
@@ -1503,6 +1504,7 @@ impl HebnixApp {
             colours: crate::patcher::colours::ColoursState::new(),
             colour_admin_prompt_open: false,
             admin_prompt_open: false,
+            live_setup_pending: cfg!(windows),
             item_action_prompt_open: false,
             plugin_delete_prompt: None,
             presets: crate::presets::PresetStore::new(&base_dir.clone()),
@@ -1536,7 +1538,7 @@ impl HebnixApp {
         } else {
             app.evaluate_proxies();
         }
-        if app.spoofer_certificate_prompt_open {
+        if app.spoofer_certificate_prompt_open || app.admin_prompt_open {
             app.set_hidden(&cc.egui_ctx, false);
         }
         fetch_catalogs(app.tx.clone(), cc.egui_ctx.clone(), &CATALOG_NAMES);
@@ -1550,6 +1552,7 @@ impl HebnixApp {
     }
 
     fn save_config(&mut self) {
+        if let Some(hotkey) = &self.hotkey { hotkey.set_restricted(self.config.settings.restrict_hotkey_to_hebnix_or_rocket_league); }
         if let Err(e) = self.config.save(&self.base_dir) {
             self.console
                 .write(format!("[Console] Failed to save config: {e}"));
@@ -2777,13 +2780,12 @@ impl HebnixApp {
 
     #[cfg(not(target_os = "linux"))]
     fn set_hidden(&mut self, ctx: &egui::Context, hidden: bool) {
+        if !crate::visibility::begin_change(ctx, hidden) { return; }
         tracing::info!(hidden, "toggling main window visibility");
         if hidden {
             self.panel.leave(ctx);
             if let Some(navigation) = &mut self.modern_navigation { navigation.hide(); }
         }
-        let rocket_league_had_focus =
-            !hidden && hebnix_sdk::process::is_rocket_league_focused();
         if !hidden {
             winutil::note_foreground();
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2806,15 +2808,14 @@ impl HebnixApp {
                 self.topmost = true;
                 winutil::set_main_window_topmost(true);
             }
-            let game_fullscreen =
-                self.last_rl_open && self.window_mode == Some(WindowMode::Fullscreen);
-            if !game_fullscreen && !rocket_league_had_focus {
-                winutil::focus_main_window();
-            }
+            // An explicit Show must raise the real window even when the key
+            // came from Rocket League; otherwise it remains behind the game.
+            winutil::focus_main_window();
         }
 
         ctx.request_repaint();
         self.plugin_mgr.dispatch_gui_visibility(!hidden);
+        crate::visibility::applied(ctx);
     }
 
     fn handle_toggle_visibility(&mut self, ctx: &egui::Context) {
@@ -3221,7 +3222,8 @@ impl HebnixApp {
                         }
                     }
                     let launched = rl_open && !self.last_rl_open;
-                    if (rl_state_changed || platform_changed) && !rl_open && crate::watchdog::is_ready() {
+                    if !self.live_setup_pending && !self.admin_prompt_open && !self.colour_admin_prompt_open
+                        && (rl_state_changed || platform_changed) && !rl_open && crate::watchdog::is_ready() {
                         crate::patcher::live_cosmetics::start(&self.config.settings.rl_path);
                     }
 
@@ -8403,6 +8405,14 @@ impl eframe::App for HebnixApp {
         // a slow background task must not prevent the selected hotkey or tray
         // from delivering an already-queued visibility request.
         self.handle_messages(ctx);
+        #[cfg(windows)]
+        if self.live_setup_pending && !self.admin_prompt_open && !self.colour_admin_prompt_open
+            && !self.spoofer_certificate_prompt_open && crate::watchdog::is_ready() {
+            // App construction/evaluate_proxies may open the startup admin
+            // prompt. Only the final session may begin patching after it closes.
+            self.live_setup_pending = false;
+            crate::patcher::live_cosmetics::start(&self.config.settings.rl_path);
+        }
         self.owned_inventory.poll(ctx);
         self.owned_inventory.follow_game_account(ctx,self.last_rl_open);
         let engine_cooked=PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
