@@ -86,3 +86,6 @@ nav-lan-hosting = LAN Hosting
 nav-practice = Practice
 nav-bots-and-podium = Bots & Podium
 nav-live-editor = Live Editor
+
+swapper-save-account = Owned Items
+rl-launch-setup-non-steam-shortcuts-can-t-pass = Non-Steam shortcuts cannot pass Rocket League launch arguments directly. Configure them in your launcher.

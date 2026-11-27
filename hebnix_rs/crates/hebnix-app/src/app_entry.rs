@@ -389,9 +389,7 @@ fn main() -> eframe::Result {
         tracing::warn!("WebSocket proxy cleanup: {error}");
     }
     tracing::info!("legacy WebSocket cleanup check complete");
-    if watchdog::spawn() {
-        patcher::live_cosmetics::start(&cfg.settings.rl_path);
-    } else {
+    if !watchdog::spawn() {
         patcher::live_cosmetics::unavailable("Live cosmetics unavailable: the cleanup watchdog could not start. Restart Hebnix to retry.");
         tracing::warn!("Live cosmetics disabled because the cleanup watchdog could not start");
     }

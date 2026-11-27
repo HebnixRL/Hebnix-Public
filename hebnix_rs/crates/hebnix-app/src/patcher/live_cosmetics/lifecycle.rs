@@ -5,7 +5,13 @@ use std::sync::{atomic::{AtomicBool, Ordering}, OnceLock};
 
 static COOKED: OnceLock<Mutex<PathBuf>> = OnceLock::new();
 static BUSY: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+#[path = "operation_recovery.rs"]
+mod operation_recovery;
 pub fn managed() -> bool { COOKED.get().is_some() }
+pub(super) fn runtime_report_path() -> Option<PathBuf> {
+    Some(directory().join("runtime.ini"))
+}
 #[derive(Serialize, Deserialize)]
 struct Function { path: String, before: Vec<u8>, after: Vec<u8>, #[serde(default)] older: Vec<Vec<u8>> }
 #[derive(Clone, Serialize, Deserialize)]
@@ -66,12 +72,33 @@ fn payload<'a>(p: &'a UpkPackage, path: &str) -> Result<(usize, &'a [u8]), Strin
     let e = &p.exports[i];
     Ok((i, &p.image[e.serial_offset..e.serial_offset + e.serial_size]))
 }
-fn lock() -> Result<fs::File, String> {
-    use std::os::windows::fs::OpenOptionsExt;
+fn lock(takeover: bool) -> Result<fs::File, String> {
     fs::create_dir_all(directory()).map_err(|e| e.to_string())?;
-    // A Windows share lock dies with its process. A stale lock file is harmless.
-    fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0)
-        .open(directory().join("operation.lock")).map_err(|e| format!("Live cosmetic operation is busy: {e}"))
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    let path = directory().join("operation.lock");
+    let mut opened = options.open(&path);
+    #[cfg(windows)]
+    if opened.as_ref().is_err_and(|e| matches!(e.raw_os_error(), Some(32 | 33))) {
+        status("Recovering the previous live cosmetic operation…");
+        if takeover { operation_recovery::release_previous_worker(&path)?; }
+        for _ in 0..40 {
+            if opened.is_ok() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            opened = options.open(&path);
+        }
+    }
+    let file = opened.map_err(|e| format!("Could not recover the previous live cosmetic operation: {e}"))?;
+    // Unix opens are shareable: hold an OS lock until this File is dropped.
+    // A crashed process releases the lock; a stale lock file remains harmless.
+    #[cfg(unix)]
+    file.try_lock().map_err(|e| format!("Could not recover the previous live cosmetic operation: {e}"))?;
+    Ok(file)
 }
 fn allowed(owner: u32) -> Result<(), String> {
     #[cfg(test)]
@@ -154,12 +181,23 @@ pub fn reconcile_async() {
     if BUSY.swap(true, Ordering::AcqRel) { return; }
     std::thread::spawn(move || {
         status("Preparing live features…");
-        for attempt in 0..3 {
+        let mut attempt = 0;
+        loop {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reconcile(&cooked, true, std::process::id())))
                 .unwrap_or_else(|_| Err("Live recovery stopped unexpectedly; the saved journal was retained".into()));
             match outcome {
                 Ok(()) => { status("Live features ready"); break; }
                 Err(error) => {
+                    if hebnix_sdk::process::is_rocket_league_running() {
+                        status("Error: Rocket League is using the game files. Live patching will resume after Rocket League closes.");
+                        while hebnix_sdk::process::is_rocket_league_running()
+                            && !crate::watchdog::replacement_is_running(std::process::id()) {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                        if crate::watchdog::replacement_is_running(std::process::id()) { break; }
+                        attempt = 0;
+                        continue;
+                    }
                     tracing::warn!(attempt, "Live cosmetics: {error}");
                     status(format!("Error: {error}"));
                     if attempt == 2 || hebnix_sdk::process::is_rocket_league_running()
@@ -167,6 +205,7 @@ pub fn reconcile_async() {
                     // Re-read the durable journal and actual package contents on
                     // every attempt. Never restart from assumed vanilla files.
                     std::thread::sleep(std::time::Duration::from_secs(1 + attempt));
+                    attempt += 1;
                 }
             }
         }
@@ -200,10 +239,12 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
     if let Some(root) = TEST_ROOT.with(|r| r.borrow().clone()) {
         assert!(cooked.canonicalize().unwrap().starts_with(root.canonicalize().unwrap()), "test writes must stay inside its isolated copy");
     }
-    let _process_lock = lock()?;
+    allowed(owner)?;
+    let _process_lock = lock(install && crate::watchdog::parent_pid().is_none())?;
     let _movie_lock = super::super::title_patcher::UI_PATCH_LOCK.lock().map_err(|e| e.to_string())?;
     let _package_lock = super::super::profile_pictures::PACKAGE_EDIT.lock().map_err(|e| e.to_string())?;
     allowed(owner)?;
+    if install { runtime::verify_dependencies(cooked)?; }
     // Retire the old literal-scale patch before this function enters the live journal.
     // This is idempotent: an interrupted migration resumes from its existing backup.
     if install && super::super::goal_explosion::current(&cooked.join("Backups")).is_some() {
@@ -253,7 +294,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
         package = prepared;
         names.extend(scoreboard_names);
         let mods = super::game_mods::prepare(&mut package, &cooked.join("Backups"))?;
-        let mut functions = runtime::generate(&package)?.into_iter().map(|(path, after)| {
+        let mut functions = runtime::generate_with_paths(&package, &cooked.parent().ok_or("Missing TAGame directory")?.join("HbxLiveCosmetics.ini"), &directory().join("runtime.ini"))?.into_iter().map(|(path, after)| {
             let before = payload(&package, &path)?.1.to_vec();
             Ok(Function { path, before, after, older: Vec::new() })
         }).collect::<Result<Vec<_>, String>>()?;
@@ -301,7 +342,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
         package = prepared;
         r.names.extend(scoreboard_names);
         let mods = super::game_mods::prepare(&mut package, &cooked.join("Backups"))?;
-        let mut generated = runtime::generate(&package)?.into_iter().map(|(path, after)| {
+        let mut generated = runtime::generate_with_paths(&package, &cooked.parent().ok_or("Missing TAGame directory")?.join("HbxLiveCosmetics.ini"), &directory().join("runtime.ini"))?.into_iter().map(|(path, after)| {
             Ok((path.clone(), payload(&package, &path)?.1.to_vec(), after))
         }).collect::<Result<Vec<_>, String>>()?;
         generated.extend(scoreboard);
@@ -441,6 +482,7 @@ mod tests {
         let cooked = root.join("TAGame/CookedPCConsole");
         fs::create_dir_all(&cooked).unwrap();
         fs::copy(&source, cooked.join("TAGame.upk")).unwrap();
+        for file in ["Core.upk", "Engine.upk", "ProjectX.upk"] { fs::copy(parent.join(file), cooked.join(file)).unwrap(); }
         for (file, _) in super::super::movies::FILES { fs::copy(parent.join(file), cooked.join(file)).unwrap(); }
         TEST_ROOT.with(|r| *r.borrow_mut() = Some(root.clone()));
         println!("Installing all live hooks into isolated copies");

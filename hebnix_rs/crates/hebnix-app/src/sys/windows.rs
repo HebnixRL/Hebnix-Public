@@ -299,48 +299,7 @@ pub fn set_startup_enabled(enabled: bool) -> std::io::Result<()> {
 
 /// force-kill RocketLeague.exe (console quit command)
 pub fn kill_rocket_league() -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "RocketLeague.exe"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .and_then(|output| {
-            if output.status.success() || !hebnix_sdk::process::is_rocket_league_running() {
-                return Ok(());
-            }
-
-            // Rocket League can be elevated independently of Hebnix.  A
-            // normal user process cannot terminate an elevated process, so
-            // retry via Windows' on-demand UAC prompt instead of requiring
-            // the whole app to be launched as administrator.
-            if !crate::spoofer::is_admin() && kill_rocket_league_elevated()? {
-                return Ok(());
-            }
-
-            Err(std::io::Error::other(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ))
-        })
-}
-
-fn kill_rocket_league_elevated() -> std::io::Result<bool> {
-    #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            "$process = Start-Process -FilePath 'taskkill.exe' -ArgumentList '/F','/IM','RocketLeague.exe' -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $process.ExitCode",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    Ok(output.status.success() || !hebnix_sdk::process::is_rocket_league_running())
+    hebnix_sdk::process::window::close_rocket_league()
 }
 
 /// Remove Rocket League's embedded-browser cache, if it exists, including
