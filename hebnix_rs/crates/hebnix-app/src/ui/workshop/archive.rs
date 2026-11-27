@@ -1,8 +1,8 @@
 //! the RL Workshop Archive (xplodingeggo.github.io/RLWorkshopCollection): a
-//! public list of workshop maps with direct downloads, for players without a
-//! Hubcap API key. Anyone can request a Steam Workshop map on the site and it
-//! is added within minutes. This lists the archive's maps.json and downloads
-//! and imports a map the same way a hand-picked file or zip is imported.
+//! public list of workshop maps with direct downloads. Anyone can request a
+//! Steam Workshop map on the site and it is added within minutes. This lists
+//! the archive's maps.json and downloads and imports a map the same way a
+//! hand-picked file or zip is imported.
 
 use crate::i18n::{t, t_args};
 use std::io::Read;
@@ -227,72 +227,6 @@ pub struct ArchiveBrowser {
 }
 
 impl ArchiveBrowser {
-    #[cfg(windows)]
-    pub(super) fn web_snapshot(&mut self) -> (Value, Option<LocalMap>) {
-        use serde_json::json;
-        let loading = self.loading.load(Ordering::Relaxed);
-        let downloading = self.downloading.load(Ordering::Relaxed);
-        let mut map = None;
-        let mut matches = Vec::new();
-        let mut count = 0;
-        let mut error = String::new();
-        let mut status = String::new();
-        if let Ok(mut shared) = self.shared.lock() {
-            match &shared.index {
-                Some(Ok(items)) if self.show_list => {
-                    count = items.len();
-                    matches.extend(items.iter().enumerate().filter(|(_, item)| item.matches(&self.search)).map(|(index, item)| {
-                        json!({ "id": index, "name": item.title, "author": item.author, "tags": item.categories() })
-                    }));
-                }
-                Some(Err(message)) => error = message.clone(),
-                _ => {}
-            }
-            status.clone_from(&shared.status);
-            if let Some(result) = &shared.finished {
-                match result {
-                    Ok(item) => {
-                        status = t_args("render-imported-map-find-it-under-browse", &[("map", item.name.as_str().into())]);
-                        if !downloading && !shared.delivered { map = Some(item.clone()); }
-                    }
-                    Err(message) => error = message.clone(),
-                }
-            }
-            if map.is_some() { shared.delivered = true; }
-        }
-        let labels = json!({
-            "title": t("render-no-api-key-use-the-rl"), "intro": t("render-if-you-can-t-get-a"),
-            "site": t("render-open-the-rl-workshop-archive-request"), "show": t("render-show-archive-maps"),
-            "hide": t("render-hide-list"), "refresh": t("render-refresh-list"),
-            "search": t("render-search-name-author-or-tag"), "download": t("render-download"),
-            "count": t_args("render-shown-of-maps-maps", &[("shown", matches.len().to_string().into()), ("maps", count.to_string().into())]),
-        });
-        (json!({
-            "show": self.show_list, "loading": loading, "busy": downloading, "search": self.search,
-            "status": status, "error": error, "maps": matches, "labels": labels,
-        }), map)
-    }
-
-    #[cfg(windows)]
-    pub(super) fn web_action(&mut self, key: &str, search: Option<String>, id: Option<usize>, cache: &Path, runtime: &Path, ctx: &egui::Context) {
-        match key {
-            "show" => {
-                self.show_list = true;
-                if self.shared.lock().is_ok_and(|shared| shared.index.is_none()) { self.load(ctx); }
-            }
-            "hide" => self.show_list = false,
-            "refresh" => self.load(ctx),
-            "search" => self.search = search.unwrap_or_default(),
-            "site" => { let _ = open::that(ARCHIVE_SITE); }
-            "download" if self.show_list => {
-                let item = self.shared.lock().ok().and_then(|shared| {
-                    shared.index.as_ref()?.as_ref().ok()?.get(id?).cloned()
-                });
-                if let Some(item) = item { self.start(item, cache.to_owned(), runtime.to_owned(), ctx); }
-            }
-            _ => {}
-        }
-    }
     fn load(&self, ctx: &egui::Context) {
         if self.loading.swap(true, Ordering::Relaxed) {
             return;
@@ -362,9 +296,9 @@ impl ArchiveBrowser {
         let loading = self.loading.load(Ordering::Relaxed);
         let downloading = self.downloading.load(Ordering::Relaxed);
 
-        ui.heading(t("render-no-api-key-use-the-rl"));
+        ui.heading(t("archive-heading"));
         ui.separator();
-        ui.label(t("render-if-you-can-t-get-a"));
+        ui.label(t("archive-intro"));
         ui.hyperlink_to(
             t("render-open-the-rl-workshop-archive-request"),
             ARCHIVE_SITE,

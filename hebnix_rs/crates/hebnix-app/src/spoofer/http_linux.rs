@@ -32,7 +32,14 @@ impl HttpProxy {
             ca,
             "api.epicgames.dev",
         )))?;
-        let upstream = proxy::build_upstream_agent_pins(Default::default());
+        // Pin upstream DNS so a stale hosts entry for the account host cannot loop back here.
+        #[cfg(windows)]
+        let pins = super::dns::resolve_a("api.epicgames.dev")
+            .map(|ip| [("api.epicgames.dev".to_owned(), ip)].into())
+            .unwrap_or_default();
+        #[cfg(not(windows))]
+        let pins = Default::default();
+        let upstream = proxy::build_upstream_agent_pins(pins);
         let running = Arc::new(AtomicBool::new(true));
         let active = Arc::clone(&running);
         let worker = std::thread::Builder::new()
@@ -43,7 +50,7 @@ impl HttpProxy {
                         break;
                     }
                     let Ok(stream) = stream else { continue };
-                    let config = Arc::clone(&config);
+                    let config = Some(Arc::clone(&config));
                     let upstream = upstream.clone();
                     let rules = Arc::clone(&rules);
                     let tx = tx.clone();
@@ -55,6 +62,38 @@ impl HttpProxy {
                 }
             })
             .map_err(|e| format!("Cannot start HTTP proxy: {e}"))?;
+        Ok(Self {
+            port,
+            running,
+            worker: Mutex::new(Some(worker)),
+        })
+    }
+
+    /// Tunnel every connection untouched on exactly `port`. The recovery watchdog
+    /// uses this to keep a running Rocket League online after Hebnix has closed.
+    #[cfg(windows)]
+    pub fn start_passthrough(port: u16) -> Result<Self, String> {
+        let listener = super::bind_local("passthrough proxy", &[port])?;
+        let running = Arc::new(AtomicBool::new(true));
+        let active = Arc::clone(&running);
+        let upstream = proxy::build_upstream_agent_pins(Default::default());
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let worker = std::thread::Builder::new()
+            .name("spoofer-passthrough".into())
+            .spawn(move || {
+                for stream in listener.incoming() {
+                    if !active.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(stream) = stream else { continue };
+                    let upstream = upstream.clone();
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = handle(stream, None, upstream, Arc::new(Vec::new()), tx);
+                    });
+                }
+            })
+            .map_err(|e| format!("Cannot start passthrough proxy: {e}"))?;
         Ok(Self {
             port,
             running,
@@ -95,7 +134,7 @@ impl Drop for HttpProxy {
 
 fn handle(
     mut client: TcpStream,
-    config: Arc<rustls::ServerConfig>,
+    config: Option<Arc<rustls::ServerConfig>>,
     upstream: ureq::Agent,
     rules: Arc<Vec<Box<dyn Rule>>>,
     tx: Sender<AppMsg>,
@@ -138,7 +177,7 @@ fn handle(
         return proxy::serve_one(&mut replay, &upstream, &rules, &tx, host);
     }
     let (host, port) = connect_target(target)?;
-    if inspect_account(host, port) {
+    if let Some(config) = config.filter(|_| inspect_account(host, port)) {
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .map_err(|e| e.to_string())?;
@@ -216,7 +255,7 @@ mod tests {
             .with_cert_resolver(Arc::new(rustls::server::ResolvesServerCertUsingSni::new()));
             handle(
                 listener.accept().unwrap().0,
-                Arc::new(config),
+                Some(Arc::new(config)),
                 proxy::build_upstream_agent_pins(Default::default()),
                 Arc::new(Vec::new()),
                 crossbeam_channel::unbounded().0,

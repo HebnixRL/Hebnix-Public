@@ -33,6 +33,15 @@ const MOVIES: [Movie; 2] = [
     },
 ];
 
+/// Earlier Hebnix builds of these movies, with and without the downloader.
+/// They differ from the current build in the constant pool, which the ABC
+/// merge cannot carry over, so they are replaced outright.
+const OLD_BUILDS: [&str; 2] = [
+    // workshop menu v26
+    "6e04c6d0cc9c8869c8193587d13e3ca4c712211596606d51b27c706eb6787a7d",
+    "e2068f6d87aa6104dd99f97172316ad691d2994de8c54f9e2f4778057a690bdf",
+];
+
 pub(super) fn managed_movie(file: &str, upk: &UpkPackage, index: usize) -> Option<&'static Movie> {
     MOVIES.iter().find(|movie| {
         file.eq_ignore_ascii_case(movie.package)
@@ -84,6 +93,7 @@ impl Movie {
 
     fn is_patched(&self, current: &str) -> bool {
         current == digest(self.patched)
+            || OLD_BUILDS.contains(&current)
             || self
                 .menu_only()
                 .ok()

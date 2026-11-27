@@ -581,14 +581,14 @@ impl HebnixApp {
         #[derive(serde::Serialize)]
         struct ConsoleData<'a> {
             placeholder: String,
-            lines: &'a [String],
+            lines: Vec<String>,
             history: &'a [String],
             draft: &'a str,
             suggestions: &'a [String],
         }
         let data = ConsoleData {
             placeholder: t("render-enter-system-command"),
-            lines: &self.console.lines,
+            lines: self.console.lines.iter().map(|line| line.display(self.config.settings.console_timestamps)).collect(),
             history: &self.console.history,
             draft: &self.console.input,
             suggestions: &self.console.suggestions,

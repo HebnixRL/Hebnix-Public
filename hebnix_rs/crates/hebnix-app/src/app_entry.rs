@@ -281,6 +281,7 @@ fn main() -> eframe::Result {
         tracing::warn!("WebSocket proxy cleanup: {error}");
     }
     let _ = watchdog::spawn();
+    watchdog::restore_on_session_end();
 
     hebnix_sdk::process::exempt_own_window_decorations();
 
@@ -362,7 +363,6 @@ fn main() -> eframe::Result {
     if skip_elevate && !spoofer::is_admin() {
         cfg.settings.run_as_admin = false;
         let _ = cfg.save(&base_dir);
-        let _ = spoofer::disable_saved_http_features(&base_dir);
     }
     if cfg.settings.run_as_admin && !skip_elevate && !spoofer::is_admin() {
         tracing::info!("requesting elevated relaunch");

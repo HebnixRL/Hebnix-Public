@@ -78,6 +78,14 @@ game-mod-bots-freeplay = Bots in freeplay
 game-mod-bots-freeplay-key = Bots in freeplay key
 game-mod-bots-freeplay-on = Bots in freeplay command is on.
 game-mod-bots-freeplay-off = Bots in freeplay command is off.
+game-mod-menu-access = Menu access in game
+game-mod-menu-access-description = Lets you open Private Match, LAN and other main-menu-only Play cards from freeplay and training instead of showing "Access is disabled in your current game mode". Don't start one from an online match: leaving it that way can count as an abandon.
+game-mod-menu-access-on = Menu access in game is on. Start Rocket League to use it.
+game-mod-menu-access-off = Menu access in game is off.
+game-mod-font-glyphs = All-language font
+game-mod-font-glyphs-description = Adds the Cyrillic, Korean, Japanese and Chinese letters from the game's other language fonts to the English UI font, plus symbols and other scripts from your installed Windows fonts, so names using them show instead of white blocks. Built from your own game files.
+game-mod-font-glyphs-on = All-language font is on. Start Rocket League to see it.
+game-mod-font-glyphs-off = All-language font is off.
 game-mod-bots-freeplay-description = Adds a bot to freeplay each time you press the key you bind it to. Rocket League must be closed to switch it on or off.
 app-automatically-upload-replays = Auto Save/Upload Replays
 tab-about = About
@@ -189,10 +197,13 @@ system-start-with-windows = Start with Windows:
 system-start-with-linux = Start with Linux:
 console-startup-failed = Failed to update startup entry: { $error }
 system-start-in-tray = Start in Tray:
+system-run-as-admin = Always Run as Admin:
+system-run-as-admin-hint = Start Hebnix as administrator so features like the Name Changer work without a restart. Windows asks for permission at each launch.
 system-close-to-tray = Close to Tray:
 system-p2p = P2P File Sharing:
 system-p2p-note = Turning this off stops other players in Workshop multiplayer from downloading maps from your PC. Custom maps that aren't on the Hebnix Workshop can then no longer be downloaded by other players.
 system-suppress-left = Suppress Left Alerts:
+system-console-timestamps = Show Console Timestamps:
 system-fullscreen-warning = Fullscreen Warning:
 system-fullscreen-note = Warns when the game is fullscreen and the overlay can't draw.
 system-allow-draw-focus = Allow Draw on Hebnix Focus:
@@ -557,6 +568,8 @@ render-apply-alignment = Apply alignment
 
 ## ui/console.rs
 render-enter-system-command = Enter system command...
+console-copy = Copy
+console-copy-tooltip = Copy the console output to the clipboard
 
 ## ui/rlapi.rs
 rlapi-enable-before-launching-rocket-league-to = Enable before launching Rocket League to capture its session. Requests share the game's connection.
@@ -633,8 +646,8 @@ menu-map-import-empty = That MenuCam export has nothing Hebnix can use.
 render-import-map = Import Map
 render-multiplayer = Multiplayer
 render-can-t-find-the-map-you = Can't find the map you want? You can download maps straight from the Steam Workshop in the Import Map tab.
-render-no-hubcap-api-key-the-import = No Hubcap API key? The Import Map tab also lists the RL Workshop Archive, where anyone can request a Workshop map.
 render-can-t-find-a-map = Can't find a map?
+workshop-help-archive = The Import Map tab also lists the RL Workshop Archive, a ready-made collection of Workshop maps.
 render-map-to-replace = Map To Replace:
 multiplayer-workshop-multiplayer = Workshop Multiplayer
 multiplayer-connects-you-to-the-private-workshop = Connects you to the private Workshop network. Host or join from inside Rocket League's own LAN match screen once it's up.
@@ -673,8 +686,6 @@ card-failed-to-load = Failed to load
 card-no-image-available = No Image Available
 
 ## ui/workshop/archive.rs
-render-no-api-key-use-the-rl = No API key? Use the RL Workshop Archive
-render-if-you-can-t-get-a = If you can't get a Hubcap API key (or can't be bothered), request the map on the RL Workshop Archive instead. Paste its Steam Workshop link there and it's usually added within 5-10 minutes. Then download it below, or download the .zip from the site and import it with "Choose map file..." above.
 render-open-the-rl-workshop-archive-request = Open the RL Workshop Archive (request a map)
 render-hide-list = Hide list
 render-search-name-author-or-tag = Search name, author or tag...
@@ -732,14 +743,22 @@ render-optional-banner-shown-on-the-map = Optional banner shown on the map card.
 render-import-map-2 = Import map
 
 ## ui/workshop/steam_download.rs
+archive-heading = RL Workshop Archive
+archive-intro = A ready-made collection of Rocket League Workshop maps. Download one below, or open the site to request a map and download its .zip.
 render-download-from-the-steam-workshop = Download from the Steam Workshop
-render-paste-a-rocket-league-workshop-link = Paste a Rocket League workshop link or id and Hebnix downloads the map and imports it. This needs your own Hubcap API key and the .NET runtime.
-render-hubcap-api-key = Hubcap API key
-render-paste-your-key = paste your key
-render-get-a-key = Get a key
+steam-download-intro = Search the Rocket League Workshop, or paste a workshop link or id. Hebnix downloads the map straight from Steam and imports it. No API key or Steam login needed.
+steam-search-hint = Search the Steam Workshop
+steam-search-button = Search
+steam-search-sort-popular = Most popular
+steam-search-sort-trending = Trending
+steam-search-sort-recent = Newest
+steam-search-no-results = No maps found.
+steam-search-shown-of-total = Showing { $shown } of { $total } maps
+steam-search-subscribers = { $count } subscribers
+steam-search-steam-page = Steam page
+steam-search-more = Load more
 render-workshop-link-or-id = Workshop link or id
 render-https-steamcommunity-com-sharedfiles-fil = https://steamcommunity.com/sharedfiles/filedetails/?id=...
-render-enter-a-hubcap-api-key-first = Enter a Hubcap API key first.
 render-that-doesn-t-look-like-a = That doesn't look like a workshop link or id.
 render-to-install-it-with-winget-run = To install it with winget, run this in a terminal:
 render-run-in-terminal = Run in terminal
@@ -987,7 +1006,6 @@ render-remove-background = Remove Background
 render-apply-background = Apply Background
 
 ## ui/workshop/steam_download.rs
-fetch-manifest-the-hubcap-api-key-was-rejected = The Hubcap API key was rejected. Check it and try again.
 download-item-looking-up-the-workshop-item-on = Looking up the workshop item on Steam...
 download-item-requesting-the-download-manifest = Requesting the download manifest...
 download-item-downloading-the-map = Downloading the map...
@@ -1145,3 +1163,19 @@ scoreboard-current-playlist = Show current playlist
 scoreboard-current-gamemode = Show current gamemode
 scoreboard-manual-selection = Choose a playlist manually
 scoreboard-choose-mode = Choose a gamemode
+
+settings-nav-preferences = Preferences
+settings-heading-preferences = Preferences
+preferences-black-infinium = Black Infinium paint
+preferences-black-infinium-hint = BakkesMod paints Infinium wheels a plain #000000. The in-game Black finish looks different. This decides which one Hebnix uses when something swaps to Black Infinium.
+preferences-black-infinium-ask = Ask me
+preferences-black-infinium-bakkes = BakkesMod Infinium (#000000)
+preferences-black-infinium-vanilla = Vanilla Infinium (in-game Black)
+infinium-prompt-title = Black Infinium
+infinium-prompt-body = Something is swapping to Black Infinium wheels. Use the BakkesMod look (pure #000000) or the vanilla in-game Black? You can change this later in Settings > Preferences.
+infinium-prompt-bakkes = Use BakkesMod Infinium
+infinium-prompt-vanilla = Use vanilla Infinium
+infinium-prompt-saved = Black Infinium choice saved. Apply the swap again.
+swapper-infinium-choose = Choose BakkesMod or vanilla Black Infinium, then apply again.
+rl-launch-setup-non-steam-shortcuts-can-t-pass = A non-Steam shortcut can't pass -multihome: Steam won't add arguments to it
+swapper-save-account = Rocket League account
