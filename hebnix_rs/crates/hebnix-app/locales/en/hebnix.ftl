@@ -1177,3 +1177,7 @@ infinium-prompt-bakkes = Use BakkesMod Infinium
 infinium-prompt-vanilla = Use vanilla Infinium
 infinium-prompt-saved = Black Infinium choice saved. Apply the swap again.
 swapper-infinium-choose = Choose BakkesMod or vanilla Black Infinium, then apply again.
+workshop-menu-lock-title = Enable the in-game Workshop menu
+workshop-menu-lock-body = Browse Maps and Add Maps need Rocket League's in-game Workshop menu. Enable it to continue. Installed maps will then show up in the game's Workshop menu.
+workshop-menu-lock-enable = Enable in-game Workshop menu
+workshop-menu-lock-busy = Enabling…

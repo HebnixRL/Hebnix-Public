@@ -2846,13 +2846,9 @@ impl HebnixApp {
         if !self.config.settings.panel_enabled {
             return;
         }
-        if self
-            .config
-            .settings
-            .restrict_hotkey_to_hebnix_or_rocket_league
-            && !own_window_focused()
-            && !hebnix_sdk::process::is_rocket_league_focused()
-        {
+        // Opening the panel steals focus, so it only opens from Hebnix or Rocket League.
+        // Unlike the show/hide hotkey this ignores restrict_hotkey_to_hebnix_or_rocket_league.
+        if !own_window_focused() && !hebnix_sdk::process::is_rocket_league_focused() {
             return;
         }
         self.panel.page = None;

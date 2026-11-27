@@ -19,10 +19,6 @@
         </label>
       </div>
     </section>
-    <div class="tracker-detail p-3 mb-3" id="menu-warning" hidden>
-      <p class="mb-2">Installed maps appear in Rocket League’s Workshop menu.</p>
-      <button type="button" class="btn btn-sm btn-outline-secondary" id="enable-menu">Enable in-game Workshop menu</button>
-    </div>
     <p class="text-body-secondary mb-3" id="count" role="status"></p>
     <div id="empty" class="tracker-detail p-3" hidden></div>
     <section class="maps-grid" id="maps" aria-label="Maps"></section>
@@ -32,6 +28,13 @@
         <button type="button" class="btn btn-sm btn-outline-secondary" id="next">Next</button>
     </nav>
   </main>
+  <div class="menu-lock" id="menu-warning" role="alertdialog" aria-modal="true" aria-labelledby="menu-lock-title" aria-describedby="menu-lock-body" hidden>
+    <div class="menu-lock-card">
+      <h2 class="h6" id="menu-lock-title"></h2>
+      <p id="menu-lock-body"></p>
+      <button type="button" class="btn btn-primary btn-sm" id="enable-menu"></button>
+    </div>
+  </div>
   <script src="/browse-maps.js"></script>
 </body>
 </html>

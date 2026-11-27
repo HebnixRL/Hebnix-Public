@@ -986,8 +986,17 @@ pub(in crate::patcher) fn has_instant_suite_bridge(data: &[u8]) -> bool {
 
 /// Replace the retired image request with a bounded poll of the native Shell bridge.
 pub(in crate::patcher) fn instant_suite_bridge(data: &[u8], enabled: bool) -> Result<Option<(Vec<u8>, usize)>> {
-    if instant_suite_hook(data)?.is_none() {
+    let Some((offset, was_enabled)) = instant_suite_hook(data)? else {
         return Ok(None);
+    };
+    // Rewriting hbxGot a second time fails, so an installed bridge only needs its hook state synced.
+    if has_instant_suite_bridge(data) {
+        if was_enabled == enabled {
+            return Ok(None);
+        }
+        let mut bytes = data.to_vec();
+        bytes[offset] = if enabled { 0xd0 } else { RETURN_VOID };
+        return Ok(Some((bytes, 1)));
     }
     let abc = Abc::parse(data)?;
     let class = abc.classes.iter().find(|class| {

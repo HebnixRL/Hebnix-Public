@@ -25,6 +25,7 @@ pub(crate) enum BrowseMapsAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AddMapsAction {
     Local { key: String, fields: Option<[String; 3]> },
+    EnableMenu,
 }
 
 #[derive(serde::Deserialize)]
@@ -42,6 +43,13 @@ fn peer_token(ip: std::net::IpAddr) -> String {
     use std::hash::{BuildHasher, RandomState};
     static KEY: std::sync::OnceLock<RandomState> = std::sync::OnceLock::new();
     format!("{:016x}", KEY.get_or_init(RandomState::new).hash_one(ip))
+}
+
+fn menu_lock_labels() -> Value {
+    json!({
+        "title": t("workshop-menu-lock-title"), "body": t("workshop-menu-lock-body"),
+        "enable": t("workshop-menu-lock-enable"), "busy": t("workshop-menu-lock-busy"),
+    })
 }
 
 impl WorkshopState {
@@ -182,10 +190,22 @@ impl WorkshopState {
     }
     pub(crate) fn add_maps_web_snapshot(&mut self) -> Value {
         let local = self.import_wizard.web_snapshot();
-        json!({ "page": "add-maps", "local": local })
+        json!({
+            "page": "add-maps", "local": local,
+            "menu_disabled": self.ingame_menu.is_enabled() == Some(false), "menu_busy": self.ingame_menu.busy(),
+            "menu_lock": menu_lock_labels(),
+        })
     }
 
-    pub(crate) fn add_maps_web_action(&mut self, action: AddMapsAction, ctx: &egui::Context) {
+    /// Browse Maps and Add Maps stay locked behind a popup until Rocket League's Workshop menu is on.
+    fn enable_ingame_menu(&mut self, rl_path: &str, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if !self.ingame_menu.busy() && self.ingame_menu.is_enabled() == Some(false) {
+            let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+            self.ingame_menu.start(ctx, &cooked, true, tx);
+        }
+    }
+
+    pub(crate) fn add_maps_web_action(&mut self, action: AddMapsAction, rl_path: &str, tx: &Sender<AppMsg>, ctx: &egui::Context) {
         let cache = &self.manager.cache_dir;
         let runtime = &self.manager.runtime_dir;
         match action {
@@ -194,6 +214,7 @@ impl WorkshopState {
                     self.add_local_map(map);
                 }
             }
+            AddMapsAction::EnableMenu => self.enable_ingame_menu(rl_path, tx, ctx),
         }
     }
     pub(crate) fn menu_web_snapshot(&mut self, cooked: &Path, ctx: &egui::Context) -> Value {
@@ -279,6 +300,7 @@ impl WorkshopState {
             "empty": if self.catalog.is_empty() { self.catalog_status.clone() } else { t("handle-messages-no-maps-found") },
             "menu_disabled": self.ingame_menu.is_enabled() == Some(false),
             "menu_busy": self.ingame_menu.busy(),
+            "menu_lock": menu_lock_labels(),
         })
     }
 
@@ -308,10 +330,7 @@ impl WorkshopState {
                 return;
             }
             BrowseMapsAction::EnableMenu => {
-                if !self.ingame_menu.busy() && self.ingame_menu.is_enabled() == Some(false) {
-                    let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-                    self.ingame_menu.start(ctx, &cooked, true, tx);
-                }
+                self.enable_ingame_menu(rl_path, tx, ctx);
                 return;
             }
             BrowseMapsAction::Load { id } => (id, CardAction::InstallOrDownload),

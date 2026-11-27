@@ -476,6 +476,19 @@ function actionButtons() {
 }
 function addMaps() {
   const action = (type, key, data = {}) => send({ type: "add_maps", action: { type, key, ...data } });
+  if (state.menu_disabled) {
+    const lock = element("div", "menu-lock");
+    lock.id = "menu-lock";
+    lock.setAttribute("role", "alertdialog");
+    lock.setAttribute("aria-modal", "true");
+    const card = element("div", "menu-lock-card");
+    const enable = button(state.menu_busy ? state.menu_lock.busy : state.menu_lock.enable,
+      () => send({ type: "add_maps", action: { type: "enable_menu" } }), state.menu_busy, "primary");
+    card.append(element("h2", "h6", state.menu_lock.title), element("p", "", state.menu_lock.body), enable);
+    lock.append(card);
+    document.body.append(lock);
+    rows.inert = true;
+  }
   const local = state.local;
   const labels = local.labels;
   const editor = panel();
@@ -3629,6 +3642,8 @@ function renderContent() {
   document.body.classList.toggle("preset-creator-page", state.page === "preset-creator");
   controls.replaceChildren();
   rows.replaceChildren();
+  rows.inert = false;
+  document.getElementById("menu-lock")?.remove();
   controls.classList.add("mb-3");
   query.hidden = state.page !== "installed" && state.page !== "browse";
   field("plugin-search-row").hidden = query.hidden;

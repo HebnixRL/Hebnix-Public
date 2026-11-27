@@ -1381,7 +1381,7 @@ impl HebnixApp {
             }
             ManageAction::GameMod { id, key, value } if self.game_mod_visible(&id) => self.web_game_mod(&id, &key, value, ctx),
             ManageAction::AddMaps { action } if self.tab == Tab::Workshop && self.workshop.view == crate::ui::workshop::WorkshopView::Import => {
-                self.workshop.add_maps_web_action(action, ctx);
+                self.workshop.add_maps_web_action(action, &self.config.settings.rl_path, &self.tx, ctx);
             }
             ManageAction::LaunchSetup { key, draft, candidate } if self.tab == Tab::Settings
                 && self.hebnix_settings_tab == HebnixSettingsTab::Directories && self.rl_launch_setup_open =>

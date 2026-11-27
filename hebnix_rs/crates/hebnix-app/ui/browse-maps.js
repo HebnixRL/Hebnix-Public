@@ -105,6 +105,10 @@ window.showBrowseMaps = (data) => {
   field("downloaded").checked = data.downloaded;
   field("downloaded-label").textContent = data.downloaded_label;
   field("menu-warning").hidden = !data.menu_disabled;
+  document.querySelector("main").inert = data.menu_disabled;
+  field("menu-lock-title").textContent = data.menu_lock.title;
+  field("menu-lock-body").textContent = data.menu_lock.body;
+  field("enable-menu").textContent = data.menu_busy ? data.menu_lock.busy : data.menu_lock.enable;
   field("enable-menu").disabled = data.menu_busy;
   field("count").textContent = data.count.toLocaleString() + (data.count === 1 ? " map" : " maps");
   field("page").textContent = (data.page + 1) + " / " + data.pages;

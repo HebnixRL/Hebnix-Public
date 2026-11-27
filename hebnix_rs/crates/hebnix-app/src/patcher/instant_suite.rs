@@ -735,4 +735,18 @@ mod tests {
         let (_, disabled) = edit_hook(&upgraded, false).unwrap();
         assert_eq!(edit_hook(&disabled.unwrap(), false).unwrap(), (Some(false), None));
     }
+
+    #[test]
+    fn bridging_an_already_bridged_movie_only_syncs_the_hook() {
+        use super::super::title_patcher::{abc, movie};
+        let (_, bridged) = edit_hook(MOVIE.patched, true).unwrap();
+        let bridged = bridged.unwrap();
+        let bridge = |enabled| move |data: &[u8]| abc::instant_suite_bridge(data, enabled);
+        assert!(movie::rewrite(&bridged, &bridge(true)).unwrap().is_none());
+        let (_, disabled) = edit_hook(&bridged, false).unwrap();
+        let disabled = disabled.unwrap();
+        assert!(movie::rewrite(&disabled, &bridge(false)).unwrap().is_none());
+        let (reenabled, _) = movie::rewrite(&disabled, &bridge(true)).unwrap().unwrap();
+        assert_eq!(edit_hook(&reenabled, true).unwrap(), (Some(true), None));
+    }
 }

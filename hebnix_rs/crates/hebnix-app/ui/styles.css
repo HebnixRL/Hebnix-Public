@@ -962,3 +962,6 @@ input[type="checkbox"],input[type="radio"],input[type="range"] { accent-color:va
 .live-colour-row > label { margin-bottom: 0 !important; }
 .live-colour-row input[type="color"] { width: 3.5rem; }
 @media (max-width: 480px) { .live-colour-row { grid-template-columns: minmax(8rem, 1fr) 3.5rem; } .live-colour-row > label:last-child { grid-column: 1 / -1; } }
+.menu-lock { position: fixed; inset: 0; z-index: 1055; display: flex; align-items: center; justify-content: center; padding: 1rem; background: #000b; }
+.menu-lock[hidden] { display: none; }
+.menu-lock-card { max-width: 28rem; padding: 1.25rem; border: 1px solid var(--theme-border, #39516e); border-radius: .75rem; background: var(--theme-surface, #111e30); color: var(--theme-text, #e8f0fd); box-shadow: 0 .6rem 2rem #0009; }
