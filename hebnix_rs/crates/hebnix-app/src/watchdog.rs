@@ -38,9 +38,6 @@ pub fn spawn() -> bool {
     }
     *child_slot = None;
 
-    if !crate::spoofer::is_admin() {
-        return false;
-    }
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
@@ -99,6 +96,60 @@ pub fn spawn() -> bool {
     false
 }
 
+/// Put the user's proxy back when Windows logs off or shuts down. A hidden
+/// top-level window receives WM_ENDSESSION; killed processes get no other chance.
+pub fn restore_on_session_end() {
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, RegisterClassW,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_ENDSESSION, WNDCLASSW,
+    };
+    use windows::core::w;
+
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg == WM_ENDSESSION && wparam.0 != 0 {
+            crate::spoofer::restore_if_crashed(&crate::config::base_dir());
+        }
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("session-end-proxy-restore".into())
+        .spawn(|| unsafe {
+            let Ok(instance) = GetModuleHandleW(None) else {
+                return;
+            };
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(proc),
+                hInstance: instance.into(),
+                lpszClassName: w!("HebnixSessionEnd"),
+                ..Default::default()
+            };
+            RegisterClassW(&class);
+            let Ok(_window) = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("HebnixSessionEnd"),
+                w!("Hebnix"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            ) else {
+                return;
+            };
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+            }
+        });
+}
+
 pub fn parent_pid() -> Option<u32> {
     let mut args = std::env::args();
     while let Some(argument) = args.next() {
@@ -110,6 +161,7 @@ pub fn parent_pid() -> Option<u32> {
 }
 
 pub fn run(parent_pid: u32) {
+    restore_on_session_end();
     if let Ok(parent) = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, parent_pid) } {
         let args: Vec<String> = std::env::args().collect();
         if let Some(index) = args.iter().position(|arg| arg == CLEANUP_WATCHDOG_ARG) {
@@ -125,6 +177,7 @@ pub fn run(parent_pid: u32) {
             let _ = CloseHandle(parent);
         }
     }
+    crate::spoofer::hold_proxy_until_game_exits(&crate::config::base_dir());
     if replacement_is_running(parent_pid) {
         return;
     }

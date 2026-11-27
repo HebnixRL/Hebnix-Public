@@ -479,6 +479,8 @@ pub struct SwapperState {
     resolutions: HashMap<SwapCategory, Resolution>,
     resolution_generation: u64,
     swap_paint: HashMap<String, SwapPaint>,
+    black_infinium: crate::config::BlackInfinium,
+    infinium_prompt: bool,
     recolour_category: SwapCategory,
     recolour_search: String,
     recolour_selected: Vec<String>,
@@ -590,6 +592,8 @@ impl SwapperState {
             resolutions: HashMap::new(),
             resolution_generation: 0,
             swap_paint: HashMap::new(),
+            black_infinium: Default::default(),
+            infinium_prompt: false,
             recolour_category: SwapCategory::Bodies,
             recolour_search: String::new(),
             recolour_selected: Vec::new(),
@@ -913,6 +917,38 @@ impl SwapperState {
         super::upk_history::replace(&Self::manifest_path(backups_dir), &bytes)
     }
 
+    pub fn set_black_infinium(&mut self, choice: crate::config::BlackInfinium) {
+        self.black_infinium = choice;
+    }
+
+    /// True once after a Black Infinium swap was stopped to ask which black to use.
+    pub fn take_infinium_prompt(&mut self) -> bool {
+        std::mem::take(&mut self.infinium_prompt)
+    }
+
+    fn resolve_black_infinium(
+        &mut self,
+        paint: SwapPaint,
+        source: &SwapItem,
+        target: &SwapItem,
+    ) -> Result<SwapPaint, String> {
+        // Preset 3 is the Black entry of painted_swap's PALETTE.
+        let infinium = [&source.name, &target.name]
+            .iter()
+            .any(|name| name.to_ascii_lowercase().contains("infinium"));
+        if paint != SwapPaint::Preset(3) || !infinium {
+            return Ok(paint);
+        }
+        match self.black_infinium {
+            crate::config::BlackInfinium::Bakkes => Ok(SwapPaint::Custom([0, 0, 0])),
+            crate::config::BlackInfinium::Vanilla => Ok(paint),
+            crate::config::BlackInfinium::Ask => {
+                self.infinium_prompt = true;
+                Err(t("swapper-infinium-choose"))
+            }
+        }
+    }
+
     fn apply_swap(
         &mut self,
         category: SwapCategory,
@@ -923,6 +959,7 @@ impl SwapperState {
         cooked_pc: &Path,
         backups_dir: &Path,
     ) -> Result<(), String> {
+        let paint = self.resolve_black_infinium(paint, source, target)?;
         backup_guard::check_install(cooked_pc, backups_dir)?;
         for file in [&source.upk, &target.upk] {
             super::upk_history::check_live_package(cooked_pc, &cooked_pc.join(file))?;
