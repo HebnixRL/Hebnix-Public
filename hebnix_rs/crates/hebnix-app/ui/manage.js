@@ -2982,9 +2982,12 @@ function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings
       input.type = "color";
       input.value = "#" + settings[key].rgb.map(b => b.toString(16).padStart(2, "0")).join("");
       input.setAttribute("aria-label", label);
+      const rainbow = key !== "goal_explosion";
+      if (!rainbow) settings[key].rainbow = false;
       input.disabled = !!settings[key].rainbow;
       input.addEventListener("input", () => { settings[key].rgb = input.value.slice(1).match(/../g).map(b => parseInt(b, 16)); save(); });
-      row.append(toggle(label, settings[key].enabled, on => { settings[key].enabled = on; save(); }), input, toggle("Rainbow", !!settings[key].rainbow, on => { settings[key].rainbow = on; input.disabled = on; save(); }));
+      row.append(toggle(label, settings[key].enabled, on => { settings[key].enabled = on; save(); }), input);
+      if (rainbow) row.append(toggle("Rainbow", !!settings[key].rainbow, on => { settings[key].rainbow = on; input.disabled = on; save(); }));
       section.append(row);
     }
   }

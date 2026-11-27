@@ -81,7 +81,7 @@ impl Settings {
         text.push_str(&format!("HbxLive.goal-explosion.enabled={}\nHbxLive.goal-explosion.scale={}\n", u8::from(self.goal_explosion_scale != 0.), self.goal_explosion_scale));
         for (key, paint) in [("primary", &self.primary), ("secondary", &self.secondary), ("heatseeker", &self.heatseeker), ("trim", &self.trim), ("wheels", &self.wheels), ("boost", &self.boost), ("decal", &self.decal), ("antenna", &self.antenna), ("topper", &self.topper), ("trail", &self.trail), ("goal_explosion", &self.goal_explosion), ("banner", &self.banner), ("avatar_border", &self.avatar_border)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(paint.enabled)));
-            text.push_str(&format!("HbxLive.{key}.rainbow={}\n", u8::from(paint.rainbow)));
+            text.push_str(&format!("HbxLive.{key}.rainbow={}\n", u8::from(paint.rainbow && key != "goal_explosion")));
             for (channel, value) in ["r", "g", "b"].into_iter().zip(paint.rgb) {
                 // Material parameters use linear RGB.
                 let srgb = value as f32 / 255.;
@@ -241,7 +241,7 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut paint.enabled, label).changed();
                     ui.add_enabled_ui(!paint.rainbow, |ui| { changed |= ui.color_edit_button_srgb(&mut paint.rgb).changed(); });
-                    changed |= ui.checkbox(&mut paint.rainbow, "Rainbow").changed();
+                    if label == "Goal explosion" { paint.rainbow = false; } else { changed |= ui.checkbox(&mut paint.rainbow, "Rainbow").changed(); }
                 });
             }
         }
