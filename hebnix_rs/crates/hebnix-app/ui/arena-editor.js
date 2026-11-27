@@ -175,6 +175,7 @@ window.showArenaEditor = next => {
     previews = {};
   }
   state = next;
+  window.patchProgress(field("patch-operation-progress"), !!state.busy, state.progress, state.status || "Updating arena patch");
   Object.assign(previews, state.previews);
   field("map-instructions").hidden = false;
   field("map-instructions").textContent = state.full ? "Choose the map you want to play, then choose the arena it will replace entirely." : "Choose the arena you want to play, then choose the fog, sky, and background to borrow.";

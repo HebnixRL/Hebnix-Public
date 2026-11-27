@@ -822,6 +822,7 @@ function gameMods() {
       }
     }
     if (mod.busy || mod.status) card.append(element("p", "small text-body-secondary mt-2 mb-0", mod.status || "Working…"));
+    window.patchProgress(card, !!mod.busy, mod.progress, mod.status || mod.label);
     rows.append(card);
   }
 }
@@ -1118,6 +1119,7 @@ function workshopMenu() {
       button("Update Workshop patch", () => sendMenu("update"), state.busy || state.enabled !== true));
     if (state.error) menu.append(element("p", "text-warning", state.error));
     if (state.busy || state.status) menu.append(element("p", "small mt-2 mb-0", state.status || "Working…"));
+    window.patchProgress(menu, !!state.busy, state.progress, state.status || "Updating Workshop in-game menu");
     const downloader = panel();
     downloader.append(element("h2", "h6", "Map downloader"),
       toggle("Enable map downloader", state.downloader, enabled => sendMenu("downloader", { enabled }), state.busy || state.enabled !== true),
@@ -1240,6 +1242,7 @@ function playerRank() {
     button(state.restore, () => send({ type: "player_rank_apply", restore: true }), !state.ready));
   card.append(actions);
   if (state.status) card.append(element("p", "small mt-2 mb-0", state.status));
+  window.patchProgress(card, !!state.busy, state.progress, state.status || "Updating ranks");
   rows.append(card);
   if (rankView.draft) rankDialog();
 }
@@ -1442,6 +1445,7 @@ function titles() {
     applied.append(element("p", "small", state.status || (!state.ready ? "Close Rocket League to Apply or Restore." : state.validation)));
   }
   if (state.admin) applied.append(button("Restart as administrator for title patching", () => action("admin")));
+  window.patchProgress(applied, !!state.busy, state.progress, state.status || "Updating titles");
   columns.append(library, editor, applied);
   rows.append(columns);
   if (state.restore) {
@@ -2797,12 +2801,7 @@ function studioAsset() {
     }
     if (state.busy) {
       const working = element("div", "text-body-secondary small", state.status || "Working…");
-      if (state.progress !== null) {
-        const progress = element("progress", "w-100");
-        progress.max = 1;
-        progress.value = state.progress;
-        working.append(progress);
-      }
+      window.patchProgress(working, true, state.progress, state.status || "Applying patch");
       content.append(working);
     }
   } else content.append(grid, paging);
@@ -3274,6 +3273,7 @@ function goalExplosion() {
       row, button(model.apply, () => command(false), model.busy, "primary"), " ",
       button(model.restore, () => command(true), model.busy || !model.active));
     if (model.status || model.busy) card.append(element("p", "small mt-2 mb-0", model.status || "Working…"));
+    window.patchProgress(card, !!model.busy, model.progress, model.status || model.title);
     content.append(card);
   });
 }
@@ -3516,6 +3516,7 @@ function systemSettings() {
   if (!certificate.admin) proxy.append(element("p", "small text-body-secondary mt-2", "Restart as Administrator to install or remove the certificate."));
   proxy.append(element("p", "mt-2 mb-0", certificate.proxyLabel + " " + certificate.proxy));
   options.append(maintenanceActions);
+  window.patchProgress(options, !!state.repairBusy, null, state.repair);
   rows.append(options, proxy);
   if (backups.error) rows.append(card);
   if (backups.confirming) {
@@ -3682,6 +3683,10 @@ function render() {
   const selection = focused && ["text", "password", "search"].includes(focused.type)
     ? [focused.selectionStart, focused.selectionEnd] : null;
   renderContent();
+  // A page-level fallback covers every patch model with a busy flag. Cards
+  // containing separate patch workers add their own bars below their controls.
+  if (!rows.querySelector(".patch-progress, progress"))
+    window.patchProgress(rows, !!state.busy, state.progress, state.status || "Applying patch");
   if (creatorFocus) { const input = document.getElementById(creatorFocus.id); input?.focus({preventScroll:true}); if (input && creatorSelection) input.setSelectionRange(...creatorSelection); }
   const next = rows.querySelector(".plugin-settings-layout");
   if (next) {

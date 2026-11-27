@@ -86,6 +86,7 @@ function mapCard(map) {
       () => { deleteId = map.id; renderMaps(); }));
   }
   contents.append(actions);
+  window.patchProgress(contents, !!map.busy, map.progress, map.primary || "Updating map");
   card.append(image, contents);
   return card;
 }
@@ -106,8 +107,9 @@ window.showBrowseMaps = (data) => {
   field("downloaded-label").textContent = data.downloaded_label;
   field("help-title").textContent = data.help_title;
   field("help").textContent = data.help.join(" ");
-  field("menu-warning").hidden = !data.menu_disabled;
+  field("menu-warning").hidden = !data.menu_disabled && !data.menu_busy;
   field("enable-menu").disabled = data.menu_busy;
+  window.patchProgress(field("menu-warning"), !!data.menu_busy, null, "Updating Workshop in-game menu");
   field("count").textContent = data.count.toLocaleString() + (data.count === 1 ? " map" : " maps");
   field("page").textContent = (data.page + 1) + " / " + data.pages;
   field("prev").disabled = data.page === 0;

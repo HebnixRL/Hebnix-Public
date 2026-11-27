@@ -13,7 +13,11 @@
     <section class="tracker-summary live-summary mb-3" aria-label="Match summary">
       <div class="tracker-person"><div><small>Rocket League</small><strong id="running"></strong></div></div>
       <div class="tracker-metric"><small>Stats API</small><strong id="connection"></strong></div>
-      <div class="tracker-metric"><small>Live Cosmetics</small><strong id="live-cosmetics" role="status"></strong></div>
+      <div class="tracker-metric"><small>Live Cosmetics</small><strong id="live-cosmetics" role="status"></strong>
+        <div id="live-cosmetics-progress" class="progress live-cosmetics-progress" role="progressbar" aria-label="Installing live cosmetics" hidden>
+          <div class="progress-bar"></div>
+        </div>
+      </div>
     </section>
     <section id="dashboard-actions" class="tracker-detail p-3 d-flex gap-2" hidden>
       <button id="dashboard-start" type="button" class="btn btn-primary">Start Rocket League</button>

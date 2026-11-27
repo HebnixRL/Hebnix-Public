@@ -151,7 +151,8 @@ pub fn status_snapshot() -> serde_json::Value {
     let installed = detail == "Live features ready";
     let failed = detail.starts_with("Error:");
     let close = !installed && !detail.starts_with("Checking installed") && hebnix_sdk::process::is_rocket_league_running();
-    serde_json::json!({"label": if failed { "Error" } else if installed { "Installed" } else if close { "Close RL" } else { "Pending" },
+    serde_json::json!({"label": if failed { "Error" } else if installed { "Installed" } else if close { "Close RL" } else { "Installing" },
+        "installing": !failed && !installed && !close,
         "colour": if failed { "danger" } else if installed { "success" } else if close { "danger" } else { "warning" }, "detail": detail})
 }
 fn status(value: impl Into<String>) { if let Ok(mut slot) = STATUS.lock() { *slot = value.into(); } }

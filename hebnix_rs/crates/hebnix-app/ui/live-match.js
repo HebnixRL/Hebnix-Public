@@ -65,6 +65,11 @@ window.showLiveMatch = (state) => {
   cosmetics.textContent = state.live_cosmetics.label;
   cosmetics.className = "text-" + state.live_cosmetics.colour;
   cosmetics.title = state.live_cosmetics.detail;
+  const installing = !!state.live_cosmetics.installing;
+  cosmetics.setAttribute("aria-busy", String(installing));
+  const progress = field("live-cosmetics-progress");
+  progress.hidden = !state.dashboard || !installing;
+  progress.title = state.live_cosmetics.detail;
   let error = field("live-cosmetics-error");
   if (!error) {
     error = node("small", "text-danger text-break");

@@ -743,6 +743,9 @@ impl Navigation {
                         (&Method::GET, "/manage.html") => Some((
                             "text/html; charset=utf-8", Cow::Borrowed(include_bytes!("manage.html")),
                         )),
+                        (&Method::GET, "/patch-progress.js") => Some((
+                            "text/javascript; charset=utf-8", Cow::Borrowed(include_bytes!("patch-progress.js")),
+                        )),
                         (&Method::GET, "/manage.js") => Some((
                             "text/javascript; charset=utf-8", Cow::Borrowed(include_bytes!("manage.js")),
                         )),

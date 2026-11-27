@@ -962,3 +962,17 @@ input[type="checkbox"],input[type="radio"],input[type="range"] { accent-color:va
 .live-colour-row > label { margin-bottom: 0 !important; }
 .live-colour-row input[type="color"] { width: 3.5rem; }
 @media (max-width: 480px) { .live-colour-row { grid-template-columns: minmax(8rem, 1fr) 3.5rem; } .live-colour-row > label:last-child { grid-column: 1 / -1; } }
+
+/* Installation has no reliable percentage; show indeterminate activity. */
+.live-cosmetics-progress { height: .35rem; min-width: 8rem; margin-top: .5rem; background: var(--theme-border, var(--bs-border-color)); }
+.live-cosmetics-progress .progress-bar { width: 36%; background: var(--theme-accent, var(--bs-primary)); animation: live-cosmetics-installing 1.5s ease-in-out infinite; }
+@keyframes live-cosmetics-installing { from { transform: translateX(-100%); } to { transform: translateX(280%); } }
+@media (prefers-reduced-motion: reduce) { .live-cosmetics-progress .progress-bar { animation: none; margin-inline: auto; } }
+
+.patch-progress { height: .375rem; width: 100%; margin-top: .75rem; flex: 0 0 auto; background: var(--theme-border, var(--bs-border-color)); overflow: hidden; }
+.patch-progress .progress-bar { background: var(--theme-accent, var(--bs-primary)); transition: width .15s ease; }
+.patch-progress.is-indeterminate .progress-bar { animation: live-cosmetics-installing 1.5s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .patch-progress .progress-bar { transition: none; }
+  .patch-progress.is-indeterminate .progress-bar { animation: none; margin-inline: auto; }
+}
