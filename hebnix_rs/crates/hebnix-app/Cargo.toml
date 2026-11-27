@@ -64,6 +64,10 @@ fluent-bundle = "0.16.0"
 unic-langid = "0.9.6"
 sys-locale = "0.3.2"
 sysinfo = "0.38.4"
+# downloads workshop items straight from steam's CDN (MIT/Apache, no .net)
+steamroom = { version = "=0.3.0", features = ["serde"] }
+steamroom-client = "=0.3.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 eframe = "0.35.0"

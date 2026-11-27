@@ -633,8 +633,8 @@ menu-map-import-empty = That MenuCam export has nothing Hebnix can use.
 render-import-map = Import Map
 render-multiplayer = Multiplayer
 render-can-t-find-the-map-you = Can't find the map you want? You can download maps straight from the Steam Workshop in the Import Map tab.
-render-no-hubcap-api-key-the-import = No Hubcap API key? The Import Map tab also lists the RL Workshop Archive, where anyone can request a Workshop map.
 render-can-t-find-a-map = Can't find a map?
+workshop-help-archive = The Import Map tab also lists the RL Workshop Archive, a ready-made collection of Workshop maps.
 render-map-to-replace = Map To Replace:
 multiplayer-workshop-multiplayer = Workshop Multiplayer
 multiplayer-connects-you-to-the-private-workshop = Connects you to the private Workshop network. Host or join from inside Rocket League's own LAN match screen once it's up.
@@ -673,8 +673,6 @@ card-failed-to-load = Failed to load
 card-no-image-available = No Image Available
 
 ## ui/workshop/archive.rs
-render-no-api-key-use-the-rl = No API key? Use the RL Workshop Archive
-render-if-you-can-t-get-a = If you can't get a Hubcap API key (or can't be bothered), request the map on the RL Workshop Archive instead. Paste its Steam Workshop link there and it's usually added within 5-10 minutes. Then download it below, or download the .zip from the site and import it with "Choose map file..." above.
 render-open-the-rl-workshop-archive-request = Open the RL Workshop Archive (request a map)
 render-hide-list = Hide list
 render-search-name-author-or-tag = Search name, author or tag...
@@ -732,14 +730,22 @@ render-optional-banner-shown-on-the-map = Optional banner shown on the map card.
 render-import-map-2 = Import map
 
 ## ui/workshop/steam_download.rs
+archive-heading = RL Workshop Archive
+archive-intro = A ready-made collection of Rocket League Workshop maps. Download one below, or open the site to request a map and download its .zip.
 render-download-from-the-steam-workshop = Download from the Steam Workshop
-render-paste-a-rocket-league-workshop-link = Paste a Rocket League workshop link or id and Hebnix downloads the map and imports it. This needs your own Hubcap API key and the .NET runtime.
-render-hubcap-api-key = Hubcap API key
-render-paste-your-key = paste your key
-render-get-a-key = Get a key
+steam-download-intro = Search the Rocket League Workshop, or paste a workshop link or id. Hebnix downloads the map straight from Steam and imports it. No API key or Steam login needed.
+steam-search-hint = Search the Steam Workshop
+steam-search-button = Search
+steam-search-sort-popular = Most popular
+steam-search-sort-trending = Trending
+steam-search-sort-recent = Newest
+steam-search-no-results = No maps found.
+steam-search-shown-of-total = Showing { $shown } of { $total } maps
+steam-search-subscribers = { $count } subscribers
+steam-search-steam-page = Steam page
+steam-search-more = Load more
 render-workshop-link-or-id = Workshop link or id
 render-https-steamcommunity-com-sharedfiles-fil = https://steamcommunity.com/sharedfiles/filedetails/?id=...
-render-enter-a-hubcap-api-key-first = Enter a Hubcap API key first.
 render-that-doesn-t-look-like-a = That doesn't look like a workshop link or id.
 render-to-install-it-with-winget-run = To install it with winget, run this in a terminal:
 render-run-in-terminal = Run in terminal
@@ -987,7 +993,6 @@ render-remove-background = Remove Background
 render-apply-background = Apply Background
 
 ## ui/workshop/steam_download.rs
-fetch-manifest-the-hubcap-api-key-was-rejected = The Hubcap API key was rejected. Check it and try again.
 download-item-looking-up-the-workshop-item-on = Looking up the workshop item on Steam...
 download-item-requesting-the-download-manifest = Requesting the download manifest...
 download-item-downloading-the-map = Downloading the map...

@@ -3240,22 +3240,12 @@ impl HebnixApp {
                         }
                     }
                 }
-                AppMsg::WorkshopCatalog(result) => match result {
-                    Ok(items) => {
-                        self.workshop.set_catalog(items);
-                        if self.workshop.valid.is_empty() {
-                            self.workshop.catalog_status =
-                                t("handle-messages-no-maps-found").to_string();
-                        }
+                AppMsg::WorkshopSteamPage { generation, more, result } => {
+                    if let Err(e) = &result {
+                        self.console.write(format!("[Core] Failed to fetch maps: {e}"));
                     }
-                    Err(e) => {
-                        self.workshop.merge_local_maps();
-                        self.workshop.catalog_status =
-                            t("handle-messages-failed-to-load-maps").to_string();
-                        self.console
-                            .write(format!("[Core] Failed to fetch maps: {e}"));
-                    }
-                },
+                    self.workshop.add_steam_page(generation, more, result);
+                }
                 AppMsg::WorkshopImage { key, bytes } => {
                     let state = if bytes.is_empty() {
                         ImageState::Failed
