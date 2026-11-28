@@ -5,7 +5,7 @@
 use crate::i18n::{t, t_args, t_n};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -677,13 +677,15 @@ fn render_player_maps(
     workshop: &Path,
     busy: bool,
     install: &mut Option<(SlotMap, IpAddr, bool)>,
-) {
+) -> bool {
+    let mut join = false;
     if let Some(map) = offer.maps.iter().find(|map| map.slot == HOSTING_SLOT) {
         let have = peer_workshop_file(workshop, map).is_some();
         ui.horizontal_wrapped(|ui| {
-            ui.label(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
+            ui.strong(t_args("player-maps-hosting", &[("name", map.name.clone().into())]));
             if have {
                 ui.colored_label(OK_COLOUR, t("player-maps-you-have-it"));
+                join = ui.button("Join").on_hover_text("Join this match without the LAN browser").clicked();
             } else if ui
                 .add_enabled(!busy, egui::Button::new(t("player-maps-download-to-workshop")))
                 .clicked()
@@ -693,7 +695,10 @@ fn render_player_maps(
                 *install = Some((target, offer.ip, true));
             }
         });
+    } else {
+        ui.weak("Not hosting");
     }
+    join
 }
 
 fn multiplayer_icon(ui: &mut egui::Ui) {
@@ -876,6 +881,14 @@ struct MultiplayerState {
     saved_host_checking: bool,
     detected_target: Option<String>,
     detected_map: Option<String>,
+    /// the map this player hosts, as the other players see it
+    hosted: Option<HostedMap>,
+    own_hosting: Option<String>,
+    /// typed by the player, used for Join; never sent to other players
+    join_password: String,
+    /// Join was pressed: sync that host's map first, then join
+    pending_join: Option<(Ipv4Addr, String)>,
+    join_ready: Option<(Ipv4Addr, String)>,
     /// set while a peer's map is being downloaded + installed in the background
     map_install_busy: Arc<AtomicBool>,
     map_install_result: Arc<Mutex<String>>,
@@ -944,6 +957,11 @@ impl Default for MultiplayerState {
             saved_host_checking: false,
             detected_target: None,
             detected_map: None,
+            hosted: None,
+            own_hosting: None,
+            join_password: String::new(),
+            pending_join: None,
+            join_ready: None,
             map_install_busy: Arc::new(AtomicBool::new(false)),
             map_install_result: Arc::new(Mutex::new(String::new())),
             map_transfer: Arc::new(TransferProgress::default()),
@@ -1269,6 +1287,15 @@ impl WorkshopState {
             return;
         }
         let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
+        if let Some((ip, name)) = self.multiplayer.join_ready.take() {
+            match crate::patcher::workshop_host::join_lan(&cooked, ip, self.multiplayer.join_password.trim()) {
+                Ok(command) => {
+                    let _ = tx.send(AppMsg::SendWsCommand(command));
+                    crate::toast::report("lan-join", &format!("[Workshop] Joining {name}'s match..."), None, true);
+                }
+                Err(error) => crate::toast::report_failed("lan-join", &format!("[Workshop] Could not join {name}: {error}")),
+            }
+        }
         if let Some(path) = ingame_menu::take_host_request() {
             let (cooked, tx, ctx) = (cooked.clone(), tx.clone(), ctx.clone());
             std::thread::spawn(move || {
@@ -2319,6 +2346,7 @@ impl WorkshopState {
         // change mid-session, so it's only looked up until one is found
         let player_name = Arc::new(Mutex::new(String::new()));
         let hosted = HostedMap::new(self.manager.cache_dir.clone(), &Path::new(rl_path).join("TAGame").join("CookedPCConsole"));
+        self.multiplayer.hosted = Some(hosted.clone());
         let map_provider: MapProvider = Arc::new(move || {
             let mut name = player_name.lock().unwrap();
             if name.is_empty() {
@@ -2395,11 +2423,12 @@ impl WorkshopState {
         if self.join_polled.is_none_or(|at| at.elapsed() > Duration::from_secs(2)) {
             self.join_polled = Some(std::time::Instant::now());
             self.join_mismatch = hebnix_sdk::log::join_mismatch(None);
+            self.multiplayer.own_hosting = self.multiplayer.hosted.as_ref().and_then(HostedMap::current).map(|map| map.name);
             let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
             if crate::patcher::workshop_lan_trial::enabled(&cooked) {
                 let workshop = crate::patcher::workshop_menu::workshop_dir(&cooked);
                 let mut missing = Vec::new();
-                let offers: Vec<_> = session.peer_offers().into_iter().filter_map(|offer| {
+                let mut offers: Vec<_> = session.peer_offers().into_iter().filter_map(|offer| {
                     let IpAddr::V4(ip) = offer.ip else { return None; };
                     let mut map = offer.maps.iter().find(|m| m.slot == HOSTING_SLOT)?.clone();
                     // older hosts do not announce the package filename
@@ -2421,8 +2450,21 @@ impl WorkshopState {
                         ip, title: map.name.clone(), map: local, package: map.package.clone(),
                     })
                 }).collect();
+                // two hosts can announce the same slot and the first offer gets it, so the one being joined goes first
+                if let Some((ip, _)) = &self.multiplayer.pending_join {
+                    offers.sort_by_key(|offer| offer.ip != *ip);
+                }
                 let asked = std::mem::take(&mut self.slot_sync_asked);
                 let synced = crate::patcher::workshop_lan_trial::sync_offers(&cooked, &offers);
+                if let Some((ip, name)) = self.multiplayer.pending_join.take() {
+                    match &synced {
+                        Ok(()) if offers.iter().any(|offer| offer.ip == ip && offer.map.is_some()) => {
+                            self.multiplayer.join_ready = Some((ip, name));
+                        }
+                        Ok(()) => crate::toast::report_failed("lan-join", &format!("[Workshop] {name}'s map isn't in your Workshop folder yet, download it first.")),
+                        Err(error) => crate::toast::report_failed("lan-join", &format!("[Workshop] Could not get {name}'s map ready: {error}")),
+                    }
+                }
                 // a joined map took over one of your ticked maps' slots, so the game's list must show it unticked
                 if crate::patcher::workshop_slots::take_unticked() {
                     let cooked = cooked.clone();
@@ -2454,6 +2496,10 @@ impl WorkshopState {
                         .filter(|(map, _)| title.is_empty() || map.name.eq_ignore_ascii_case(&title))
                         .collect();
                 }
+            }
+            // without LAN map slots there is nothing to sync first
+            if let Some(join) = self.multiplayer.pending_join.take() {
+                self.multiplayer.join_ready = Some(join);
             }
         }
         ctx.request_repaint_after(Duration::from_secs(2));
@@ -2597,6 +2643,16 @@ impl WorkshopState {
             } else {
                 self.multiplayer.player_filter.clear();
             }
+            if let Some(name) = &self.multiplayer.own_hosting {
+                ui.strong(format!("You're hosting: {name}"));
+            }
+            if !rows.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label("Match password for Join:");
+                    ui.add(egui::TextEdit::singleline(&mut self.multiplayer.join_password).password(true).hint_text("only if the host set one"));
+                });
+            }
+            let mut join = None;
             if !rows.is_empty() || !mine.is_empty() {
                 ui.add_space(8.0);
                 egui::ScrollArea::vertical()
@@ -2622,7 +2678,11 @@ impl WorkshopState {
                                         }
                                     });
                                     if let Some(offer) = offer {
-                                        render_player_maps(ui, offer, &self.workshop_maps, busy, install);
+                                        if render_player_maps(ui, offer, &self.workshop_maps, busy, install) {
+                                            if let IpAddr::V4(ip) = offer.ip {
+                                                join = Some((ip, name.clone()));
+                                            }
+                                        }
                                         if ui.small_button(t("maps-in-use-block-player"))
                                             .on_hover_text(t("maps-in-use-hide-this-player-s-maps-and"))
                                             .clicked()
@@ -2644,6 +2704,10 @@ impl WorkshopState {
                             });
                         }
                     });
+            }
+            if join.is_some() {
+                self.multiplayer.pending_join = join;
+                self.join_polled = None;
             }
             let transfer = &self.multiplayer.map_transfer;
             let total = transfer.total.load(Ordering::Relaxed);
