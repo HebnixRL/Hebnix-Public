@@ -1,7 +1,7 @@
 //! Independently assembled UnrealScript hooks. No new native-backed fields.
 use super::super::{script_patch::{Script, function_payload}, upk_package::UpkPackage};
 // Bump whenever generated hooks or their Game Mods/scoreboard dependencies change.
-pub const REVISION: u32 = 46;
+pub const REVISION: u32 = 47;
 #[path = "animation.rs"]
 mod animation;
 #[path = "boost.rs"]

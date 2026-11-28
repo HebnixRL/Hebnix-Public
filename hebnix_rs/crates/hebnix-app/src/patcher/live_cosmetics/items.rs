@@ -222,7 +222,7 @@ fn attachment_materials(p: &UpkPackage, base: usize, target: Script, domain: Scr
     let material_ready = context(p, mesh.clone(), call(p, "Engine.MeshComponent.GetMaterial", &[int(0)])?, Some("Engine.MeshComponent.GetMaterial.ReturnValue"))?;
     let empty = choose(native(0x96, &[length(refs.clone()), int(2)]), not_null(material_ready), raw(&[0x28]))?;
     let count = context(p, mesh.clone(), call(p, "Engine.MeshComponent.GetNumElements", &[])?, Some("Engine.MeshComponent.GetNumElements.ReturnValue"))?;
-    let mut snapshot = assign(length(refs.clone()), native(0x92, &[native(0x94, &[count.clone(), int(2)]), int(1)]));
+    let mut snapshot = assign(length(refs.clone()), native(0x92, &[native(0x90, &[count.clone(), int(2)]), int(1)]));
     snapshot.append(&assign(element_at(int(0), refs.clone()), mesh.clone()));
     snapshot.append(&super::boost::repeat(p, begin + 3 + empty.mem_size() + snapshot.mem_size(), "HbxAttachmentMaterialIndex", count.clone(), |_, index| {
         let original = context(p, mesh.clone(), call(p, "Engine.MeshComponent.GetMaterial", &[index.clone()])?, Some("Engine.MeshComponent.GetMaterial.ReturnValue"))?;
@@ -277,7 +277,7 @@ fn attachment_materials(p: &UpkPackage, base: usize, target: Script, domain: Scr
 }
 
 fn restore_attachment_snapshot(p: &UpkPackage, base: usize, mesh: Script, refs: Script) -> R<Script> {
-    let count = native(0x95, &[native(0x93, &[length(refs.clone()), int(1)]), int(2)]);
+    let count = native(0x91, &[native(0x93, &[length(refs.clone()), int(1)]), int(2)]);
     super::boost::repeat(p, base, "HbxAttachmentRestoreIndex", count.clone(), |base, index| {
         let original = dynamic(p, "Engine.MaterialInterface", element_at(native(0x92, &[index.clone(), int(1)]), refs.clone()))?;
         let material = dynamic(p, "Engine.MaterialInstanceConstant", original.clone())?;
@@ -725,7 +725,11 @@ pub(super) fn materials_changed(p: &UpkPackage, base: usize) -> R<Script> {
     let array = references(p)?;
     let clear = super::boost::repeat(p, at + 3 + valid.mem_size(), "HbxMaterialResetIndex", length(array.clone()), |base, index| {
         let entry = element_at(index, array);
-        guard(base, not_null(dynamic(p, PAINT_CLOSURE, entry.clone())?), assign(entry, raw(&[0x2a])))
+        // ApplyPaintSettings recaptures only body/skin/wheel paints after InitMaterials.
+        // Toppers, antennas, boosts and trails are never reapplied, so keep their records.
+        let callback = dynamic(p, PAINT_CLOSURE, entry.clone())?;
+        let own = choose(not_null(callback.clone()), object_eq(&[field(p, callback, &format!("{PAINT_CLOSURE}.ObjectToPaint"))?, raw(&[0x17])]), raw(&[0x28]))?;
+        guard(base, own, assign(entry, raw(&[0x2a])))
     })?;
     out.append(&guard(at, valid, clear)?);
     guard(base, ready, out)

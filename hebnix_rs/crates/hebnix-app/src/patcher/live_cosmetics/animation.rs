@@ -100,10 +100,10 @@ pub(super) fn update(p: &UpkPackage, base: usize) -> R<Script> {
         out.append(&assign(member(p, "Core.Object.LinearColor", "A", colour.clone(), true)?, float(0.)));
         out.append(&guard(start + out.mem_size(), active, assign(colour, rainbow.clone()))?);
     }
-    let count = native(0x95, &[native(0x93, &[length(array.clone()), int(1)]), int(2)]);
+    let count = native(0x91, &[native(0x93, &[length(array.clone()), int(1)]), int(2)]);
     out.append(&boost::repeat(p, start + out.mem_size(), "HbxAnimationIndex", count, |base, index| {
-        let material = dynamic(p, "Engine.MaterialInstanceConstant", at(native(0x92, &[native(0x94, &[index.clone(), int(2)]), int(1)]), array.clone()))?;
-        let data = dynamic(p, "ProductPaint_TA", at(native(0x92, &[native(0x94, &[index, int(2)]), int(2)]), array.clone()))?;
+        let material = dynamic(p, "Engine.MaterialInstanceConstant", at(native(0x92, &[native(0x90, &[index.clone(), int(2)]), int(1)]), array.clone()))?;
+        let data = dynamic(p, "ProductPaint_TA", at(native(0x92, &[native(0x90, &[index, int(2)]), int(2)]), array.clone()))?;
         let channel = cast(0x3a, field(p, data.clone(), "ProductPaint_TA.FinishType")?);
         let colour = fixed(channel.clone(), colours);
         let active = choose(nonnull(material.clone()), choose(nonnull(data.clone()),
