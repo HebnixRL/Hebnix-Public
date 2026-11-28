@@ -73,6 +73,8 @@ fn show_palette_cell(palettes: &mut Palettes, team: usize, primary: bool, index:
 
 #[derive(Default)]
 pub struct LoadoutsPanel {
+    #[cfg(windows)]
+    summary_job: Option<Receiver<SaveSummary>>,
     accounts: Vec<SaveAccount>,
     save: Option<PathBuf>,
     names: Vec<String>,
@@ -97,6 +99,15 @@ pub struct LoadoutsPanel {
     creator: Option<creator::Creator>,
     #[cfg(windows)]
     creator_attempt: u64,
+}
+
+#[cfg(windows)]
+struct SaveSummary {
+    save: Option<PathBuf>,
+    accounts: Vec<SaveAccount>,
+    names: Vec<String>,
+    bodies: Vec<i64>,
+    message: String,
 }
 
 enum LoadoutDialog {

@@ -1,7 +1,9 @@
 //! Independently assembled UnrealScript hooks. No new native-backed fields.
 use super::super::{script_patch::{Script, function_payload}, upk_package::UpkPackage};
 // Bump whenever generated hooks or their Game Mods/scoreboard dependencies change.
-pub const REVISION: u32 = 38;
+pub const REVISION: u32 = 42;
+#[path = "animation.rs"]
+mod animation;
 #[path = "boost.rs"]
 mod boost;
 #[path = "items.rs"]
@@ -30,6 +32,11 @@ pub const TARGETS: &[&str] = &[
     "ExplosionPreviewer_TA.ApplyExplosionParameters",
     "ProductOverride_ParticleSystemColorParameter_TA.GetPaintToApply",
     "CarMeshComponent_TA.SetLoadout",
+    "ProductAttribute_Painted_TA.OverrideMeshMaterial",
+    "CarMeshComponentBase_TA.InitMaterials",
+    "CarMeshComponentBase_TA.ApplyColorsToCar",
+    "CarMeshComponentBase_TA.GetPhysicsAsset",
+    "CarMeshComponentBase_TA.AddCarInheritedObject",
 ];
 type R<T> = Result<T, String>;
 /// Import records are just names: assembling a valid reference does not prove
@@ -210,6 +217,16 @@ fn getter(p: &UpkPackage, settings_path: &std::path::Path, control_path: &std::p
     let mut initialize = items::ensure_holder(p, at + 3 + init.mem_size())?;
     initialize.append(&ret(text("")));
     s.append(&guard(at, init, initialize)?);
+    let binding = native(0xcc, &[key.clone(), text("HbxAnimation.bind")]);
+    let at = s.mem_size();
+    let mut bind = animation::register(p, at + 3 + binding.mem_size())?;
+    bind.append(&ret(text("")));
+    s.append(&guard(at, binding, bind)?);
+    let maintain = native(0xcc, &[key.clone(), text("HbxRegistry.maintain")]);
+    let at = s.mem_size();
+    let mut maintenance = items::maintenance(p, at + 3 + maintain.mem_size(), cast(STRING_TO_FLOAT, get_self(p, text("HbxRegistryTime"))?))?;
+    maintenance.append(&ret(text("")));
+    s.append(&guard(at, maintain, maintenance)?);
     let wheels = native(0xcc, &[key.clone(), text("HbxWheel.refresh")]);
     let at = s.mem_size();
     let mut update = refresh_wheel_colours(p, at + 3 + wheels.mem_size())?;
@@ -430,13 +447,17 @@ fn materials(p: &UpkPackage, base: usize) -> R<Script> {
             cast(0x60, text(color)), cast(0x60, text(full)),
         ])?;
         let start = base + 3 + local.mem_size() + body.mem_size();
-        let apply = guard(start + 3 + condition.mem_size(), pass, apply)?;
+        let apply = guard(start + 3 + condition.mem_size(), pass.clone(), apply)?;
         body.append(&guard(start, condition, apply)?);
+        let start = base + 3 + local.mem_size() + body.mem_size();
+        let mut bind = Script::new();
+        bind.append(&animation::bind(p, raw(&[0x17]), var(p, 0x2b, "CarMeshComponentBase_TA.SetMaterialColors.MatInst")?, text(key), cast(0x60, text(color)), Some(full))?);
+        body.append(&guard(start, items::choose(flag(p, &format!("{key}.enabled"))?, pass, raw(&[0x28]))?, bind)?);
     }
-    // Restore the real material callback used by the working pre-FPS hooks.
-    // refresh_mesh owns the per-car 10 Hz clock: subsequent material callbacks
-    // return before scanning or applying any registered paints.
-    body.append(&items::refresh_mesh(p, base + 3 + local.mem_size() + body.mem_size())?);
+    // The material callback binds colours; the scheduled change pass owns
+    // item reconciliation and native paint replay.
+    // Paint replay lives in ApplyColorsToCar, once per change rather than once
+    // per material callback. This callback only binds existing MICs.
     // Wheels/trim also have a direct material path, independent of inventory
     // paint capture. Report that path after refresh_mesh resets its counters.
     for key in ["trim", "wheels"] {
@@ -457,15 +478,19 @@ fn rgb(p: &UpkPackage, key: &str) -> R<Script> {
 // Keep channel expressions scalar: projecting a member from a temporary struct
 // without a VM temporary buffer makes native MakeLinearColor write to null.
 fn paint_channel(p: &UpkPackage, key: &str, index: usize) -> R<Script> {
-    let time = cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?);
-    let phase = [0., -std::f32::consts::TAU / 3., std::f32::consts::TAU / 3.][index];
-    let rainbow = native(0xae, &[float(0.5), native(0xab, &[float(0.5), native(0xbb, &[native(0xae, &[native(0xab, &[time, float(std::f32::consts::TAU / 6.)]), float(phase)])])])]);
+    let rainbow = rainbow_channel(p, index)?;
     let fixed = value(p, &format!("{key}.{}", ["r", "g", "b"][index]), 0., 1.)?;
     let mut result = raw(&[0x45]);
     result.append(&flag(p, &format!("{key}.rainbow"))?)
         .raw(&u16::try_from(rainbow.mem_size()).map_err(|_| "Rainbow expression overflow")?.to_le_bytes()).append(&rainbow)
         .raw(&u16::try_from(fixed.mem_size()).map_err(|_| "Colour expression overflow")?.to_le_bytes()).append(&fixed);
     Ok(result)
+}
+fn rainbow_channel(p: &UpkPackage, index: usize) -> R<Script> {
+    let time = cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?);
+    let phase = [0., -std::f32::consts::TAU / 3., std::f32::consts::TAU / 3.][index];
+    let rainbow = native(0xae, &[float(0.5), native(0xab, &[float(0.5), native(0xbb, &[native(0xae, &[native(0xab, &[time, float(std::f32::consts::TAU / 6.)]), float(phase)])])])]);
+    Ok(rainbow)
 }
 fn paint_rgb(p: &UpkPackage, key: &str) -> R<Script> {
     call(p, "Core.Object.MakeLinearColor", &[paint_channel(p, key, 0)?, paint_channel(p, key, 1)?, paint_channel(p, key, 2)?, float(1.)])
@@ -612,15 +637,15 @@ fn tick(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path) -> R<
     let body = tick_ready(p, base + 3 + ready.mem_size(), menu, report)?;
     guard(base, ready, body)
 }
-fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path) -> R<Script> {
+fn tick_ready(p: &UpkPackage, base: usize, menu: bool, _report: &std::path::Path) -> R<Script> {
     let time = field(p, var(p, 0x01, "Engine.Actor.WorldInfo")?, "Engine.WorldInfo.RealTimeSeconds")?;
-    // Shared across menu/game and local players, ten file reads a second.
+    // File IO runs synchronously on the game thread. Keep it independent of
+    // animation and shared across local players: two polls per second.
     let next = cast(STRING_TO_FLOAT, get(p, "HbxLiveNextRead")?);
     let reset = context(p, saved(p)?, set_self(p, "HbxLiveNextRead", text("0"))?, None)?;
     let mut body = guard(base, native(0xb0, &[time.clone(), native(0xaf, &[next.clone(), float(1.)])]), reset)?;
     let condition = native(0xb1, &[time.clone(), next]);
-    let mut poll = set_dynamic(p, text("HbxRainbowTime"), cast(FLOAT_TO_STRING, time.clone()))?;
-    poll.append(&context(p, saved(p)?, set_self(p, "HbxLiveNextRead", cast(FLOAT_TO_STRING, native(0xae, &[time, float(0.1)])))?, None)?);
+    let mut poll = context(p, saved(p)?, set_self(p, "HbxLiveNextRead", cast(FLOAT_TO_STRING, native(0xae, &[time, float(0.5)])))?, None)?;
     let mut refresh = raw(&[0x0e]); refresh.object(obj(p, "UISavedValues_TA.Get.ReturnValue")?).append(&get(p, "HbxLive.refresh")?);
     poll.append(&refresh);
     let quit = native(0xcc, &[get(p, "HbxControl.quit")?, text("1")]);
@@ -628,6 +653,10 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
     exit.object(obj(p, "Engine.Actor.ConsoleCommand.ReturnValue")?).append(&virtual_call(p, "ConsoleCommand", &[text("quit"), raw(&[0x28])])?);
     poll.append(&guard(base + body.mem_size() + 3 + condition.mem_size() + poll.mem_size(), quit, exit)?);
     let poll_base = base + body.mem_size() + 3 + condition.mem_size();
+    let uninitialized = native(0xcc, &[items::control_session(p)?, text("")]);
+    let mut initialize = raw(&[0x0e]);
+    initialize.object(obj(p, "UISavedValues_TA.Get.ReturnValue")?).append(&get(p, "HbxControl.init")?);
+    poll.append(&guard(poll_base + poll.mem_size(), uninitialized, initialize)?);
     if menu {
         // Refresh once per file change or menu-world change, including disable
         // and malformed-file fallback. Do not disturb match team instances.
@@ -669,6 +698,12 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
     }
     // Game Mod binds are match-only: SetBind on the menu controller's PlayerInput crashes the game.
     if !menu { poll.append(&super::game_mods::bindings(p, poll_base + poll.mem_size())?); }
+    let maintenance_time = field(p, var(p, 0x01, "Engine.Actor.WorldInfo")?, "Engine.WorldInfo.RealTimeSeconds")?;
+    poll.append(&set(p, "HbxRegistryTime", cast(FLOAT_TO_STRING, maintenance_time))?);
+    let mut maintain = raw(&[0x0e]);
+    maintain.object(obj(p, "UISavedValues_TA.Get.ReturnValue")?).append(&get(p, "HbxRegistry.maintain")?);
+    poll.append(&maintain);
+    // No periodic runtime report writes: all gameplay file IO is read-only.
     body.append(&guard(base + body.mem_size(), condition, poll)?);
     // A shared file poll must not prevent other local controllers from updating
     // their own car. Each controller gets an independent cosmetic refresh clock.
@@ -677,7 +712,8 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
     let render_next = cast(STRING_TO_FLOAT, get_dynamic(p, render_key.clone())?);
     body.append(&guard(base + body.mem_size(), native(0xb0, &[render_time.clone(), native(0xaf, &[render_next.clone(), float(1.)])]), set_dynamic(p, render_key.clone(), text("0"))?)?);
     let render_condition = native(0xb1, &[render_time.clone(), render_next]);
-    let mut render = set_dynamic(p, render_key, cast(FLOAT_TO_STRING, native(0xae, &[render_time, float(0.1)])))?;
+    let mut render = set_dynamic(p, render_key, cast(FLOAT_TO_STRING, native(0xae, &[render_time.clone(), float(0.1)])))?;
+    render.append(&set(p, "HbxRainbowTime", cast(FLOAT_TO_STRING, render_time))?);
     let mesh = local_mesh(p, menu)?;
     // Garage preview meshes derive from the base mesh class. Casting them to
     // the in-match subclass suppressed the entire live render pass in menus.
@@ -694,8 +730,40 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
     let mut alignment = context(p, dynamic(p, "CarMeshComponent_TA", mesh.clone())?, call(p, "CarMeshComponent_TA.InitWheelControls", &[])?, None)?;
     alignment.append(&set_dynamic(p, alignment_key, alignment_signature)?);
     render.append(&guard(base + body.mem_size() + 3 + render_condition.mem_size() + render.mem_size(), changed, alignment)?);
-    // SetMeshMaterialColors takes the mesh to update, not the component itself.
-    render.append(&context(p, mesh.clone(), call(p, "CarMeshComponentBase_TA.SetMeshMaterialColors", &[mesh])?, None)?);
+    // Static settings must stop the native material walk entirely. Include
+    // real native recaptures so delayed/recreated equipment still updates.
+    let material_key = native(0xf8, &[text("HbxCarColoursApplied."), cast(0x56, mesh.clone())]);
+    let mut signature = native(0xf8, &[get(p, "HbxLiveCache")?, get(p, "HbxLoadoutGeneration")?]);
+    signature = native(0xf8, &[native(0xf8, &[signature, text("|")]), get(p, "HbxPaintCaptureGeneration")?]);
+    let changed = native(0xc0, &[signature.clone(), get_dynamic(p, material_key.clone())?]);
+    let mut apply = context(p, mesh.clone(), call(p, "CarMeshComponentBase_TA.SetMeshMaterialColors", &[mesh.clone()])?, None)?;
+    apply.append(&set_dynamic(p, material_key, signature.clone())?);
+    render.append(&guard(base + body.mem_size() + 3 + render_condition.mem_size() + render.mem_size(), changed, apply)?);
+    // Particle-only paints keep their bounded native update clock, independent
+    // of the material walk. Static paints still stop after the change pass.
+    let fx_key = native(0xf8, &[text("HbxParticleColoursApplied."), cast(0x56, mesh.clone())]);
+    let signature = native(0xf8, &[native(0xf8, &[signature, text("|")]), get(p, "HbxInheritedGeneration")?]);
+    // Discover attachments which complete asynchronously, without replaying
+    // unchanged paints or walking the car's materials on this clock.
+    let discovery = cast(INT_TO_STRING, cast(0x44, native(0xab, &[cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?), float(0.5)])));
+    let signature = native(0xf8, &[native(0xf8, &[signature, text("|")]), items::choose(flag(p, "items.enabled")?, discovery, text(""))?]);
+    let trail = items::choose(flag(p, "trail.enabled")?, flag(p, "trail.rainbow")?, raw(&[0x28]))?;
+    let boost = items::choose(flag(p, "boost.enabled")?, flag(p, "boost.rainbow")?, raw(&[0x28]))?;
+    let animated = items::choose(trail, raw(&[0x27]), boost)?;
+    let phase = cast(INT_TO_STRING, cast(0x44, native(0xab, &[cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?), float(4.)])));
+    let signature = native(0xf8, &[native(0xf8, &[signature, text("|")]), items::choose(animated, phase, text(""))?]);
+    let changed = native(0xc0, &[signature.clone(), get_dynamic(p, fx_key.clone())?]);
+    let mut apply = set(p, "HbxPaintDispatch", text("1"))?;
+    // Supply the normal arguments even though our dispatch prefix returns
+    // before the original body. Native calls retain their stock behaviour.
+    // These arguments are unused by the dispatch prefix. Avoid querying PRI /
+    // team state while preview attachments are still being initialized.
+    let team = call(p, "Core.Object.MakeLinearColor", &[float(0.), float(0.), float(0.), float(1.)])?;
+    let accent = team.clone();
+    apply.append(&context(p, mesh.clone(), call(p, "CarMeshComponentBase_TA.ApplyColorsToCar", &[team, accent])?, None)?);
+    apply.append(&set(p, "HbxPaintDispatch", text("0"))?);
+    apply.append(&set_dynamic(p, fx_key, signature)?);
+    render.append(&guard(base + body.mem_size() + 3 + render_condition.mem_size() + render.mem_size(), changed, apply)?);
     // Wheel meshes are separate components. Refresh each one's materials using
     // the stock material iterator, then apply its independent paint override.
     // The marker is scoped to synchronous calls and always cleared afterwards.
@@ -709,8 +777,26 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
     let item_base = base + body.mem_size() + 3 + render_condition.mem_size() + render.mem_size();
     render.append(&items::refresh_vanity(p, item_base)?);
     body.append(&guard(base + body.mem_size(), render_condition, render)?);
+    // Fast, bounded colour-only path. No stock paint, material creation, or
+    // file IO is reachable from this branch.
+    let clock = native(0xf8, &[text("HbxAnimationNext."), cast(0x56, raw(&[0x17]))]);
     let time = field(p, var(p, 0x01, "Engine.Actor.WorldInfo")?, "Engine.WorldInfo.RealTimeSeconds")?;
-    body.append(&items::diagnostics(p, base + body.mem_size(), time, path_text(report))?);
+    let next = cast(STRING_TO_FLOAT, get_dynamic(p, clock.clone())?);
+    body.append(&guard(base + body.mem_size(), native(0xb0, &[time.clone(), native(0xaf, &[next.clone(), float(1.)])]), set_dynamic(p, clock.clone(), text("0"))?)?);
+    let due = native(0xb1, &[time.clone(), next]);
+    let ready = items::choose(flag(p, "materials.animated")?, due.clone(), items::choose(flag(p, "wheels.enabled")?, items::choose(flag(p, "wheels.rainbow")?, due, raw(&[0x28]))?, raw(&[0x28]))?)?;
+    let mesh = dynamic(p, "CarMeshComponentBase_TA", local_mesh(p, menu)?)?;
+    let ready = items::choose(native(0xce, &[mesh.clone(), raw(&[0x2a])]), ready, raw(&[0x28]))?;
+    let mut fast = set_dynamic(p, clock, cast(FLOAT_TO_STRING, native(0xae, &[time.clone(), float(1. / 30.)])))?;
+    fast.append(&set(p, "HbxRainbowTime", cast(FLOAT_TO_STRING, time))?);
+    fast.append(&set(p, "HbxAnimationMesh", call(p, "Core.Object.PathName", &[mesh.clone()])?)?);
+    fast.append(&set(p, "HbxAnimationPass", text("1"))?);
+    let mut discard = raw(&[0x0e]);
+    discard.object(obj(p, "CarMeshComponentBase_TA.GetPhysicsAsset.ReturnValue")?).append(&context(p, mesh,
+        call(p, "CarMeshComponentBase_TA.GetPhysicsAsset", &[])?, Some("CarMeshComponentBase_TA.GetPhysicsAsset.ReturnValue"))?);
+    fast.append(&discard);
+    fast.append(&set(p, "HbxAnimationPass", text("0"))?);
+    body.append(&guard(base + body.mem_size(), ready, fast)?);
     Ok(body)
 }
 // Keep wheel iteration in its own dispatch branch. Both controller tick
@@ -728,7 +814,7 @@ fn refresh_wheel_colours_ready(p: &UpkPackage, base: usize, car_mesh: Script) ->
     let wheel_key = native(0xf8, &[text("HbxWheelMaterials."), cast(0x56, car_mesh.clone())]);
     let active_key = native(0xf8, &[wheel_key.clone(), text(".active")]);
     let was_active = native(0xcc, &[get_dynamic(p, active_key.clone())?, text("1")]);
-    let mut stamp = native(0xf8, &[items::vanity_stamp(p, "wheels")?, get(p, "HbxLoadoutGeneration")?]);
+    let mut stamp = native(0xf8, &[get(p, "HbxLiveCache")?, get(p, "HbxLoadoutGeneration")?]);
     // Native loadout changes replace the wheel set together. Track the first
     // component plus count as well as generation, including delayed startup.
     let mut count = raw(&[0x57, 1]); count.append(&wheels);
@@ -742,11 +828,35 @@ fn refresh_wheel_colours_ready(p: &UpkPackage, base: usize, car_mesh: Script) ->
     let needed = items::choose(flag(p, "wheels.enabled")?, changed, was_active)?;
     let wheel_base = base + out.mem_size();
     let mut update = set_dynamic(p, text("HbxWheelColourPass"), text("1"))?;
+    // Animate existing wheel MICs directly. The stock iterator re-enters the
+    // general material/paint hooks for every wheel material and can rebuild
+    // renderer state. It is needed only once when restoring factory colours.
+    for (index, channel) in ["R", "G", "B"].into_iter().enumerate() {
+        update.append(&set(p, &format!("HbxWheelLive.{channel}"), cast(FLOAT_TO_STRING, paint_channel(p, "wheels", index)?))?);
+    }
     for i in 0..4 {
         let mut count = raw(&[0x57, 1]); count.append(&wheels);
         let condition = native(0x96, &[int(i), count]);
-        let apply = context(p, car_mesh.clone(), call(p, "CarMeshComponentBase_TA.SetMeshMaterialColors", &[element(i, wheels.clone())])?, None)?;
-        update.append(&guard(wheel_base + 3 + needed.mem_size() + update.mem_size(), condition, apply)?);
+        let wheel = element(i, wheels.clone());
+        let at = wheel_base + 3 + needed.mem_size() + update.mem_size();
+        let start = at + 3 + condition.mem_size();
+        let enabled = flag(p, "wheels.enabled")?;
+        let count = context(p, wheel.clone(), call(p, "Engine.MeshComponent.GetNumElements", &[])?, Some("Engine.MeshComponent.GetNumElements.ReturnValue"))?;
+        let animate = boost::repeat(p, start + 3 + enabled.mem_size(), "HbxWheelMaterialIndex", count, |base, index| {
+            let material = dynamic(p, "Engine.MaterialInstanceConstant", context(p, wheel.clone(),
+                call(p, "Engine.MeshComponent.GetMaterial", &[index])?, Some("Engine.MeshComponent.GetMaterial.ReturnValue"))?)?;
+            let colour = call(p, "Core.Object.MakeLinearColor", &[
+                cast(STRING_TO_FLOAT, get(p, "HbxWheelLive.R")?), cast(STRING_TO_FLOAT, get(p, "HbxWheelLive.G")?),
+                cast(STRING_TO_FLOAT, get(p, "HbxWheelLive.B")?), float(1.)])?;
+            let mut apply = context(p, car_mesh.clone(),
+                call(p, "CarMeshComponentBase_TA.SetMaterialColorParams", &[material.clone(), colour, cast(0x60, text("CustomColor")), cast(0x60, text("CustomColorFull"))])?, None)?;
+            apply.append(&animation::bind(p, car_mesh.clone(), material.clone(), text("wheels"), cast(0x60, text("CustomColor")), Some("CustomColorFull"))?);
+            guard(base, native(0xce, &[material, raw(&[0x2a])]), apply)
+        })?;
+        let mut apply = guard(start, enabled.clone(), animate)?;
+        apply.append(&guard(start + apply.mem_size(), native(0x81, &[enabled]), context(p, car_mesh.clone(),
+            call(p, "CarMeshComponentBase_TA.SetMeshMaterialColors", &[wheel])?, None)?)?);
+        update.append(&guard(at, condition, apply)?);
     }
     update.append(&set_dynamic(p, text("HbxWheelColourPass"), text("0"))?);
     update.append(&set_dynamic(p, wheel_key, stamp)?);
@@ -792,6 +902,21 @@ pub fn generate_with_paths(p: &UpkPackage, settings: &std::path::Path, report: &
     out.push((TARGETS[18].into(), append_original(p, TARGETS[18], |base| items::goal_preview(p, base))?));
     out.push((TARGETS[19].into(), items::particle_override_getter(p)?));
     out.push((TARGETS[20].into(), prefix_original(p, TARGETS[20], items::reset_loadout(p, 0)?)?));
+    out.push((TARGETS[21].into(), append_original(p, TARGETS[21], |base| animation::capture_native(p, base))?));
+    out.push((TARGETS[22].into(), append_original(p, TARGETS[22], |base| {
+        let mut reset = items::materials_changed(p, base)?;
+        reset.append(&animation::clear(p, base + reset.mem_size())?);
+        Ok(reset)
+    })?));
+    let condition = native(0xcc, &[get(p, "HbxPaintDispatch")?, text("1")]);
+    let mut replay = items::refresh_mesh(p, 3 + condition.mem_size())?;
+    replay.append(&ret(raw(&[0x0b])));
+    out.push((TARGETS[23].into(), prefix_original(p, TARGETS[23], guard(0, condition, replay)?)?));
+    let condition = native(0xcc, &[get(p, "HbxAnimationPass")?, text("1")]);
+    let mut fast = animation::update(p, 3 + condition.mem_size())?;
+    fast.append(&ret(raw(&[0x2a])));
+    out.push((TARGETS[24].into(), prefix_original(p, TARGETS[24], guard(0, condition, fast)?)?));
+    out.push((TARGETS[25].into(), append_original(p, TARGETS[25], |base| items::inherited_added(p, base))?));
     out.push((TARGETS[13].into(), items::paint_route(p)?));
     out.push((TARGETS[14].into(), append_original(p, TARGETS[14], |base| items::vanity(p, base))?));
     out.push((TARGETS[12].into(), append_original(p, TARGETS[12], |base| boost::actor(p, base))?));
@@ -1006,7 +1131,9 @@ mod tests {
     #[ignore = "requires an explicitly supplied unmodified local TAGame package"]
     fn generate_against_local_package() {
         let path = std::env::var("HEBNIX_UPK_TEST_SOURCE").unwrap();
-        verify_dependencies(std::path::Path::new(&path).parent().unwrap()).unwrap();
+        let dependency_dir = std::env::var("HEBNIX_UPK_TEST_COOKED").ok();
+        verify_dependencies(dependency_dir.as_deref().map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new(&path).parent().unwrap())).unwrap();
         let mut package = UpkPackage::load(std::path::Path::new(&path)).unwrap();
         for name in ["LoadFileToString", "InStr", "Left", "Mid", "FClamp"] { println!("NAME {name}: {:?}", package.names.iter().position(|s| s == name)); }
         for index in [0xb53c, 0xb540, 0x3143, 0x3144] { println!("MATERIAL NAME {index}: {:?}", package.names.get(index)); }
@@ -1028,6 +1155,14 @@ mod tests {
             validate(&script, 0).unwrap();
         }
         let generated = generate(&package).unwrap();
+        let fast = &generated.iter().find(|(path, _)| path == "CarMeshComponentBase_TA.GetPhysicsAsset").unwrap().1;
+        for forbidden in ["ProductAttribute_Painted_TA.ApplyPaintToObject", "Engine.MeshComponent.CreateAndSetMaterialInstanceConstant", "CarMeshComponentBase_TA.SetMeshMaterialColors"] {
+            let mut marker = vec![0x1c];
+            marker.extend_from_slice(&package.find_object(forbidden).unwrap().to_le_bytes());
+            assert!(!fast.windows(marker.len()).any(|w| w == marker), "animation must never rebuild paints/materials: {forbidden}");
+        }
+        let rebuilt = &generated.iter().find(|(path, _)| path == "CarMeshComponentBase_TA.InitMaterials").unwrap().1;
+        assert!(rebuilt.windows("HbxLoadoutGeneration".len()).any(|w| w == b"HbxLoadoutGeneration"));
         let scoped = items::references(&package).unwrap();
         assert!(scoped.bytes().windows(".HbxLivePaintRecords".len()).any(|w| w == b".HbxLivePaintRecords"));
         assert!(!scoped.bytes().windows(".HbxLiveColourReferences".len()).any(|w| w == b".HbxLiveColourReferences"),
@@ -1067,7 +1202,7 @@ mod tests {
         }
         // Export/property order is NOT UFunction argument order. Compare our
         // replay against the stock closure's native call convention.
-        let replay = &generated.iter().find(|(path, _)| path == "CarMeshComponentBase_TA.SetMaterialColors").unwrap().1;
+        let replay = &generated.iter().find(|(path, _)| path == "CarMeshComponentBase_TA.ApplyColorsToCar").unwrap().1;
         let mut call_marker = vec![0x1c];
         call_marker.extend_from_slice(&package.find_object("CarMeshComponentBase_TA.ApplyPaintSettingsToObject").unwrap().to_le_bytes());
         let start = replay.windows(call_marker.len()).position(|w| w == call_marker).unwrap() + call_marker.len();
@@ -1092,12 +1227,12 @@ mod tests {
             ("UISavedValues_TA.Get", "HbxControl.quit"),
             ("UISavedValues_TA.Get", "HbxQuitLast"),
             ("CarMeshComponent_TA.SetLoadout", "HbxLoadoutGeneration"),
-            ("CarMeshComponentBase_TA.SetMaterialColors", "HbxChangedPaintLastApplied."),
+            ("CarMeshComponentBase_TA.ApplyColorsToCar", "HbxChangedPaintLastApplied."),
             ("PlayerController_TA.PlayerTick", ".lastApplied"),
             ("PlayerController_Menu_TA.PlayerTick", ".lastApplied"),
-            ("CarMeshComponentBase_TA.SetMaterialColors", "HbxNativeRefreshCount"),
-            ("CarMeshComponentBase_TA.SetMaterialColors", "HbxNativePaintReplay"),
-            ("CarMeshComponentBase_TA.SetMaterialColors", "HbxLivePaintRecords"),
+            ("CarMeshComponentBase_TA.ApplyColorsToCar", "HbxNativeRefreshCount"),
+            ("CarMeshComponentBase_TA.ApplyColorsToCar", "HbxNativePaintReplay"),
+            ("CarMeshComponentBase_TA.ApplyColorsToCar", "HbxLivePaintRecords"),
             ("ProductAttribute_Painted_TA.ApplyPaintToObject", "HbxLivePaintRecords"),
             ("PlayerController_TA.PlayerTick", "HbxControl.quit"),
             ("PlayerController_Menu_TA.PlayerTick", "HbxControl.quit"),

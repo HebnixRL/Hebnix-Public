@@ -48,16 +48,13 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
         Tab::Items => &[
             (Items(ItemsSubTab::Swapper), "nav-swapper"),
             (Items(ItemsSubTab::Colours), "nav-colours"),
-            (Items(ItemsSubTab::Active), "nav-active"),
-            (Items(ItemsSubTab::Presets), "presets-presets"),
             (Items(ItemsSubTab::Loadouts), "loadouts-title"),
             (Items(ItemsSubTab::PresetCreator), "nav-preset-creator"),
+            (Items(ItemsSubTab::Presets), "nav-swapper-presets"),
         ],
         Tab::Patcher => &[
             (Studio(StudioSection::CustomAssets), "studio-custom-assets"),
             (Studio(StudioSection::Appearance), "studio-appearance"),
-            (Studio(StudioSection::Active), "nav-active"),
-            (Studio(StudioSection::History), "upk-history"),
         ],
         Tab::Spoofer => &[
             (Player(SpooferSubTab::Username), "nav-player-name"),
@@ -94,6 +91,7 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
                 Settings(HebnixSettingsTab::ActionButton),
                 "settings-nav-action-button",
             ),
+            (Settings(HebnixSettingsTab::Active), "nav-active"),
         ],
         Tab::GameMods => &[
             (MatchTools(MatchToolsPage::PAGES[0].0), MatchToolsPage::PAGES[0].1),
@@ -113,6 +111,19 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
 }
 
 impl HebnixApp {
+    pub(super) fn on_active_garage_page(&self) -> bool {
+        self.tab == Tab::Settings && self.hebnix_settings_tab == HebnixSettingsTab::Active
+            && self.active_settings_page == super::ActiveSettingsPage::Garage
+    }
+    pub(super) fn on_active_cosmetics_page(&self) -> bool {
+        self.tab == Tab::Settings && self.hebnix_settings_tab == HebnixSettingsTab::Active
+            && self.active_settings_page == super::ActiveSettingsPage::Cosmetics
+    }
+    pub(super) fn on_active_history_page(&self) -> bool {
+        self.tab == Tab::Settings && self.hebnix_settings_tab == HebnixSettingsTab::Active
+            && self.active_settings_page == super::ActiveSettingsPage::History
+    }
+
     pub(super) fn render_wry_page(&mut self, ui: &egui::Ui) {
         match self.modern_content_page() {
             Some(ContentPage::About) => { self.render_modern_about(ui); }
@@ -132,7 +143,7 @@ impl HebnixApp {
     fn modern_page_title(&self) -> String {
         match self.modern_content_page() {
             Some(ContentPage::About) => return t("about-hebnix"),
-            Some(ContentPage::Swapper) if self.items_subtab == ItemsSubTab::Swapper => {
+            Some(ContentPage::Swapper) if self.tab == Tab::Items && self.items_subtab == ItemsSubTab::Swapper => {
                 return t("nav-swapper");
             }
             Some(ContentPage::ReplayUpload) => return "Auto Save + Upload".into(),
@@ -291,8 +302,8 @@ impl HebnixApp {
             "inventory": self.owned_inventory.web_snapshot(),
             "ownedOnly": self.config.settings.owned_items_only,
             "controller": self.panel.active,
-            "page_warning": (self.tab == Tab::Items
-                && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active)
+            "page_warning": ((self.on_active_garage_page() || self.tab == Tab::Items
+                && self.items_subtab == ItemsSubTab::Swapper)
                 && self.last_rl_open).then_some("Close Rocket League before changing item swaps."),
             "panel": panel,
             "action_inset": action_inset,
@@ -400,6 +411,7 @@ impl HebnixApp {
             Tab::Workshop if self.arena_page().is_some() => Some(ContentPage::Arena),
             Tab::About => Some(if self.maintenance.tab { ContentPage::Manage } else { ContentPage::About }),
             Tab::Console => Some(ContentPage::Console),
+            Tab::Settings if self.on_active_garage_page() => Some(ContentPage::Swapper),
             Tab::Plugins | Tab::Spoofer | Tab::Settings | Tab::Freeplay | Tab::GameMods | Tab::LiveEditor | Tab::Items | Tab::Workshop | Tab::Patcher | Tab::Replays if self.has_modern_manager() => Some(ContentPage::Manage),
             Tab::Items
                 if matches!(
@@ -418,7 +430,7 @@ impl HebnixApp {
 
     pub(super) fn render_modern_swapper(&mut self, ui: &egui::Ui) -> bool {
         let cooked = self.swapper_cooked_path();
-        if self.items_subtab == ItemsSubTab::Active {
+        if self.on_active_garage_page() {
             let data = serde_json::json!({
                 "mode": "active",
                 "catalog": self.swapper.web_active_catalog(ui.ctx(), &cooked, &self.swapper_preview_ids),
@@ -498,7 +510,7 @@ impl HebnixApp {
     }
 
     pub(super) fn handle_modern_swapper(&mut self, action: SwapperAction, ctx: &egui::Context) {
-        if self.items_subtab == ItemsSubTab::Active {
+        if self.on_active_garage_page() {
             match action {
                 SwapperAction::Previews {
                     category: None,
@@ -794,6 +806,8 @@ impl HebnixApp {
             Subtab::Studio(StudioSection::CustomAssets) => STUDIO_CUSTOM.iter().enumerate().map(|(i, (_, key))| (i, t(key))).collect(),
             Subtab::Studio(StudioSection::Appearance) => STUDIO_APPEARANCE.iter().enumerate().map(|(i, (_, key))| (i, t(key))).collect(),
             Subtab::Settings(HebnixSettingsTab::Interface) => return vec![(0, "General".into()), (1, "Theme".into())],
+            Subtab::Settings(HebnixSettingsTab::Active) => return super::ActiveSettingsPage::PAGES.iter()
+                .enumerate().map(|(index, (_, key))| (index, t(key))).collect(),
             _ => return Vec::new(),
         };
         rows.sort_by_cached_key(|(_, label): &(usize, String)| label.to_lowercase());
@@ -818,6 +832,12 @@ impl HebnixApp {
             },
             Subtab::Settings(HebnixSettingsTab::Interface) if leaf < 2 => {
                 self.appearance_subtab = if leaf == 0 { super::AppearanceSubTab::General } else { super::AppearanceSubTab::Theme };
+            }
+            Subtab::Settings(HebnixSettingsTab::Active) => {
+                if let Some(&(page, _)) = super::ActiveSettingsPage::PAGES.get(leaf) {
+                    self.active_settings_page = page;
+                    if page == super::ActiveSettingsPage::History { self.upk_history.enter(); }
+                }
             }
             _ => {}
         }

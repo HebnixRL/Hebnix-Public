@@ -93,17 +93,56 @@ impl LoadoutsPanel {
     }
 
     pub(crate) fn sync_global_save(&mut self, path: Option<&Path>, refresh: bool) {
+        if let Some(job) = &self.summary_job {
+            match job.try_recv() {
+                Ok(summary) => {
+                    self.save = summary.save;
+                    self.accounts = summary.accounts;
+                    self.names = summary.names;
+                    self.bodies = summary.bodies;
+                    self.message = summary.message;
+                    self.summary_job = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.summary_job = None;
+                    self.message = "Could not read Rocket League saves".into();
+                }
+                Err(TryRecvError::Empty) => (),
+            }
+        }
         let initial = !self.loaded;
-        if initial { self.loaded = true; self.refresh_accounts(); }
+        if initial { self.loaded = true; }
         let changed = path.is_some_and(|path| self.save.as_deref() != Some(path));
         if changed {
             self.save = path.map(Path::to_path_buf);
+            self.names.clear(); self.bodies.clear();
             self.creator = None;
             self.dialog = None; self.code = None; self.mode = SaveMode::Replace;
             self.base = 0; self.target = 0;
         }
-        if refresh { self.refresh_accounts(); if let Some(path) = path { self.save = Some(path.to_path_buf()); } }
-        if initial || changed || refresh { self.reload(); }
+        if initial || changed || refresh {
+            // Save discovery and decryption can take seconds. Opening a tab
+            // must not do that work on the UI thread or build unused previews.
+            let requested = path.map(Path::to_path_buf).or_else(|| self.save.clone());
+            self.save = requested.clone();
+            let (send, receive) = mpsc::channel();
+            self.summary_job = Some(receive);
+            std::thread::spawn(move || {
+                let mut panel = LoadoutsPanel::default();
+                panel.refresh_accounts();
+                if let Some(path) = requested { panel.save = Some(path); }
+                panel.reload();
+                let _ = send.send(SaveSummary { save: panel.save, accounts: panel.accounts,
+                    names: panel.names, bodies: panel.bodies, message: panel.message });
+            });
+        }
+    }
+
+    pub(crate) fn creator_page_snapshot(&mut self, swapper: &mut SwapperState, cooked: &Path, ctx: &egui::Context) -> Value {
+        json!({"page": "preset-creator", "creator": self.creator_snapshot(swapper, cooked, ctx),
+            "rows": self.names.iter().enumerate().map(|(position, name)| json!({"position":position,"name":name})).collect::<Vec<_>>(),
+            "message":self.message, "creatorAttempt":self.creator_attempt,
+            "closed": !hebnix_sdk::process::is_rocket_league_running(), "loading": self.summary_job.is_some()})
     }
 
     pub(crate) fn web_snapshot(
@@ -202,7 +241,7 @@ impl LoadoutsPanel {
             ),
         );
         json!({
-            "page": "loadouts", "rows": rows, "account": account,
+            "page": "loadouts", "rows": rows, "account": account, "loading": self.summary_job.is_some(),
             "preview_positions": self.web_previews, "creatorAttempt": self.creator_attempt,
             "accounts": self.accounts.iter().map(|account| &account.display_name).collect::<Vec<_>>(),
             "closed": !hebnix_sdk::process::is_rocket_league_running(),

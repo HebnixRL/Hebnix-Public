@@ -20,9 +20,11 @@ fn colour_channel(p: &UpkPackage, domain: Script, index: usize) -> R<Script> {
     let phase = [0., -std::f32::consts::TAU / 3., std::f32::consts::TAU / 3.][index];
     let rainbow = native(0xae, &[float(0.5), native(0xab, &[float(0.5), native(0xbb, &[native(0xae, &[native(0xab, &[time, float(std::f32::consts::TAU / 6.)]), float(phase)])])])]);
     let fixed = virtual_call(p, "FClamp", &[cast(STRING_TO_FLOAT, lookup(p, domain.clone(), [".r", ".g", ".b"][index])?), float(0.), float(1.)])?;
-    choose(native(0xcc, &[lookup(p, domain, ".rainbow")?, text("1")]), rainbow, fixed)
+    let allowed = choose(native(0xc0, &[domain.clone(), text("goal_explosion")]),
+        native(0xcc, &[lookup(p, domain, ".rainbow")?, text("1")]), raw(&[0x28]))?;
+    choose(allowed, rainbow, fixed)
 }
-fn fixed_element(index: i32, array: Script) -> Script {
+pub(super) fn fixed_element(index: i32, array: Script) -> Script {
     // ProductPaint.Colors is a fixed array, not a dynamic array.
     let mut code = raw(&[0x1a]); code.append(&int(index)).append(&array); code
 }
@@ -50,7 +52,12 @@ pub(super) fn paint_route(p: &UpkPackage) -> R<Vec<u8>> {
     let old = &p.image[export.serial_offset..export.serial_offset + export.serial_size];
     let args = ["PaintSettings", "ProductPaint", "ObjectToPaint", "Asset"].map(|name| var(p, 0x2b, &format!("{owner}.{name}"))).into_iter().collect::<R<Vec<_>>>()?;
     let original = static_call(p, "ProductAttribute_Painted_TA", call(p, "ProductAttribute_Painted_TA.ApplyPaintToObject", &args)?, None)?;
-    let mut script = guard(0, not_null(args[1].clone()), original)?;
+    // A replay already has a captured factory paint. Restoring it immediately
+    // before applying the live paint doubles material/FX rebuilds per frame.
+    let live_replay = choose(native(0xcc, &[get(p, "HbxNativePaintReplay")?, text("1")]),
+        choose(not_null(args[0].clone()), enabled(p, asset_domain(p, args[3].clone())?)?, raw(&[0x28]))?, raw(&[0x28]))?;
+    let restore = choose(not_null(args[1].clone()), native(0x81, &[live_replay]), raw(&[0x28]))?;
+    let mut script = guard(0, restore, original)?;
     script.append(&paint(p, script.mem_size())?).append(&ret(raw(&[0x0b]))).raw(&[0x4c]);
     validate(&script, 0)?;
     function_payload(old, &script)
@@ -122,7 +129,7 @@ fn holder(p: &UpkPackage) -> R<Script> {
     let path = join(call(p, "Core.Object.PathName", &[engine(p)?])?, text(".HbxLiveColourReferences"));
     dynamic(p, "Engine.ObjectReferencer", call(p, "Core.Object.FindObject", &[path, var(p, 0x20, "Engine.ObjectReferencer")?])?)
 }
-fn global_references(p: &UpkPackage) -> R<Script> { field(p, holder(p)?, "Engine.ObjectReferencer.ReferencedObjects") }
+pub(super) fn global_references(p: &UpkPackage) -> R<Script> { field(p, holder(p)?, "Engine.ObjectReferencer.ReferencedObjects") }
 fn paint_mesh(p: &UpkPackage) -> R<Script> {
     dynamic(p, "CarMeshComponentBase_TA", call(p, "Core.Object.FindObject", &[get(p, "HbxPaintMesh")?, var(p, 0x20, "CarMeshComponentBase_TA")?])?)
 }
@@ -240,6 +247,18 @@ fn attachment_materials(p: &UpkPackage, base: usize, target: Script, domain: Scr
         Ok(save)
     })?);
     let mut apply = guard(begin, empty, snapshot)?;
+    // Unpainted toppers/antennas use this fallback instead of the native
+    // OverrideMeshMaterial callback. Bind their existing MICs as well, so
+    // their rainbows do not depend on replaying the attachment paint path.
+    apply.append(&super::boost::repeat(p, begin + apply.mem_size(), "HbxAttachmentAnimationIndex", count.clone(), |base, index| {
+        let material = dynamic(p, "Engine.MaterialInstanceConstant", context(p, mesh.clone(),
+            call(p, "Engine.MeshComponent.GetMaterial", &[index])?, Some("Engine.MeshComponent.GetMaterial.ReturnValue"))?)?;
+        let mut bind = Script::new();
+        for parameter in ["CustomColor", "CustomColorFull"] {
+            bind.append(&super::animation::bind(p, paint_mesh(p)?, material.clone(), domain.clone(), cast(0x60, text(parameter)), None)?);
+        }
+        guard(base, not_null(material), bind)
+    })?);
     let rgb = call(p, "Core.Object.MakeLinearColor", &[
         colour_channel(p, domain.clone(), 0)?, colour_channel(p, domain.clone(), 1)?, colour_channel(p, domain.clone(), 2)?, float(1.)])?;
     for name in ["CustomColor", "CustomColorFull"] {
@@ -517,6 +536,11 @@ fn capture_arguments(p: &UpkPackage, base: usize, asset: Script, target: Script,
     // Give each retained record a distinct name, not just the slot's name.
     create.append(&source_mesh(p, target.clone())?).append(&join(text("HbxLiveCapture_"), get(p, "HbxNativeRootSlot")?)).append(&int(0)).append(&var(p, 0x20, PAINT_CLOSURE)?).raw(&[0x2a]);
     let mut store = guard(store_base, native(0x81, &[not_null(callback.clone())]), assign(entry, create))?;
+    // A native recapture means the target may have reset its material/FX state.
+    // Replay passes are excluded above, so invalidate only on real game changes.
+    store.append(&set_dynamic(p, join(text("HbxChangedPaintLastApplied."), cast(0x56, callback.clone())), text(""))?);
+    store.append(&set(p, "HbxPaintCaptureGeneration", cast(INT_TO_STRING,
+        native(0x92, &[number(p, "HbxPaintCaptureGeneration")?, int(1)])))?);
     // Unpainted registration only runs when there is no Painted attribute.
     // Clear a previous variant if the same component/asset is reused unpainted.
     store.append(&assign(field(p, callback.clone(), &format!("{PAINT_CLOSURE}.ProductPaint"))?, factory));
@@ -565,35 +589,47 @@ fn refresh_paints(p: &UpkPackage, base: usize, mesh: Script) -> R<Script> {
         // Reapplying the same native goal paint repeatedly re-enters its FX
         // state/particle setup. A one-shot explosion needs changes, not a
         // continuous car-material refresh (especially through goal replays).
-        let product = field(p, callback.clone(), &format!("{PAINT_CLOSURE}.Product"))?;
-        let template = context(p, product, call(p, "ProductAsset_TA.GetProduct", &[])?, Some("ProductAsset_TA.GetProduct.ReturnValue"))?;
-        let slot = field(p, template, "ProductTemplate_TA.Slot")?;
-        let goal = object_eq(&[slot.clone(), var(p, 0x20, "ProductSlots.GoalExplosion")?]);
-        let wheel = object_eq(&[slot, var(p, 0x20, "ProductSlots.Wheels")?]);
-        let changed_only = choose(goal.clone(), raw(&[0x27]), wheel.clone())?;
-        let domain = choose(wheel.clone(), text("wheels"), text("goal_explosion"))?;
+        // Every native paint replay can rebuild materials/FX, not just goals.
+        // Static paints apply once; animated paints advance on their colour clock.
+        let domain_value = asset_domain(p, field(p, callback.clone(), &format!("{PAINT_CLOSURE}.Product"))?)?;
+        let domain = get(p, "HbxReplayDomain")?;
+        let goal = native(0xcc, &[domain.clone(), text("goal_explosion")]);
+        let wheel = native(0xcc, &[domain.clone(), text("wheels")]);
         let is_enabled = enabled(p, domain.clone())?;
         let stamp_key = join(text("HbxChangedPaintLastApplied."), cast(0x56, callback));
-        let stamp = join(choose(wheel, get(p, "HbxLiveCache")?, vanity_stamp(p, "goal_explosion")?)?, get(p, "HbxLoadoutGeneration")?);
+        // Wheels animate existing MIC parameters in their dedicated pass.
+        // Other native paints need at most four updates per second.
+        let material_only = choose(native(0xcc, &[domain.clone(), text("trim")]), raw(&[0x27]),
+            choose(native(0xcc, &[domain.clone(), text("decal")]), raw(&[0x27]),
+            choose(native(0xcc, &[domain.clone(), text("antenna")]), raw(&[0x27]), native(0xcc, &[domain.clone(), text("topper")]))?)?)?;
+        let one_shot = choose(goal, raw(&[0x27]), choose(wheel, raw(&[0x27]), material_only)?)?;
+        let frame = cast(INT_TO_STRING, cast(0x44, native(0xab, &[
+            cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?), float(4.)])));
+        let phase = choose(one_shot, text(""), frame)?;
+        let animated = native(0xcc, &[lookup(p, domain.clone(), ".rainbow")?, text("1")]);
+        let stamp = join(join(get(p, "HbxLiveCache")?, choose(animated, phase, text(""))?), get(p, "HbxLoadoutGeneration")?);
+        let mesh_target = dynamic(p, "Engine.MeshComponent", target.clone())?;
+        let material = choose(not_null(mesh_target.clone()), context(p, mesh_target,
+            call(p, "Engine.MeshComponent.GetMaterial", &[int(0)])?, Some("Engine.MeshComponent.GetMaterial.ReturnValue"))?, raw(&[0x2a]))?;
+        let stamp = join(join(stamp, text("|")), cast(0x56, material));
         let changed = native(0xc0, &[stamp.clone(), get_dynamic(p, stamp_key.clone())?]);
         let active_key = join(stamp_key.clone(), text(".active"));
         let was_active = native(0xcc, &[get_dynamic(p, active_key.clone())?, text("1")]);
-        // Disabled explosions never enter the live repaint path, except once
+        // Disabled paints never enter the live repaint path, except once
         // to undo a previously applied override on the still-existing effect.
         let needs_update = choose(is_enabled.clone(), changed, was_active)?;
-        let needed = choose(changed_only.clone(), needs_update, raw(&[0x27]))?;
+        let needed = needs_update;
         let at = base + 3 + alive.mem_size() + 3 + owns.mem_size();
-        let mut update = Script::new();
+        let mut update = set(p, "HbxReplayDomain", domain_value)?;
         let mut report = set_dynamic(p, join(text("HbxNativeFound."), domain.clone()), text("1"))?;
         report.append(&set_dynamic(p, join(text("HbxNativeApplied."), domain),
             choose(is_enabled.clone(), text("1"), text("0"))?)?);
-        update.append(&guard(at, changed_only.clone(), report)?);
-        let start = at + update.mem_size() + 3 + needed.mem_size();
+        update.append(&report);
         let mut apply = context(p, mesh, call(p, "CarMeshComponentBase_TA.ApplyPaintSettingsToObject", &args)?, None)?;
         let mut remember = set_dynamic(p, stamp_key, stamp)?;
         remember.append(&set_dynamic(p, active_key,
             choose(is_enabled, text("1"), text("0"))?)?);
-        apply.append(&guard(start + apply.mem_size(), changed_only, remember)?);
+        apply.append(&remember);
         update.append(&guard(at + update.mem_size(), needed, apply)?);
         leading.append(&guard(base, alive.clone(), guard(base + 3 + alive.mem_size(), owns, update)?)?);
         Ok(leading)
@@ -627,7 +663,44 @@ pub(super) fn refresh_mesh(p: &UpkPackage, base: usize) -> R<Script> {
     Ok(out)
 }
 fn mesh_time(p: &UpkPackage) -> R<Script> {
-    field(p, field(p, var(p, 0x01, "Engine.ActorComponent.Owner")?, "Engine.Actor.WorldInfo")?, "Engine.WorldInfo.RealTimeSeconds")
+    // Preview components can exist before ActorComponent.Owner is assigned.
+    // The controller supplies a valid clock before dispatching paint work.
+    Ok(cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?))
+}
+pub(super) fn inherited_added(p: &UpkPackage, base: usize) -> R<Script> {
+    let local = raw(&[0x2d]).append(&var(p, 0x01, "CarMeshComponentBase_TA.bLocalPlayer")?).clone();
+    // Our reconciliation is already capturing these associations. Do not
+    // reset its re-entrancy clock from inside that synchronous pass.
+    let external = native(0xc0, &[get(p, "HbxPaintDispatch")?, text("1")]);
+    let ready = choose(settings_ready(p)?, choose(local, external, raw(&[0x28]))?, raw(&[0x28]))?;
+    let mut update = set(p, "HbxInheritedGeneration", cast(INT_TO_STRING,
+        native(0x92, &[number(p, "HbxInheritedGeneration")?, int(1)])))?;
+    for prefix in ["HbxNativeRefreshNext.", "HbxNativeReconcile."] {
+        update.append(&set_dynamic(p, join(text(prefix), cast(0x56, raw(&[0x17]))), text("0"))?);
+    }
+    guard(base, ready, update)
+}
+/// Preview decal changes rebuild materials without calling the match-only
+/// SetLoadout hook. Retire callbacks for the previous skin and reconcile the
+/// current associations on the next scheduled pass, independent of RGB edits.
+pub(super) fn materials_changed(p: &UpkPackage, base: usize) -> R<Script> {
+    let local = raw(&[0x2d]).append(&var(p, 0x01, "CarMeshComponentBase_TA.bLocalPlayer")?).clone();
+    let ready = choose(settings_ready(p)?, local, raw(&[0x28]))?;
+    let start = base + 3 + ready.mem_size();
+    let mut out = set(p, "HbxPaintMesh", call(p, "Core.Object.PathName", &[raw(&[0x17])])?)?;
+    out.append(&set(p, "HbxLoadoutGeneration", cast(INT_TO_STRING, native(0x92, &[number(p, "HbxLoadoutGeneration")?, int(1)])))?);
+    for prefix in ["HbxNativeRefreshNext.", "HbxNativeReconcile."] {
+        out.append(&set_dynamic(p, join(text(prefix), cast(0x56, raw(&[0x17]))), text("0"))?);
+    }
+    let valid = not_null(bucket(p)?);
+    let at = start + out.mem_size();
+    let array = references(p)?;
+    let clear = super::boost::repeat(p, at + 3 + valid.mem_size(), "HbxMaterialResetIndex", length(array.clone()), |base, index| {
+        let entry = element_at(index, array);
+        guard(base, not_null(dynamic(p, PAINT_CLOSURE, entry.clone())?), assign(entry, raw(&[0x2a])))
+    })?;
+    out.append(&guard(at, valid, clear)?);
+    guard(base, ready, out)
 }
 /// Asset initialization can precede SaveGameManager readiness. Revisit the
 /// engine's own asset/object associations so missing captures recover later,
@@ -658,7 +731,12 @@ fn reconcile_mesh(p: &UpkPackage, base: usize) -> R<Script> {
         let callback = dynamic(p, PAINT_CLOSURE, element_at(native(0x93, &[index, int(1)]), references(p)?))?;
         let same_target = object_eq(&[field(p, callback.clone(), &format!("{PAINT_CLOSURE}.ObjectToPaint"))?, target.clone()]);
         let same_asset = object_eq(&[field(p, callback.clone(), &format!("{PAINT_CLOSURE}.Product"))?, asset.clone()]);
-        let captured = choose(in_range, choose(not_null(callback), choose(same_target, same_asset, raw(&[0x28]))?, raw(&[0x28]))?, raw(&[0x28]))?;
+        // Paint settings may finish loading after the association/callback.
+        // A retained callback with None settings is not ready forever: recapture
+        // once the asset exposes its actual settings, without repaint polling.
+        let same_settings = object_eq(&[field(p, callback.clone(), &format!("{PAINT_CLOSURE}.PaintSettings"))?, asset_settings(p, asset.clone())?]);
+        let captured = choose(in_range, choose(not_null(callback), choose(same_target,
+            choose(same_asset, same_settings, raw(&[0x28]))?, raw(&[0x28]))?, raw(&[0x28]))?, raw(&[0x28]))?;
         let missing = native(0x81, &[captured]);
         let valid = choose(not_null(asset.clone()), choose(not_null(target.clone()), missing, raw(&[0x28]))?, raw(&[0x28]))?;
         guard(base, valid, call(p, "CarMeshComponentBase_TA.ApplyAttributes", &[asset, target])?)
@@ -731,6 +809,7 @@ pub(super) fn vanity_stamp(p: &UpkPackage, key: &str) -> R<Script> {
     let mut stamp = get(p, "HbxLiveCache")?;
     // Four expensive UI/one-shot FX updates per second for rainbow, independent
     // of the 10 Hz continuous car-material clock.
+    if key == "goal_explosion" { return Ok(stamp); }
     let phase = cast(INT_TO_STRING, cast(0x44, native(0xab, &[
         cast(STRING_TO_FLOAT, get(p, "HbxRainbowTime")?), float(4.)])));
     stamp = join(join(stamp, text("|")), choose(flag(p, &format!("{key}.rainbow"))?, phase, text(""))?);
@@ -851,6 +930,20 @@ pub(super) fn diagnostics(p: &UpkPackage, base: usize, time: Script, report_path
     discard.object(obj(p, "Core.FileSystem.SaveStringToFile.ReturnValue")?).append(&save);
     write.append(&discard);
     out.append(&guard(base + out.mem_size(), due, write)?);
+    Ok(out)
+}
+
+/// GC roots must be pruned even when optional file diagnostics are disabled.
+pub(super) fn maintenance(p: &UpkPackage, base: usize, time: Script) -> R<Script> {
+    let next = cast(STRING_TO_FLOAT, get(p, "HbxRegistryMaintenanceNext")?);
+    let mut out = guard(base, native(0xb0, &[time.clone(), native(0xaf, &[next.clone(), float(2.)])]),
+        set(p, "HbxRegistryMaintenanceNext", text("0"))?)?;
+    let due = native(0xb1, &[time.clone(), next]);
+    let start = base + out.mem_size() + 3 + due.mem_size();
+    let mut prune = set(p, "HbxRegistryMaintenanceNext", cast(FLOAT_TO_STRING, native(0xae, &[time, float(2.)])))?;
+    prune.append(&ensure_holder(p, start + prune.mem_size())?);
+    prune.append(&prune_buckets(p, start + prune.mem_size())?);
+    out.append(&guard(base + out.mem_size(), due, prune)?);
     Ok(out)
 }
 
