@@ -6278,18 +6278,6 @@ impl HebnixApp {
                                             self.save_config();
                                         }
                                     });
-                                    // main.rs relaunches elevated on the next start when this is on
-                                    #[cfg(target_os = "windows")]
-                                    ui.horizontal(|ui| {
-                                        crate::i18n::layout::settings_label(ui, label_w, t("system-run-as-admin"));
-                                        if ui
-                                            .checkbox(&mut self.config.settings.run_as_admin, "")
-                                            .on_hover_text(t("system-run-as-admin-hint"))
-                                            .changed()
-                                        {
-                                            self.save_config();
-                                        }
-                                    });
                                     #[cfg(target_os = "linux")]
                                     ui.horizontal(|ui| {
                                         crate::i18n::layout::settings_label(ui, label_w, "Minimize to Tray:");

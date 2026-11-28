@@ -349,7 +349,7 @@ fn main() -> eframe::Result {
         "main window rendering mode"
     );
 
-    let mut cfg = config::Config::load(&base_dir);
+    let cfg = config::Config::load(&base_dir);
     tracing::info!(
         pid = std::process::id(),
         base_dir = %base_dir.display(),
@@ -357,19 +357,6 @@ fn main() -> eframe::Result {
     );
     i18n::init(&cfg.settings.language, Some(base_dir.join("locales")));
     tracing::info!("startup localization initialized");
-
-    let skip_elevate = std::env::args().any(|a| a == spoofer::SKIP_ELEVATE_ARG);
-    if skip_elevate && !spoofer::is_admin() {
-        cfg.settings.run_as_admin = false;
-        let _ = cfg.save(&base_dir);
-    }
-    if cfg.settings.run_as_admin && !skip_elevate && !spoofer::is_admin() {
-        tracing::info!("requesting elevated relaunch");
-        if spoofer::spawn_elevated_relaunch() {
-            return Ok(());
-        }
-        tracing::warn!("couldnt spawn the elevated relaunch helper");
-    }
 
     let Some(_mutex) = winutil::acquire_single_instance() else {
         winutil::focus_existing_instance();

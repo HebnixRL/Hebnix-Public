@@ -115,7 +115,7 @@ impl Default for ColourSettings {
             heatseeker_glow: false,
             heatseeker_max_speed: [255, 64, 0],
             car_colours: false,
-            custom_colours: vec![[255, 0, 0]],
+            custom_colours: Vec::new(),
             custom_colour: None,
             applied_car_colours: None,
             applied: false,
