@@ -1,7 +1,7 @@
 //! Independently assembled UnrealScript hooks. No new native-backed fields.
 use super::super::{script_patch::{Script, function_payload}, upk_package::UpkPackage};
 // Bump whenever generated hooks or their Game Mods/scoreboard dependencies change.
-pub const REVISION: u32 = 38;
+pub const REVISION: u32 = 39;
 #[path = "boost.rs"]
 mod boost;
 #[path = "items.rs"]
@@ -667,8 +667,8 @@ fn tick_ready(p: &UpkPackage, base: usize, menu: bool, report: &std::path::Path)
         poll.append(&guard(poll_base + poll.mem_size(), ready,
             context(p, ball, call(p, "Ball_God_TA.UpdateColor", &[])?, None)?)?);
     }
-    // Game Mod binds are match-only: SetBind on the menu controller's PlayerInput crashes the game.
-    if !menu { poll.append(&super::game_mods::bindings(p, poll_base + poll.mem_size())?); }
+    // Disabled: SetBind on PlayerInput crashes the game in the menu and in matches (RocketLeague.exe+0x368445).
+    let _ = super::game_mods::bindings;
     body.append(&guard(base + body.mem_size(), condition, poll)?);
     // A shared file poll must not prevent other local controllers from updating
     // their own car. Each controller gets an independent cosmetic refresh clock.

@@ -3,7 +3,7 @@ mod runtime;
 mod lifecycle;
 mod game_mods;
 mod movies;
-pub(crate) use lifecycle::{start, cleanup_after_exit};
+pub(crate) use lifecycle::{start, cleanup_after_exit, reinstall_async};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::{Path, PathBuf}, sync::Mutex};
 

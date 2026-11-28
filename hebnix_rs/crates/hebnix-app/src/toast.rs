@@ -377,6 +377,10 @@ impl ToastCenter {
     pub fn progress(&mut self, key: &str, text: &str, fraction: Option<f32>, done: bool, failed: bool) {
         if done {
             self.cards.retain(|c| c.key != key);
+            // Empty text closes the card without a toast.
+            if text.is_empty() {
+                return;
+            }
             if failed {
                 let style = ToastStyle { failed: true, ..ToastStyle::default() };
                 self.push("hebnix-failed", "Hebnix: failed", text, style);

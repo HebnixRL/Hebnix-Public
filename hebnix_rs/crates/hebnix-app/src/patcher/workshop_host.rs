@@ -129,7 +129,16 @@ pub(super) fn jump(target: usize, condition: &Script) -> Result<Script, String> 
 /// The block, its jump targets counted from the start of the function: `base`
 /// is where it starts, in memory form.
 fn block(upk: &UpkPackage, base: usize) -> Result<Script, String> {
+    block_with(upk, base, false)
+}
+
+/// `legacy` is the first block, which loaded the path into CommandJson. That
+/// parameter is a const out string the native still owns, so writing it
+/// corrupted the heap and crashed the game. Kept so remove() still finds it.
+fn block_with(upk: &UpkPackage, base: usize, legacy: bool) -> Result<Script, String> {
     let command = field(upk, 0x2b, &format!("{COMMAND}.CommandJson"))?;
+    // The Workshop menu already uses ItemRemoved as its file-read scratch string.
+    let scratch = if legacy { command.clone() } else { scratch(upk)? };
     let load_file = upk
         .names
         .iter()
@@ -147,15 +156,15 @@ fn block(upk: &UpkPackage, base: usize) -> Result<Script, String> {
         Some("ProjectX.GFxDataStore_X.CreateObject.ReturnValue"),
     )?;
     // ClassContext(class'FileSystem'), skip, no return property, then
-    // LoadFileToString(path, CommandJson)
+    // LoadFileToString(path, scratch)
     let mut read = Script::new();
-    read.raw(&[0x1b]).raw(&load_file).append(&string(RUN_PATH)).append(&command).raw(&[0x16]);
+    read.raw(&[0x1b]).raw(&load_file).append(&string(RUN_PATH)).append(&scratch).raw(&[0x16]);
     let mut load = Script::new();
     load.raw(&[0x5e, 0x12, 0x00, 0x20]).object(file_system);
     load.raw(&u16::try_from(read.mem_size()).map_err(|e| e.to_string())?.to_le_bytes());
     // no return property (still an object reference in memory), then the call
     load.object(0).raw(&[0x00]).append(&read);
-    let start = context(upk, workshop(upk)?, call(upk, &format!("{WORKSHOP}.LoadWorkshopMap"), &[command])?, None)?;
+    let start = context(upk, workshop(upk)?, call(upk, &format!("{WORKSHOP}.LoadWorkshopMap"), &[scratch])?, None)?;
 
     // positions in memory form, from the block's start
     let outer = 3 + request.mem_size();
@@ -189,17 +198,41 @@ fn load_text(upk: &UpkPackage, filename: &str, destination: &Script) -> Result<S
     Ok(load)
 }
 
+/// Make the Workshop data object when it does not exist yet, so its
+/// ItemRemoved can hold file text. `base` is where this starts in memory.
+fn ensure_workshop(upk: &UpkPackage, base: usize) -> Result<Script, String> {
+    let is_none = native(207, &[workshop(upk)?, Script::from_parts(vec![0x2a], 0)]);
+    let create = context(
+        upk,
+        store(upk)?,
+        call(upk, "ProjectX.GFxDataStore_X.CreateObject", &[field(upk, 0x20, WORKSHOP)?, native_nothing(), native_nothing()])?,
+        Some("ProjectX.GFxDataStore_X.CreateObject.ReturnValue"),
+    )?;
+    let mut s = jump(base + 3 + is_none.mem_size() + create.mem_size(), &is_none)?;
+    s.append(&create);
+    Ok(s)
+}
+
+/// Workshop.ItemRemoved, the scratch string for file reads. Never CommandJson:
+/// it is a const out string the native owns, and writing it corrupts the heap.
+fn scratch(upk: &UpkPackage) -> Result<Script, String> {
+    let removed = format!("{WORKSHOP}.ItemRemoved");
+    context(upk, workshop(upk)?, field(upk, 0x01, &removed)?, Some(&removed))
+}
+
+/// Versions 1-3 read the file into CommandJson and crash the game. Version 4
+/// answers the same V3 request through the Workshop scratch string.
 fn freeplay_block(upk: &UpkPackage, base: usize, version: u8) -> Result<Script, String> {
     let legacy = version == 1;
     let command = field(upk, 0x2b, &format!("{COMMAND}.CommandJson"))?;
-    let load = load_text(upk, FREEPLAY_FILE, &command)?;
+    let target = if version == 4 { scratch(upk)? } else { command.clone() };
     let mut open = native(
         if legacy { 0xf8 } else { 0xa8 },
         &[string(if legacy { "open " } else { "Open" }), command.clone()],
     );
-    if version == 3 {
+    if version >= 3 {
         // The file holds Disconnect or a complete Open/Start travel command.
-        open = command.clone();
+        open = target.clone();
     }
     let execute = if legacy {
         // Retained to recognize and remove the first restart hook.
@@ -223,16 +256,19 @@ fn freeplay_block(upk: &UpkPackage, base: usize, version: u8) -> Result<Script, 
         2 => V2_FREEPLAY_REQUEST,
         _ => FREEPLAY_REQUEST,
     })]);
-    let end = base + 3 + request.mem_size() + load.mem_size() + execute.mem_size();
+    let body = base + 3 + request.mem_size();
+    let ensure = if version == 4 { ensure_workshop(upk, body)? } else { Script::new() };
+    let load = load_text(upk, FREEPLAY_FILE, &target)?;
+    let end = body + ensure.mem_size() + load.mem_size() + execute.mem_size();
     let mut block = jump(end, &request)?;
-    block.append(&load).append(&execute);
+    block.append(&ensure).append(&load).append(&execute);
     Ok(block)
 }
 
 pub(super) fn edit_freeplay_restart(upk: &mut UpkPackage, on: bool) -> Result<bool, String> {
     let (_, mut script) = payload(upk)?;
-    let installed = freeplay_version(&script);
-    if installed == on.then_some(3) {
+    let installed = freeplay_variant(upk, &script);
+    if installed == on.then_some(4) {
         return Ok(false);
     }
     if !script.bytes().ends_with(&[0x04, 0x0b, 0x4c]) {
@@ -248,11 +284,24 @@ pub(super) fn edit_freeplay_restart(upk: &mut UpkPackage, on: bool) -> Result<bo
         script.cut(start, block.len(), block.refs());
     }
     if on {
-        let block = freeplay_block(upk, script.mem_size() - END, 3)?;
+        let block = freeplay_block(upk, script.mem_size() - END, 4)?;
         script.insert_before_tail(END, &block);
     }
     replace_script(upk, COMMAND, &script)?;
     Ok(true)
+}
+
+/// The installed block's variant. The V3 request is shared by variants 3 and 4,
+/// so look at which one sits before the tail.
+fn freeplay_variant(upk: &UpkPackage, script: &Script) -> Option<u8> {
+    let version = freeplay_version(script)?;
+    let at_tail = |version| -> bool {
+        let Ok(probe) = freeplay_block(upk, 0, version) else { return false };
+        let Some(start) = script.len().checked_sub(END + probe.len()) else { return false };
+        freeplay_block(upk, script.mem_size() - END - probe.mem_size(), version)
+            .is_ok_and(|block| script.bytes().get(start..start + block.len()) == Some(block.bytes()))
+    };
+    Some(if version == 3 && at_tail(4) { 4 } else { version })
 }
 
 /// Temporarily remove the restart hook while another feature changes the
@@ -266,7 +315,7 @@ fn freeplay_version(script: &Script) -> Option<u8> {
 
 pub(crate) fn detach_freeplay_restart(upk: &mut UpkPackage) -> Result<Option<u8>, String> {
     let (_, script) = payload(upk)?;
-    let version = freeplay_version(&script);
+    let version = freeplay_variant(upk, &script);
     edit_freeplay_restart(upk, false)?;
     Ok(version)
 }
@@ -298,7 +347,7 @@ pub(crate) fn detach_tail_blocks(upk: &mut UpkPackage) -> Result<Vec<TailBlock>,
     let mut detached = Vec::new();
     loop {
         let (_, script) = payload(upk)?;
-        let freeplay = freeplay_version(&script);
+        let freeplay = freeplay_variant(upk, &script);
         let host = has(upk);
         let chat = super::chat_test_cleanup::present(&script);
         if freeplay.is_none() && !host && !chat {
@@ -489,21 +538,28 @@ fn add(upk: &mut UpkPackage) -> Result<(), String> {
     Err(format!("{COMMAND} changed layout in this Rocket League version"))
 }
 
+/// Where the block sits before the tail, current or legacy form: start and bytes.
+fn find_block(upk: &UpkPackage, script: &Script, legacy: bool) -> Result<Option<(usize, Script)>, String> {
+    let probe = block_with(upk, 0, legacy)?;
+    // the block was written for its place, so find its start by its length
+    let Some(start) = script.len().checked_sub(END + probe.len()) else { return Ok(None) };
+    let base = script.mem_size() - END - probe.mem_size();
+    let here = block_with(upk, base, legacy)?;
+    Ok((script.bytes().get(start..start + here.len()) == Some(here.bytes())).then_some((start, here)))
+}
+
 fn remove(upk: &mut UpkPackage) -> Result<(), String> {
     if !has(upk) {
         return Ok(());
     }
     let (_, mut script) = payload(upk)?;
-    let probe = block(upk, 0)?;
-    // the block was written for its place, so find its start by its length
-    let start = script.len().checked_sub(END + probe.len()).ok_or("The host block is not where it was put")?;
-    let base = script.mem_size() - END - probe.mem_size();
-    let here = block(upk, base)?;
-    if script.bytes().get(start..start + here.len()) != Some(here.bytes()) {
-        return Err("The host block is not where it was put".into());
+    for legacy in [false, true] {
+        if let Some((start, here)) = find_block(upk, &script, legacy)? {
+            script.cut(start, here.len(), here.refs());
+            return replace_script(upk, COMMAND, &script);
+        }
     }
-    script.cut(start, here.len(), here.refs());
-    replace_script(upk, COMMAND, &script)
+    Err("The host block is not where it was put".into())
 }
 
 fn ensure_closed() -> Result<(), String> {
@@ -533,9 +589,16 @@ pub fn enable(cooked: &Path) -> Result<(), String> {
     let live = game_path::resolve(cooked, PACKAGE);
     let mut upk = UpkPackage::load(&live)?;
     if has(&upk) {
-        return Ok(());
+        let (_, script) = payload(&upk)?;
+        if find_block(&upk, &script, false)?.is_some() {
+            return Ok(());
+        }
+        // Swap the crashing legacy block for the current one.
+        ensure_closed()?;
+        remove(&mut upk)?;
+    } else {
+        ensure_closed()?;
     }
-    ensure_closed()?;
     add(&mut upk)?;
     install(cooked, &live, &upk, true)
 }
@@ -559,7 +622,30 @@ pub fn run_file(cooked: &Path) -> std::path::PathBuf {
 
 /// Whether the live package can take the command now.
 pub fn ready(cooked: &Path) -> bool {
-    UpkPackage::load(&game_path::resolve(cooked, PACKAGE)).is_ok_and(|upk| has(&upk))
+    // Loading the package takes seconds, so remember the answer per file version.
+    static CACHE: std::sync::Mutex<Option<(std::path::PathBuf, u64, std::time::SystemTime, bool)>> =
+        std::sync::Mutex::new(None);
+    let live = game_path::resolve(cooked, PACKAGE);
+    let Some((len, modified)) = std::fs::metadata(&live).ok().and_then(|m| Some((m.len(), m.modified().ok()?))) else {
+        return false;
+    };
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((path, l, m, answer)) = cache.as_ref() {
+        if *path == live && *l == len && *m == modified {
+            return *answer;
+        }
+    }
+    let answer = UpkPackage::load(&live).is_ok_and(|upk| has(&upk));
+    *cache = Some((live, len, modified, answer));
+    answer
+}
+
+/// Put an enabled Freeplay restart back when TAGame.upk lost it, e.g. after a verify.
+pub(crate) fn reapply_freeplay(cooked: &Path) -> Result<(), String> {
+    if cooked.join("Backups").join(FREEPLAY_ENABLED).is_file() && !freeplay_patch_intact(cooked) {
+        set_freeplay_patch(cooked, true)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

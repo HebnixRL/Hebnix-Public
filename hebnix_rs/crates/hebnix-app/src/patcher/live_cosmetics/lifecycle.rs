@@ -6,6 +6,8 @@ use std::sync::{atomic::{AtomicBool, Ordering}, OnceLock};
 
 static COOKED: OnceLock<Mutex<PathBuf>> = OnceLock::new();
 static BUSY: AtomicBool = AtomicBool::new(false);
+// Set by `repatch all`: rebuild the hooks instead of trusting a matching hash.
+static FORCE: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 #[path = "operation_recovery.rs"]
 mod operation_recovery;
@@ -191,6 +193,10 @@ pub fn start(root: &str) {
         });
     } else { reconcile_async(); }
 }
+pub fn reinstall_async() {
+    FORCE.store(true, Ordering::Release);
+    reconcile_async();
+}
 pub fn reconcile_async() {
     if hebnix_sdk::process::is_rocket_league_running() {
         status("Live setup will be checked when Rocket League closes");
@@ -205,7 +211,28 @@ pub fn reconcile_async() {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reconcile(&cooked, true, std::process::id())))
                 .unwrap_or_else(|_| Err("Live recovery stopped unexpectedly; the saved journal was retained".into()));
             match outcome {
-                Ok(()) => { status("Live features ready"); break; }
+                Ok(()) => {
+                    FORCE.store(false, Ordering::Release);
+                    // Like the Game Mods, an enabled Workshop menu comes back after a verify.
+                    if let Err(error) = super::super::workshop_menu::reapply_if_missing(&cooked) {
+                        tracing::warn!("Workshop menu reapply: {error}");
+                        status(format!("Error: Workshop menu: {error}"));
+                        break;
+                    }
+                    // Lets a right-click host start the match once its LAN slot copy is made.
+                    if super::super::workshop_menu::status(&cooked).unwrap_or(false) {
+                        if let Err(error) = super::super::workshop_host::enable(&cooked) {
+                            tracing::warn!("Workshop LAN host command: {error}");
+                        }
+                    }
+                    if let Err(error) = super::super::workshop_host::reapply_freeplay(&cooked) {
+                        tracing::warn!("Freeplay restart reapply: {error}");
+                    }
+                    // Warm the host check so a right-click host doesn't wait on it.
+                    let _ = super::super::workshop_host::ready(&cooked);
+                    status("Live features ready");
+                    break;
+                }
                 Err(error) => {
                     if hebnix_sdk::process::is_rocket_league_running() {
                         status("Error: Rocket League is using the game files. Live patching will resume after Rocket League closes.");
@@ -277,7 +304,7 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
     if saved.as_ref().is_some_and(|r| r.version != 1 || r.cooked != cooked) {
         return Err("Live cosmetic recovery belongs to another game installation. Restore it before changing installations".into());
     }
-    let mut upgrade = install && saved.as_ref().is_some_and(|r| r.runtime_revision != runtime::REVISION);
+    let mut upgrade = install && saved.as_ref().is_some_and(|r| r.runtime_revision != runtime::REVISION || FORCE.load(Ordering::Acquire));
     // Older receipts could take another patch's reserved name as a size donor.
     let mut release = install && saved.as_ref().is_some_and(|r| r.names.iter()
         .any(|(_, before, after)| runtime::RESERVED_NAMES.contains(&before.as_str()) && after.starts_with("HbxLiveUnused")));
@@ -356,6 +383,13 @@ fn reconcile(cooked: &Path, install: bool, owner: u32) -> Result<(), String> {
             }
         }
         if !names.is_empty() { package.rename_names_same_size(&names)?; changed = true; }
+        // Our hooks call LoadFileToString, but older journals left that slot to the
+        // Workshop menu. After a verify nothing renames it and the game crashes at the menu.
+        if !package.names.iter().any(|n| n == "LoadFileToString") {
+            let index = package.names.iter().position(|n| n == "TransformedLeftX").ok_or("LoadFileToString slot is missing")?;
+            package.rename_name(index, "LoadFileToString")?;
+            changed = true;
+        }
         for (slot, before, after) in &r.imports {
             let current = package.import_bytes(*slot)?;
             if current == *after { continue; }

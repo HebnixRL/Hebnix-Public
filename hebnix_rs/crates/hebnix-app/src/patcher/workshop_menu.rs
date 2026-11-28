@@ -265,7 +265,7 @@ pub(super) fn rename_names(upk: &mut UpkPackage, on: bool) -> Result<(), String>
 
 /// The unused names, renamed while the menu is enabled.
 fn names(upk: &UpkPackage, on: bool) -> Result<Vec<(usize, Vec<u8>)>, String> {
-    let keep_loader = super::instant_suite::has_native_bridge(upk) || super::workshop_host::has_freeplay_restart(upk);
+    let keep_loader = super::instant_suite::has_native_bridge(upk) || super::workshop_host::has_freeplay_restart(upk) || super::live_cosmetics::has_native_bridge(upk);
     NAMES
         .iter()
         .map(|(vanilla, patched)| {
@@ -1295,6 +1295,15 @@ pub fn reapply(cooked: &Path, backups: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Put an enabled menu back when TAGame.upk lost it, e.g. after verifying the game.
+pub fn reapply_if_missing(cooked: &Path) -> Result<(), String> {
+    let backups = cooked.join("Backups");
+    if !backups.join(ENABLED).is_file() || status(cooked)? {
+        return Ok(());
+    }
+    reapply(cooked, &backups)
 }
 
 pub(super) fn recover_after_update(cooked: &Path, archive: &Path) -> Result<(), String> {

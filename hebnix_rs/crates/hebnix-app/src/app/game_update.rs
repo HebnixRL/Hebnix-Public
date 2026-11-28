@@ -208,6 +208,10 @@ impl HebnixApp {
 
     pub(super) fn repatch_from_console(&mut self, ctx: &egui::Context, all: bool) {
         self.start_game_update(ctx, all, false);
+        if all && !hebnix_sdk::process::is_rocket_league_running() {
+            self.console.write("[Recovery] Rebuilding live cosmetics.");
+            crate::patcher::live_cosmetics::reinstall_async();
+        }
     }
 
     fn start_game_update(&mut self, ctx: &egui::Context, all: bool, clear: bool) {
