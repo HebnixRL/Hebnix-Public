@@ -44,7 +44,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 toml = "1.1.2"
-time = { version = "0.3.55", features = ["local-offset"] }
+fontdb = "0.24"
+time ={ version = "0.3.55", features = ["local-offset"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tray-icon = "0.24.1"

@@ -113,6 +113,8 @@ pub struct OwnedInventory {
     launch_watch_until: Option<std::time::Instant>,
     next_account_probe: Option<std::time::Instant>,
     account_probe: Option<Receiver<Option<String>>>,
+    /// The modern header's quick settings hold the account picker, so pages leave it out.
+    pub(crate) in_header: bool,
 }
 
 impl OwnedInventory {
@@ -157,6 +159,10 @@ impl OwnedInventory {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        if self.in_header {
+            self.poll(ui.ctx());
+            return;
+        }
         self.show_with_actions(ui, |_| {});
     }
 
@@ -224,7 +230,13 @@ impl OwnedInventory {
             if ui.add_enabled(self.result.is_none(), egui::Button::new("↻")).on_hover_text("Refresh save").clicked() {
                 refresh = true;
             }
+            if self.result.is_some() {
+                ui.spinner();
+            }
         });
+        if let Some(error) = &self.error {
+            ui.weak(error);
+        }
         if refresh { self.refresh(ui.ctx()); }
         if let Some(id) = next.as_ref() {
             self.refresh_web(ui.ctx(), Some(id));
@@ -255,6 +267,10 @@ impl OwnedInventory {
 
     pub(crate) fn selected_save(&self) -> Option<&std::path::Path> { self.selected.as_deref() }
 
+    pub(crate) fn selected_account_id(&self) -> Option<&str> {
+        self.accounts.iter().find(|account| Some(&account.path) == self.selected.as_ref()).map(|account| account.account_id.as_str())
+    }
+
     #[cfg(windows)]
     pub(crate) fn refresh_web(&mut self, ctx: &egui::Context, account: Option<&str>) {
         if self.result.is_some() {
@@ -275,6 +291,10 @@ impl OwnedInventory {
 
     pub fn show_with_actions(&mut self, ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui)) {
         self.poll(ui.ctx());
+        if self.in_header {
+            ui.horizontal_wrapped(actions);
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label("Owned items from the active account");
             let name = self

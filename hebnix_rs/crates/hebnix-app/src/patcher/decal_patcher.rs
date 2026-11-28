@@ -3906,7 +3906,10 @@ impl DecalPatcherState {
         owned_inventory: &mut crate::owned_inventory::OwnedInventory,
     ) {
         self.handle_op_result(tx, config);
-        ui.heading(t("nav-decals"));
+        // the browser below repeats it, and the modern header has its own title
+        if !owned_inventory.in_header {
+            ui.heading(t("nav-decals"));
+        }
         owned_inventory.show_with_actions(ui, |ui| {
             let label = "Show only owned items";
             let width = ui.spacing().icon_width

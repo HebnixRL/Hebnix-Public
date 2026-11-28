@@ -216,8 +216,8 @@ impl ConsoleState {
         });
 
         // Reserve space for the input row at the bottom.
-        let input_height = 32.0;
-        let log_height = (ui.available_height() - input_height - 8.0).max(60.0);
+        let input_height = 40.0;
+        let log_height = (ui.available_height() - input_height - 14.0).max(60.0);
 
         egui::Frame::group(ui.style())
             .fill(ui.visuals().extreme_bg_color)
@@ -324,6 +324,8 @@ impl ConsoleState {
                 .hint_text(t("render-enter-system-command"))
                 .font(egui::TextStyle::Monospace)
                 .lock_focus(!self.suggestions.is_empty()) // else tab should walk focus off the input
+                // egui 0.35 ignores min_size.y on a TextEdit, so the margin sets the height
+                .margin(egui::Margin::symmetric(10, 11))
                 .desired_width(f32::INFINITY),
         );
 

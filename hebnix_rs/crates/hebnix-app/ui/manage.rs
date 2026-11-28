@@ -781,12 +781,12 @@ impl HebnixApp {
                 if key == "import_theme" {
                     let dialog = rfd::FileDialog::new()
                         .set_title(t("settings-import-themes"))
-                        .add_filter("ZIP", &["zip"]);
+                        .add_filter("Theme", &["toml", "zip"]);
                     let Some(path) = winutil::parent_file_dialog(dialog).pick_file() else {
                         return;
                     };
                     if let Err(error) =
-                        crate::deep_link::import_theme_zip(&path, &self.themes_dir, &self.fonts_dir)
+                        crate::deep_link::import_theme_file(&path, &self.themes_dir, &self.fonts_dir)
                     {
                         let dialog = rfd::MessageDialog::new()
                             .set_title(t("settings-import-themes"))
@@ -807,6 +807,10 @@ impl HebnixApp {
             }
             "theme_folder" => {
                 let _ = open::that(&self.themes_dir);
+                return;
+            }
+            "theme_store" => {
+                self.open_theme_store();
                 return;
             }
             "fonts_folder" => {
@@ -1905,11 +1909,20 @@ impl HebnixApp {
         let columns = 5usize;
         let gap = 12.0;
         let width = ((ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32).floor();
+        // two rows plus the buttons below fit the visible height; under 200 the labels overlap
+        let height = ((ui.clip_rect().bottom() - ui.cursor().top() - gap - 84.0) / 2.0).clamp(200.0, 230.0);
         let numerals = ["I", "II", "III", "IV"];
-        egui::Grid::new("rank_tiles").spacing([gap, gap]).show(ui, |ui| {
-            for (index, &(id, name, _)) in super::RANK_SPOOF_PLAYLISTS.iter().enumerate() {
+        // plain rows, since a Grid keeps the column widths of a wider window
+        for (chunk_index, chunk) in super::RANK_SPOOF_PLAYLISTS.chunks(columns).enumerate() {
+            if chunk_index > 0 {
+                ui.add_space(gap);
+            }
+            ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (offset, &(id, name, _)) in chunk.iter().enumerate() {
+                let index = chunk_index * columns + offset;
                 let state = self.spoofer_ranks.entry(id).or_default();
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 242.0), egui::Sense::click());
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
                 let hover = ui.ctx().animate_bool_with_time(response.id.with("h"), response.hovered() && !busy, 0.12);
                 let border = if state.enabled { accent } else { line.color.lerp_to_gamma(accent, hover) };
                 ui.painter().rect_stroke(rect, 12.0, egui::Stroke::new(1.0, border), egui::StrokeKind::Inside);
@@ -1928,11 +1941,9 @@ impl HebnixApp {
                 if response.clicked() && !busy && !toggled {
                     draft = Some((id, state.rank, state.division, state.mmr.clone()));
                 }
-                if (index + 1) % columns == 0 {
-                    ui.end_row();
-                }
             }
-        });
+            });
+        }
         ui.add_space(12.0);
         let ready = self.web_rank_ready();
         let mut action = None;
@@ -2056,13 +2067,17 @@ fn web_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let line = ui.visuals().widgets.noninteractive.bg_stroke;
     // filled from the active theme so text stays readable over a theme background image
     let [r, g, b, a] = ui.visuals().panel_fill.to_srgba_unmultiplied();
+    // in a row the rest of the row is "available", so row cards size themselves instead
+    let fill = !ui.layout().is_horizontal();
     egui::Frame::NONE
         .fill(egui::Color32::from_rgba_unmultiplied(r, g, b, a.max(205)))
         .stroke(line)
         .corner_radius(8.0)
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            if fill {
+                ui.set_width(ui.available_width());
+            }
             add(ui)
         })
         .inner
@@ -2136,7 +2151,13 @@ impl HebnixApp {
                 "multiplayer" => Self::egui_multiplayer(ui, data, &mut actions),
                 "menu-map" => Self::egui_menu_map(ui, data, &mut actions),
                 "files-settings" => Self::egui_files_settings(ui, data, &mut actions),
-                "appearance-settings" => Self::egui_appearance_settings(ui, data, &mut actions),
+                "appearance-settings" => {
+                    Self::egui_appearance_settings(ui, data, &mut actions);
+                    if data["themePage"].as_bool().unwrap_or(false) {
+                        ui.add_space(12.0);
+                        self.theme_editor_ui(ui);
+                    }
+                }
                 "system-settings" => Self::egui_system_settings(ui, data, &mut actions),
                 "discord-settings" => Self::egui_discord_settings(ui, data, &mut actions),
                 "ball-appearance" => Self::egui_ball_appearance(ui, data, &mut actions),
@@ -3813,7 +3834,18 @@ impl HebnixApp {
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    for (key, text) in [("refresh_theme", "refresh"), ("import_theme", "import"), ("theme_folder", "folder"), ("fonts_folder", "fonts")] {
+                    if ui.button(label("refresh")).clicked() {
+                        actions.push(update("refresh_theme", Value::Null));
+                    }
+                    ui.menu_button("Install Theme ⏷", |ui| {
+                        if ui.button("Local file (.toml / .zip)…").clicked() {
+                            actions.push(update("import_theme", Value::Null));
+                        }
+                        if ui.button("From Hebnix…").clicked() {
+                            actions.push(update("theme_store", Value::Null));
+                        }
+                    });
+                    for (key, text) in [("theme_folder", "folder"), ("fonts_folder", "fonts")] {
                         if ui.button(label(text)).clicked() {
                             actions.push(update(key, Value::Null));
                         }
@@ -4059,7 +4091,14 @@ fn web_rgb_of(value: &Value) -> [u8; 3] {
 /// Colour swatch; returns the new rgb when the user picked one.
 fn web_colour(ui: &mut egui::Ui, rgb: [u8; 3], enabled: bool) -> Option<[u8; 3]> {
     let mut next = rgb;
-    let changed = ui.add_enabled(enabled, |ui: &mut egui::Ui| ui.color_edit_button_srgb(&mut next)).changed();
+    let changed = ui
+        .scope(|ui| {
+            // the colour button sizes itself from interact_size, which themes make tall
+            ui.spacing_mut().interact_size = egui::vec2(56.0, 20.0);
+            ui.add_enabled(enabled, |ui: &mut egui::Ui| ui.color_edit_button_srgb(&mut next))
+        })
+        .inner
+        .changed();
     changed.then_some(next)
 }
 
@@ -5684,18 +5723,9 @@ impl HebnixApp {
                     if let Some(value) = web_toggle(ui, "Show player profile pictures", data["enabled"].as_bool().unwrap_or(false), data["canToggle"].as_bool().unwrap_or(false)) {
                         actions.push(set("enabled", json!(value)));
                     }
-                    let accounts = web_pairs(&data["accounts"]);
-                    if accounts.is_empty() {
-                        ui.label(egui::RichText::new(data["owner"].as_str().filter(|text| !text.is_empty()).unwrap_or("Open Rocket League to upload")).small());
-                    } else {
-                        let mut options = accounts.clone();
-                        if data["account"].is_null() {
-                            options.insert(0, (String::new(), "Waiting for Rocket League…".to_owned()));
-                        }
-                        let enabled = !data["running"].as_bool().unwrap_or(false) && !busy;
-                        if let Some(value) = web_select(ui, "profile_account", &val_str(&data["account"]), &options, enabled) {
-                            actions.push(set("account", json!(value)));
-                        }
+                    // the account is picked once, in the header's quick settings
+                    if !owner {
+                        web_muted(ui, "Open Rocket League to upload");
                     }
                     if data["update"].as_bool().unwrap_or(false) && ui.add_enabled(data["canToggle"].as_bool().unwrap_or(false), egui::Button::new("Update avatar support")).clicked() {
                         actions.push(set("update", json!(true)));
@@ -5720,27 +5750,30 @@ impl HebnixApp {
                     let per_row = ((ui.available_width() / 84.0).floor() as usize).max(1);
                     let rows = data["rows"].as_array().cloned().unwrap_or_default();
                     for chunk in rows.chunks(per_row) {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_top(|ui| {
                             for entry in chunk {
                                 let active = entry["id"] == data["active"];
-                                ui.vertical(|ui| {
-                                    let accent = ui.visuals().selection.stroke.color;
-                                    let size = egui::vec2(76.0, 76.0);
-                                    let (rect, response) = ui.allocate_exact_size(size, if busy || !owner { egui::Sense::hover() } else { egui::Sense::click() });
-                                    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(if active { 2.0 } else { 1.0 }, if active { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color }), egui::StrokeKind::Inside);
-                                    if let Some(image) = entry["image"].as_str() {
-                                        ui.put(rect.shrink(4.0), |ui: &mut egui::Ui| {
-                                            web_image(ui, image, rect.shrink(4.0).size());
-                                            ui.label("")
-                                        });
-                                    }
-                                    if response.on_hover_text(if active { "Upload current picture again" } else { "Upload picture" }).clicked() {
-                                        actions.push(set("upload", entry["id"].clone()));
-                                    }
-                                    if ui.add_enabled(!busy, egui::Button::new("×").small()).on_hover_text("Remove from recent pictures").clicked() {
-                                        actions.push(set("remove", entry["id"].clone()));
-                                    }
-                                });
+                                let accent = ui.visuals().selection.stroke.color;
+                                let size = egui::vec2(76.0, 76.0);
+                                let (rect, response) = ui.allocate_exact_size(size, if busy || !owner { egui::Sense::hover() } else { egui::Sense::click() });
+                                ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(if active { 2.0 } else { 1.0 }, if active { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color }), egui::StrokeKind::Inside);
+                                if let Some(image) = entry["image"].as_str() {
+                                    ui.put(rect.shrink(4.0), |ui: &mut egui::Ui| {
+                                        web_image(ui, image, rect.shrink(4.0).size());
+                                        ui.label("")
+                                    });
+                                }
+                                // the remove button sits on the thumbnail's corner, like the web tile
+                                let corner = egui::Rect::from_center_size(rect.right_top() + egui::vec2(-4.0, 4.0), egui::vec2(18.0, 18.0));
+                                let remove = ui.interact(corner, response.id.with("remove"), if busy { egui::Sense::hover() } else { egui::Sense::click() });
+                                let fill = if remove.hovered() && !busy { ui.visuals().error_fg_color } else { ui.visuals().widgets.inactive.bg_fill };
+                                ui.painter().circle(corner.center(), 9.0, fill, ui.visuals().widgets.noninteractive.bg_stroke);
+                                ui.painter().text(corner.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(13.0), ui.visuals().strong_text_color());
+                                if remove.on_hover_text("Remove from recent pictures").clicked() {
+                                    actions.push(set("remove", entry["id"].clone()));
+                                } else if response.on_hover_text(if active { "Upload current picture again" } else { "Upload picture" }).clicked() {
+                                    actions.push(set("upload", entry["id"].clone()));
+                                }
                             }
                         });
                     }
@@ -6030,8 +6063,9 @@ impl HebnixApp {
                     });
                     let term = view.search.trim().to_lowercase();
                     let matching: Vec<&Value> = rows.iter().filter(|row| (view.car.is_none() || view.car.as_ref() == Some(&row["body"])) && val_str(&row["name"]).to_lowercase().contains(&term)).collect();
-                    let tile_w = 185.0;
-                    let columns = (((right - 34.0) / (tile_w + 10.0)).floor() as usize).max(1);
+                    let tile_w = 220.0;
+                    let tile_gap = 10.0;
+                    let columns = (((right - 34.0 + tile_gap) / (tile_w + tile_gap)).floor() as usize).max(1);
                     let page_size = columns * 3;
                     let pages = matching.len().div_ceil(page_size).max(1);
                     view.page = view.page.min(pages - 1);
@@ -6045,9 +6079,11 @@ impl HebnixApp {
                     }
                     for chunk in visible.chunks(columns) {
                         ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = tile_gap;
                             for row in chunk {
-                                web_card(ui, |ui| {
-                                    ui.set_width(tile_w - 24.0);
+                                // web_card fills the width it is given, so each tile gets its own slot
+                                ui.allocate_ui_with_layout(egui::vec2(tile_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| web_card(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
                                     ui.horizontal(|ui| {
                                         web_loadout_preview(ui, &row["image"], &row["body"], egui::vec2(56.0, 56.0));
                                         ui.vertical(|ui| {
@@ -6076,7 +6112,7 @@ impl HebnixApp {
                                             actions.push(send("open", json!({ "position": row["position"], "kind": "delete" })));
                                         }
                                     });
-                                });
+                                }));
                             }
                         });
                     }

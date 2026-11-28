@@ -292,10 +292,8 @@ impl HebnixApp {
             .size_range(crate::modern_ui::SIDEBAR_WIDTH..=420.0)
             .frame(egui::Frame::NONE.fill(paint.surface).inner_margin(egui::Margin::symmetric(8, 14)))
             .show(ui, |ui| {
-                // still scrolls with the wheel and by dragging
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, true])
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     for (index, tab) in Tab::ALL.iter().enumerate() {
@@ -403,27 +401,25 @@ impl HebnixApp {
                         .open_memory(settings.clicked().then_some(egui::SetOpenCommand::Toggle))
                         .align(egui::RectAlign::BOTTOM_END)
                         .width(360.0)
-                        .show(|ui| {
+                        .show(|ui| bootstrap_scope(ui, |ui| {
                             ui.set_min_width(336.0);
                             ui.heading("Settings");
                             ui.separator();
                             if let Some(account) = self.owned_inventory.show_account_picker(ui) {
                                 self.home_tracker.web_select_save_account(&account, ui.ctx());
                             }
-                            ui.add_space(8.0);
                             let mut owned = self.config.settings.owned_items_only;
                             if ui.checkbox(&mut owned, "Show only owned items").changed() {
                                 self.config.settings.owned_items_only = owned;
                                 self.config.patcher.decal_only_owned = owned;
                                 self.save_config();
                             }
-                            ui.add_space(8.0);
-                            if ui.button("⚙ More Settings").clicked() {
+                            if ui.add(egui::Button::new("⚙ More Settings").min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
                                 self.tab = Tab::Settings;
                                 self.hebnix_settings_tab = HebnixSettingsTab::Interface;
                                 ui.close();
                             }
-                        });
+                        }));
                     ui.label(egui::RichText::new(&self.status_text).strong().size(12.0).color(self.status_color));
                     self.render_action_button(ui);
                 });
@@ -1153,20 +1149,33 @@ fn bootstrap_scope<R>(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui) -> R
         style.visuals.hyperlink_color = accent;
         style.visuals.selection.stroke.color = accent;
         let widgets = &mut style.visuals.widgets;
+        // colours the theme sets itself (the theme editor writes these) win over the defaults below
+        let custom = crate::theme::widget_overrides(&ctx);
         // purple only while hovered or pressed; resting widgets keep the theme's normal colours
-        for (widget, strength) in [(&mut widgets.hovered, 0.6), (&mut widgets.active, 1.0)] {
-            widget.bg_fill = accent.gamma_multiply(strength);
-            widget.weak_bg_fill = accent.gamma_multiply(strength);
+        for (widget, strength, own) in [(&mut widgets.hovered, 0.6, &custom.hovered), (&mut widgets.active, 1.0, &custom.active)] {
+            if own.bg_fill.is_none() {
+                widget.bg_fill = accent.gamma_multiply(strength);
+            }
+            if own.weak_bg_fill.is_none() {
+                widget.weak_bg_fill = accent.gamma_multiply(strength);
+            }
         }
-        for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+        for (widget, own) in [(&mut widgets.inactive, &custom.inactive), (&mut widgets.hovered, &custom.hovered), (&mut widgets.active, &custom.active)] {
             widget.corner_radius = egui::CornerRadius::same(6);
-            widget.bg_stroke = egui::Stroke::new(1.0, border);
+            if own.bg_stroke.is_none() {
+                widget.bg_stroke = egui::Stroke::new(1.0, border);
+            }
         }
         // group frames double as the web panels: soft border, 8px corners
         widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
-        widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
-        widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
-        widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+        if custom.noninteractive.bg_stroke.is_none() {
+            widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+        }
+        for (widget, own) in [(&mut widgets.hovered, &custom.hovered), (&mut widgets.active, &custom.active)] {
+            if own.bg_stroke.is_none() {
+                widget.bg_stroke = egui::Stroke::new(1.0, accent);
+            }
+        }
         render(ui)
     })
     .inner

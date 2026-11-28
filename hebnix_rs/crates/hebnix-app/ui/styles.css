@@ -8,11 +8,11 @@
   --scrollbar-active: #82aee0;
 }
 
-::-webkit-scrollbar { width: 11px; height: 11px; }
-::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+/* thin, matching the egui shell's scroll bars */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
-  border: 2px solid var(--scrollbar-track);
   border-radius: 999px;
   min-height: 28px;
 }

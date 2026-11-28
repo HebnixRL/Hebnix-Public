@@ -482,16 +482,21 @@ impl HebnixApp {
         self.title_patcher.poll();
         let mut changed = !self.spoofer_title_enabled;
         self.spoofer_title_enabled = true;
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.heading("Titles");
-            ui.separator();
-            self.owned_inventory.show(ui);
-            if self.title_patcher.busy() {
-                ui.label("Title patch operation in progress. Editing will resume when it finishes.");
-            }
-        });
-        ui.add_space(6.0);
+        // the modern header already shows the title and holds the account picker
+        if !self.owned_inventory.in_header || self.title_patcher.busy() {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if !self.owned_inventory.in_header {
+                    ui.heading("Titles");
+                    ui.separator();
+                    self.owned_inventory.show(ui);
+                }
+                if self.title_patcher.busy() {
+                    ui.label("Title patch operation in progress. Editing will resume when it finishes.");
+                }
+            });
+            ui.add_space(6.0);
+        }
         // Columns always divide the available viewport. Only the two lists scroll.
         let total = ui.available_width();
         let height = ui.available_height().max(0.0);

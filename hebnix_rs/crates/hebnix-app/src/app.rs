@@ -31,6 +31,8 @@ mod spoofer_controls;
 mod titles;
 #[path = "ui/menu_textures.rs"]
 mod menu_textures;
+#[path = "ui/theme_editor.rs"]
+mod theme_editor;
 #[cfg(test)]
 #[path = "ui/titles_tests.rs"]
 mod titles_tests;
@@ -697,6 +699,10 @@ struct InstallModal {
     search_query: String,
     current_page: usize,
     images: HashMap<String, ImageState>,
+    /// Lists themes from api.hebnix.com instead of plugins.
+    themes: bool,
+    /// Catalog id to the theme names it installed this session, for the Apply button.
+    installed_themes: HashMap<String, Vec<String>>,
 }
 
 pub struct HebnixApp {
@@ -774,6 +780,7 @@ pub struct HebnixApp {
 
     capturing_hotkey: bool,
     theme_options: Vec<String>,
+    theme_editor: theme_editor::ThemeEditor,
     packet_rate: Option<String>,
     port_value: Option<String>,
     web_port_value: Option<String>,
@@ -1427,6 +1434,7 @@ impl HebnixApp {
             status_color: Color32::from_rgb(0xDC, 0xE4, 0xEE),
             capturing_hotkey: false,
             theme_options,
+            theme_editor: Default::default(),
             packet_rate: None,
             port_value: None,
             web_port_value: None,
@@ -3725,16 +3733,24 @@ impl HebnixApp {
                         }
                     }
                 }
-                AppMsg::ThemeInstallDone { result } => match result {
-                    Ok((name, author)) => {
-                        self.theme_options = theme::list_themes(&self.themes_dir);
-                        self.console
-                            .write(format!("[Console] Installed Theme {name} by {author}"));
+                AppMsg::ThemeInstallDone { id, result } => {
+                    if self.install_modal.downloading_id.as_deref() == Some(id.as_str()) {
+                        self.install_modal.downloading_id = None;
                     }
-                    Err(error) => self
-                        .console
-                        .write(format!("[Console] Theme installation failed: {error}")),
-                },
+                    match result {
+                        Ok((name, author, themes)) => {
+                            self.theme_options = theme::list_themes(&self.themes_dir);
+                            self.console
+                                .write(format!("[Console] Installed Theme {name} by {author}"));
+                            if !themes.is_empty() {
+                                self.install_modal.installed_themes.insert(id, themes);
+                            }
+                        }
+                        Err(error) => self
+                            .console
+                            .write(format!("[Console] Theme installation failed: {error}")),
+                    }
+                }
                 AppMsg::Toast {
                     slug,
                     name,
@@ -5426,7 +5442,10 @@ impl HebnixApp {
         if self.hebnix_settings_tab == HebnixSettingsTab::Active {
             #[cfg(windows)]
             if modern_navigation {
-                if self.active_settings_page == ActiveSettingsPage::Garage {
+                if self.active_settings_page == ActiveSettingsPage::Garage && self.egui_shell() {
+                    let cooked = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
+                    self.render_active_items(ui, &cooked, &cooked.join("Backups"));
+                } else if self.active_settings_page == ActiveSettingsPage::Garage {
                     self.render_modern_swapper(ui);
                 } else {
                     self.render_modern_manager(ui);
@@ -5557,12 +5576,19 @@ impl HebnixApp {
                                                     t("console-themes-rescanned")
                                                 ));
                                             }
-                                            if ui.button(t("settings-import-themes")).clicked() {
+                                            let mut local = false;
+                                            ui.menu_button("Install Theme ⏷", |ui| {
+                                                local = ui.button("Local file (.toml / .zip)…").clicked();
+                                                if ui.button("From Hebnix…").clicked() {
+                                                    self.open_theme_store();
+                                                }
+                                            });
+                                            if local {
                                                 let dialog = rfd::FileDialog::new()
                                                     .set_title(t("settings-import-themes"))
-                                                    .add_filter("ZIP", &["zip"]);
+                                                    .add_filter("Theme", &["toml", "zip"]);
                                                 if let Some(path) = winutil::parent_file_dialog(dialog).pick_file() {
-                                                    match crate::deep_link::import_theme_zip(&path, &self.themes_dir, &self.fonts_dir) {
+                                                    match crate::deep_link::import_theme_file(&path, &self.themes_dir, &self.fonts_dir) {
                                                         Ok(()) => {
                                                             self.theme_options = theme::list_themes(&self.themes_dir);
                                                             let selected = self.config.settings.theme.clone();
@@ -5587,6 +5613,8 @@ impl HebnixApp {
                                                 let _ = open::that(&self.fonts_dir);
                                             }
                                         });
+                                        ui.add_space(8.0);
+                                        self.theme_editor_ui(ui);
 
                                         return;
                                     }
@@ -6628,6 +6656,9 @@ impl HebnixApp {
                     "[Console] {}",
                     t_args("console-theme-changed", &[("theme", choice.into())])
                 ));
+                theme::apply_window_opacity(ctx, self.config.settings.window_opacity);
+                self.offer_theme_font(ctx);
+                return;
             }
             Err(e) => {
                 let _ = std::fs::write(
@@ -7650,8 +7681,9 @@ impl HebnixApp {
         let mut open = true;
         let mut close_requested = false;
 
+        let title = if self.install_modal.themes { "Install Theme".to_owned() } else { t("plugins-install-plugin") };
         let window = if self.install_modal.hebnix_stage {
-            egui::Window::new(t("plugins-install-plugin"))
+            egui::Window::new(title)
                 .id(egui::Id::new("install_plugin_catalog"))
                 .open(&mut open)
                 .collapsible(false)
@@ -7734,7 +7766,7 @@ impl HebnixApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let search_resp = ui.add(
                     egui::TextEdit::singleline(&mut self.install_modal.search_query)
-                        .hint_text(t("hebnix-install-search-plugins"))
+                        .hint_text(if self.install_modal.themes { "Search themes...".to_owned() } else { t("hebnix-install-search-plugins") })
                         .desired_width(200.0),
                 );
                 if search_resp.changed() {
@@ -7749,7 +7781,7 @@ impl HebnixApp {
                 ui.add_space(20.0);
                 ui.spinner();
                 ui.add_space(8.0);
-                ui.label(t("hebnix-install-fetching-plugins"));
+                ui.label(if self.install_modal.themes { "Fetching themes...".to_owned() } else { t("hebnix-install-fetching-plugins") });
             });
             return;
         }
@@ -7822,7 +7854,11 @@ impl HebnixApp {
             Enable(String),
             Disable(String),
             Download(String),
+            InstallTheme(String),
+            ApplyTheme(String),
         }
+        let themes = self.install_modal.themes;
+        let current_theme = self.config.settings.theme.clone();
 
         // the panel draws text and buttons larger, so the fixed-height tile has to grow with them
         let text_scale = if self.panel.active { 1.25 } else { 1.0 };
@@ -7835,7 +7871,7 @@ impl HebnixApp {
                     ui.add_space(20.0);
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            egui::RichText::new(t("hebnix-install-no-plugins-found"))
+                            egui::RichText::new(if self.install_modal.themes { "No themes found".to_owned() } else { t("hebnix-install-no-plugins-found") })
                                 .italics()
                                 .color(egui::Color32::GRAY),
                         );
@@ -7875,8 +7911,13 @@ impl HebnixApp {
                     }
                     let version = plugin_data
                         .get("version_number")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                        .and_then(|v| v.as_str());
+                    // themes often have no version, so they show the name alone
+                    let title = match version {
+                        Some(version) => format!("{name} v{version}"),
+                        None if themes => name.to_owned(),
+                        None => format!("{name} v?"),
+                    };
                     let banner = plugin_data
                         .get("banner_path")
                         .and_then(|v| v.as_str())
@@ -7897,7 +7938,7 @@ impl HebnixApp {
                                 Some(ImageState::Loading) => { image_ui.spinner(); }
                                 _ => {}
                             }
-                            ui.add(egui::Label::new(egui::RichText::new(format!("{name} v{version}")).strong()).truncate()).on_hover_text(name);
+                            ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate()).on_hover_text(name);
                             ui.add(egui::Label::new(egui::RichText::new(author).weak()).truncate());
                             let (description_rect, _) = ui.allocate_exact_size(egui::vec2(width, 66.0 * text_scale), egui::Sense::hover());
                             let mut description = ui.new_child(egui::UiBuilder::new().max_rect(description_rect).layout(egui::Layout::top_down(egui::Align::Center)));
@@ -7910,7 +7951,19 @@ impl HebnixApp {
                                                 p.manifest.plugin_id.as_deref() == Some(id)
                                             });
                                         ui.add_space(((ui.available_width() - 208.0) * 0.5).max(0.0));
-                                        if let Some(existing) = existing {
+                                        if themes {
+                                            let installed = self.install_modal.installed_themes.get(id).and_then(|names| names.first()).cloned();
+                                            if self.install_modal.downloading_id.as_deref() == Some(id) {
+                                                ui.add_enabled(false, egui::Button::new(t("hebnix-install-installing")));
+                                            } else if let Some(name) = installed {
+                                                let applied = name == current_theme;
+                                                if ui.add_enabled(!applied, egui::Button::new(if applied { "Applied" } else { "Apply" }).min_size(egui::vec2(208.0, 26.0))).clicked() {
+                                                    action = Some(ModalAction::ApplyTheme(name));
+                                                }
+                                            } else if ui.add_sized([208.0, 26.0], egui::Button::new(t("hebnix-install-install"))).clicked() {
+                                                action = Some(ModalAction::InstallTheme(id.to_string()));
+                                            }
+                                        } else if let Some(existing) = existing {
                                             let slug = existing.slug.clone();
                                             let enabled = existing.enabled;
                                             let settings = existing.has_settings();
@@ -8009,6 +8062,13 @@ impl HebnixApp {
             Some(ModalAction::Download(id)) => {
                 self.download_hebnix_plugin(&id);
             }
+            Some(ModalAction::InstallTheme(id)) => {
+                self.install_modal.downloading_id = Some(id.clone());
+                self.download_theme(&id);
+            }
+            Some(ModalAction::ApplyTheme(name)) => {
+                self.change_theme(&ctx, &name);
+            }
             None => {}
         }
     }
@@ -8041,11 +8101,12 @@ impl HebnixApp {
         self.install_modal.catalog.clear();
 
         let tx = self.tx.clone();
+        let url = if self.install_modal.themes { "https://api.hebnix.com/themes" } else { "https://api.hebnix.com/plugins" };
         std::thread::spawn(move || {
             let result: Result<Value, String> = (|| {
                 let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
                 let resp = agent
-                    .get("https://api.hebnix.com/plugins")
+                    .get(url)
                     .timeout(Duration::from_secs(10))
                     .call()
                     .map_err(|e| e.to_string())?;
@@ -8061,9 +8122,30 @@ impl HebnixApp {
         let fonts_dir = self.fonts_dir.clone();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = crate::deep_link::install_theme(&theme_id, &themes_dir, &fonts_dir);
-            let _ = tx.send(AppMsg::ThemeInstallDone { result });
+            // a reinstall overwrites files instead of adding them, so look at what changed
+            let started = std::time::SystemTime::now() - Duration::from_secs(2);
+            let result = crate::deep_link::install_theme(&theme_id, &themes_dir, &fonts_dir).map(|(name, author)| {
+                let mut written: Vec<String> = std::fs::read_dir(&themes_dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("toml")))
+                    .filter(|path| path.metadata().and_then(|meta| meta.modified()).is_ok_and(|time| time >= started))
+                    .filter_map(|path| path.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned))
+                    .collect();
+                written.sort();
+                (name, author, written)
+            });
+            let _ = tx.send(AppMsg::ThemeInstallDone { id: theme_id, result });
         });
+    }
+
+    /// The plugin installer's catalog view, listing themes from api.hebnix.com.
+    pub(super) fn open_theme_store(&mut self) {
+        let installed_themes = std::mem::take(&mut self.install_modal.installed_themes);
+        self.install_modal = InstallModal { open: true, hebnix_stage: true, themes: true, installed_themes, ..Default::default() };
+        self.fetch_hebnix_plugin();
     }
     fn download_hebnix_plugin(&mut self, plugin_id: &str) {
         self.install_modal.downloading_id = Some(plugin_id.to_string());
@@ -8505,6 +8587,10 @@ impl eframe::App for HebnixApp {
         }
         self.owned_inventory.poll(ctx);
         self.owned_inventory.follow_game_account(ctx,self.last_rl_open);
+        #[cfg(windows)]
+        if self.owned_inventory.in_header && let Some(id) = self.owned_inventory.selected_account_id() {
+            self.profile_pictures.select_save_account(id);
+        }
         let engine_cooked=PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
         self.swapper.refresh_engine_audio_ownership(ctx,&engine_cooked,&mut self.owned_inventory.ids);
         crate::visibility::poll(ctx);
@@ -8554,6 +8640,7 @@ impl eframe::App for HebnixApp {
             self.workshop.startup_sync(&self.config.settings.rl_path, ctx);
             self.scoreboard.tick(ctx, std::path::Path::new(&self.config.settings.rl_path), &self.config.scoreboard, self.last_rl_open);
             self.profile_pictures.tick(ctx, std::path::Path::new(&self.config.settings.rl_path));
+        self.poll_font_download(ctx);
         } else {
             crate::patcher::instant_suite::suspend(&cooked);
         }
@@ -8588,6 +8675,7 @@ impl eframe::App for HebnixApp {
         }
         #[cfg(not(windows))]
         let modern_mode = false;
+        self.owned_inventory.in_header = modern_mode;
         let wry_ui = modern_mode;
         #[cfg(target_os = "windows")]
         if self.hidden

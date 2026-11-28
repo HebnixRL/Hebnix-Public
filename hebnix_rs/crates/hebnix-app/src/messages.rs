@@ -92,7 +92,9 @@ pub enum AppMsg {
         result: Result<(String, String), String>,
     },
     ThemeInstallDone {
-        result: Result<(String, String), String>,
+        id: String,
+        /// Name, author, and the theme files the install wrote.
+        result: Result<(String, String, Vec<String>), String>,
     },
     // hebnix.toast from a plugin
     Toast {

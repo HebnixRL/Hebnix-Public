@@ -77,6 +77,9 @@ pub struct SettingsCfg {
     pub owned_items_only: bool,
     pub hotkey: String,
     pub theme: String,
+    /// Theme font downloads the user said no to, so switching themes doesn't ask again.
+    #[serde(default)]
+    pub declined_font_downloads: Vec<String>,
     /// Use the original themed egui navigation instead of either modern shell.
     #[serde(default)]
     pub legacy_ui: bool,
@@ -156,6 +159,7 @@ impl Default for SettingsCfg {
             owned_items_only: false,
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
+            declined_font_downloads: Vec::new(),
             legacy_ui: false,
             wry_ui: true,
             language: crate::i18n::AUTO.to_string(),

@@ -104,6 +104,7 @@ mod speed_patch {
 mod swapper {
     pub use crate::patcher::swapper::*;
 }
+mod fonts;
 mod theme;
 mod toast;
 mod tray;

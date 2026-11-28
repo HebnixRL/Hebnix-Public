@@ -360,7 +360,7 @@ impl State {
                 Ok(Completion::Started(true, true, _)) => crate::toast::console("[Profile Pictures] Avatar support needs an update. Close Rocket League to apply it."),
                 Ok(Completion::Started(..)) => {}
                 Ok(Completion::Enabled(on, _)) => crate::toast::console(format!("[Profile Pictures] Avatar support {}", if *on { "enabled" } else { "disabled" })),
-                Ok(Completion::Imported(_)) => crate::toast::console("[Profile Pictures] Picture imported (not uploaded yet)"),
+                Ok(Completion::Imported(_)) => crate::toast::console("[Profile Pictures] Picture imported"),
                 Ok(Completion::Uploaded { .. }) => crate::toast::console("[Profile Pictures] Upload finished. Restart Rocket League to see the new avatar"),
                 Ok(Completion::Canceled) => {}
                 Err(error) => crate::toast::console(format!("[Profile Pictures] Failed: {error}")),
@@ -392,11 +392,16 @@ impl State {
                     self.save();
                 }
                 Ok(Completion::Imported(id)) => {
-                    gallery::remember(&mut self.settings.history, id);
+                    // a first picture has nothing to choose between, so it goes straight up
+                    let only = self.settings.history.iter().all(|known| *known == id);
+                    gallery::remember(&mut self.settings.history, id.clone());
                     self.textures
                         .retain(|id, _| self.settings.history.contains(id));
                     self.status = "Picture added. It is NOT uploaded yet: click it under Recent pictures to upload it.".into();
                     self.save();
+                    if only && self.owner.is_some() {
+                        self.upload(ctx, id);
+                    }
                 }
                 Ok(Completion::Uploaded { owner, id }) => {
                     self.settings.pending_upload = None;
@@ -534,6 +539,25 @@ impl State {
             }),
             _ => {}
         }
+    }
+
+    /// Follows the save account picked in the header's quick settings.
+    #[cfg(windows)]
+    pub(crate) fn select_save_account(&mut self, id: &str) {
+        let Some(key) = self.save_accounts.iter().find(|account| account.id.eq_ignore_ascii_case(id)).map(|account| account.key.clone()) else {
+            return;
+        };
+        if self.settings.account.as_deref() == Some(key.as_str())
+            || self.busy()
+            || hebnix_sdk::process::is_rocket_league_running()
+        {
+            return;
+        }
+        self.owner = accounts::choose(&self.save_accounts, Some(&key), false, None);
+        self.settings.account = Some(key);
+        self.status.clear();
+        self.error = false;
+        self.save();
     }
 
     fn import_picture(&mut self, ctx: &egui::Context) {

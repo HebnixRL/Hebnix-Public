@@ -1411,14 +1411,8 @@ function profilePictures() {
   const recent = panel();
   const set = (key, value = null) => send({ type: "profile_picture", key, value });
   account.append(toggle("Show player profile pictures", state.enabled, value => set("enabled", value), !state.canToggle));
-  if (state.accounts.length) {
-    const options = state.account === null ? [["", "Waiting for Rocket League…"], ...state.accounts] : state.accounts;
-    const select = loadoutSelect("Rocket League account", options, state.account, value => set("account", value));
-    select.disabled = state.running || state.busy;
-    account.append(select);
-  } else {
-    account.append(element("p", "small", state.owner || "Open Rocket League to upload"));
-  }
+  // the account is picked once, in the header's quick settings
+  if (!state.owner) account.append(element("p", "small", "Open Rocket League to upload"));
   if (state.update) account.append(button("Update avatar support", () => set("update", true), !state.canToggle));
   if (state.retry) account.append(button("Retry connection", () => set("retry")));
   if (state.current) {
