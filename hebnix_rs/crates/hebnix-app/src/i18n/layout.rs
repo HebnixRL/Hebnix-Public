@@ -10,6 +10,11 @@ pub fn subtab_content_frame() -> egui::Frame {
     })
 }
 
+/// Plain selectable row for a side list of pages, like the Visual Patches list.
+pub fn side_select<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.selectable_value(current, value, text)
+}
+
 /// Frame a full-width section inside a page or scroll area.
 pub fn bordered_panel(ui: &mut egui::Ui, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style()).show(ui, |ui| {

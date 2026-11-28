@@ -1104,14 +1104,23 @@ impl NavPaint {
 
 /// Roomier, bordered controls like the web pages use, in the active theme's colours.
 fn bootstrap_scope<R>(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let ctx = ui.ctx().clone();
     ui.scope(|ui| {
         let style = ui.style_mut();
         style.spacing.button_padding = egui::vec2(14.0, 7.0);
         style.spacing.interact_size.y = 34.0;
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         let border = style.visuals.text_color().gamma_multiply(0.3);
-        let accent = style.visuals.hyperlink_color;
+        // the same accent the sidebar highlights with, so buttons match the equipped theme
+        let accent = NavPaint::new(&ctx).selected;
+        style.visuals.hyperlink_color = accent;
+        style.visuals.selection.stroke.color = accent;
         let widgets = &mut style.visuals.widgets;
+        // purple only while hovered or pressed; resting widgets keep the theme's normal colours
+        for (widget, strength) in [(&mut widgets.hovered, 0.6), (&mut widgets.active, 1.0)] {
+            widget.bg_fill = accent.gamma_multiply(strength);
+            widget.weak_bg_fill = accent.gamma_multiply(strength);
+        }
         for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
             widget.corner_radius = egui::CornerRadius::same(6);
             widget.bg_stroke = egui::Stroke::new(1.0, border);

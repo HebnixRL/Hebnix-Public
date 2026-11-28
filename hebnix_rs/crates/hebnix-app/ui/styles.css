@@ -275,7 +275,10 @@
 .live-event-clock { color: #9bd9ff; font-variant-numeric: tabular-nums; }
 .maps-search { width: auto; min-width: min(100%, 14rem); }
 .maps-grid { display: grid; grid-template-columns: repeat(var(--map-columns, 1), minmax(0, 1fr)); gap: 16px; }
-.maps-card { overflow: hidden; display: flex; flex-direction: column; }
+.maps-card { overflow: hidden; display: flex; flex-direction: column; position: relative; }
+.maps-forget { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border: 0; border-radius: 50%; padding: 0; line-height: 1; opacity: 0; background: rgba(0, 0, 0, .7); color: #fff; cursor: pointer; z-index: 2; }
+.maps-card:hover .maps-forget, .maps-forget:focus-visible { opacity: 1; }
+.maps-forget:hover { background: #c0392b; }
 .maps-card-body { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .maps-banner {
   position: relative;

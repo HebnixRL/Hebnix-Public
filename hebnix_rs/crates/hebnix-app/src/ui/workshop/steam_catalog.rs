@@ -27,7 +27,27 @@ pub struct SteamPage {
     pub next_cursor: Option<String>,
 }
 
+/// a pasted workshop link (has a scheme or a domain and an `id=`), as opposed to a name
+fn pasted_link_id(query: &str) -> Option<String> {
+    let query = query.trim();
+    let lower = query.to_ascii_lowercase();
+    let linky = lower.contains("://") || lower.contains(".com/") || lower.starts_with("steamcommunity.com");
+    if linky { steam_download::parse_workshop_id(query) } else { None }
+}
+
 pub fn fetch_page(query: &str, cursor: Option<&str>) -> Result<SteamPage, String> {
+    if let Some(wid) = pasted_link_id(query) {
+        let details = steam_download::fetch_details(&wid)?;
+        let item = SearchItem {
+            wid,
+            title: details.title,
+            author: details.creator,
+            description: details.description,
+            preview_url: details.preview_url,
+            ..Default::default()
+        };
+        return Ok(SteamPage { items: vec![to_catalog_entry(&item)], total: 1, next_cursor: None });
+    }
     let page = steam_download::search(query, SearchSort::Popular, cursor)?;
     Ok(SteamPage {
         items: page.items.iter().map(to_catalog_entry).collect(),
@@ -70,6 +90,22 @@ pub fn load_downloaded(runtime_dir: &Path) -> Vec<Value> {
 
 pub fn load_search_cache(runtime_dir: &Path) -> Vec<Value> {
     load_entries(&runtime_dir.join(SEARCH_CACHE_FILE))
+}
+
+/// drops one map from the remembered search results (the X on a Browse Maps tile)
+pub fn forget_search_result(runtime_dir: &Path, id: &str) {
+    let mut maps = load_search_cache(runtime_dir);
+    let before = maps.len();
+    maps.retain(|map| super::id_of(map) != id);
+    if maps.len() == before {
+        return;
+    }
+    let written = serde_json::to_vec(&maps)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| std::fs::write(runtime_dir.join(SEARCH_CACHE_FILE), bytes).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        tracing::warn!("[Workshop] could not save the search cache: {error}");
+    }
 }
 
 /// remembers search results for later viewing (newer results replace older

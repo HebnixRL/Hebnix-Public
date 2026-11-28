@@ -995,6 +995,22 @@ impl HebnixApp {
         let (tx, rx) = crossbeam_channel::unbounded::<AppMsg>();
         let (control_tx, control_rx) = crossbeam_channel::unbounded();
         crate::toast::install_sink(tx.clone(), cc.egui_ctx.clone());
+        {
+            // what support needs first: version, game folder and build
+            let rl = std::path::Path::new(&config.settings.rl_path);
+            let cooked = rl.join("TAGame/CookedPCConsole");
+            let game = if config.settings.rl_path.is_empty() {
+                "not set (choose it in Settings > Directories)".to_string()
+            } else if !cooked.is_dir() {
+                format!("{} (CookedPCConsole not found, check the folder)", config.settings.rl_path)
+            } else {
+                match crate::patcher::backup_guard::build_id(&cooked) {
+                    Ok(build) => format!("{} (build {build})", config.settings.rl_path),
+                    Err(error) => format!("{} (build unknown: {error})", config.settings.rl_path),
+                }
+            };
+            let _ = tx.send(AppMsg::Log(format!("[Core] Hebnix {} | Rocket League folder: {game}", env!("CARGO_PKG_VERSION"))));
+        }
         #[cfg(windows)]
         match crate::hosts_file::startup_repair() {
             Some(Ok(backup)) => {
@@ -2653,7 +2669,7 @@ impl HebnixApp {
     pub(crate) fn enable_modern_ui(&mut self, cc: &eframe::CreationContext<'_>) {
         let labels = Self::modern_tab_labels();
         let started = std::time::Instant::now();
-        let built = crate::modern_ui::Navigation::new(cc, &labels, self.config.settings.egui_light_pages);
+        let built = crate::modern_ui::Navigation::new(cc, &labels, true);
         tracing::info!("Modern UI web views built in {:?}", started.elapsed());
         match built {
             Ok(navigation) => {
@@ -3582,6 +3598,7 @@ impl HebnixApp {
                     }
                 }
                 AppMsg::ItemActionBlocked => {
+                    self.console.write("[Patcher] Not applied: close Rocket League first, then try again.");
                     self.item_action_prompt_open = true;
                 }
                 AppMsg::ReloadCatalogs => {
@@ -4607,7 +4624,7 @@ impl HebnixApp {
                                 (SpooferSubTab::Friends, t("spoofer-friends")),
                             ];
                             for (value, label) in tabs {
-                                ui.selectable_value(&mut self.spoofer_subtab, value, label);
+                                crate::i18n::layout::side_select(ui, &mut self.spoofer_subtab, value, label);
                             }
                         });
                     });
@@ -5445,7 +5462,7 @@ impl HebnixApp {
                                 (HebnixSettingsTab::ActionButton, t("settings-nav-action-button")),
                             ];
                             for (value, label) in tabs {
-                                ui.selectable_value(&mut self.hebnix_settings_tab, value, label);
+                                crate::i18n::layout::side_select(ui, &mut self.hebnix_settings_tab, value, label);
                             }
                         });
                     });
@@ -5472,20 +5489,6 @@ impl HebnixApp {
 
                             match self.hebnix_settings_tab {
                                 HebnixSettingsTab::Interface => {
-                                    #[cfg(windows)]
-                                    if ui.checkbox(&mut self.config.settings.legacy_ui, "Legacy UI")
-                                        .on_hover_text("Applies the next time Hebnix starts.")
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
-                                    #[cfg(windows)]
-                                    if ui.checkbox(&mut self.config.settings.egui_light_pages, "Draw sidebar, header, Home, Console and About with egui")
-                                        .on_hover_text("Skips those web views, which saves memory and startup time. Applies the next time Hebnix starts.")
-                                        .changed()
-                                    {
-                                        self.save_config();
-                                    }
                                     ui.horizontal_wrapped(|ui| {
                                         ui.selectable_value(
                                             &mut self.appearance_subtab,
@@ -8910,15 +8913,7 @@ impl HebnixApp {
                                 categories.sort_by_key(|category| category.label().to_lowercase());
                                 for category in categories {
                                     let value = PatcherSubTab::Swapper(category);
-                                    if modern_navigation {
-                                        // full-width outlined rows like the web page's category list
-                                        let row = egui::Button::new(category.label()).selected(self.swapper_subtab == value);
-                                        if ui.add_sized([ui.available_width(), 34.0], row).clicked() {
-                                            self.swapper_subtab = value;
-                                        }
-                                    } else {
-                                        ui.selectable_value(&mut self.swapper_subtab, value, category.label());
-                                    }
+                                    crate::i18n::layout::side_select(ui, &mut self.swapper_subtab, value, category.label());
                                 }
                             }
                         });
@@ -9019,7 +9014,7 @@ impl HebnixApp {
                             pages.sort_by_key(|(_, key)| t(key).to_lowercase());
                             for (value, key) in pages {
                                 let Some(value) = value else {
-                                    ui.selectable_value(&mut self.items_mode, ItemsMode::ItemNames, t(key));
+                                    crate::i18n::layout::side_select(ui, &mut self.items_mode, ItemsMode::ItemNames, t(key));
                                     continue;
                                 };
                                 let selected = self.items_mode == ItemsMode::Patching
@@ -9042,7 +9037,7 @@ impl HebnixApp {
                             ];
                             pages.sort_by_key(|(_, key)| t(key).to_lowercase());
                             for (value, key) in pages {
-                                ui.selectable_value(&mut self.items_mode, value, t(key));
+                                crate::i18n::layout::side_select(ui, &mut self.items_mode, value, t(key));
                             }
                         }
                         StudioSection::Active | StudioSection::History => unreachable!(),

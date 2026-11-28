@@ -196,6 +196,15 @@ fn scaled(kind: Kind, v: [f32; 4], m: f32) -> (Vec<u8>, usize) {
 /// depend on how many times the package was patched before. Returns the number
 /// of parameters changed.
 pub fn apply(path: &Path, reference: Option<&Path>, multiplier: f32) -> Result<usize, String> {
+    let result = apply_inner(path, reference, multiplier);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match &result {
+        Ok(count) => crate::toast::console(format!("[Speed] {name}: scaled {count} parameter(s) to {multiplier}x")),
+        Err(error) => crate::toast::console(format!("[Speed] {name}: failed: {error}")),
+    }
+    result
+}
+fn apply_inner(path: &Path, reference: Option<&Path>, multiplier: f32) -> Result<usize, String> {
     let multiplier = clamp(multiplier);
     let mut package = UpkPackage::load(path)?;
     let slots = collect(&package)?;

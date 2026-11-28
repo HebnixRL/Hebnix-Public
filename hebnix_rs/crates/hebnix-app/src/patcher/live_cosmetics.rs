@@ -163,7 +163,14 @@ pub fn status_snapshot() -> serde_json::Value {
         "installing": !failed && !installed && !close,
         "colour": if failed { "danger" } else if installed { "success" } else if close { "danger" } else { "warning" }, "detail": detail})
 }
-fn status(value: impl Into<String>) { if let Ok(mut slot) = STATUS.lock() { *slot = value.into(); } }
+fn status(value: impl Into<String>) {
+    let value = value.into();
+    if let Ok(mut slot) = STATUS.lock() {
+        // each status change is a console line, so users and support can follow the long live patch
+        if *slot != value { crate::toast::console(format!("[Live Cosmetics] {}", value.trim_start_matches("Error: "))); }
+        *slot = value;
+    }
+}
 pub fn unavailable(message: &str) { status(message); }
 pub fn managed() -> bool { lifecycle::managed() }
 const MOD_IDS: &[&str] = &["forfeit", "celebration", "bots-freeplay", "chat-export", "lan-commands", "chat-paste", "instant-suite"];
@@ -197,13 +204,16 @@ pub fn sync_game_options(cooked: &Path, cfg: &crate::config::GameModsCfg) -> Res
 }
 pub fn set_mod(cooked: &Path, id: &str, enabled: bool, binding: Option<(&str, &str)>) -> Result<(), String> {
     if !MOD_IDS.contains(&id) { return Err("Unknown Game Mod".into()); }
+    crate::toast::console(format!("[Game Mods] {} {id}…", if enabled { "Enabling" } else { "Disabling" }));
     let mut settings = values();
     settings.game_mods.insert(id.to_owned(), enabled);
     if let Some((key, pad)) = binding {
         settings.bindings.insert(format!("{id}.key"), key.to_owned());
         settings.bindings.insert(format!("{id}.pad"), if pad.is_empty() { String::new() } else { format!("XboxTypeS_{pad}") });
     }
-    update(cooked, settings)
+    let result = update(cooked, settings);
+    if let Err(error) = &result { crate::toast::console(format!("[Game Mods] {id}: {error}")); }
+    result
 }
 pub fn scoreboard_options() -> (bool, bool) { let s = values(); (s.scoreboard_mmr, s.scoreboard_names) }
 pub fn set_scoreboard(game: &Path, mmr: bool, names: bool) -> Result<(), String> {

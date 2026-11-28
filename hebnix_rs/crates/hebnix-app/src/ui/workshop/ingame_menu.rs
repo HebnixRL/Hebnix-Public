@@ -654,6 +654,10 @@ impl InGameMenuState {
         match job {
             Job::Status(enabled) => self.enabled = Some(enabled),
             Job::Done(result) => {
+                match &result {
+                    Ok(message) => crate::toast::console(format!("[Workshop Menu] {message}")),
+                    Err(error) => crate::toast::console(format!("[Workshop Menu] Failed: {error}")),
+                }
                 self.status = result.unwrap_or_else(|e| e);
                 let cooked = cooked.to_path_buf();
                 self.spawn(ctx, move || Job::Status(workshop_menu::status(&cooked)));
@@ -696,6 +700,7 @@ impl InGameMenuState {
             return;
         }
         self.status = "Patching TAGame.upk...".into();
+        crate::toast::console(if enable { "[Workshop Menu] Installing the in-game map menu (patches TAGame.upk)…" } else { "[Workshop Menu] Removing the in-game map menu…" });
         let (cooked, backups) = (cooked.to_path_buf(), cooked.join("Backups"));
         if enable {
             let folder = workshop_menu::maps_folder(&cooked);

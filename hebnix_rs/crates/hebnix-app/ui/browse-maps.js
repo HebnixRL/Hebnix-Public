@@ -78,6 +78,14 @@ function mapCard(map) {
   const badge = node("span", "badge text-truncate maps-status " + (map.busy ? "text-bg-warning" : map.loaded ? "text-bg-success" : "text-bg-secondary"), map.status);
   badge.title = map.status;
   image.append(badge);
+  if (map.can_forget) {
+    const forget = node("button", "maps-forget", "✕");
+    forget.type = "button";
+    forget.title = "Remove from cached search";
+    forget.setAttribute("aria-label", "Remove " + map.name + " from cached search");
+    forget.addEventListener("click", () => send({ type: "forget", id: map.id }));
+    card.append(forget);
+  }
   contents.append(heading, node("p", "small text-body-secondary mb-2 text-truncate", map.author));
   const actions = node("div", "maps-card-actions mt-auto");
   if (deleteId === map.id) {

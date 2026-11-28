@@ -211,6 +211,7 @@ impl State {
     ) {
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
+        if !label.is_empty() { crate::toast::console(format!("[Profile Pictures] {label}")); }
         self.status = label.into();
         self.error = false;
         let ctx = ctx.clone();
@@ -354,6 +355,16 @@ impl State {
         });
         if let Some(result) = result {
             self.pending = None;
+            match &result {
+                Ok(Completion::Started(_, _, Err(error))) => crate::toast::console(format!("[Profile Pictures] Could not start the local avatar service: {error}")),
+                Ok(Completion::Started(true, true, _)) => crate::toast::console("[Profile Pictures] Avatar support needs an update. Close Rocket League to apply it."),
+                Ok(Completion::Started(..)) => {}
+                Ok(Completion::Enabled(on, _)) => crate::toast::console(format!("[Profile Pictures] Avatar support {}", if *on { "enabled" } else { "disabled" })),
+                Ok(Completion::Imported(_)) => crate::toast::console("[Profile Pictures] Picture imported (not uploaded yet)"),
+                Ok(Completion::Uploaded { .. }) => crate::toast::console("[Profile Pictures] Upload finished. Restart Rocket League to see the new avatar"),
+                Ok(Completion::Canceled) => {}
+                Err(error) => crate::toast::console(format!("[Profile Pictures] Failed: {error}")),
+            }
             match result {
                 Ok(Completion::Started(on, needs_update, runtime)) => {
                     self.enabled = on;
@@ -424,7 +435,10 @@ impl State {
         self.spawn(ctx, "Uploading picture…", move || {
             let jpeg = gallery::read(&root, &id)?;
             accounts::authorize(&owner)?;
+            let began = std::time::Instant::now();
+            crate::toast::console(format!("[Profile Pictures] Sending {} KB to the avatar server…", jpeg.len() / 1024));
             service::upload(&owner.id, jpeg.clone())?;
+            crate::toast::console(format!("[Profile Pictures] Server accepted the picture in {:.1}s", began.elapsed().as_secs_f32()));
             fs::create_dir_all(&pictures).map_err(|e| e.to_string())?;
             fs::write(owner.picture_file(&pictures), jpeg).map_err(|e| e.to_string())?;
             Ok(Completion::Uploaded {
@@ -488,7 +502,10 @@ impl State {
 
     #[cfg(windows)]
     pub(crate) fn web_action(&mut self, game: &Path, key: &str, value: &serde_json::Value, ctx: &egui::Context) {
-        if self.busy() { return; }
+        if self.busy() {
+            crate::toast::console("[Profile Pictures] Busy with the previous step, try again in a moment");
+            return;
+        }
         match key {
             "enabled" | "update" if !game.as_os_str().is_empty() && !hebnix_sdk::process::is_rocket_league_running() => {
                 if let Some(enabled) = value.as_bool() { self.set_enabled(ctx, game, enabled); }
@@ -510,6 +527,11 @@ impl State {
                 }
             }
             "retry" if self.enabled && !self.needs_update && self.runtime.is_none() => self.retry_connection(ctx),
+            "enabled" | "update" | "account" => crate::toast::console(if game.as_os_str().is_empty() && key != "account" {
+                "[Profile Pictures] Not changed: no Rocket League folder is set in Settings"
+            } else {
+                "[Profile Pictures] Not changed: close Rocket League first"
+            }),
             _ => {}
         }
     }

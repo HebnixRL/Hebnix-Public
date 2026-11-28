@@ -228,29 +228,108 @@ pub const REMOTE_FILES_BASE: &str = "https://hebnix.com";
 pub const DOWNLOAD_ENDPOINT_BASE: &str = "https://api.hebnix.com/download/map/";
 
 const SHADER_PACKAGE: &str = "Engine_MI_Shaders.upk";
-const SHADER_URL: &str = "https://api.hebnix.com/catalogs/Engine_MI_Shaders.upk";
+// A zip of the workshop packages. The old Engine_MI_Shaders.upk-only download is still accepted by fetch_textures.
+const TEXTURES_URL: &str = "https://api.hebnix.com/catalogs/workshop-textures.zip";
+const MAX_TEXTURES_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Workshop maps need this stock package; a joiner missing it is dropped with
-/// "Content mismatch (Package Engine_MI_Shaders)". Fetched once if it isn't there.
-pub(crate) fn ensure_shader_package(rl_path: &str) -> Result<(), String> {
+/// UDK packages workshop maps import, which no game install ships. A joiner
+/// missing one is dropped with "Content mismatch (Package Engine_MI_Shaders)".
+/// Only these names are taken from the download, and only with these hashes.
+const WORKSHOP_TEXTURES: [(&str, &str); 13] = [
+    ("Engine_MI_Shaders.upk", "4f030a5adc53be6a459673fd9a4ccd5ed9cb81677c2f8b54bab97d4a4f4d9408"),
+    ("MapTemplates.upk", "b8ec37461f2efd516a6a13b5b7cb6a01ed098a9af3cb0ce65c4027239caab1fb"),
+    ("EditorMaterials.upk", "471d924a9ab76925ded99cd437679538f4e6bc75e3fbe5e2bb12f1ae9f814421"),
+    ("EngineVolumetrics.upk", "719b0b9f31bae72e9e0b03b766a873fa2e085c7f01a4deb04af9ca52655733b4"),
+    ("EditorResources.upk", "f791360ad0558729ae1aad672bb54fd649e228537a16f23a946e9f3b0975a8d6"),
+    ("EditorMeshes.upk", "bf9f0094927da68f56aebee233d3db89abff95e4ae3df13ac47d6d07248cf777"),
+    ("EditorLandscapeResources.upk", "b70fc4fdbe6a1514fe5886892c55dac185d67e2df7945e524a6561c00697338e"),
+    ("NodeBuddies.upk", "4eceeee0cc3a06f5e4fcf56a1acd1ae9e09e93b92e36cfb3db03f90341a89d2d"),
+    ("EngineResources.upk", "3c1e4bf2d3926e52f3ab1e100f20a6c14b251fc220d45fe22fb3061db58bf8cd"),
+    ("MapTemplateIndex.upk", "93fa84ce32b3feac09f336e888cfc47f7c621c1f473349d375c8fdcf0adbee69"),
+    ("EngineBuildings.upk", "db38fb1043654f1ff9eb94544537f0e450a5919f261e34af3988d5875787bc21"),
+    ("EngineMaterials.upk", "fd8f9a81b3f1a4ff6ef8ba52397e1f683e7b6aec2fa0f23c119d1e97f2172807"),
+    ("EngineDebugMaterials.upk", "9f3caf13f0def88ea999cf903340bb28d6bd3b97078afd4f69beba7b821cabfb"),
+];
+
+/// Fetch the workshop texture packages the game folder is missing. Files
+/// already there are left alone.
+pub(crate) fn ensure_workshop_textures(rl_path: &str) -> Result<(), String> {
+    // startup and a map install can both ask at once
+    static BUSY: Mutex<()> = Mutex::new(());
+    let _busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
     let cooked = Path::new(rl_path).join("TAGame").join("CookedPCConsole");
-    let dest = cooked.join(SHADER_PACKAGE);
-    if dest.exists() || !cooked.is_dir() {
+    if !cooked.is_dir() {
         return Ok(());
     }
-    let part = cooked.join(format!("{SHADER_PACKAGE}.part"));
-    let resp = get_download(SHADER_URL)?;
-    let copied = std::fs::File::create(&part)
-        .map_err(|e| e.to_string())
-        .and_then(|mut out| std::io::copy(&mut resp.into_reader(), &mut out).map_err(|e| e.to_string()));
-    if let Err(error) = copied {
-        let _ = std::fs::remove_file(&part);
-        return Err(error);
+    let missing: Vec<_> = WORKSHOP_TEXTURES.iter().filter(|(name, _)| !cooked.join(name).exists()).collect();
+    if missing.is_empty() {
+        return Ok(());
     }
-    std::fs::rename(&part, &dest).map_err(|e| {
-        let _ = std::fs::remove_file(&part);
-        e.to_string()
-    })
+    crate::toast::console(format!("[Workshop] Downloading workshop textures ({} file(s) missing)...", missing.len()));
+    // same drive as the game, so each verified file is renamed into place
+    let temp = cooked.parent().unwrap_or(&cooked).join("HbxTextures.tmp");
+    let result = fetch_textures(&temp, &cooked, &missing);
+    let _ = std::fs::remove_dir_all(&temp);
+    match &result {
+        Ok(installed) => crate::toast::console(format!(
+            "[Workshop] Installed {installed} workshop texture file(s), {} already there.",
+            WORKSHOP_TEXTURES.len() - missing.len()
+        )),
+        Err(error) => crate::toast::console(format!("[Workshop] Workshop textures: {error}")),
+    }
+    result.map(|_| ())
+}
+
+fn fetch_textures(temp: &Path, cooked: &Path, missing: &[&(&str, &str)]) -> Result<usize, String> {
+    use std::io::Read;
+    let _ = std::fs::remove_dir_all(temp);
+    std::fs::create_dir_all(temp).map_err(|e| e.to_string())?;
+    let download = temp.join("download.part");
+    let resp = get_download(TEXTURES_URL)?;
+    std::fs::File::create(&download)
+        .and_then(|mut out| std::io::copy(&mut resp.into_reader().take(MAX_TEXTURES_BYTES), &mut out))
+        .map_err(|e| e.to_string())?;
+    let mut magic = [0u8; 4];
+    let is_package = std::fs::File::open(&download).and_then(|mut f| f.read_exact(&mut magic)).is_ok()
+        && magic == [0xC1, 0x83, 0x2A, 0x9E];
+    if is_package {
+        std::fs::rename(&download, temp.join(SHADER_PACKAGE)).map_err(|e| e.to_string())?;
+    } else {
+        let file = std::fs::File::open(&download).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("the download isn't a readable zip: {e}"))?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+            // only a known name is written, whatever folder the zip keeps it in
+            let Some(name) = entry.enclosed_name().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            else { continue };
+            let Some((name, _)) = missing.iter().find(|(known, _)| known.eq_ignore_ascii_case(&name)) else { continue };
+            std::fs::File::create(temp.join(name))
+                .and_then(|mut out| std::io::copy(&mut (&mut entry).take(MAX_TEXTURES_BYTES), &mut out))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    let mut installed = 0;
+    let mut problems = Vec::new();
+    for (name, sha256) in missing {
+        let file = temp.join(name);
+        if !file.is_file() {
+            problems.push(format!("{name} is not in the download"));
+            continue;
+        }
+        if crate::multiplayer_lan::hash_file(&file).map_err(|e| e.to_string())? != *sha256 {
+            problems.push(format!("{name} failed its SHA-256 check, not installed"));
+            continue;
+        }
+        let dest = cooked.join(name);
+        if dest.exists() {
+            continue;
+        }
+        match std::fs::rename(&file, &dest) {
+            Ok(()) => installed += 1,
+            Err(e) => problems.push(format!("{name}: {e}")),
+        }
+    }
+    if problems.is_empty() { Ok(installed) } else { Err(problems.join("; ")) }
 }
 
 /// Maps are copied into Hebnix's workshop folder for the in-game Workshop menu.
@@ -439,8 +518,8 @@ impl MapManager {
         let map_id = id_of(map_data);
         let cached_map_path = self.cache_dir.join(format!("{map_id}.upk"));
 
-        if let Err(error) = ensure_shader_package(rl_path) {
-            tracing::warn!("could not fetch {SHADER_PACKAGE}: {error}");
+        if let Err(error) = ensure_workshop_textures(rl_path) {
+            tracing::warn!("could not fetch the workshop textures: {error}");
         }
         self.cache_from_workshop_folder(&map_id, rl_path)?;
         let mut map_data = map_data.clone();
@@ -925,6 +1004,7 @@ pub struct WorkshopState {
     fetch_queue: Vec<(SlotMap, std::net::Ipv4Addr)>,
     join_mismatch_dismissed: Option<hebnix_sdk::log::JoinMismatch>,
     import_wizard: ImportWizard,
+    #[allow(dead_code)]
     steam_downloader: SteamDownloader,
     archive_browser: ArchiveBrowser,
     multiplayer: MultiplayerState,
@@ -2988,7 +3068,7 @@ impl WorkshopState {
 
         let mut result = None;
 
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        let card = egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(230.0);
             ui.vertical_centered(|ui| {
                 // Image
@@ -3122,7 +3202,26 @@ impl WorkshopState {
                 });
             });
         });
+        // an X while hovering a tile that is neither downloaded nor loaded
+        if !is_cached && !is_busy && active_targets.is_empty() && steam_catalog::is_steam_entry(&self.catalog[map_idx]) && ui.rect_contains_pointer(card.response.rect) {
+            let rect = card.response.rect;
+            let spot = egui::Rect::from_min_size(egui::pos2(rect.right() - 26.0, rect.top() + 6.0), egui::vec2(20.0, 20.0));
+            let response = ui.interact(spot, egui::Id::new(("forget_search", &map_id)), egui::Sense::click());
+            let fill = if response.hovered() { egui::Color32::from_rgb(0xc0, 0x39, 0x2b) } else { ui.visuals().extreme_bg_color.gamma_multiply(0.85) };
+            ui.painter().rect_filled(spot, 10.0, fill);
+            ui.painter().text(spot.center(), egui::Align2::CENTER_CENTER, "✕", egui::FontId::proportional(12.0), ui.visuals().text_color());
+            if response.on_hover_text("Remove from cached search").clicked() {
+                result = Some(CardAction::ForgetSearch);
+            }
+        }
         result
+    }
+
+    /// Drops a map that was only ever a search result from the cached results and the list.
+    pub(crate) fn forget_search(&mut self, id: &str) {
+        steam_catalog::forget_search_result(&self.manager.runtime_dir, id);
+        self.catalog.retain(|entry| id_of(entry) != id);
+        self.execute_search(false);
     }
 
     /// The targets a map is loaded on, the workshop folder included.
@@ -3162,6 +3261,11 @@ impl WorkshopState {
                     let _ = tx.send(AppMsg::Log(format!("[Workshop] {e}")));
                 }
                 self.execute_search(false);
+            }
+            CardAction::ForgetSearch => {
+                if self.active_targets(&map_id).is_empty() && !self.is_downloaded(&map_id) {
+                    self.forget_search(&map_id);
+                }
             }
             CardAction::DeleteCache => {
                 // a loaded map has to be unloaded before its download can go
@@ -3296,6 +3400,8 @@ enum CardAction {
     InstallOrDownload,
     Unload,
     DeleteCache,
+    /// the X on a tile that was only seen in a search: forget it from the cached results
+    ForgetSearch,
 }
 
 // Every tile reserves the same slots, including the optional cache action.

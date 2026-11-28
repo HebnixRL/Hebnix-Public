@@ -1651,7 +1651,7 @@ impl SwapperState {
         let mut categories: Vec<_> = SwapCategory::ALL.into_iter().filter(|c| c.supports_recolour()).collect();
         categories.sort_by_key(|category| category.label().to_lowercase());
         for category in categories {
-            ui.selectable_value(&mut self.recolour_category, category, category.label());
+            crate::i18n::layout::side_select(ui, &mut self.recolour_category, category, category.label());
         }
         if before != self.recolour_category {
             self.recolour_selected.clear();

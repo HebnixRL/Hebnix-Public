@@ -167,7 +167,7 @@ impl HebnixApp {
             }
             Tab::Workshop if self.workshop.view == crate::ui::workshop::WorkshopView::Import => self.workshop.add_maps_web_snapshot(),
             Tab::Workshop if self.workshop.view == crate::ui::workshop::WorkshopView::Multiplayer => self.workshop.multiplayer_web_snapshot(),
-            Tab::Workshop if self.workshop.view == crate::ui::workshop::WorkshopView::MenuMap => self.workshop.menu_map_web_snapshot(&self.config.settings.rl_path, ui.ctx()),
+            Tab::Workshop if self.workshop.view == crate::ui::workshop::WorkshopView::MenuMap => self.workshop.menu_map_web_snapshot(&self.config.settings.rl_path, &self.tx, ui.ctx()),
             Tab::Workshop => {
                 let cooked = self.swapper_cooked_path();
                 self.workshop.menu_web_snapshot(&cooked, ui.ctx())
@@ -713,7 +713,7 @@ impl HebnixApp {
         });
         json!({
             "page": "appearance-settings", "themePage": self.appearance_subtab == super::AppearanceSubTab::Theme,
-            "legacy": cfg.legacy_ui, "theme": cfg.theme, "themes": self.theme_options,
+            "theme": cfg.theme, "themes": self.theme_options,
             "general": general, "panel": panel, "labels": labels,
         })
     }
@@ -785,7 +785,6 @@ impl HebnixApp {
                 self.change_language(ctx, text);
                 return;
             }
-            "legacy" => cfg.legacy_ui = boolean.unwrap_or(cfg.legacy_ui),
             "opacity" => {
                 let Some(opacity) = number else { return };
                 cfg.window_opacity = opacity.clamp(0.5, 1.0);
@@ -2018,7 +2017,10 @@ impl HebnixApp {
 /// Bordered section like the web `tracker-detail` panel.
 fn web_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let line = ui.visuals().widgets.noninteractive.bg_stroke;
+    // filled from the active theme so text stays readable over a theme background image
+    let [r, g, b, a] = ui.visuals().panel_fill.to_srgba_unmultiplied();
     egui::Frame::NONE
+        .fill(egui::Color32::from_rgba_unmultiplied(r, g, b, a.max(205)))
         .stroke(line)
         .corner_radius(8.0)
         .inner_margin(egui::Margin::same(16))
@@ -2051,10 +2053,22 @@ impl HebnixApp {
         match self.tab {
             Tab::Spoofer => matches!(
                 self.spoofer_subtab,
-                SpooferSubTab::Username | SpooferSubTab::Friends | SpooferSubTab::Scoreboard
+                SpooferSubTab::Username | SpooferSubTab::Friends | SpooferSubTab::Scoreboard | SpooferSubTab::ProfilePictures
             ),
-            Tab::Settings => self.hebnix_settings_tab == HebnixSettingsTab::ActionButton,
-            Tab::GameMods | Tab::Freeplay => true,
+            Tab::Settings => matches!(
+                self.hebnix_settings_tab,
+                HebnixSettingsTab::ActionButton | HebnixSettingsTab::Interface | HebnixSettingsTab::Directories | HebnixSettingsTab::Discord | HebnixSettingsTab::System
+            ),
+            Tab::GameMods | Tab::Freeplay | Tab::LiveEditor => true,
+            Tab::About => self.maintenance.tab,
+            Tab::Replays => self.replays_subtab == super::ReplaysSubTab::ReplayTimeline,
+            Tab::Items => matches!(self.items_subtab, super::ItemsSubTab::Colours | super::ItemsSubTab::Presets | super::ItemsSubTab::Loadouts | super::ItemsSubTab::PresetCreator),
+            Tab::Patcher => matches!(
+                self.items_mode,
+                super::ItemsMode::SpeedPatch | super::ItemsMode::GoalExplosion | super::ItemsMode::Manage | super::ItemsMode::WheelAlignment
+                    | super::ItemsMode::GoalExplosionScale | super::ItemsMode::GameColours | super::ItemsMode::BallAppearance
+                    | super::ItemsMode::MenuTextures | super::ItemsMode::History
+            ) || self.on_studio_asset_page(),
             Tab::Workshop => matches!(self.workshop.view, crate::ui::workshop::WorkshopView::Import | crate::ui::workshop::WorkshopView::MenuMap | crate::ui::workshop::WorkshopView::InGameMenu | crate::ui::workshop::WorkshopView::Multiplayer),
             _ => false,
         }
@@ -2084,10 +2098,35 @@ impl HebnixApp {
                 "workshop-menu" => Self::egui_workshop_menu(ui, data, &mut actions),
                 "multiplayer" => Self::egui_multiplayer(ui, data, &mut actions),
                 "menu-map" => Self::egui_menu_map(ui, data, &mut actions),
+                "files-settings" => Self::egui_files_settings(ui, data, &mut actions),
+                "appearance-settings" => Self::egui_appearance_settings(ui, data, &mut actions),
+                "system-settings" => Self::egui_system_settings(ui, data, &mut actions),
+                "discord-settings" => Self::egui_discord_settings(ui, data, &mut actions),
+                "ball-appearance" => Self::egui_ball_appearance(ui, data, &mut actions),
+                "goal-explosion" => Self::egui_goal_explosion(ui, data, &mut actions),
+                "speed-patch" => Self::egui_speed_patch(ui, data, &mut actions),
+                "wheel-alignment" => Self::egui_wheel_alignment(ui, data, &mut actions),
+                "game-colours" => Self::egui_game_colours(ui, data, &mut actions),
+                "live-colours" | "live-wheels" | "live-goal-explosion" => Self::egui_live_editor(ui, data, &mut actions),
+                "studio-active" => Self::egui_studio_active(ui, data, &mut actions),
+                "maintenance" => Self::egui_maintenance(ui, data, &mut actions),
+                "menu-textures" => Self::egui_menu_textures(ui, data, &mut actions),
+                "upk-history" => Self::egui_upk_history(ui, data, &mut actions),
+                "studio-asset" => Self::egui_studio_asset(ui, data, &mut actions),
+                "item-artwork" => Self::egui_item_artwork(ui, data, &mut actions),
+                "anthems" => Self::egui_anthems(ui, data, &mut actions),
+                "profile-pictures" => Self::egui_profile_pictures(ui, data, &mut actions),
+                "presets" => Self::egui_presets(ui, data, &mut actions),
+                "loadouts" => Self::egui_loadouts(ui, data, &mut actions),
+                "preset-creator" => Self::egui_preset_creator(ui, data, &mut actions),
+                "replay-library" => Self::egui_replay_library(ui, data, &mut actions),
                 _ => handled = false,
             }
         });
         let ctx = ui.ctx().clone();
+        if page == "menu-map" {
+            self.menu_map_previews(&ctx);
+        }
         for action in actions {
             self.send_manage(action, &ctx);
         }
@@ -2594,8 +2633,7 @@ fn web_progress(ui: &mut egui::Ui, busy: bool, progress: &Value) {
 }
 
 fn web_primary(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
-    let accent = ui.visuals().selection.stroke.color;
-    ui.add_enabled(enabled, egui::Button::new(label).fill(accent.gamma_multiply(0.6))).clicked()
+    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).strong())).clicked()
 }
 
 impl HebnixApp {
@@ -3262,20 +3300,75 @@ impl HebnixApp {
                     ui.add_enabled(editable, egui::TextEdit::singleline(&mut term).hint_text(label("search")).desired_width(f32::INFINITY));
                     let lower = term.trim().to_lowercase();
                     ui.ctx().data_mut(|d| d.insert_temp(id, term));
-                    egui::ScrollArea::vertical().id_salt("menu_map_choices").max_height(260.0).show(ui, |ui| {
-                        let accent = ui.visuals().selection.stroke.color;
-                        for choice in maps["choices"].as_array().into_iter().flatten() {
-                            let (key, name) = (val_str(&choice[0]), val_str(&choice[1]));
-                            if !name.to_lowercase().contains(&lower) {
+                    let mut images: std::collections::HashMap<String, Option<std::sync::Arc<[u8]>>> = ui.ctx().data(|d| d.get_temp(egui::Id::new("menu_map_images"))).unwrap_or_default();
+                    if workshop {
+                        // downloaded maps bring their own thumbnail
+                        for (id, uri) in maps["previews"].as_object().into_iter().flatten() {
+                            if images.get(id).is_some_and(Option::is_some) {
                                 continue;
                             }
-                            let on = maps["selected"].as_str() == Some(key.as_str());
-                            let button = egui::Button::new(&name).fill(if on { accent.gamma_multiply(0.6) } else { egui::Color32::TRANSPARENT });
-                            if ui.add_enabled(editable, button.min_size(egui::vec2(ui.available_width(), 28.0))).clicked() {
-                                actions.push(call("select", json!({ "id": key })));
-                            }
+                            let bytes = uri.as_str().and_then(|uri| uri.split_once(',')).and_then(|(_, encoded)| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok());
+                            images.insert(id.clone(), bytes.map(Into::into));
                         }
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("menu_map_images"), images.clone()));
+                    }
+                    let mut visible: Vec<String> = Vec::new();
+                    let grid_height = (ui.ctx().content_rect().height() * 0.5).clamp(240.0, 480.0);
+                    let width = ui.available_width() - 10.0;
+                    let columns = (((width + 8.0) / 128.0).floor() as usize).clamp(2, 5);
+                    let tile_w = ((width - 8.0 * (columns as f32 - 1.0)) / columns as f32).floor();
+                    egui::ScrollArea::vertical().id_salt("menu_map_choices").max_height(grid_height).min_scrolled_height(grid_height).auto_shrink([false, false]).show(ui, |ui| {
+                        egui::Grid::new("menu_map_tiles").spacing([8.0, 8.0]).show(ui, |ui| {
+                            let mut shown = 0;
+                            for choice in maps["choices"].as_array().into_iter().flatten() {
+                                let (key, name) = (val_str(&choice[0]), val_str(&choice[1]));
+                                if !name.to_lowercase().contains(&lower) {
+                                    continue;
+                                }
+                                let on = maps["selected"].as_str() == Some(key.as_str());
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(tile_w, 116.0), egui::Sense::click());
+                                let hover = ui.ctx().animate_bool_with_time(response.id.with("h"), response.hovered() && editable, 0.1);
+                                let fill = ui.visuals().widgets.inactive.weak_bg_fill.lerp_to_gamma(ui.visuals().widgets.hovered.weak_bg_fill, hover);
+                                let accent = ui.visuals().selection.stroke.color;
+                                let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
+                                ui.painter().rect(rect, 6.0, fill, egui::Stroke::new(1.0, if on { accent } else { line.lerp_to_gamma(accent, hover * 0.6) }), egui::StrokeKind::Inside);
+                                let caption_h = 30.0;
+                                let art = egui::Rect::from_min_max(rect.min + egui::vec2(4.0, 4.0), egui::pos2(rect.right() - 4.0, rect.bottom() - caption_h - 6.0));
+                                if !workshop && ui.is_rect_visible(rect) {
+                                    visible.push(key.clone());
+                                }
+                                match images.get(&key) {
+                                    Some(Some(bytes)) => {
+                                        let source = egui::ImageSource::Bytes { uri: format!("bytes://menumap/{key}").into(), bytes: egui::load::Bytes::Shared(bytes.clone()) };
+                                        egui::Image::new(source).fit_to_exact_size(art.size()).corner_radius(3.0).paint_at(ui, art);
+                                    }
+                                    Some(None) => {
+                                        ui.painter().rect_stroke(egui::Rect::from_center_size(art.center(), egui::vec2(28.0, 22.0)), 3.0, egui::Stroke::new(1.5, muted), egui::StrokeKind::Inside);
+                                    }
+                                    None if workshop => {
+                                        ui.painter().text(art.center(), egui::Align2::CENTER_CENTER, "No preview", egui::FontId::proportional(12.0), muted);
+                                    }
+                                    None => {
+                                        ui.painter().text(art.center(), egui::Align2::CENTER_CENTER, "Loading preview…", egui::FontId::proportional(12.0), muted);
+                                    }
+                                }
+                                let cap = egui::Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.bottom() - caption_h - 4.0), rect.max - egui::vec2(4.0, 4.0));
+                                ui.painter().rect_filled(cap, 3.0, ui.visuals().extreme_bg_color.gamma_multiply(0.8));
+                                let galley = ui.painter().layout(name.clone(), egui::FontId::proportional(12.0), ui.visuals().text_color(), cap.width() - 8.0);
+                                let pos = egui::pos2(cap.center().x - galley.size().x / 2.0, cap.center().y - galley.size().y / 2.0);
+                                ui.painter().with_clip_rect(cap).galley(pos, galley, ui.visuals().text_color());
+                                response.clone().on_hover_text(&name);
+                                if editable && response.clicked() {
+                                    actions.push(call("select", json!({ "id": key })));
+                                }
+                                shown += 1;
+                                if shown % columns == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
                     });
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("menu_map_visible"), visible));
                     ui.horizontal(|ui| {
                         if web_primary(ui, &label("apply"), editable && !maps["selected"].is_null()) {
                             actions.push(call("apply", Value::Null));
@@ -3440,5 +3533,3451 @@ impl HebnixApp {
                 });
             });
         });
+    }
+}
+
+/// Slider that reports its value once released, like the web range inputs.
+fn web_slider(ui: &mut egui::Ui, title: &str, value: f64, range: std::ops::RangeInclusive<f64>, enabled: bool, show: impl Fn(f64) -> String) -> Option<f64> {
+    let id = egui::Id::new(("web_slider", title));
+    let mut edited: f64 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(value);
+    let mut committed = None;
+    let dragging = ui.ctx().data(|d| d.get_temp::<bool>(id.with("drag"))).unwrap_or(false);
+    if !dragging {
+        edited = value;
+    }
+    ui.horizontal(|ui| {
+        ui.label(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(show(edited)).small());
+            let response = ui.add_enabled(enabled, egui::Slider::new(&mut edited, range).show_value(false));
+            if response.dragged() || response.has_focus() {
+                ui.ctx().data_mut(|d| d.insert_temp(id.with("drag"), true));
+            }
+            if response.drag_stopped() || response.lost_focus() {
+                ui.ctx().data_mut(|d| d.insert_temp(id.with("drag"), false));
+                committed = Some(edited);
+            }
+        });
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(id, edited));
+    committed
+}
+
+fn web_path_row(ui: &mut egui::Ui, title: &str, value: &str, browse: &str, extra: Option<&str>) -> (bool, bool) {
+    let (mut picked, mut extra_clicked) = (false, false);
+    ui.horizontal(|ui| {
+        ui.label(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            picked = ui.button(browse).clicked();
+            if let Some(extra) = extra {
+                extra_clicked = ui.button(extra).clicked();
+            }
+            let mut shown = value.to_owned();
+            ui.add(egui::TextEdit::singleline(&mut shown).desired_width(ui.available_width()).interactive(false));
+        });
+    });
+    (picked, extra_clicked)
+}
+
+impl HebnixApp {
+    fn egui_files_settings(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let update = |key: &str, value: Value| json!({ "type": "files", "key": key, "value": value });
+        let paths = data["paths"].as_array().cloned().unwrap_or_default();
+        web_card(ui, |ui| {
+            web_muted(ui, &label("intro"));
+            for entry in paths.iter().take(2) {
+                let key = val_str(&entry[0]);
+                if web_path_row(ui, &val_str(&entry[1]), &val_str(&entry[2]), &label("browse"), None).0 {
+                    actions.push(update(&key, Value::Null));
+                }
+            }
+            for entry in data["ini"].as_array().into_iter().flatten() {
+                let (key, title, value, suggested) = (val_str(&entry[0]), val_str(&entry[1]), val_str(&entry[2]), val_str(&entry[3]));
+                let id = egui::Id::new(("files_ini", &key));
+                let mut text: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| value.clone());
+                ui.horizontal(|ui| {
+                    ui.label(&title);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if key == "Port" && ui.button(label("refresh")).clicked() {
+                            actions.push(update("refresh", Value::Null));
+                        }
+                        if value != suggested {
+                            let name = match key.as_str() {
+                                "PacketSendRate" => label("setRate"),
+                                "Port" => label("reset"),
+                                _ => label("setWebPort"),
+                            };
+                            if ui.button(name).clicked() {
+                                actions.push(update(&key, json!(suggested)));
+                                text = suggested.clone();
+                            }
+                        }
+                        let response = ui.add(egui::TextEdit::singleline(&mut text).hint_text(label("missing")).desired_width(90.0));
+                        text.retain(|c| c.is_ascii_digit());
+                        if response.lost_focus() && text != value {
+                            let port: u32 = text.parse().unwrap_or(0);
+                            if !text.is_empty() && (key == "PacketSendRate" || (1..=65535).contains(&port)) {
+                                actions.push(update(&key, json!(text)));
+                            } else {
+                                text = value.clone();
+                            }
+                        }
+                    });
+                });
+                ui.ctx().data_mut(|d| d.insert_temp(id, text));
+            }
+            web_muted(ui, &label("note"));
+            if let Some(entry) = paths.get(2) {
+                let (key, reset) = (val_str(&entry[0]), entry[3].as_bool().unwrap_or(false));
+                let (picked, cleared) = web_path_row(ui, &val_str(&entry[1]), &val_str(&entry[2]), &label("browse"), reset.then(|| label("reset")).as_deref());
+                if picked {
+                    actions.push(update(&key, Value::Null));
+                }
+                if cleared {
+                    actions.push(update("reset_replays", Value::Null));
+                }
+            }
+        });
+        ui.add_space(12.0);
+        web_card(ui, |ui| {
+            web_heading(ui, &label("title"));
+            web_muted(ui, &label("description"));
+            ui.label(label("status"));
+            if ui.button(label("setup")).clicked() {
+                actions.push(update("setup", Value::Null));
+            }
+        });
+        if data["setup"].is_object() {
+            Self::egui_launch_setup(ui.ctx(), &data["setup"], actions);
+        }
+    }
+
+    fn egui_launch_setup(ctx: &egui::Context, model: &Value, actions: &mut Vec<Value>) {
+        let labels = &model["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let id = egui::Id::new("launch_setup_draft");
+        let mut draft: Value = ctx.data(|d| d.get_temp(id)).unwrap_or_else(|| model["draft"].clone());
+        let send = |key: &str, draft: &Value, candidate: Value| json!({ "type": "launch_setup", "key": key, "draft": draft, "candidate": candidate });
+        let mut closed = false;
+        web_modal(ctx, "launch_setup", 460.0, |ui| {
+            web_heading(ui, &label("title"));
+            web_muted(ui, &label("hint"));
+            let modes = web_pairs(&model["modes"]);
+            if let Some(mode) = web_select(ui, "launch_mode", &val_str(&draft["mode"]), &modes, true) {
+                draft["mode"] = json!(mode);
+            }
+            let text_field = |ui: &mut egui::Ui, draft: &mut Value, key: &str, title: String| {
+                ui.label(title);
+                let mut text = val_str(&draft[key]);
+                if ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY)).changed() {
+                    draft[key] = json!(text);
+                }
+            };
+            match draft["mode"].as_str().unwrap_or_default() {
+                "steam_native" => text_field(ui, &mut draft, "steam_id", label("steam")),
+                "steam_shortcut" => {
+                    ui.colored_label(ui.visuals().warn_fg_color, label("warning"));
+                    if ui.button(label("scan")).clicked() {
+                        actions.push(send("scan", &draft, Value::Null));
+                    }
+                    let candidates = model["candidates"].as_array().cloned().unwrap_or_default();
+                    if candidates.is_empty() {
+                        web_muted(ui, &label("empty"));
+                    }
+                    for (index, name) in candidates.iter().enumerate() {
+                        if ui.button(val_str(name)).clicked() {
+                            actions.push(send("candidate", &draft, json!(index)));
+                        }
+                    }
+                    text_field(ui, &mut draft, "steam_id", label("shortcut"));
+                    if let Some(exe) = draft["shortcut_exe"].as_str().filter(|text| !text.is_empty()) {
+                        ui.label(egui::RichText::new(exe).small());
+                    }
+                }
+                _ => {}
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(label("cancel")).clicked() {
+                    actions.push(send("cancel", &draft, Value::Null));
+                    closed = true;
+                }
+                if web_primary(ui, &label("save"), true) {
+                    actions.push(send("save", &draft, Value::Null));
+                    closed = true;
+                }
+            });
+        });
+        ctx.data_mut(|d| {
+            if closed {
+                d.remove::<Value>(id);
+            } else {
+                d.insert_temp(id, draft);
+            }
+        });
+    }
+
+    fn egui_appearance_settings(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let update = |key: &str, value: Value| json!({ "type": "appearance", "key": key, "value": value });
+        web_card(ui, |ui| {
+            if let Some(value) = web_toggle(ui, "Legacy UI", data["legacy"].as_bool().unwrap_or(false), true) {
+                actions.push(update("legacy", json!(value)));
+            }
+            if data["themePage"].as_bool().unwrap_or(false) {
+                let themes: Vec<(String, String)> = data["themes"].as_array().into_iter().flatten().map(|name| (val_str(name), val_str(name))).collect();
+                web_row(ui, &label("themeLabel"), |ui| {
+                    if let Some(value) = web_select(ui, "appearance_theme", &val_str(&data["theme"]), &themes, true) {
+                        actions.push(update("theme", json!(value)));
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (key, text) in [("refresh_theme", "refresh"), ("import_theme", "import"), ("theme_folder", "folder"), ("fonts_folder", "fonts")] {
+                        if ui.button(label(text)).clicked() {
+                            actions.push(update(key, Value::Null));
+                        }
+                    }
+                });
+                return;
+            }
+            let general = &data["general"];
+            let capturing = general["capturing"].as_bool().unwrap_or(false);
+            web_row(ui, &label("hotkey"), |ui| {
+                if ui.add_enabled(!capturing, egui::Button::new(label("capture"))).clicked() {
+                    actions.push(update("capture", Value::Null));
+                }
+                let mut shown = if capturing { "…".to_owned() } else { val_str(&general["hotkey"]) };
+                ui.add(egui::TextEdit::singleline(&mut shown).desired_width(120.0).interactive(false));
+            });
+            web_row(ui, &label("language"), |ui| {
+                if let Some(value) = web_select(ui, "appearance_language", &val_str(&general["language"]), &web_pairs(&general["languages"]), true) {
+                    actions.push(update("language", json!(value)));
+                }
+            });
+            if let Some(value) = web_slider(ui, &label("opacity"), general["opacity"].as_f64().unwrap_or(1.0), 0.5..=1.0, true, |value| format!("{value:.2}")) {
+                actions.push(update("opacity", json!(value)));
+            }
+            let toasts: Vec<(String, String)> = general["toasts"].as_array().into_iter().flatten().map(|name| (val_str(name), val_str(name))).collect();
+            web_row(ui, &label("toast"), |ui| {
+                if let Some(value) = web_select(ui, "appearance_toast", &val_str(&general["toast"]), &toasts, true) {
+                    actions.push(update("toast", json!(value)));
+                }
+            });
+            web_row(ui, &label("defaultTab"), |ui| {
+                if let Some(value) = web_select(ui, "appearance_default_tab", &val_str(&general["defaultTab"]), &web_pairs(&general["tabs"]), true) {
+                    actions.push(update("default_tab", json!(value)));
+                }
+            });
+        });
+        if data["themePage"].as_bool().unwrap_or(false) {
+            return;
+        }
+        ui.add_space(12.0);
+        let panel = &data["panel"];
+        let enabled = panel["enabled"].as_bool().unwrap_or(false);
+        web_card(ui, |ui| {
+            web_heading(ui, "Controller panel");
+            if let Some(value) = web_toggle(ui, "Enable controller panel", enabled, true) {
+                actions.push(update("panel_enabled", json!(value)));
+            }
+            web_muted(ui, "Open the panel beside the game with L3 + R3.");
+            let sides = vec![("left".to_owned(), "Left".to_owned()), ("right".to_owned(), "Right".to_owned())];
+            let current = if panel["left"].as_bool().unwrap_or(false) { "left" } else { "right" };
+            web_row(ui, "Opens from", |ui| {
+                if let Some(value) = web_select(ui, "panel_side", current, &sides, enabled) {
+                    actions.push(update("panel_left", json!(value == "left")));
+                }
+            });
+            if let Some(value) = web_slider(ui, "Width", panel["width"].as_f64().unwrap_or(0.3), 0.2..=0.5, enabled, |value| format!("{}%", (value * 100.0).round())) {
+                actions.push(update("panel_width", json!(value)));
+            }
+            if let Some(value) = web_toggle(ui, "Slide in like a drawer", panel["animate"].as_bool().unwrap_or(false), enabled) {
+                actions.push(update("panel_animate", json!(value)));
+            }
+            if let Some(value) = web_toggle(ui, "Show every page (Advanced mode)", panel["advanced"].as_bool().unwrap_or(false), enabled) {
+                actions.push(update("panel_advanced", json!(value)));
+            }
+        });
+    }
+
+    fn egui_system_settings(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let backups = &data["backups"];
+        let certificate = &data["certificate"];
+        let command = |key: &str| json!({ "type": "system_command", "key": key });
+        let backup = |key: &str| json!({ "type": "system_backups", "key": key });
+        if let Some(error) = backups["error"].as_str().filter(|text| !text.is_empty()) {
+            ui.colored_label(ui.visuals().warn_fg_color, error);
+        }
+        web_card(ui, |ui| {
+            for item in data["rows"].as_array().into_iter().flatten() {
+                if let Some(enabled) = web_toggle(ui, item["label"].as_str().unwrap_or_default(), item["enabled"].as_bool().unwrap_or(false), true) {
+                    actions.push(json!({ "type": "system_toggle", "key": item["key"], "enabled": enabled }));
+                }
+                if let Some(note) = item["note"].as_str().filter(|text| !text.is_empty()) {
+                    web_muted(ui, note);
+                }
+            }
+            if let Some(value) = web_slider(ui, "Overlay refresh rate", data["fps"].as_f64().unwrap_or(30.0), 20.0..=60.0, true, |value| format!("{} fps", value.round())) {
+                actions.push(json!({ "type": "system_fps", "fps": value.round() }));
+            }
+            let busy = data["repairBusy"].as_bool().unwrap_or(false);
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!busy, egui::Button::new(data["repair"].as_str().unwrap_or_default())).clicked() {
+                    actions.push(command("repair"));
+                }
+                if ui.button("Uninstall").clicked() {
+                    actions.push(command("uninstall"));
+                }
+                if ui.button(backups["label"].as_str().unwrap_or_default()).clicked() {
+                    actions.push(backup("open"));
+                }
+            });
+            web_progress(ui, busy, &Value::Null);
+        });
+        ui.add_space(12.0);
+        web_card(ui, |ui| {
+            web_heading(ui, "Account HTTPS proxy certificate");
+            web_muted(ui, "Name and Friends use the account HTTPS proxy while Rocket League is running. It routes only api.epicgames.dev and leaves Windows proxy settings unchanged.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("{} {}", val_str(&certificate["statusLabel"]), val_str(&certificate["status"])));
+                if ui.button(val_str(&certificate["action"])).clicked() {
+                    actions.push(command("certificate"));
+                }
+                if ui.button("↻").on_hover_text(val_str(&certificate["refresh"])).clicked() {
+                    actions.push(command("refresh_certificate"));
+                }
+            });
+            if !certificate["admin"].as_bool().unwrap_or(false) {
+                web_muted(ui, "Restart as Administrator to install or remove the certificate.");
+            }
+            ui.label(format!("{} {}", val_str(&certificate["proxyLabel"]), val_str(&certificate["proxy"])));
+        });
+        if backups["confirming"].as_bool().unwrap_or(false) {
+            web_modal(ui.ctx(), "system_backups", 440.0, |ui| {
+                web_heading(ui, backups["label"].as_str().unwrap_or_default());
+                ui.add_space(6.0);
+                ui.label(backups["note"].as_str().unwrap_or_default());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(backups["cancel"].as_str().unwrap_or_default()).clicked() {
+                        actions.push(backup("cancel"));
+                    }
+                    let danger = ui.visuals().error_fg_color.gamma_multiply(0.6);
+                    if ui.add(egui::Button::new(backups["confirm"].as_str().unwrap_or_default()).fill(danger)).clicked() {
+                        actions.push(backup("confirm"));
+                    }
+                });
+            });
+        }
+    }
+
+    fn egui_discord_settings(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let flag = |key: &str| data[key].as_bool().unwrap_or(false);
+        let set = |key: &str, enabled: bool| json!({ "type": "discord_option", "key": key, "enabled": enabled });
+        let game = flag("game");
+        web_card(ui, |ui| {
+            if let Some(value) = web_toggle(ui, &label("enabled"), flag("enabled"), true) {
+                actions.push(set("enabled", value));
+            }
+            if let Some(value) = web_toggle(ui, &label("only"), flag("only"), true) {
+                actions.push(set("only", value));
+            }
+            ui.add_space(6.0);
+            ui.label(label("message"));
+            if let Some(value) = web_toggle(ui, &label("game"), game, true) {
+                actions.push(set("game", value));
+            }
+            let count = ["score", "map", "mode"].iter().filter(|key| flag(key)).count();
+            ui.indent("discord_game_options", |ui| {
+                for key in ["score", "map", "mode"] {
+                    if let Some(value) = web_toggle(ui, &label(key), flag(key), game && !(flag(key) && count <= 1)) {
+                        actions.push(set(key, value));
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if let Some(value) = web_toggle(ui, &label("custom"), !game, true) {
+                    actions.push(set("game", !value));
+                }
+                let id = egui::Id::new("discord_message");
+                let mut text: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| val_str(&data["message"]));
+                let response = ui.add_enabled(!game, egui::TextEdit::singleline(&mut text).hint_text(label("placeholder")));
+                if response.lost_focus() {
+                    actions.push(json!({ "type": "discord_message", "message": text }));
+                }
+                ui.ctx().data_mut(|d| d.insert_temp(id, text));
+            });
+            if game {
+                web_muted(ui, &label("disabled"));
+            }
+        });
+        ui.add_space(12.0);
+        let link = &data["link"];
+        let link_labels = &link["labels"];
+        let link_label = |key: &str| link_labels[key].as_str().unwrap_or_default().to_owned();
+        let busy = link["busy"].as_bool().unwrap_or(false);
+        web_card(ui, |ui| {
+            web_heading(ui, &link_label("heading"));
+            web_muted(ui, &link_label("instruction"));
+            let id = egui::Id::new("discord_link_code");
+            let mut code: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| val_str(&link["code"]));
+            let mut submit = false;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(link_label("code"));
+                let response = ui.add_enabled(!busy, egui::TextEdit::singleline(&mut code).char_limit(64).desired_width(180.0));
+                submit = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                submit |= web_primary(ui, &link_label("button"), !busy);
+            });
+            if submit && !busy {
+                actions.push(json!({ "type": "discord_link", "code": code }));
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(id, code));
+            web_muted(ui, link["status"].as_str().unwrap_or_default());
+            let accounts = link["accounts"].as_array().cloned().unwrap_or_default();
+            if !accounts.is_empty() {
+                web_heading(ui, &link_label("accounts"));
+                for name in &accounts {
+                    ui.label(format!("• {}", val_str(name)));
+                }
+            }
+        });
+    }
+}
+
+/// Image from a web data URI (or bytes the page already holds), keyed by a short hash.
+fn web_image(ui: &mut egui::Ui, uri: &str, size: egui::Vec2) {
+    let Some((_, encoded)) = uri.split_once(',') else {
+        ui.allocate_space(size);
+        return;
+    };
+    let id = egui::Id::new(("web_image", uri.len(), &uri[uri.len().saturating_sub(48)..]));
+    let bytes: Option<std::sync::Arc<[u8]>> = ui.ctx().data(|d| d.get_temp(id)).or_else(|| {
+        let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+        let shared: std::sync::Arc<[u8]> = decoded.into();
+        ui.ctx().data_mut(|d| d.insert_temp(id, shared.clone()));
+        Some(shared)
+    });
+    match bytes {
+        Some(bytes) => {
+            let source = egui::ImageSource::Bytes { uri: format!("bytes://web/{:x}", id.value()).into(), bytes: egui::load::Bytes::Shared(bytes) };
+            ui.add(egui::Image::new(source).fit_to_exact_size(size));
+        }
+        None => {
+            ui.allocate_space(size);
+        }
+    }
+}
+
+fn web_rgb_of(value: &Value) -> [u8; 3] {
+    let channel = |index: usize| value[index].as_u64().unwrap_or(0).min(255) as u8;
+    [channel(0), channel(1), channel(2)]
+}
+
+/// Colour swatch; returns the new rgb when the user picked one.
+fn web_colour(ui: &mut egui::Ui, rgb: [u8; 3], enabled: bool) -> Option<[u8; 3]> {
+    let mut next = rgb;
+    let changed = ui.add_enabled(enabled, |ui: &mut egui::Ui| ui.color_edit_button_srgb(&mut next)).changed();
+    changed.then_some(next)
+}
+
+fn web_status(ui: &mut egui::Ui, data: &Value) {
+    web_card(ui, |ui| {
+        web_heading(ui, "Status");
+        let status = data["status"].as_str().unwrap_or_default();
+        let text = if status.is_empty() && data["busy"].as_bool().unwrap_or(false) { "Working…" } else { status };
+        if data["error"].as_bool().unwrap_or(false) || data["error"].as_str().is_some_and(|text| !text.is_empty()) {
+            ui.colored_label(ui.visuals().warn_fg_color, text);
+        } else {
+            ui.label(egui::RichText::new(text).small());
+        }
+    });
+}
+
+impl HebnixApp {
+    fn egui_ball_appearance(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let update = |key: &str, value: Value| json!({ "type": "ball_appearance", "key": key, "value": value });
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let models: Vec<(String, String)> = data["balls"].as_array().into_iter().flatten().enumerate().map(|(index, name)| (index.to_string(), val_str(name))).collect();
+        web_card(ui, |ui| {
+            ui.label(label("description"));
+            web_muted(ui, &label("hint"));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(label("source"));
+                if let Some(value) = web_select(ui, "ball_source", &val_str(&data["source"]), &models, !busy).and_then(|value| value.parse::<u64>().ok()) {
+                    actions.push(update("source", json!(value)));
+                }
+                ui.label(label("donor"));
+                if let Some(value) = web_select(ui, "ball_donor", &val_str(&data["donor"]), &models, !busy).and_then(|value| value.parse::<u64>().ok()) {
+                    actions.push(update("donor", json!(value)));
+                }
+            });
+            if let Some(value) = web_toggle(ui, &label("colour"), data["colours"].as_bool().unwrap_or(false), !busy && data["canColour"].as_bool().unwrap_or(false)) {
+                actions.push(update("colours", json!(value)));
+            }
+            web_muted(ui, &label("colourHint"));
+            if let Some(applied) = data["applied"].as_str().filter(|text| !text.is_empty()) {
+                ui.label(applied);
+                ui.label(egui::RichText::new(label("restoreFirst")).small());
+            }
+            if let Some(error) = data["ballError"].as_str().filter(|text| !text.is_empty()) {
+                ui.colored_label(ui.visuals().warn_fg_color, error);
+            }
+            ui.horizontal(|ui| {
+                if web_primary(ui, &label("apply"), data["canApply"].as_bool().unwrap_or(false) && !busy) {
+                    actions.push(update("apply", Value::Null));
+                }
+                if ui.add_enabled(data["canRestore"].as_bool().unwrap_or(false) && !busy, egui::Button::new(label("restore"))).clicked() {
+                    actions.push(update("restore", Value::Null));
+                }
+            });
+        });
+        ui.add_space(12.0);
+        web_status(ui, data);
+    }
+
+    fn egui_goal_explosion(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        for (index, model) in data["panels"].as_array().into_iter().flatten().enumerate() {
+            let busy = model["busy"].as_bool().unwrap_or(false);
+            let (min, max) = (model["min"].as_f64().unwrap_or(0.0), model["max"].as_f64().unwrap_or(1.0));
+            let id = egui::Id::new(("goal_volume", index));
+            let mut value: f64 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| model["value"].as_f64().unwrap_or(min));
+            web_card(ui, |ui| {
+                web_heading(ui, model["title"].as_str().unwrap_or_default());
+                web_muted(ui, model["description"].as_str().unwrap_or_default());
+                ui.horizontal(|ui| {
+                    let mut slider = egui::Slider::new(&mut value, min..=max);
+                    if model["log"].as_bool().unwrap_or(false) {
+                        slider = slider.logarithmic(true);
+                    }
+                    ui.add_enabled(!busy, slider);
+                    ui.label(model["suffix"].as_str().unwrap_or_default());
+                    if model["mute"].as_str().is_some_and(|text| !text.is_empty()) && value <= min {
+                        web_muted(ui, model["mute"].as_str().unwrap_or_default());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if web_primary(ui, model["apply"].as_str().unwrap_or_default(), !busy) {
+                        actions.push(json!({ "type": "goal_explosion", "volume": true, "value": value, "restore": false }));
+                    }
+                    if ui.add_enabled(!busy && model["active"].as_bool().unwrap_or(false), egui::Button::new(model["restore"].as_str().unwrap_or_default())).clicked() {
+                        actions.push(json!({ "type": "goal_explosion", "volume": true, "value": value, "restore": true }));
+                    }
+                });
+                let status = model["status"].as_str().unwrap_or_default();
+                if busy || !status.is_empty() {
+                    ui.label(egui::RichText::new(if status.is_empty() { "Working…" } else { status }).small());
+                }
+                web_progress(ui, busy, &model["progress"]);
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(id, value));
+            ui.add_space(8.0);
+        }
+    }
+
+    fn egui_speed_patch(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let has_package = data["package"].as_str().is_some_and(|text| !text.is_empty());
+        let id = egui::Id::new("speed_patch_value");
+        let mut speed: f64 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| data["speed"].as_f64().unwrap_or(1.0));
+        web_card(ui, |ui| {
+            web_muted(ui, &label("description"));
+            if let Some(value) = web_toggle(ui, &label("items"), data["items"].as_bool().unwrap_or(false), true) {
+                actions.push(json!({ "type": "speed_items", "enabled": value }));
+            }
+            web_muted(ui, &label("itemsHint"));
+            ui.separator();
+            web_heading(ui, &label("oneoff"));
+            web_muted(ui, &label("oneoffHint"));
+            ui.horizontal(|ui| {
+                if ui.button(label("choose")).clicked() {
+                    actions.push(json!({ "type": "speed_choose" }));
+                }
+                ui.label(if has_package { val_str(&data["package"]) } else { label("noPackage") });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(label("multiplier"));
+                ui.add(egui::Slider::new(&mut speed, data["min"].as_f64().unwrap_or(0.25)..=data["max"].as_f64().unwrap_or(10.0)).step_by(0.25));
+                if ui.button("1x").clicked() {
+                    speed = 1.0;
+                }
+                if ui.button("5x").clicked() {
+                    speed = 5.0;
+                }
+            });
+            ui.horizontal(|ui| {
+                if web_primary(ui, &label("patch"), has_package && !busy) {
+                    actions.push(json!({ "type": "speed_run", "speed": speed, "restore": false }));
+                }
+                if ui.add_enabled(has_package && !busy, egui::Button::new(label("restore"))).clicked() {
+                    actions.push(json!({ "type": "speed_run", "speed": speed, "restore": true }));
+                }
+            });
+            let status = data["status"].as_str().unwrap_or_default();
+            if busy || !status.is_empty() {
+                let text = if status.is_empty() { "Working…" } else { status };
+                if data["error"].as_bool().unwrap_or(false) {
+                    ui.colored_label(ui.visuals().warn_fg_color, text);
+                } else {
+                    web_muted(ui, text);
+                }
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(id, speed));
+    }
+
+    fn egui_wheel_alignment(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let models: Vec<String> = data["models"].as_array().into_iter().flatten().map(val_str).collect();
+        let selected = data["selected"].as_u64().unwrap_or(0) as usize;
+        let id = egui::Id::new("wheel_alignment_values");
+        let mut values: Value = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| data["settings"].clone());
+        let keyed = (selected, data["settings"].to_string());
+        let key_id = id.with("key");
+        if ui.ctx().data(|d| d.get_temp::<(usize, String)>(key_id)).as_ref() != Some(&keyed) {
+            values = data["settings"].clone();
+            ui.ctx().data_mut(|d| d.insert_temp(key_id, keyed));
+        }
+        web_card(ui, |ui| {
+            let search_id = id.with("search");
+            let mut term: String = ui.ctx().data(|d| d.get_temp(search_id)).unwrap_or_default();
+            let disabled = busy || models.is_empty();
+            ui.horizontal_wrapped(|ui| {
+                ui.add_enabled(!disabled, egui::TextEdit::singleline(&mut term).hint_text(label("filter")).desired_width(160.0));
+                let lower = term.trim().to_lowercase();
+                let options: Vec<(String, String)> = models.iter().enumerate().filter(|(_, name)| name.to_lowercase().contains(&lower)).map(|(index, name)| (index.to_string(), name.clone())).collect();
+                if let Some(value) = web_select(ui, "wheel_car", &selected.to_string(), &options, !disabled).and_then(|value| value.parse::<u64>().ok()) {
+                    actions.push(json!({ "type": "wheel_select", "index": value }));
+                }
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(search_id, term));
+            if data["catalogLoading"].as_bool().unwrap_or(false) || data["catalogError"].as_str().is_some_and(|text| !text.is_empty()) || models.is_empty() {
+                let text = data["catalogError"].as_str().filter(|text| !text.is_empty()).map(str::to_owned)
+                    .unwrap_or_else(|| if data["catalogLoading"].as_bool().unwrap_or(false) { "Loading…".to_owned() } else { label("noCatalog") });
+                web_muted(ui, &text);
+            }
+            if !models.is_empty() {
+                for (key, max) in [("camber", 30.0), ("vertical", 15.0), ("lateral", 15.0)] {
+                    let mut value = values[key].as_f64().unwrap_or(0.0);
+                    web_row(ui, &label(key), |ui| {
+                        ui.add_enabled(!busy, egui::Slider::new(&mut value, -max..=max).step_by(0.5));
+                    });
+                    values[key] = json!(value);
+                    web_muted(ui, &label(&format!("{key}Hint")));
+                }
+                let running = data["running"].as_bool().unwrap_or(false);
+                let response = ui.add_enabled(!busy && !running, egui::Button::new(label("apply")).fill(ui.visuals().selection.stroke.color.gamma_multiply(0.6)));
+                if running {
+                    response.clone().on_hover_text(label("close"));
+                }
+                if response.clicked() {
+                    actions.push(json!({ "type": "wheel_apply", "settings": values }));
+                }
+            }
+        });
+        ui.add_space(12.0);
+        web_card(ui, |ui| {
+            web_heading(ui, &label("revert"));
+            if ui.add_enabled(!busy, egui::Button::new(label("reset"))).clicked() {
+                for key in ["camber", "vertical", "lateral"] {
+                    values[key] = json!(0);
+                }
+            }
+            web_muted(ui, &label("editedLabel"));
+            let edited = data["edited"].as_array().cloned().unwrap_or_default();
+            for row in &edited {
+                ui.horizontal(|ui| {
+                    let index = row["index"].as_u64();
+                    let accent = ui.visuals().selection.stroke.color;
+                    let on = index == Some(selected as u64);
+                    if ui.add_enabled(!busy && index.is_some(), egui::Button::new(val_str(&row["label"])).fill(if on { accent.gamma_multiply(0.6) } else { egui::Color32::TRANSPARENT })).clicked() {
+                        actions.push(json!({ "type": "wheel_select", "index": index }));
+                    }
+                    if ui.add_enabled(!busy && !data["running"].as_bool().unwrap_or(false), egui::Button::new("×")).clicked() {
+                        actions.push(json!({ "type": "wheel_apply", "remove": row["file"] }));
+                    }
+                });
+            }
+            if edited.is_empty() {
+                web_muted(ui, &label("empty"));
+            }
+        });
+        ui.add_space(12.0);
+        web_status(ui, &json!({ "status": data["status"], "busy": busy }));
+        ui.ctx().data_mut(|d| d.insert_temp(id, values));
+    }
+
+    fn egui_game_colours(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let live_managed = data["liveManaged"].as_bool().unwrap_or(false);
+        let id = egui::Id::new("game_colours_settings");
+        let key_id = id.with("key");
+        let origin = data["settings"].to_string();
+        let mut settings: Value = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| data["settings"].clone());
+        if ui.ctx().data(|d| d.get_temp::<String>(key_id)).as_deref() != Some(origin.as_str()) {
+            settings = data["settings"].clone();
+            ui.ctx().data_mut(|d| d.insert_temp(key_id, origin));
+        }
+        web_muted(ui, &label("description"));
+        let team_group = |ui: &mut egui::Ui, settings: &mut Value, title: String, toggle_label: String, hint: String, key: &str, team: &str| {
+            web_card(ui, |ui| {
+                web_heading(ui, &title);
+                let mut on = settings[key].as_bool().unwrap_or(false);
+                if ui.checkbox(&mut on, toggle_label).changed() {
+                    settings[key] = json!(on);
+                }
+                web_muted(ui, &hint);
+                if on {
+                    let (blue, orange) = (format!("{team}_blue"), format!("{team}_orange"));
+                    for (field, name) in [(&blue, label("blue")), (&orange, label("orange"))] {
+                        ui.horizontal(|ui| {
+                            ui.label(name);
+                            if let Some(rgb) = web_colour(ui, web_rgb_of(&settings[field.as_str()]), true) {
+                                settings[field.as_str()] = json!(rgb);
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        if team == "hud" && ui.button(label("match")).clicked() {
+                            settings["hud_blue"] = settings["stadium_blue"].clone();
+                            settings["hud_orange"] = settings["stadium_orange"].clone();
+                        }
+                        if ui.button(label("defaults")).clicked() {
+                            settings[blue.as_str()] = data["defaults"][&blue].clone();
+                            settings[orange.as_str()] = data["defaults"][&orange].clone();
+                        }
+                        if ui.button(label("swap")).clicked() {
+                            let first = settings[blue.as_str()].clone();
+                            settings[blue.as_str()] = settings[orange.as_str()].clone();
+                            settings[orange.as_str()] = first;
+                        }
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        };
+        if !live_managed {
+            team_group(ui, &mut settings, label("stadium"), label("stadiumOn"), label("stadiumHint"), "stadium_colours", "stadium");
+            team_group(ui, &mut settings, label("hud"), label("hudOn"), label("hudHint"), "hud_colours", "hud");
+        }
+        web_card(ui, |ui| {
+            web_heading(ui, &label("car"));
+            let mut on = settings["car_colours"].as_bool().unwrap_or(false);
+            if ui.checkbox(&mut on, label("carOn")).changed() {
+                settings["car_colours"] = json!(on);
+            }
+            web_muted(ui, &label("carHint"));
+            if on {
+                let mut remove = None;
+                let customs = settings["custom_colours"].as_array().cloned().unwrap_or_default();
+                for (index, rgb) in customs.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(label("custom"));
+                        if let Some(next) = web_colour(ui, web_rgb_of(rgb), true) {
+                            settings["custom_colours"][index] = json!(next);
+                        }
+                        if ui.button("×").clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = remove {
+                    if let Some(list) = settings["custom_colours"].as_array_mut() {
+                        list.remove(index);
+                    }
+                }
+                if ui.button("+").clicked() {
+                    if let Some(list) = settings["custom_colours"].as_array_mut() {
+                        list.push(json!([255, 0, 0]));
+                    }
+                }
+            }
+            ui.separator();
+            let mut palette = settings["extended_palette"].as_bool().unwrap_or(false);
+            if ui.checkbox(&mut palette, label("paletteOn")).changed() {
+                settings["extended_palette"] = json!(palette);
+            }
+            web_muted(ui, &label("paletteHint"));
+            web_muted(ui, "Rocket League must be closed to apply palette colours.");
+            if web_primary(ui, "Apply palette colours", !busy) {
+                actions.push(json!({ "type": "game_colours", "settings": settings, "restore": false }));
+            }
+        });
+        ui.add_space(8.0);
+        if !live_managed {
+            team_group_heatseeker(ui, &mut settings, &label("heatseeker"), &label("heatseekerOn"), &label("heatseekerHint"), &label("maxSpeed"));
+        }
+        ui.add_space(8.0);
+        web_card(ui, |ui| {
+            web_heading(ui, "Status");
+            ui.horizontal(|ui| {
+                if web_primary(ui, &label("apply"), !busy) {
+                    actions.push(json!({ "type": "game_colours", "settings": settings, "restore": false }));
+                }
+                if ui.add_enabled(!busy && data["canRestore"].as_bool().unwrap_or(false), egui::Button::new(label("restore"))).clicked() {
+                    actions.push(json!({ "type": "game_colours", "settings": settings, "restore": true }));
+                }
+            });
+            let status = data["status"].as_str().unwrap_or_default();
+            let text = if status.is_empty() && busy { "Working…" } else { status };
+            if data["error"].as_bool().unwrap_or(false) {
+                ui.colored_label(ui.visuals().warn_fg_color, text);
+            } else {
+                ui.label(egui::RichText::new(text).small());
+            }
+            web_muted(ui, data["backup"].as_str().unwrap_or_default());
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(id, settings));
+    }
+
+    fn egui_live_editor(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let page = data["page"].as_str().unwrap_or_default();
+        let id = egui::Id::new(("live_cosmetics", page));
+        let key_id = id.with("key");
+        let origin = data["live"]["settings"].to_string();
+        let mut settings: Value = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| data["live"]["settings"].clone());
+        if ui.ctx().data(|d| d.get_temp::<String>(key_id)).as_deref() != Some(origin.as_str()) {
+            settings = data["live"]["settings"].clone();
+            ui.ctx().data_mut(|d| d.insert_temp(key_id, origin));
+        }
+        let mut changed = false;
+        match page {
+            "live-goal-explosion" => web_card(ui, |ui| {
+                web_heading(ui, "Goal explosion scale");
+                web_muted(ui, "Changes apply to the next goal explosion. Default preserves the game's original size.");
+                let scale = settings["goal_explosion_scale"].as_f64().unwrap_or(0.0);
+                let mut custom = scale != 0.0;
+                if ui.checkbox(&mut custom, "Custom scale").changed() {
+                    settings["goal_explosion_scale"] = json!(if custom { 1.0 } else { 0.0 });
+                    changed = true;
+                }
+                let mut value = if scale == 0.0 { 1.0 } else { scale };
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(custom, egui::Slider::new(&mut value, 0.1..=10.0).step_by(0.1).suffix("×")).changed() {
+                        settings["goal_explosion_scale"] = json!(value);
+                        changed = true;
+                    }
+                    if !custom {
+                        ui.label(egui::RichText::new("Default").small());
+                    }
+                });
+            }),
+            "live-wheels" => web_card(ui, |ui| {
+                web_heading(ui, "Live Wheel Alignment · All local cars");
+                web_muted(ui, "Changes are saved automatically and update in Rocket League. Values remain available while Hebnix is closed.");
+                let status = data["live"]["status"].as_str().filter(|text| !text.is_empty()).unwrap_or("Starting…");
+                web_muted(ui, &format!("Live cosmetics: {status}"));
+                for (key, name, max, unit) in [("camber", "Camber", 30.0, "°"), ("vertical", "Up / Down", 15.0, ""), ("lateral", "Track width", 15.0, "")] {
+                    let mut value = settings["alignment"][key].as_f64().unwrap_or(0.0);
+                    web_row(ui, name, |ui| {
+                        if ui.add(egui::Slider::new(&mut value, -max..=max).step_by(0.5).suffix(unit)).changed() {
+                            settings["alignment"][key] = json!(value);
+                            changed = true;
+                        }
+                    });
+                }
+                if ui.button("Reset alignment").clicked() {
+                    settings["alignment"] = json!({ "camber": 0, "vertical": 0, "lateral": 0 });
+                    changed = true;
+                }
+            }),
+            _ => {
+                Self::egui_live_colours(ui, &mut settings, &mut changed);
+                // team colours live in the game colours editor too
+                let team_card = |ui: &mut egui::Ui, settings: &mut Value, changed: &mut bool, key: &str, title: &str| {
+                    web_card(ui, |ui| {
+                        web_heading(ui, title);
+                        let mut on = settings[key]["enabled"].as_bool().unwrap_or(false);
+                        if ui.checkbox(&mut on, "Enabled").changed() {
+                            settings[key]["enabled"] = json!(on);
+                            *changed = true;
+                        }
+                        if on {
+                            for side in ["blue", "orange"] {
+                                ui.horizontal(|ui| {
+                                    ui.label(if side == "blue" { "Blue" } else { "Orange" });
+                                    if let Some(rgb) = web_colour(ui, web_rgb_of(&settings[key][side]), true) {
+                                        settings[key][side] = json!(rgb);
+                                        *changed = true;
+                                    }
+                                });
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                };
+                ui.add_space(8.0);
+                if settings["stadium"].is_object() {
+                    team_card(ui, &mut settings, &mut changed, "stadium", "Stadium colours");
+                }
+                if settings["hud"].is_object() {
+                    team_card(ui, &mut settings, &mut changed, "hud", "HUD colours");
+                }
+            }
+        }
+        if changed {
+            actions.push(json!({ "type": "live_cosmetics", "settings": settings }));
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(id, settings));
+    }
+
+    fn egui_live_colours(ui: &mut egui::Ui, settings: &mut Value, changed: &mut bool) {
+        web_card(ui, |ui| {
+            web_heading(ui, "Colours");
+            let sections: [(&str, &[(&str, &str)]); 4] = [
+                ("Car Colours", &[("primary", "Primary paint"), ("secondary", "Secondary paint"), ("trim", "Body / trim"), ("decal", "Decal"), ("wheels", "Wheels"), ("topper", "Topper")]),
+                ("Effects", &[("boost", "Boost"), ("trail", "Trail"), ("goal_explosion", "Goal explosion")]),
+                ("Player Colours", &[("banner", "Player banner"), ("avatar_border", "Avatar border")]),
+                ("Heatseeker Ball", &[("heatseeker", "Heatseeker ball")]),
+            ];
+            for (title, entries) in sections {
+                ui.add_space(8.0);
+                web_heading(ui, title);
+                for (key, name) in entries {
+                    if !settings[*key].is_object() {
+                        continue;
+                    }
+                    let rainbow = *key != "goal_explosion" && settings[*key]["rainbow"].as_bool().unwrap_or(false);
+                    ui.horizontal(|ui| {
+                        let mut on = settings[*key]["enabled"].as_bool().unwrap_or(false);
+                        if ui.checkbox(&mut on, *name).changed() {
+                            settings[*key]["enabled"] = json!(on);
+                            *changed = true;
+                        }
+                        if let Some(rgb) = web_colour(ui, web_rgb_of(&settings[*key]["rgb"]), !rainbow) {
+                            settings[*key]["rgb"] = json!(rgb);
+                            *changed = true;
+                        }
+                        if *key != "goal_explosion" {
+                            let mut flag = rainbow;
+                            if ui.checkbox(&mut flag, "Rainbow").changed() {
+                                settings[*key]["rainbow"] = json!(flag);
+                                *changed = true;
+                            }
+                        }
+                    });
+                    if *key == "goal_explosion" {
+                        web_muted(ui, "Only in game");
+                    }
+                }
+            }
+        });
+    }
+
+    fn egui_studio_active(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let rows = data["rows"].as_array().cloned().unwrap_or_default();
+        web_card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(data["count"].as_str().unwrap_or_default());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(!rows.is_empty(), egui::Button::new(data["all"].as_str().unwrap_or_default())).clicked() {
+                        actions.push(json!({ "type": "studio_restore", "kind": Value::Null, "target": Value::Null }));
+                    }
+                });
+            });
+        });
+        ui.add_space(8.0);
+        if rows.is_empty() {
+            web_muted(ui, data["empty"].as_str().unwrap_or_default());
+            return;
+        }
+        let width = 220.0;
+        let per_row = ((ui.available_width() / (width + 12.0)).floor() as usize).max(1);
+        for chunk in rows.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                for patch in chunk {
+                    web_card(ui, |ui| {
+                        ui.set_width(width - 34.0);
+                        ui.vertical_centered(|ui| {
+                            let images = patch["images"].as_array().cloned().unwrap_or_default();
+                            if images.is_empty() {
+                                web_muted(ui, data["missing"].as_str().unwrap_or_default());
+                            }
+                            for source in &images {
+                                web_image(ui, source.as_str().unwrap_or_default(), egui::vec2(width - 34.0, 110.0));
+                            }
+                            ui.label(egui::RichText::new(patch["name"].as_str().unwrap_or_default()).strong());
+                            web_muted(ui, patch["description"].as_str().unwrap_or_default());
+                            if ui.button(data["restore"].as_str().unwrap_or_default()).clicked() {
+                                actions.push(json!({ "type": "studio_restore", "kind": patch["kind"], "target": patch["target"] }));
+                            }
+                        });
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        }
+    }
+
+    fn egui_maintenance(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let cmd = |key: &str, enabled: Value| json!({ "type": "maintenance", "key": key, "enabled": enabled });
+        web_card(ui, |ui| {
+            if ui.button(format!("‹ {}", label("back"))).clicked() {
+                actions.push(cmd("back", Value::Null));
+            }
+            web_heading(ui, &label("remove"));
+            for entry in data["options"].as_array().into_iter().flatten() {
+                if let Some(value) = web_toggle(ui, &val_str(&entry[1]), entry[2].as_bool().unwrap_or(false), true) {
+                    actions.push(cmd(&val_str(&entry[0]), json!(value)));
+                }
+            }
+        });
+        ui.add_space(8.0);
+        web_card(ui, |ui| {
+            ui.label(label("note"));
+            ui.label(egui::RichText::new(data["base"].as_str().unwrap_or_default()).monospace());
+            egui::CollapsingHeader::new(label("files")).show(ui, |ui| {
+                for path in data["paths"].as_array().into_iter().flatten() {
+                    ui.label(egui::RichText::new(val_str(path)).monospace().small());
+                }
+            });
+        });
+        ui.add_space(8.0);
+        web_card(ui, |ui| {
+            if let Some(error) = data["error"].as_str().filter(|text| !text.is_empty()) {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+            if ui.add_enabled(data["selected"].as_bool().unwrap_or(false), egui::Button::new(label("remove")).fill(danger)).clicked() {
+                actions.push(cmd("confirm", Value::Null));
+            }
+        });
+        if data["confirm"].as_bool().unwrap_or(false) {
+            web_modal(ui.ctx(), "maintenance_confirm", 440.0, |ui| {
+                web_heading(ui, &label("remove"));
+                ui.add_space(6.0);
+                ui.label(label("confirm"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(label("cancel")).clicked() {
+                        actions.push(cmd("cancel", Value::Null));
+                    }
+                    let danger = ui.visuals().error_fg_color.gamma_multiply(0.6);
+                    if ui.add(egui::Button::new(label("confirmButton")).fill(danger)).clicked() {
+                        actions.push(cmd("remove", Value::Null));
+                    }
+                });
+            });
+        }
+    }
+}
+
+fn team_group_heatseeker(ui: &mut egui::Ui, settings: &mut Value, title: &str, toggle_label: &str, hint: &str, max_speed: &str) {
+    web_card(ui, |ui| {
+        web_heading(ui, title);
+        let mut on = settings["heatseeker_glow"].as_bool().unwrap_or(false);
+        if ui.checkbox(&mut on, toggle_label).changed() {
+            settings["heatseeker_glow"] = json!(on);
+        }
+        web_muted(ui, hint);
+        if on {
+            ui.horizontal(|ui| {
+                ui.label(max_speed);
+                if let Some(rgb) = web_colour(ui, web_rgb_of(&settings["heatseeker_max_speed"]), true) {
+                    settings["heatseeker_max_speed"] = json!(rgb);
+                }
+            });
+        }
+    });
+}
+
+/// Card-like image button used by the texture pickers.
+fn web_tile(ui: &mut egui::Ui, name: &str, image: Option<&str>, detail: &str, selected: bool, enabled: bool) -> bool {
+    let accent = ui.visuals().selection.stroke.color;
+    let fill = if selected { accent.gamma_multiply(0.45) } else { egui::Color32::TRANSPARENT };
+    let size = egui::vec2(110.0, 112.0);
+    let (rect, response) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let line = if selected { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color };
+    let fill = if response.hovered() && enabled { ui.visuals().widgets.hovered.weak_bg_fill } else { fill };
+    ui.painter().rect(rect, 6.0, fill, egui::Stroke::new(1.0, line), egui::StrokeKind::Inside);
+    if let Some(image) = image.filter(|text| !text.is_empty()) {
+        let art = egui::Rect::from_min_size(rect.min + egui::vec2(20.0, 4.0), egui::vec2(70.0, 64.0));
+        ui.put(art, |ui: &mut egui::Ui| {
+            web_image(ui, image, art.size());
+            ui.label("")
+        });
+    }
+    let color = if enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
+    let text = ui.painter().layout(name.to_owned(), egui::FontId::proportional(12.0), color, size.x - 8.0);
+    let at = egui::pos2(rect.center().x - text.size().x / 2.0, rect.bottom() - 40.0);
+    ui.painter().with_clip_rect(rect).galley(at, text, color);
+    if !detail.is_empty() {
+        let small = ui.painter().layout_no_wrap(detail.to_owned(), egui::FontId::proportional(10.0), ui.visuals().weak_text_color());
+        ui.painter().with_clip_rect(rect).galley(egui::pos2(rect.center().x - small.size().x / 2.0, rect.bottom() - 16.0), small, ui.visuals().weak_text_color());
+    }
+    response.on_hover_text(name).clicked() && enabled
+}
+
+impl HebnixApp {
+    fn egui_menu_textures(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let action = |key: &str, value: Value| json!({ "type": "menu_textures", "key": key, "value": value });
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let has_file = data["file"].as_str().is_some_and(|text| !text.is_empty());
+        let active = data["active"].as_u64().unwrap_or(0);
+        web_card(ui, |ui| {
+            web_muted(ui, "Close Rocket League to replace textures in its menu packages.");
+            ui.horizontal_wrapped(|ui| {
+                let mut packages = vec![(String::new(), "Choose a menu package".to_owned())];
+                packages.extend(data["packages"].as_array().into_iter().flatten().map(|file| (val_str(file), val_str(file))));
+                if let Some(file) = web_select(ui, "menu_texture_package", &val_str(&data["file"]), &packages, !busy).filter(|file| !file.is_empty()) {
+                    actions.push(action("package", json!(file)));
+                }
+                if ui.add_enabled(has_file && !busy, egui::Button::new("Reload")).clicked() {
+                    actions.push(action("reload", Value::Null));
+                }
+                let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                if ui.add_enabled(active > 0 && !busy && closed, egui::Button::new(format!("Restore All ({active})")).fill(danger)).clicked() {
+                    actions.push(action("restore-all", Value::Null));
+                }
+            });
+            let message = data["error"].as_str().filter(|text| !text.is_empty()).or_else(|| data["message"].as_str().filter(|text| !text.is_empty()));
+            if let Some(message) = message {
+                ui.label(egui::RichText::new(message).small());
+            }
+        });
+        ui.add_space(8.0);
+        web_card(ui, |ui| {
+            web_heading(ui, "Replacement");
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!busy, egui::Button::new("Image file…")).clicked() {
+                    actions.push(action("image", Value::Null));
+                }
+                if ui.add_enabled(!busy, egui::Button::new("Minecraft resource pack…")).clicked() {
+                    actions.push(action("pack", Value::Null));
+                }
+                if let Some(value) = web_toggle(ui, "Tile (4×)", data["tile"].as_bool().unwrap_or(false), !busy) {
+                    actions.push(action("tile", json!(value)));
+                }
+                if let Some(value) = web_toggle(ui, "Keep original alpha", data["keepAlpha"].as_bool().unwrap_or(false), !busy) {
+                    actions.push(action("alpha", json!(value)));
+                }
+            });
+            if data["replacement"].is_object() {
+                web_tile(ui, &val_str(&data["replacement"]["name"]), data["replacement"]["image"].as_str(), "", false, false);
+            }
+            let pack_count = data["packCount"].as_u64().unwrap_or(0);
+            if pack_count > 0 {
+                let id = egui::Id::new("menu_texture_pack_search");
+                let mut term: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| val_str(&data["packSearch"]));
+                if ui.add(egui::TextEdit::singleline(&mut term).hint_text(format!("Filter {pack_count} resource pack textures")).desired_width(f32::INFINITY)).changed() {
+                    actions.push(action("pack-search", json!(term)));
+                }
+                ui.ctx().data_mut(|d| d.insert_temp(id, term));
+                ui.horizontal_wrapped(|ui| {
+                    for item in data["pack"].as_array().into_iter().flatten() {
+                        if web_tile(ui, &val_str(&item["name"]), item["image"].as_str(), "", false, !busy) {
+                            actions.push(action("pack-select", item["name"].clone()));
+                        }
+                    }
+                });
+            }
+        });
+        if !has_file {
+            return;
+        }
+        ui.add_space(8.0);
+        let rows = data["rows"].as_array().cloned().unwrap_or_default();
+        let selected = rows.iter().filter(|row| row["selected"].as_bool().unwrap_or(false)).count();
+        let restore_count = data["restoreCount"].as_u64().unwrap_or(0);
+        web_card(ui, |ui| {
+            let title = if busy { "Patching…" } else if data["loading"].as_bool().unwrap_or(false) { "Loading textures…" } else { "Package textures" };
+            web_heading(ui, title);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("{} textures, {selected} selected", rows.len())).small());
+                if ui.add_enabled(!busy && !rows.is_empty(), egui::Button::new("Select all")).clicked() {
+                    actions.push(action("select-all", Value::Null));
+                }
+                if ui.add_enabled(!busy && selected > 0, egui::Button::new("Clear")).clicked() {
+                    actions.push(action("clear", Value::Null));
+                }
+                if web_primary(ui, "Apply to selected", !busy && closed && selected > 0 && data["replacement"].is_object()) {
+                    actions.push(action("apply", Value::Null));
+                }
+                if ui.add_enabled(!busy && closed && restore_count > 0, egui::Button::new(format!("Restore selected ({restore_count})"))).clicked() {
+                    actions.push(action("restore", Value::Null));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                for item in &rows {
+                    let error = item["error"].as_str().is_some_and(|text| !text.is_empty()) || item["error"].as_bool().unwrap_or(false);
+                    let detail = if error {
+                        "Unreadable".to_owned()
+                    } else {
+                        let size: Vec<String> = item["size"].as_array().into_iter().flatten().map(val_str).collect();
+                        format!("{}{}", size.join(" × "), if item["patched"].as_bool().unwrap_or(false) { " · Patched" } else { "" })
+                    };
+                    if web_tile(ui, &val_str(&item["name"]), item["image"].as_str(), &detail, item["selected"].as_bool().unwrap_or(false), !busy && !error) {
+                        actions.push(action("select", item["id"].clone()));
+                    }
+                }
+            });
+        });
+    }
+
+    fn egui_upk_history(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let cmd = |key: &str, index: Value, value: Value| json!({ "type": "upk_history", "key": key, "index": index, "value": value });
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let running = data["running"].as_bool().unwrap_or(false);
+        let search_id = egui::Id::new("upk_history_search");
+        let mut term: String = ui.ctx().data(|d| d.get_temp(search_id)).unwrap_or_default();
+        web_card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut term).hint_text(label("search")).desired_width(ui.available_width() - 100.0));
+                if ui.add_enabled(!busy, egui::Button::new(label("refresh"))).clicked() {
+                    actions.push(cmd("refresh", Value::Null, Value::Null));
+                }
+            });
+            let status = data["status"].as_str().unwrap_or_default();
+            if running || busy || !status.is_empty() {
+                ui.label(egui::RichText::new(if running { label("close") } else if busy { "Working…".to_owned() } else { status.to_owned() }).small());
+            }
+        });
+        let lower = term.trim().to_lowercase();
+        ui.ctx().data_mut(|d| d.insert_temp(search_id, term.clone()));
+        ui.add_space(8.0);
+        let groups = data["groups"].as_array().cloned().unwrap_or_default();
+        let mut shown = 0;
+        for group in &groups {
+            let name = val_str(&group["name"]);
+            let rows = group["rows"].as_array().cloned().unwrap_or_default();
+            if !name.to_lowercase().contains(&lower) && !rows.iter().any(|row| format!("{} {}", val_str(&row["file"]), val_str(&row["label"])).to_lowercase().contains(&lower)) {
+                continue;
+            }
+            shown += 1;
+            web_card(ui, |ui| {
+                web_heading(ui, &name);
+                if let Some(first) = rows.first() {
+                    Self::egui_history_point(ui, first, data, busy || running, actions);
+                }
+                if rows.len() > 1 {
+                    egui::CollapsingHeader::new(label("checkpoints")).id_salt(("history_group", val_str(&rows[0]["index"]))).show(ui, |ui| {
+                        for row in &rows[1..] {
+                            Self::egui_history_point(ui, row, data, busy || running, actions);
+                        }
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        }
+        if shown == 0 {
+            web_muted(ui, &if lower.is_empty() { label("empty") } else { "No matching checkpoints.".to_owned() });
+        }
+    }
+
+    fn egui_history_point(ui: &mut egui::Ui, row: &Value, data: &Value, locked: bool, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let cmd = |key: &str, index: Value, value: Value| json!({ "type": "upk_history", "key": key, "index": index, "value": value });
+        ui.separator();
+        let meta: Vec<String> = [val_str(&row["file"]), val_str(&row["date"])].into_iter().filter(|text| !text.is_empty()).collect();
+        web_muted(ui, &meta.join(" · "));
+        ui.label(val_str(&row["label"]));
+        let extra: Vec<String> = [val_str(&row["colour"]), val_str(&row["alignment"])].into_iter().filter(|text| !text.is_empty() && text != "null").collect();
+        if !extra.is_empty() {
+            web_muted(ui, &extra.join(" · "));
+        }
+        if row["linked"].as_bool().unwrap_or(false) {
+            return;
+        }
+        let disabled = locked || row["disabled"].as_bool().unwrap_or(false);
+        let index = row["index"].clone();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!disabled, egui::Button::new(val_str(&row["restore"]))).clicked() {
+                actions.push(cmd(row["command"].as_str().unwrap_or("restore"), index.clone(), Value::Null));
+            }
+            if row["after"].as_bool().unwrap_or(false) && ui.add_enabled(!disabled, egui::Button::new(label("after"))).clicked() {
+                actions.push(cmd("after", index.clone(), Value::Null));
+            }
+        });
+        if !row["edit"].is_object() {
+            return;
+        }
+        let edit = &row["edit"];
+        let title = if edit["alignment"].is_object() { label("edit") } else { label("editColour") };
+        egui::CollapsingHeader::new(title).id_salt(("history_edit", val_str(&index))).show(ui, |ui| {
+            let id = egui::Id::new(("history_edit_state", val_str(&index)));
+            let initial_paint = if edit["paint"]["Custom"].is_array() {
+                json!({ "Custom": edit["paint"]["Custom"] })
+            } else {
+                edit["paint"].clone()
+            };
+            let mut state: (Value, Value) = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| (initial_paint, edit["alignment"].clone()));
+            let paints: Vec<(String, String)> = data["paints"].as_array().into_iter().flatten()
+                .map(|entry| (entry[1].to_string(), val_str(&entry[0]))).collect();
+            let is_custom = state.0["Custom"].is_array();
+            let current = if is_custom { json!({ "Custom": [255, 255, 255] }).to_string() } else { state.0.to_string() };
+            ui.horizontal(|ui| {
+                if let Some(value) = web_select(ui, ("history_paint", val_str(&index)), &current, &paints, true) {
+                    state.0 = serde_json::from_str(&value).unwrap_or(Value::Null);
+                }
+                if state.0["Custom"].is_array() {
+                    if let Some(rgb) = web_colour(ui, web_rgb_of(&state.0["Custom"]), true) {
+                        state.0 = json!({ "Custom": rgb });
+                    }
+                }
+            });
+            if state.1.is_object() {
+                for (key, name, max) in [("camber", "Camber", 30.0), ("vertical", "Up / down", 15.0), ("lateral", "Track width", 15.0)] {
+                    let mut value = state.1[key].as_f64().unwrap_or(0.0);
+                    web_row(ui, name, |ui| {
+                        ui.add(egui::Slider::new(&mut value, -max..=max).step_by(0.25));
+                    });
+                    state.1[key] = json!(value);
+                }
+                if ui.add_enabled(!disabled, egui::Button::new(label("reset"))).clicked() {
+                    state.1 = json!({ "camber": 0, "vertical": 0, "lateral": 0 });
+                }
+            }
+            if web_primary(ui, &label("apply"), !disabled) {
+                actions.push(cmd("edit", index.clone(), json!({ "paint": state.0, "alignment": if state.1.is_object() { state.1.clone() } else { Value::Null } })));
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(id, state));
+        });
+    }
+}
+
+#[derive(Clone, Default)]
+struct AssetView {
+    key: String,
+    search: String,
+    page: usize,
+    requested: String,
+    applied: bool,
+    downloaded: bool,
+}
+
+impl HebnixApp {
+    fn egui_studio_asset(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let decal = data["kind"] == "decal";
+        let custom = data["custom"].as_bool().unwrap_or(false);
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let has_error = data["error"].as_str().is_some_and(|text| !text.is_empty());
+        let action = |command: &str, id: Value, value: Value| {
+            if decal {
+                json!({ "type": "studio_decal", "key": command, "id": id, "value": value })
+            } else {
+                json!({ "type": "studio_asset", "key": command, "id": id })
+            }
+        };
+        let view_id = egui::Id::new("studio_asset_view");
+        let mut view: AssetView = ui.ctx().data(|d| d.get_temp(view_id)).unwrap_or_default();
+        let key = format!("{}:{custom}", val_str(&data["kind"]));
+        if view.key != key {
+            view = AssetView { key, ..Default::default() };
+        }
+        web_card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let accent = ui.visuals().selection.stroke.color.gamma_multiply(0.6);
+                if ui.add(egui::Button::new("Catalog").fill(if custom { egui::Color32::TRANSPARENT } else { accent })).clicked() {
+                    actions.push(action("source", json!("catalog"), Value::Null));
+                }
+                if ui.add(egui::Button::new("Custom").fill(if custom { accent } else { egui::Color32::TRANSPARENT })).clicked() {
+                    actions.push(action("source", json!("custom"), Value::Null));
+                }
+                if ui.button(label("refresh")).clicked() {
+                    actions.push(action("refresh", Value::Null, Value::Null));
+                }
+                if ui.add_enabled(!busy, egui::Button::new(label("import"))).clicked() {
+                    actions.push(action("import", Value::Null, Value::Null));
+                }
+                if ui.add_enabled(data["active"].as_bool().unwrap_or(false) && !busy && !(decal && has_error), egui::Button::new(label("restore"))).clicked() {
+                    actions.push(action("restore", Value::Null, Value::Null));
+                }
+                if data["kind"] == "boost" && ui.add_enabled(!busy, egui::Button::new(label("ring"))).on_hover_text(label("ringHint")).clicked() {
+                    actions.push(action("ring", Value::Null, Value::Null));
+                }
+            });
+            if custom {
+                ui.checkbox(&mut view.applied, label("applied"));
+            } else {
+                ui.checkbox(&mut view.downloaded, label("downloaded"));
+            }
+            ui.add(egui::TextEdit::singleline(&mut view.search).hint_text(label("search")).desired_width(f32::INFINITY));
+        });
+        ui.add_space(8.0);
+        let term = view.search.trim().to_lowercase();
+        let source = if custom { data["rows"].clone() } else { data["catalog"]["rows"].clone() };
+        let items: Vec<Value> = source.as_array().cloned().unwrap_or_default().into_iter().filter(|item| {
+            let text = format!("{} {}", val_str(&item["name"]), val_str(&item["author"])).to_lowercase();
+            text.contains(&term) && if custom { !view.applied || item["active"].as_bool().unwrap_or(false) } else { !view.downloaded || item["downloaded"].as_bool().unwrap_or(false) }
+        }).collect();
+        let card_w = 175.0;
+        let width = if decal { ui.available_width() * 0.62 } else { ui.available_width() };
+        let per_row = ((width / (card_w + 16.0)).floor() as usize).max(1);
+        let page_size = (per_row * 3).min(36);
+        let pages = items.len().div_ceil(page_size).max(1);
+        view.page = view.page.min(pages - 1);
+        let visible: Vec<&Value> = items.iter().skip(view.page * page_size).take(page_size).collect();
+        let ids: Vec<Value> = visible.iter().map(|item| item["id"].clone()).collect();
+        let signature = json!(ids).to_string();
+        if view.requested != signature {
+            view.requested = signature;
+            actions.push(json!({ "type": "studio_asset_previews", "ids": ids }));
+        }
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                for chunk in visible.chunks(per_row) {
+                    ui.horizontal_top(|ui| {
+                        for item in chunk {
+                            Self::egui_asset_card(ui, item, data, decal, custom, busy, card_w, actions, &action);
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+                if items.is_empty() {
+                    web_muted(ui, if data["catalog"]["loading"].as_bool().unwrap_or(false) { "Loading…" } else { "No matching items." });
+                }
+                if pages > 1 {
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(view.page > 0, egui::Button::new("Previous")).clicked() {
+                            view.page -= 1;
+                        }
+                        ui.label(format!("{} / {pages}", view.page + 1));
+                        if ui.add_enabled(view.page + 1 < pages, egui::Button::new("Next")).clicked() {
+                            view.page += 1;
+                        }
+                    });
+                }
+            });
+            if decal {
+                web_card(ui, |ui| {
+                    let active = data["activeDecals"].as_array().cloned().unwrap_or_default();
+                    web_heading(ui, &format!("{} · {}", label("active"), active.len()));
+                    if active.is_empty() {
+                        web_muted(ui, &label("empty"));
+                    }
+                    for row in &active {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if let Some(image) = row["image"].as_str().filter(|text| !text.is_empty()) {
+                                web_image(ui, image, egui::vec2(42.0, 42.0));
+                            }
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(val_str(&row["name"])).strong().small());
+                                web_muted(ui, &val_str(&row["target"]));
+                            });
+                            if ui.add_enabled(!busy, egui::Button::new("Restore")).clicked() {
+                                actions.push(action("restore", row["id"].clone(), Value::Null));
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        if decal && custom && has_error {
+            if let Some(error) = data["catalogError"].as_str().filter(|text| !text.is_empty()) {
+                web_card(ui, |ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    if ui.button(label("retry")).clicked() {
+                        actions.push(action("reload", Value::Null, Value::Null));
+                    }
+                });
+            }
+        }
+        if decal && busy {
+            let status = data["status"].as_str().filter(|text| !text.is_empty()).unwrap_or("Working…");
+            web_muted(ui, status);
+            web_progress(ui, true, &data["progress"]);
+        }
+        if let Some(status) = data["catalog"]["status"].as_str().filter(|text| !text.is_empty()) {
+            web_muted(ui, status);
+        }
+        if let Some(error) = data["error"].as_str().filter(|text| !text.is_empty()) {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if data["confirmRestore"].as_bool().unwrap_or(false) {
+            web_modal(ui.ctx(), "studio_restore_all", 420.0, |ui| {
+                web_heading(ui, &label("restoreTitle"));
+                ui.label(format!("Restore all {} patched decal targets?", data["activeDecals"].as_array().map_or(0, Vec::len)));
+                ui.horizontal(|ui| {
+                    if ui.button(label("no")).clicked() {
+                        actions.push(action("cancel", Value::Null, Value::Null));
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new(label("yes")).fill(ui.visuals().error_fg_color.gamma_multiply(0.6))).clicked() {
+                        actions.push(action("restore-all", Value::Null, Value::Null));
+                    }
+                });
+            });
+        }
+        if let Some(name) = data["confirm"].as_str().filter(|text| !text.is_empty()) {
+            web_modal(ui.ctx(), "studio_delete", 420.0, |ui| {
+                web_heading(ui, &label("confirm"));
+                ui.label(format!("Delete {name}?"));
+                ui.horizontal(|ui| {
+                    if ui.button(label("no")).clicked() {
+                        actions.push(action("cancel", Value::Null, Value::Null));
+                    }
+                    if ui.add_enabled(!busy, egui::Button::new(label("yes")).fill(ui.visuals().error_fg_color.gamma_multiply(0.6))).clicked() {
+                        actions.push(action("confirm", Value::Null, Value::Null));
+                    }
+                });
+            });
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(view_id, view));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn egui_asset_card(ui: &mut egui::Ui, item: &Value, data: &Value, decal: bool, custom: bool, busy: bool, width: f32, actions: &mut Vec<Value>, action: &dyn Fn(&str, Value, Value) -> Value) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let id = item["id"].clone();
+        web_card(ui, |ui| {
+            ui.set_width(width - 34.0);
+            ui.vertical_centered(|ui| {
+                let images: Vec<String> = item["images"].as_array().into_iter().flatten().filter_map(|value| value.as_str().map(str::to_owned)).collect();
+                let step_id = egui::Id::new(("asset_preview", val_str(&id)));
+                let mut current: usize = ui.ctx().data(|d| d.get_temp(step_id)).unwrap_or(0);
+                let shown: Vec<&String> = if custom { images.iter().collect() } else { images.get(current % images.len().max(1)).into_iter().collect() };
+                if shown.is_empty() {
+                    web_muted(ui, "No preview");
+                }
+                for source in shown {
+                    web_image(ui, source, egui::vec2(width - 34.0, 96.0));
+                }
+                if !custom && images.len() > 1 {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("‹").clicked() {
+                            current = (current + images.len() - 1) % images.len();
+                        }
+                        if ui.small_button("›").clicked() {
+                            current = (current + 1) % images.len();
+                        }
+                    });
+                    ui.ctx().data_mut(|d| d.insert_temp(step_id, current));
+                }
+                if item["pack"].as_bool().unwrap_or(false) {
+                    ui.colored_label(ui.visuals().error_fg_color, "PACK");
+                }
+                ui.label(egui::RichText::new(val_str(&item["name"])).strong());
+                if !custom {
+                    if let Some(author) = item["author"].as_str().filter(|text| !text.is_empty()) {
+                        ui.label(egui::RichText::new(author).small());
+                    }
+                    web_muted(ui, &format!("{} downloads", val_str(&item["downloads"])));
+                    let item_busy = item["busy"].as_bool().unwrap_or(false);
+                    let text = if item_busy { "Downloading…" } else if item["downloaded"].as_bool().unwrap_or(false) { "Import" } else { "Download" };
+                    if web_primary(ui, text, !item_busy && !busy) {
+                        actions.push(action("download", id.clone(), Value::Null));
+                    }
+                    return;
+                }
+                if let Some(subtitle) = item["subtitle"].as_str().filter(|text| !text.is_empty()) {
+                    web_muted(ui, subtitle);
+                }
+                if decal {
+                    if item["chassis"].as_bool().unwrap_or(false) {
+                        web_muted(ui, "Chassis textures skipped");
+                    }
+                    let has_body = item["body"].as_bool().unwrap_or(false) || item["body"].as_str().is_some_and(|text| !text.is_empty());
+                    let target = val_str(&item["target"]);
+                    let targets: Vec<Value> = item["targets"].as_array().cloned().unwrap_or_default();
+                    let target_open = targets.iter().any(|entry| val_str(&entry[0]) == target && !entry[2].as_bool().unwrap_or(false));
+                    if !has_body {
+                        let mut bodies = vec![(String::new(), "Select body…".to_owned())];
+                        bodies.extend(web_pairs(&data["bodies"]));
+                        if let Some(value) = web_select(ui, ("decal_body", val_str(&id)), "", &bodies, true).filter(|value| !value.is_empty()) {
+                            actions.push(action("body", id.clone(), json!(value)));
+                        }
+                    } else {
+                        let filter_id = egui::Id::new(("decal_filter", val_str(&id)));
+                        let mut filter: String = ui.ctx().data(|d| d.get_temp(filter_id)).unwrap_or_default();
+                        ui.add(egui::TextEdit::singleline(&mut filter).hint_text("Filter decals").desired_width(f32::INFINITY));
+                        let lower = filter.trim().to_lowercase();
+                        let options: Vec<(String, String)> = targets.iter()
+                            .filter(|entry| val_str(&entry[0]) == target || format!("{} {}", val_str(&entry[1]), val_str(&entry[0])).to_lowercase().contains(&lower))
+                            .map(|entry| (val_str(&entry[0]), format!("{}{}", val_str(&entry[1]), if entry[2].as_bool().unwrap_or(false) { " (patched)" } else { "" })))
+                            .collect();
+                        if let Some(value) = web_select(ui, ("decal_target", val_str(&id)), &target, &options, !busy) {
+                            actions.push(action("target", id.clone(), json!(value)));
+                        }
+                        ui.ctx().data_mut(|d| d.insert_temp(filter_id, filter));
+                    }
+                    if data["speed"].as_bool().unwrap_or(false) {
+                        let mut speed = item["speed"].as_f64().unwrap_or(1.0);
+                        let response = ui.add_enabled(!busy, egui::Slider::new(&mut speed, 0.1..=20.0).step_by(0.05).suffix("×").text("Speed"));
+                        if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                            actions.push(action("speed", id.clone(), json!(speed)));
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        if web_primary(ui, &label("apply"), !busy && !has_error_str(data) && target_open) {
+                            actions.push(action("apply", id.clone(), Value::Null));
+                        }
+                        if ui.add_enabled(!busy && item["delete"].as_bool().unwrap_or(false), egui::Button::new(label("delete"))).clicked() {
+                            actions.push(action("delete", id.clone(), Value::Null));
+                        }
+                    });
+                    return;
+                }
+                let restoring = item["restore"].as_bool().or_else(|| item["active"].as_bool()).unwrap_or(false);
+                let item_error = item["error"].as_str().filter(|text| !text.is_empty());
+                if let Some(error) = item_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                ui.horizontal(|ui| {
+                    let text = if restoring { label("restore") } else { label("apply") };
+                    if ui.add_enabled(!busy && (restoring || item_error.is_none()), egui::Button::new(text)).clicked() {
+                        actions.push(action(if restoring { "restore" } else { "apply" }, id.clone(), Value::Null));
+                    }
+                    if ui.add_enabled(!busy && item["delete"].as_bool().unwrap_or(false), egui::Button::new(label("delete"))).clicked() {
+                        actions.push(action("delete", id.clone(), Value::Null));
+                    }
+                });
+            });
+        });
+    }
+}
+
+fn has_error_str(data: &Value) -> bool {
+    data["error"].as_str().is_some_and(|text| !text.is_empty())
+}
+
+#[derive(Clone, Default)]
+struct ArtView {
+    key: String,
+    query: String,
+    page: usize,
+    names: bool,
+    patched: bool,
+    requested: String,
+    draft: (String, String, String),
+}
+
+fn web_pager(ui: &mut egui::Ui, page: &mut usize, pages: usize) {
+    if pages < 2 {
+        return;
+    }
+    ui.horizontal(|ui| {
+        if ui.add_enabled(*page > 0, egui::Button::new("Previous")).clicked() {
+            *page -= 1;
+        }
+        ui.label(format!("{} / {pages}", *page + 1));
+        if ui.add_enabled(*page + 1 < pages, egui::Button::new("Next")).clicked() {
+            *page += 1;
+        }
+    });
+}
+
+fn web_preview_box(ui: &mut egui::Ui, image: Option<&str>, size: egui::Vec2, missing: &str) {
+    match image.filter(|text| !text.is_empty()) {
+        Some(image) => web_image(ui, image, size),
+        None => {
+            ui.allocate_ui(size, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new(missing).small().color(ui.visuals().weak_text_color()));
+                });
+            });
+        }
+    }
+}
+
+impl HebnixApp {
+    fn egui_item_artwork(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let cmd = |key: &str, value: Value| json!({ "type": "item_artwork", "key": key, "value": value });
+        let names = data["kind"] == "names";
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let unavailable = busy || !closed;
+        let view_id = egui::Id::new("item_artwork_view");
+        let mut view: ArtView = ui.ctx().data(|d| d.get_temp(view_id)).unwrap_or_default();
+        let key = ["kind", "category", "language", "owned", "patched"].iter().map(|name| val_str(&data[*name])).collect::<Vec<_>>().join(":");
+        if view.key != key {
+            view = ArtView { key, ..Default::default() };
+        }
+        let global_owned = data["globalOwnedOnly"].as_bool().unwrap_or(false);
+        if !names && data["owned"].as_bool().unwrap_or(false) != global_owned {
+            actions.push(cmd("owned", json!(global_owned)));
+        }
+        web_card(ui, |ui| {
+            web_muted(ui, &label("description"));
+            ui.horizontal_wrapped(|ui| {
+                if names {
+                    let languages: Vec<(String, String)> = data["languages"].as_array().into_iter().flatten()
+                        .map(|file| (val_str(file), val_str(file).trim_start_matches("Coalesced_").trim_end_matches(".bin").to_owned())).collect();
+                    if let Some(value) = web_select(ui, "artwork_language", &val_str(&data["language"]), &languages, true) {
+                        actions.push(cmd("language", json!(value)));
+                    }
+                }
+                if let Some(value) = web_select(ui, "artwork_category", &val_str(&data["category"]), &web_pairs(&data["categories"]), true) {
+                    actions.push(cmd("category", json!(value)));
+                }
+                if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() {
+                    actions.push(cmd("refresh", Value::Null));
+                }
+                let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                if ui.add_enabled(!unavailable && data["active"].as_bool().unwrap_or(false), egui::Button::new(label("restoreAll")).fill(danger)).clicked() {
+                    actions.push(cmd("restore-all", Value::Null));
+                }
+            });
+            let error = data["error"].as_str().filter(|text| !text.is_empty());
+            let status = data["status"].as_str().filter(|text| !text.is_empty());
+            if error.is_some() || status.is_some() || busy {
+                match error {
+                    Some(error) => ui.colored_label(ui.visuals().error_fg_color, error),
+                    None => ui.label(egui::RichText::new(if busy { "Working…" } else { status.unwrap_or_default() }).small()),
+                };
+            }
+            ui.horizontal_wrapped(|ui| {
+                let patched = if names { view.patched } else { data["patched"].as_bool().unwrap_or(false) };
+                if let Some(value) = web_toggle(ui, &label("patched"), patched, !busy) {
+                    if names {
+                        view.patched = value;
+                        view.page = 0;
+                        actions.push(cmd("cancel", Value::Null));
+                    } else {
+                        actions.push(cmd("patched", json!(value)));
+                    }
+                }
+                if names {
+                    ui.checkbox(&mut view.names, label("showNames"));
+                }
+            });
+        });
+        ui.add_space(8.0);
+        let selected = &data["selection"];
+        if selected.is_object() {
+            web_card(ui, |ui| {
+                web_heading(ui, selected["original"].as_str().filter(|text| !text.is_empty()).unwrap_or_else(|| selected["name"].as_str().unwrap_or_default()));
+                if names {
+                    let id = selected.to_string();
+                    if view.draft.0 != id {
+                        view.draft = (id, val_str(&selected["name"]), val_str(&selected["artist"]));
+                    }
+                    for field in ["name", "artist"] {
+                        if selected[field].is_null() {
+                            continue;
+                        }
+                        ui.label(label(field));
+                        let target = if field == "name" { &mut view.draft.1 } else { &mut view.draft.2 };
+                        ui.add_enabled(!busy, egui::TextEdit::singleline(target).char_limit(128).desired_width(f32::INFINITY));
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if web_primary(ui, &label("apply"), !unavailable && !view.draft.1.trim().is_empty()) {
+                            actions.push(cmd("save", json!({ "name": view.draft.1, "artist": view.draft.2 })));
+                        }
+                        let fields: Vec<String> = selected["fields"].as_array().into_iter().flatten().map(val_str).collect();
+                        if !fields.is_empty() && ui.add_enabled(!unavailable, egui::Button::new(label("restore"))).clicked() {
+                            actions.push(cmd("restore", Value::Null));
+                        }
+                        if !selected["artist"].is_null() {
+                            for (field, name) in [("Label", label("restoreSong")), ("Artist", label("restoreArtist"))] {
+                                if fields.iter().any(|entry| entry == field) && ui.add_enabled(!unavailable, egui::Button::new(name)).clicked() {
+                                    actions.push(cmd("restore-field", json!(field)));
+                                }
+                            }
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new(label("cancel"))).clicked() {
+                            actions.push(cmd("cancel", Value::Null));
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        for (name, image) in [(label("current"), selected["image"].as_str()), (label("replacement"), selected["replacement"].as_str())] {
+                            if name == label("replacement") && image.is_none_or(str::is_empty) {
+                                continue;
+                            }
+                            ui.vertical(|ui| {
+                                web_preview_box(ui, image, egui::vec2(144.0, 100.0), "No preview");
+                                web_muted(ui, &name);
+                            });
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(!busy, egui::Button::new(label("choose"))).clicked() {
+                            actions.push(cmd("choose", Value::Null));
+                        }
+                        let ready = selected["image"].as_str().is_some_and(|text| !text.is_empty()) && selected["replacement"].as_str().is_some_and(|text| !text.is_empty());
+                        if web_primary(ui, &label("apply"), !unavailable && ready) {
+                            actions.push(cmd("save", Value::Null));
+                        }
+                        if !selected["export"].is_null() {
+                            let id = val_str(&selected["id"]);
+                            let file = id.rsplit_once('|').map_or(id.as_str(), |(file, _)| file).to_owned();
+                            if ui.add_enabled(!unavailable, egui::Button::new(label("restore"))).clicked() {
+                                actions.push(cmd("restore", json!(format!("{file}|{}", val_str(&selected["export"])))));
+                            }
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new(label("cancel"))).clicked() {
+                            actions.push(cmd("cancel", Value::Null));
+                        }
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        } else {
+            view.draft = Default::default();
+        }
+        ui.add(egui::TextEdit::singleline(&mut view.query).hint_text(label("search")).desired_width(f32::INFINITY));
+        ui.add_space(6.0);
+        let term = view.query.trim().to_lowercase();
+        let active_thumbs = !names && data["patched"].as_bool().unwrap_or(false);
+        let items: Vec<&Value> = data["rows"].as_array().into_iter().flatten().filter(|item| {
+            let owned_ok = !names || ((!global_owned || item["owned"].as_bool().unwrap_or(false)) && (!view.patched || item["patched"].as_bool().unwrap_or(false)));
+            let text = ["name", "current", "artist", "currentArtist", "file", "id"].iter().map(|k| val_str(&item[*k])).collect::<Vec<_>>().join(" ").to_lowercase();
+            owned_ok && text.contains(&term)
+        }).collect();
+        let card_w = 175.0;
+        let per_row = if active_thumbs { 1 } else { ((ui.available_width() / (card_w + 16.0)).floor() as usize).max(1) };
+        let size = if active_thumbs { 36 } else { (per_row * if names { 3 } else { 2 }).min(36) };
+        let pages = items.len().div_ceil(size).max(1);
+        view.page = view.page.min(pages - 1);
+        let visible: Vec<&Value> = items.iter().skip(view.page * size).take(size).copied().collect();
+        let ids: Vec<Value> = visible.iter().map(|item| item["id"].clone()).collect();
+        let signature = json!(ids).to_string();
+        if view.requested != signature {
+            view.requested = signature;
+            actions.push(json!({ "type": "studio_asset_previews", "ids": ids }));
+        }
+        for chunk in visible.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                for item in chunk {
+                    web_card(ui, |ui| {
+                        if active_thumbs {
+                            ui.horizontal(|ui| {
+                                web_preview_box(ui, item["image"].as_str(), egui::vec2(60.0, 50.0), "No preview");
+                                ui.label(egui::RichText::new(val_str(&item["name"])).strong());
+                                if ui.add_enabled(!unavailable, egui::Button::new(label("restore"))).clicked() {
+                                    actions.push(cmd("restore", item["id"].clone()));
+                                }
+                            });
+                            return;
+                        }
+                        ui.set_width(card_w - 34.0);
+                        ui.vertical_centered(|ui| {
+                            let missing = item["error"].as_str().filter(|text| !text.is_empty()).unwrap_or("No preview");
+                            web_preview_box(ui, item["image"].as_str(), egui::vec2(card_w - 34.0, 90.0), missing);
+                            let title = if names && view.names { val_str(&item["current"]) } else { val_str(&item["name"]) };
+                            ui.label(egui::RichText::new(title).strong());
+                            let artist = if view.names { val_str(&item["currentArtist"]) } else { val_str(&item["artist"]) };
+                            if !artist.is_empty() {
+                                web_muted(ui, &artist);
+                            }
+                            if names && item["patched"].as_bool().unwrap_or(false) {
+                                web_muted(ui, "Patched");
+                            }
+                            let image_missing = item["image"].as_str().is_none_or(str::is_empty);
+                            if ui.add_enabled(!busy && (names || !image_missing), egui::Button::new(label("edit"))).clicked() {
+                                actions.push(cmd("select", item["id"].clone()));
+                            }
+                        });
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        }
+        if visible.is_empty() {
+            web_muted(ui, &label("empty"));
+        }
+        web_pager(ui, &mut view.page, pages);
+        ui.ctx().data_mut(|d| d.insert_temp(view_id, view));
+    }
+
+    fn egui_anthems(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let cmd = |key: &str, id: Value, value: Value| json!({ "type": "anthem", "key": key, "id": id, "value": value });
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let error = data["error"].as_str().filter(|text| !text.is_empty());
+        if let Some(text) = error.or_else(|| data["status"].as_str().filter(|text| !text.is_empty())) {
+            if error.is_some() {
+                ui.colored_label(ui.visuals().error_fg_color, text);
+            } else {
+                web_muted(ui, text);
+            }
+        }
+        let editor = &data["editor"];
+        if editor.is_object() {
+            web_card(ui, |ui| {
+                if ui.add_enabled(!busy, egui::Button::new("‹ All anthems")).clicked() {
+                    actions.push(cmd("back", Value::Null, Value::Null));
+                }
+                ui.horizontal(|ui| {
+                    if let Some(image) = editor["image"].as_str().filter(|text| !text.is_empty()) {
+                        web_image(ui, image, egui::vec2(85.0, 75.0));
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(val_str(&editor["name"])).size(18.0).strong());
+                        web_muted(ui, &val_str(&editor["file"]));
+                    });
+                });
+                if ui.add_enabled(!busy, egui::Button::new("Import Audio")).clicked() {
+                    actions.push(cmd("import", Value::Null, Value::Null));
+                }
+                web_muted(ui, editor["source"].as_str().filter(|text| !text.is_empty()).unwrap_or("Import audio to replace the anthem."));
+                if let Some(region) = editor["region"].as_str().filter(|text| !text.is_empty()) {
+                    ui.label(egui::RichText::new(format!("All {} regions · longest: {region} ({:.3} s)", val_str(&editor["regions"]), editor["length"].as_f64().unwrap_or(0.0))).small());
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(!busy && editor["original"].as_bool().unwrap_or(false), egui::Button::new(format!("Preview original {region}"))).clicked() {
+                            actions.push(cmd("original", Value::Null, Value::Null));
+                        }
+                        if editor["previewType"] == "original" {
+                            let playing = editor["playing"].as_bool().unwrap_or(false);
+                            if ui.add_enabled(!busy, egui::Button::new(if playing { "Pause original" } else { "Resume original" })).clicked() {
+                                actions.push(cmd("original-toggle", Value::Null, Value::Null));
+                            }
+                            if ui.add_enabled(!busy, egui::Button::new("Stop original")).clicked() {
+                                actions.push(cmd("stop", Value::Null, Value::Null));
+                            }
+                        }
+                    });
+                } else {
+                    ui.colored_label(ui.visuals().error_fg_color, editor["error"].as_str().filter(|text| !text.is_empty()).unwrap_or("Anthem clip timings could not be read."));
+                }
+                if editor["duration"].as_f64().is_some_and(|value| value > 0.0) && editor["maxStart"].is_null() {
+                    ui.colored_label(ui.visuals().warn_fg_color, "The imported audio must cover the longest region.");
+                }
+                if let Some(max_start) = editor["maxStart"].as_f64() {
+                    let duration = editor["duration"].as_f64().unwrap_or(1.0).max(0.001);
+                    let length = editor["length"].as_f64().unwrap_or(0.0);
+                    let start = editor["start"].as_f64().unwrap_or(0.0);
+                    let drag_id = egui::Id::new("anthem_drag");
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 120.0), egui::Sense::click_and_drag());
+                    let to_time = |x: f32| ((x - rect.left()) / rect.width()) as f64 * duration;
+                    let mut shown_start = start;
+                    let mut drag: Option<(f64, f64)> = ui.ctx().data(|d| d.get_temp(drag_id));
+                    if response.drag_started() && !busy {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let time = to_time(pos.x);
+                            let threshold = 8.0 / rect.width() as f64 * duration;
+                            if time >= start - threshold && time <= start + length + threshold {
+                                drag = Some((time, time - start));
+                            }
+                        }
+                    }
+                    if let (Some((_, offset)), Some(pos)) = (drag, response.interact_pointer_pos()) {
+                        shown_start = (to_time(pos.x) - offset).clamp(0.0, max_start);
+                    }
+                    if response.drag_stopped() {
+                        if let Some((origin, _)) = drag {
+                            if (shown_start - start).abs() > 0.002 || (to_time(response.interact_pointer_pos().map_or(rect.left(), |p| p.x)) - origin).abs() > 0.002 {
+                                actions.push(cmd("start", Value::Null, json!(shown_start)));
+                            }
+                        }
+                        drag = None;
+                    } else if response.clicked() && drag.is_none() && !busy {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            actions.push(cmd("seek", Value::Null, json!(to_time(pos.x))));
+                        }
+                    }
+                    ui.ctx().data_mut(|d| match drag {
+                        Some(value) => { d.insert_temp(drag_id, value); }
+                        None => d.remove::<(f64, f64)>(drag_id),
+                    });
+                    let painter = ui.painter_at(rect);
+                    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                    let x_of = |time: f64| rect.left() + (time / duration) as f32 * rect.width();
+                    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x_of(shown_start), rect.top()), egui::pos2(x_of(shown_start + length), rect.bottom())), 0.0, egui::Color32::from_rgb(23, 55, 84));
+                    let peaks = editor["peaks"].as_array().cloned().unwrap_or_default();
+                    for (index, peak) in peaks.iter().enumerate() {
+                        let x = rect.left() + index as f32 / peaks.len().max(1) as f32 * rect.width();
+                        let half = peak.as_f64().unwrap_or(0.0) as f32 * rect.height() / 2.0;
+                        painter.line_segment([egui::pos2(x, rect.center().y - half), egui::pos2(x, rect.center().y + half)], egui::Stroke::new(1.0, egui::Color32::from_rgb(131, 187, 223)));
+                    }
+                    let cursor = if drag.is_some() { shown_start } else { editor["position"].as_f64().unwrap_or(start) };
+                    painter.rect_filled(egui::Rect::from_min_size(egui::pos2(x_of(cursor), rect.top()), egui::vec2(2.0, rect.height())), 0.0, egui::Color32::from_rgb(214, 239, 255));
+                    ui.horizontal_wrapped(|ui| {
+                        let playing = editor["playing"].as_bool().unwrap_or(false) && editor["previewType"] == "imported";
+                        if ui.add_enabled(!busy, egui::Button::new(if playing { "Pause" } else { "Play" })).clicked() {
+                            actions.push(cmd("play", Value::Null, Value::Null));
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new("Stop")).clicked() {
+                            actions.push(cmd("stop", Value::Null, Value::Null));
+                        }
+                        ui.label("Start (s)");
+                        if let Some(value) = web_number(ui, start, Some((0.0, max_start)), 0.001, !busy) {
+                            actions.push(cmd("start", Value::Null, json!(value)));
+                        }
+                        web_muted(ui, &format!("Stop {:.3} s", start + length));
+                    });
+                    let mut volume = editor["volume"].as_f64().unwrap_or(1.0) * 100.0;
+                    let response = ui.add_enabled(!busy, egui::Slider::new(&mut volume, 0.0..=100.0).text("Song volume"));
+                    if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                        actions.push(cmd("volume", Value::Null, json!(volume / 100.0)));
+                    }
+                    if web_primary(ui, "Save and patch anthem", !busy && closed) {
+                        actions.push(cmd("save", Value::Null, Value::Null));
+                    }
+                }
+            });
+            return;
+        }
+        let view_id = egui::Id::new("anthem_view");
+        let mut view: ArtView = ui.ctx().data(|d| d.get_temp(view_id)).unwrap_or_default();
+        let owned_only = data["globalOwnedOnly"].as_bool().unwrap_or(false);
+        web_card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() {
+                    actions.push(cmd("refresh", Value::Null, Value::Null));
+                }
+                let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                if ui.add_enabled(!busy && closed && data["active"].as_bool().unwrap_or(false), egui::Button::new("Restore all anthems").fill(danger)).clicked() {
+                    actions.push(cmd("restore-all", Value::Null, Value::Null));
+                }
+            });
+            if ui.checkbox(&mut view.patched, "Show patched anthems").changed() {
+                view.page = 0;
+            }
+            ui.add(egui::TextEdit::singleline(&mut view.query).hint_text("Search anthems").desired_width(f32::INFINITY));
+        });
+        ui.add_space(8.0);
+        let term = view.query.trim().to_lowercase();
+        let items: Vec<&Value> = data["rows"].as_array().into_iter().flatten().filter(|item| {
+            (!owned_only || item["owned"].as_bool().unwrap_or(false))
+                && (!view.patched || item["active"].as_bool().unwrap_or(false))
+                && format!("{} {}", val_str(&item["name"]), val_str(&item["file"])).to_lowercase().contains(&term)
+        }).collect();
+        let card_w = 175.0;
+        let per_row = ((ui.available_width() / (card_w + 16.0)).floor() as usize).max(1);
+        let size = (per_row * 3).min(36);
+        let pages = items.len().div_ceil(size).max(1);
+        view.page = view.page.min(pages - 1);
+        let visible: Vec<&Value> = items.iter().skip(view.page * size).take(size).copied().collect();
+        let ids: Vec<Value> = visible.iter().map(|item| item["id"].clone()).collect();
+        let signature = json!(ids).to_string();
+        if view.requested != signature {
+            view.requested = signature;
+            actions.push(json!({ "type": "studio_asset_previews", "ids": ids }));
+        }
+        for chunk in visible.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                for item in chunk {
+                    web_card(ui, |ui| {
+                        ui.set_width(card_w - 34.0);
+                        ui.vertical_centered(|ui| {
+                            web_preview_box(ui, item["image"].as_str(), egui::vec2(card_w - 34.0, 90.0), "No preview");
+                            ui.label(egui::RichText::new(val_str(&item["name"])).strong()).on_hover_text(val_str(&item["file"]));
+                            if ui.add_enabled(!busy, egui::Button::new("Select")).clicked() {
+                                actions.push(cmd("select", item["id"].clone(), Value::Null));
+                            }
+                            if item["patched"].as_bool().unwrap_or(false) {
+                                if let Some(value) = web_toggle(ui, "Patch", item["active"].as_bool().unwrap_or(false), !busy && closed) {
+                                    actions.push(cmd("patch", item["id"].clone(), json!(value)));
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        }
+        if items.is_empty() {
+            web_muted(ui, if busy { "Loading…" } else { "No installed anthems match this filter." });
+        }
+        web_pager(ui, &mut view.page, pages);
+        ui.ctx().data_mut(|d| d.insert_temp(view_id, view));
+    }
+}
+
+impl HebnixApp {
+    fn egui_profile_pictures(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let set = |key: &str, value: Value| json!({ "type": "profile_picture", "key": key, "value": value });
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let owner = data["owner"].as_str().is_some_and(|text| !text.is_empty());
+        ui.label("Choose a picture to share with other Hebnix players.");
+        web_muted(ui, "Click a picture under Recent pictures to upload it as your avatar.");
+        ui.add_space(6.0);
+        let gap = 16.0;
+        let column = ((ui.available_width() - gap) / 2.0).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(column - 34.0);
+                    if let Some(value) = web_toggle(ui, "Show player profile pictures", data["enabled"].as_bool().unwrap_or(false), data["canToggle"].as_bool().unwrap_or(false)) {
+                        actions.push(set("enabled", json!(value)));
+                    }
+                    let accounts = web_pairs(&data["accounts"]);
+                    if accounts.is_empty() {
+                        ui.label(egui::RichText::new(data["owner"].as_str().filter(|text| !text.is_empty()).unwrap_or("Open Rocket League to upload")).small());
+                    } else {
+                        let mut options = accounts.clone();
+                        if data["account"].is_null() {
+                            options.insert(0, (String::new(), "Waiting for Rocket League…".to_owned()));
+                        }
+                        let enabled = !data["running"].as_bool().unwrap_or(false) && !busy;
+                        if let Some(value) = web_select(ui, "profile_account", &val_str(&data["account"]), &options, enabled) {
+                            actions.push(set("account", json!(value)));
+                        }
+                    }
+                    if data["update"].as_bool().unwrap_or(false) && ui.add_enabled(data["canToggle"].as_bool().unwrap_or(false), egui::Button::new("Update avatar support")).clicked() {
+                        actions.push(set("update", json!(true)));
+                    }
+                    if data["retry"].as_bool().unwrap_or(false) && ui.button("Retry connection").clicked() {
+                        actions.push(set("retry", Value::Null));
+                    }
+                    if let Some(current) = data["current"].as_str().filter(|text| !text.is_empty()) {
+                        web_heading(ui, "Current picture");
+                        web_image(ui, current, egui::vec2(128.0, 128.0));
+                    }
+                });
+            });
+            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(column - 34.0);
+                    web_heading(ui, "Recent pictures");
+                    if ui.add_enabled(!busy, egui::Button::new("Import picture…")).clicked() {
+                        actions.push(set("import", Value::Null));
+                    }
+                    ui.add_space(6.0);
+                    let per_row = ((ui.available_width() / 84.0).floor() as usize).max(1);
+                    let rows = data["rows"].as_array().cloned().unwrap_or_default();
+                    for chunk in rows.chunks(per_row) {
+                        ui.horizontal(|ui| {
+                            for entry in chunk {
+                                let active = entry["id"] == data["active"];
+                                ui.vertical(|ui| {
+                                    let accent = ui.visuals().selection.stroke.color;
+                                    let size = egui::vec2(76.0, 76.0);
+                                    let (rect, response) = ui.allocate_exact_size(size, if busy || !owner { egui::Sense::hover() } else { egui::Sense::click() });
+                                    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(if active { 2.0 } else { 1.0 }, if active { accent } else { ui.visuals().widgets.noninteractive.bg_stroke.color }), egui::StrokeKind::Inside);
+                                    if let Some(image) = entry["image"].as_str() {
+                                        ui.put(rect.shrink(4.0), |ui: &mut egui::Ui| {
+                                            web_image(ui, image, rect.shrink(4.0).size());
+                                            ui.label("")
+                                        });
+                                    }
+                                    if response.on_hover_text(if active { "Upload current picture again" } else { "Upload picture" }).clicked() {
+                                        actions.push(set("upload", entry["id"].clone()));
+                                    }
+                                    if ui.add_enabled(!busy, egui::Button::new("×").small()).on_hover_text("Remove from recent pictures").clicked() {
+                                        actions.push(set("remove", entry["id"].clone()));
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        let status = data["status"].as_str().unwrap_or_default();
+        if !status.is_empty() || busy {
+            let text = if status.is_empty() { "Working…" } else { status };
+            if data["error"].as_bool().unwrap_or(false) || data["error"].as_str().is_some_and(|text| !text.is_empty()) {
+                ui.colored_label(ui.visuals().warn_fg_color, text);
+            } else {
+                web_muted(ui, text);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct LoadoutView {
+    car: Option<Value>,
+    page: usize,
+    search: String,
+    previews: String,
+    import_open: bool,
+    import_draft: Option<String>,
+    modal_key: String,
+    name: String,
+    open_slot: Option<Value>,
+    item_search: String,
+    palette: Option<String>,
+    custom_rgb: [u8; 3],
+}
+
+fn web_loadout_preview(ui: &mut egui::Ui, image: &Value, product: &Value, size: egui::Vec2) {
+    if product.as_i64() == Some(0) {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, ui.visuals().weak_text_color()), egui::StrokeKind::Inside);
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(20.0), ui.visuals().weak_text_color());
+    } else {
+        web_preview_box(ui, image.as_str(), size, "");
+    }
+}
+
+impl HebnixApp {
+    fn egui_presets(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let send = |kind: &str, extra: Value| web_act("preset", kind, extra);
+        let id = egui::Id::new("presets_form");
+        let mut form: (String, bool, String, String, String) = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| (
+            val_str(&data["name"]), data["patches"].as_bool().unwrap_or(false), val_str(&data["key"]), String::new(), String::new(),
+        ));
+        let editing = &data["editing"];
+        let edit_id = val_str(&editing["name"]) + &editing["include_patches"].to_string();
+        if editing.is_object() && form.3 != edit_id {
+            form.3 = edit_id;
+            form.4 = val_str(&editing["name"]);
+        }
+        let current = &data["current"];
+        web_card(ui, |ui| {
+            web_muted(ui, &label("intro"));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(label("name"));
+                ui.add(egui::TextEdit::singleline(&mut form.0).desired_width(180.0));
+                ui.checkbox(&mut form.1, label("patches"));
+                if web_primary(ui, &label("capture"), true) {
+                    actions.push(send("capture", json!({ "name": form.0, "patches": form.1 })));
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button(label("refresh")).clicked() {
+                    actions.push(send("refresh", Value::Null));
+                }
+                if ui.button(label("import")).clicked() {
+                    actions.push(send("import_file", Value::Null));
+                }
+            });
+            if current.is_null() || current == false {
+                web_muted(ui, &label("empty"));
+            } else {
+                let list: Vec<(String, String)> = data["presets"].as_array().into_iter().flatten().enumerate().map(|(index, name)| (index.to_string(), val_str(name))).collect();
+                ui.horizontal_wrapped(|ui| {
+                    if let Some(value) = web_select(ui, "preset_pick", &val_str(&data["selected"]), &list, true).and_then(|value| value.parse::<u64>().ok()) {
+                        actions.push(send("select", json!({ "index": value })));
+                    }
+                    if web_primary(ui, "Apply Preset", true) {
+                        actions.push(send("apply", Value::Null));
+                    }
+                    if ui.button("Edit Preset").clicked() {
+                        actions.push(send("edit", Value::Null));
+                    }
+                    let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                    if ui.add(egui::Button::new(label("delete")).fill(danger)).clicked() {
+                        actions.push(send("delete", Value::Null));
+                    }
+                });
+            }
+        });
+        let draft = editing.is_object();
+        let preset = if draft { editing } else { current };
+        if preset.is_object() {
+            ui.add_space(8.0);
+            web_card(ui, |ui| {
+                if draft {
+                    web_heading(ui, "Edit preset");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut form.4).desired_width(180.0));
+                        ui.checkbox(&mut form.1, label("patches"));
+                    });
+                } else {
+                    web_heading(ui, &format!("{}{}", val_str(&preset["name"]), if preset["include_patches"].as_bool().unwrap_or(false) { " (with patches)" } else { " (swaps only)" }));
+                }
+                let save_draft = |actions: &mut Vec<Value>, form: &(String, bool, String, String, String)| {
+                    actions.push(send("draft", json!({ "name": form.4, "patches": form.1 })));
+                };
+                for (index, swap) in preset["swaps"].as_array().into_iter().flatten().enumerate() {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} → {}", swap["source_name"].as_str().unwrap_or("?"), swap["target_name"].as_str().unwrap_or("?")));
+                        if draft {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Remove").clicked() {
+                                    save_draft(actions, &form);
+                                    actions.push(send("remove_swap", json!({ "index": index })));
+                                }
+                            });
+                        }
+                    });
+                }
+                if let Some(patches) = preset["patches"].as_object() {
+                    for (kind, value) in patches.iter().filter(|(_, value)| !value.is_null()) {
+                        let entries: Vec<(String, Option<String>, String)> = match value.as_object() {
+                            Some(object) if draft => object.iter().map(|(key, item)| (format!("{kind} / {key}: {item}"), Some(key.clone()), kind.clone())).collect(),
+                            _ => vec![(format!("{kind}: {value}"), None, kind.clone())],
+                        };
+                        for (text, key, kind) in entries {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(&text);
+                                if draft {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("Remove").clicked() {
+                                            save_draft(actions, &form);
+                                            actions.push(send("remove_patch", match &key {
+                                                Some(key) => json!({ "kind": kind, "key": key }),
+                                                None => json!({ "kind": kind }),
+                                            }));
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                    }
+                }
+                if draft {
+                    ui.horizontal(|ui| {
+                        if web_primary(ui, "Save Changes", true) {
+                            save_draft(actions, &form);
+                            actions.push(send("save", Value::Null));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            actions.push(send("cancel", Value::Null));
+                        }
+                    });
+                }
+            });
+        }
+        let status = data["status"].as_str().filter(|text| !text.is_empty());
+        let missing = data["missing"].as_bool().unwrap_or(false);
+        if status.is_some() || missing {
+            ui.add_space(8.0);
+            web_card(ui, |ui| {
+                if let Some(status) = status {
+                    ui.label(status);
+                }
+                if missing {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Remove Missing Items from Preset").clicked() {
+                            actions.push(send("remove_missing", Value::Null));
+                        }
+                        if ui.button("Ignore Missing Items").clicked() {
+                            actions.push(send("ignore_missing", Value::Null));
+                        }
+                    });
+                }
+            });
+        }
+        ui.add_space(8.0);
+        web_card(ui, |ui| {
+            web_heading(ui, "Preset Key");
+            web_muted(ui, "Share or paste a base64 preset key. Imported items remain listed even when their local files are missing.");
+            ui.add(egui::TextEdit::multiline(&mut form.2).desired_rows(3).desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!current.is_null() && current != false, egui::Button::new("Show Preset Key")).clicked() {
+                    actions.push(send("show_key", Value::Null));
+                }
+                if ui.button("Import Preset").clicked() {
+                    actions.push(send("import_key", json!({ "key": form.2 })));
+                }
+            });
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(id, form));
+    }
+
+    fn egui_loadouts(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let send = |kind: &str, extra: Value| web_act("loadouts", kind, extra);
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let view_id = egui::Id::new("loadouts_view");
+        let mut view: LoadoutView = ui.ctx().data(|d| d.get_temp(view_id)).unwrap_or_default();
+        if data["catalogLoading"].as_bool().unwrap_or(false) {
+            web_muted(ui, "Loading item catalogs…");
+        }
+        if let Some(error) = data["catalogError"].as_str().filter(|text| !text.is_empty()) {
+            ui.horizontal(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, error);
+                if ui.button("Reload catalogs").clicked() {
+                    actions.push(json!({ "type": "loadouts_reload_catalogs" }));
+                }
+            });
+        }
+        let accounts_empty = data["accounts"].as_array().is_none_or(Vec::is_empty);
+        let message = data["message"].as_str().filter(|text| !text.is_empty());
+        if accounts_empty || (!view.import_open && message.is_some()) {
+            web_card(ui, |ui| {
+                if accounts_empty {
+                    web_muted(ui, &label("noSave"));
+                }
+                if let (false, Some(message)) = (view.import_open, message) {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(message).small());
+                        if ui.small_button("×").on_hover_text("Dismiss warning").clicked() {
+                            actions.push(send("dismiss_message", Value::Null));
+                        }
+                    });
+                }
+            });
+            ui.add_space(8.0);
+        }
+        let rows = data["rows"].as_array().cloned().unwrap_or_default();
+        let gap = 16.0;
+        let left = 220.0f32.min(ui.available_width() * 0.28).floor();
+        let right = (ui.available_width() - left - gap).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(egui::vec2(left, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(left - 34.0);
+                    web_heading(ui, &label("cars"));
+                    let mut counts: Vec<(Value, String, usize)> = Vec::new();
+                    for row in &rows {
+                        match counts.iter_mut().find(|(body, _, _)| *body == row["body"]) {
+                            Some(entry) => entry.2 += 1,
+                            None => counts.push((row["body"].clone(), val_str(&row["car"]), 1)),
+                        }
+                    }
+                    counts.sort_by(|a, b| a.1.cmp(&b.1));
+                    let accent = ui.visuals().selection.stroke.color.gamma_multiply(0.6);
+                    let list_height = (ui.ctx().content_rect().height() * 0.6).clamp(320.0, 640.0);
+                    egui::ScrollArea::vertical().id_salt("loadout_cars").max_height(list_height).min_scrolled_height(list_height).auto_shrink([false, false]).show(ui, |ui| {
+                        let width = ui.available_width();
+                        let pick = |ui: &mut egui::Ui, body: Option<Value>, name: String, view: &mut LoadoutView| {
+                            let on = view.car == body;
+                            if ui.add(egui::Button::new(name).fill(if on { accent } else { egui::Color32::TRANSPARENT }).min_size(egui::vec2(width, 26.0))).clicked() {
+                                view.car = body;
+                                view.page = 0;
+                            }
+                        };
+                        pick(ui, None, format!("All ({})", rows.len()), &mut view);
+                        for (body, car, count) in counts {
+                            pick(ui, Some(body), format!("{car} ({count})"), &mut view);
+                        }
+                    });
+                });
+            });
+            ui.allocate_ui_with_layout(egui::vec2(right, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(right - 34.0);
+                    ui.horizontal(|ui| {
+                        web_heading(ui, &label("list"));
+                        ui.add(egui::TextEdit::singleline(&mut view.search).hint_text(label("search")).desired_width(180.0));
+                        if ui.button("Import").clicked() {
+                            view.import_open = true;
+                        }
+                    });
+                    let term = view.search.trim().to_lowercase();
+                    let matching: Vec<&Value> = rows.iter().filter(|row| (view.car.is_none() || view.car.as_ref() == Some(&row["body"])) && val_str(&row["name"]).to_lowercase().contains(&term)).collect();
+                    let tile_w = 185.0;
+                    let columns = (((right - 34.0) / (tile_w + 10.0)).floor() as usize).max(1);
+                    let page_size = columns * 3;
+                    let pages = matching.len().div_ceil(page_size).max(1);
+                    view.page = view.page.min(pages - 1);
+                    let visible: Vec<&Value> = matching.iter().skip(view.page * page_size).take(page_size).copied().collect();
+                    let positions: Vec<Value> = visible.iter().map(|row| row["position"].clone()).collect();
+                    let key = json!(positions).to_string();
+                    let known: Vec<Value> = data["preview_positions"].as_array().cloned().unwrap_or_default();
+                    if view.previews != key || positions.iter().any(|position| !known.contains(position)) {
+                        view.previews = key;
+                        actions.push(send("previews", json!({ "positions": positions })));
+                    }
+                    for chunk in visible.chunks(columns) {
+                        ui.horizontal_top(|ui| {
+                            for row in chunk {
+                                web_card(ui, |ui| {
+                                    ui.set_width(tile_w - 24.0);
+                                    ui.horizontal(|ui| {
+                                        web_loadout_preview(ui, &row["image"], &row["body"], egui::vec2(56.0, 56.0));
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(val_str(&row["name"])).strong());
+                                            ui.label(egui::RichText::new(val_str(&row["car"])).small().color(ui.visuals().weak_text_color()));
+                                        });
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.menu_button("⧉", |ui| {
+                                            if ui.button(label("lds")).clicked() {
+                                                actions.push(send("copy", json!({ "position": row["position"], "bakkes": false })));
+                                                ui.close();
+                                            }
+                                            if ui.button(label("bakkes")).clicked() {
+                                                actions.push(send("copy", json!({ "position": row["position"], "bakkes": true })));
+                                                ui.close();
+                                            }
+                                        }).response.on_hover_text(label("copy"));
+                                        for (kind, symbol) in [("edit", "✎"), ("move", "↕")] {
+                                            if ui.add_enabled(closed, egui::Button::new(symbol)).on_hover_text(label(kind)).clicked() {
+                                                actions.push(send("open", json!({ "position": row["position"], "kind": kind })));
+                                            }
+                                        }
+                                        let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                                        if ui.add_enabled(closed, egui::Button::new("×").fill(danger)).on_hover_text(label("delete")).clicked() {
+                                            actions.push(send("open", json!({ "position": row["position"], "kind": "delete" })));
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                    }
+                    web_pager(ui, &mut view.page, pages);
+                });
+            });
+        });
+        if view.import_open {
+            Self::egui_loadout_import(ui.ctx(), data, &mut view, actions);
+        } else if data["dialog"].is_object() {
+            Self::egui_loadout_dialog(ui.ctx(), data, &mut view, actions);
+        } else {
+            view.modal_key.clear();
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(view_id, view));
+    }
+
+    fn egui_loadout_import(ctx: &egui::Context, data: &Value, view: &mut LoadoutView, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let send = |kind: &str, extra: Value| web_act("loadouts", kind, extra);
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let plan = &data["import"];
+        let mut close = false;
+        web_modal(ctx, "loadout_import", 560.0, |ui| {
+            ui.horizontal(|ui| {
+                web_heading(ui, &label("import"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if !closed {
+                ui.colored_label(ui.visuals().warn_fg_color, label("closed"));
+            }
+            if data["account"].is_null() {
+                ui.colored_label(ui.visuals().warn_fg_color, "Select a Rocket League save from the settings cog before importing.");
+            }
+            if !plan.is_object() {
+                web_muted(ui, &label("hint"));
+                let mut draft = view.import_draft.clone().unwrap_or_else(|| val_str(&data["input"]));
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut draft).hint_text("Paste a code here").desired_width(ui.available_width() - 80.0));
+                    if web_primary(ui, "Import", closed && !data["account"].is_null()) {
+                        actions.push(send("import", json!({ "code": draft })));
+                        view.import_draft = None;
+                        return;
+                    }
+                });
+                view.import_draft = Some(draft);
+            } else {
+                ui.label(val_str(&plan["summary"]));
+                let rows = data["rows"].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    web_muted(ui, &label("empty"));
+                } else {
+                    let options: Vec<(String, String)> = rows.iter().map(|row| (val_str(&row["position"]), val_str(&row["name"]))).collect();
+                    let update = |change: Value| {
+                        let mut value = json!({ "base": plan["base"], "target": plan["target"], "replace": plan["replace"], "name": plan["name"] });
+                        if let (Some(target), Some(extra)) = (value.as_object_mut(), change.as_object()) {
+                            for (key, item) in extra {
+                                target.insert(key.clone(), item.clone());
+                            }
+                        }
+                        send("plan", value)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(label("base"));
+                        if let Some(value) = web_select(ui, "import_base", &val_str(&plan["base"]), &options, true).and_then(|value| value.parse::<u64>().ok()) {
+                            actions.push(update(json!({ "base": value })));
+                        }
+                    });
+                    web_muted(ui, &label("baseHint"));
+                    let replace = plan["replace"].as_bool().unwrap_or(false);
+                    if ui.add(egui::Button::new(label("replace")).fill(if replace { ui.visuals().selection.stroke.color.gamma_multiply(0.6) } else { egui::Color32::TRANSPARENT })).clicked() {
+                        actions.push(update(json!({ "replace": true })));
+                    }
+                    ui.horizontal(|ui| {
+                        if replace {
+                            ui.label(label("target"));
+                            if let Some(value) = web_select(ui, "import_target", &val_str(&plan["target"]), &options, true).and_then(|value| value.parse::<u64>().ok()) {
+                                actions.push(update(json!({ "target": value })));
+                            }
+                        } else {
+                            ui.label(label("name"));
+                            let mut name = val_str(&plan["name"]);
+                            if ui.text_edit_singleline(&mut name).lost_focus() {
+                                actions.push(update(json!({ "name": name })));
+                            }
+                        }
+                    });
+                    if let Some(preview_rows) = plan["preview"]["rows"].as_array() {
+                        ui.label(egui::RichText::new(val_str(&plan["preview"]["name"])).strong());
+                        egui::Grid::new("import_plan").striped(true).show(ui, |ui| {
+                            for heading in labels["plan"].as_array().into_iter().flatten() {
+                                ui.label(egui::RichText::new(val_str(heading)).strong());
+                            }
+                            ui.end_row();
+                            for cells in preview_rows {
+                                for cell in cells.as_array().into_iter().flatten() {
+                                    ui.label(val_str(cell));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                        web_muted(ui, &val_str(&plan["preview"]["note"]));
+                    } else if let Some(error) = plan["preview"]["error"].as_str() {
+                        ui.colored_label(ui.visuals().warn_fg_color, error);
+                    }
+                    let blocked = !closed || !plan["preview"]["rows"].is_array();
+                    ui.horizontal(|ui| {
+                        if web_primary(ui, &label("apply"), !blocked) {
+                            actions.push(send("save_import", json!({ "apply": true })));
+                        }
+                        if ui.add_enabled(!blocked, egui::Button::new(label("importOnly"))).clicked() {
+                            actions.push(send("save_import", json!({ "apply": false })));
+                        }
+                    });
+                }
+            }
+            if let Some(message) = data["message"].as_str().filter(|text| !text.is_empty()) {
+                ui.label(egui::RichText::new(message).small());
+            }
+        });
+        if close {
+            view.import_open = false;
+            view.import_draft = None;
+            if plan.is_object() {
+                actions.push(send("cancel_import", Value::Null));
+            }
+        }
+    }
+
+    fn egui_loadout_dialog(ctx: &egui::Context, data: &Value, view: &mut LoadoutView, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let send = |kind: &str, extra: Value| web_act("loadouts", kind, extra);
+        let model = &data["dialog"];
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let kind = model["kind"].as_str().unwrap_or_default().to_owned();
+        let key = format!("{kind}:{}", val_str(&model["position"]));
+        if kind == "edit" && view.modal_key != key {
+            view.name = val_str(&model["name"]);
+            view.open_slot = None;
+            view.item_search.clear();
+        }
+        let move_id = egui::Id::new("loadout_move_target");
+        let mut destination: String = ctx.data(|d| d.get_temp(move_id)).unwrap_or_else(|| val_str(&model["target"]));
+        let mut commit: Option<Value> = None;
+        let mut cancel = false;
+        web_modal(ctx, "loadout_dialog", 560.0, |ui| {
+            web_heading(ui, &label(&kind));
+            match kind.as_str() {
+                "delete" => {
+                    ui.label(val_str(&model["message"]));
+                }
+                "move" => {
+                    ui.label(val_str(&model["name"]));
+                    web_muted(ui, &label("position"));
+                    let options: Vec<(String, String)> = data["rows"].as_array().into_iter().flatten().map(|row| (val_str(&row["position"]), format!("{} · {}", row["position"].as_u64().unwrap_or(0) + 1, val_str(&row["name"])))).collect();
+                    if let Some(value) = web_select(ui, "loadout_move", &destination, &options, true) {
+                        destination = value;
+                    }
+                }
+                _ => {
+                    ui.add(egui::TextEdit::singleline(&mut view.name).desired_width(f32::INFINITY));
+                    let teams = vec![("0".to_owned(), label("blue")), ("1".to_owned(), label("orange"))];
+                    if let Some(value) = web_select(ui, "loadout_team", &val_str(&model["team"]), &teams, true).and_then(|value| value.parse::<u64>().ok()) {
+                        actions.push(send("team", json!({ "team": value })));
+                    }
+                    let palette = &model["palette"];
+                    if palette["loading"].as_bool().unwrap_or(false) {
+                        ui.label(egui::RichText::new("Loading colours…").small());
+                    }
+                    if let Some(error) = palette["error"].as_str().filter(|text| !text.is_empty()) {
+                        ui.colored_label(ui.visuals().warn_fg_color, error);
+                    }
+                    ui.horizontal(|ui| {
+                        for colour_key in ["primary", "secondary"] {
+                            if palette[colour_key].is_null() || palette[colour_key] == false {
+                                continue;
+                            }
+                            let index = model[colour_key].as_u64().unwrap_or(0) as usize;
+                            let rgb = web_rgb_of(&palette[colour_key][index]);
+                            let swatch = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                            ui.label(egui::RichText::new("■").color(swatch));
+                            if ui.button(label(colour_key)).clicked() {
+                                view.palette = Some(colour_key.to_owned());
+                                view.custom_rgb = rgb;
+                            }
+                        }
+                    });
+                    web_muted(ui, &label("owned"));
+                    egui::ScrollArea::vertical().id_salt("loadout_slots").max_height(320.0).show(ui, |ui| {
+                        for slot in model["slots"].as_array().into_iter().flatten() {
+                            let open = view.open_slot.as_ref() == Some(&slot["slot"]);
+                            let header = format!("{} · {}", val_str(&slot["name"]), val_str(&slot["current"]));
+                            let response = egui::CollapsingHeader::new(header).id_salt(("loadout_slot", val_str(&slot["slot"]))).open(Some(open)).show(ui, |ui| {
+                                ui.add(egui::TextEdit::singleline(&mut view.item_search).hint_text(label("itemSearch")).desired_width(f32::INFINITY));
+                                let term = view.item_search.trim().to_lowercase();
+                                let mut owned: Vec<(String, bool, Value)> = slot["choices"].as_array().into_iter().flatten()
+                                    .map(|choice| (val_str(&choice[0]), choice[2].as_bool().unwrap_or(false), send("item", json!({ "team": model["team"], "slot": slot["slot"], "option": choice[1] })))).collect();
+                                for engine in slot["engines"].as_array().into_iter().flatten() {
+                                    let name = val_str(&engine["label"]);
+                                    if !owned.iter().any(|(label, _, _)| *label == name) {
+                                        owned.push((name, slot["product"] == engine["product"], send("stock_engine", json!({ "team": model["team"], "product": engine["product"] }))));
+                                    }
+                                }
+                                owned.sort_by(|a, b| a.0.cmp(&b.0));
+                                let accent = ui.visuals().selection.stroke.color.gamma_multiply(0.6);
+                                for (name, selected, action) in owned.into_iter().filter(|(name, _, _)| name.to_lowercase().contains(&term)) {
+                                    if ui.add(egui::Button::new(&name).fill(if selected { accent } else { egui::Color32::TRANSPARENT }).min_size(egui::vec2(ui.available_width(), 24.0))).clicked() {
+                                        actions.push(action);
+                                    }
+                                }
+                            });
+                            if response.header_response.clicked() {
+                                if open {
+                                    view.open_slot = None;
+                                } else {
+                                    view.open_slot = Some(slot["slot"].clone());
+                                    view.item_search.clear();
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(label("cancel")).clicked() {
+                    cancel = true;
+                }
+                let danger = kind == "delete";
+                let fill = if danger { ui.visuals().error_fg_color.gamma_multiply(0.6) } else { ui.visuals().selection.stroke.color.gamma_multiply(0.6) };
+                let text = if danger { label("delete") } else { label("confirm") };
+                let ready = closed && (kind != "edit" || !view.name.trim().is_empty());
+                if ui.add_enabled(ready, egui::Button::new(text).fill(fill)).clicked() {
+                    commit = Some(match kind.as_str() {
+                        "move" => json!({ "destination": destination.parse::<u64>().unwrap_or(0) }),
+                        "edit" => json!({ "name": view.name }),
+                        _ => json!({}),
+                    });
+                }
+            });
+        });
+        if kind == "edit" && view.palette.is_some() {
+            Self::egui_loadout_palette(ctx, data, view, actions);
+        }
+        view.modal_key = key;
+        ctx.data_mut(|d| d.insert_temp(move_id, destination));
+        if cancel {
+            actions.push(send("close", Value::Null));
+        }
+        if let Some(extra) = commit {
+            actions.push(send("confirm", extra));
+        }
+    }
+
+    fn egui_loadout_palette(ctx: &egui::Context, data: &Value, view: &mut LoadoutView, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let send = |kind: &str, extra: Value| web_act("loadouts", kind, extra);
+        let model = &data["dialog"];
+        let Some(key) = view.palette.clone() else { return };
+        let colours = model["palette"][&key].as_array().cloned().unwrap_or_default();
+        if colours.is_empty() {
+            view.palette = None;
+            return;
+        }
+        let columns = if key == "secondary" { 15 } else { 10 };
+        let mut close = false;
+        web_modal(ctx, "loadout_palette", 460.0, |ui| {
+            ui.horizontal(|ui| {
+                web_heading(ui, &label(&key));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("×").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            egui::Grid::new("loadout_palette_grid").spacing([4.0, 4.0]).show(ui, |ui| {
+                for (index, entry) in colours.iter().enumerate() {
+                    let rgb = web_rgb_of(entry);
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                    ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                    if model[&key].as_u64() == Some(index as u64) {
+                        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
+                    }
+                    if response.clicked() {
+                        actions.push(send("colour", json!({ "team": model["team"], "primary": key == "primary", "index": index })));
+                        close = true;
+                    }
+                    if (index + 1) % columns == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Any colour");
+                ui.color_edit_button_srgb(&mut view.custom_rgb);
+                if web_primary(ui, "Use colour", data["closed"].as_bool().unwrap_or(false)) {
+                    actions.push(send("custom_colour", json!({ "team": model["team"], "primary": key == "primary", "rgb": view.custom_rgb })));
+                    close = true;
+                }
+            });
+            web_muted(ui, "A custom colour is added to your garage palette, so Rocket League must be closed. Restart it to see the colour.");
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if close {
+            view.palette = None;
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct CreatorView {
+    step: usize,
+    name: String,
+    search: String,
+    copy: bool,
+    copy_pick: Option<String>,
+    pending: Option<Value>,
+    replacement: String,
+    requested: String,
+    item_page: usize,
+    initialized: bool,
+    palette: Option<(u64, String)>,
+    creating: bool,
+    attempt: Value,
+}
+
+const CREATOR_STEPS: [(&str, Option<u64>); 12] = [
+    ("Name", None), ("Body", Some(0)), ("Decal", Some(1)), ("Colours", None), ("Wheels", Some(2)), ("Boost", Some(3)),
+    ("Antenna", Some(4)), ("Topper", Some(5)), ("Trail", Some(14)), ("Goal Explosion", Some(15)), ("Engine Audio", Some(13)), ("Review", None),
+];
+
+fn creator_act(kind: &str, extra: Value) -> Value {
+    json!({ "type": "loadouts", "action": { "type": "creator", "action": web_act("", kind, extra)["action"] } })
+}
+
+impl HebnixApp {
+    fn egui_preset_creator(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let view_id = egui::Id::new("creator_view");
+        let mut view: CreatorView = ui.ctx().data(|d| d.get_temp(view_id)).unwrap_or_default();
+        let closed = data["closed"].as_bool().unwrap_or(false);
+        let draft = &data["creator"];
+        let rows = data["rows"].as_array().cloned().unwrap_or_default();
+        if view.creating && view.attempt != data["creatorAttempt"] {
+            view.creating = false;
+        }
+        if !draft.is_object() {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(520.0);
+                web_card(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        let message = data["message"].as_str().filter(|text| !text.is_empty());
+                        match message {
+                            Some("Loadout Created") => { ui.colored_label(ui.visuals().hyperlink_color, "Loadout Created"); }
+                            Some(text) => { ui.colored_label(ui.visuals().warn_fg_color, text); }
+                            None => {}
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add_space(((ui.available_width() - 330.0) / 2.0).max(0.0));
+                            if web_primary(ui, "Create New Preset", !rows.is_empty() && closed) {
+                                view = CreatorView { copy: false, ..Default::default() };
+                                actions.push(creator_act("begin", json!({ "copy": Value::Null })));
+                            }
+                            if ui.add_enabled(!rows.is_empty() && closed, egui::Button::new("Copy Existing Loadout")).clicked() {
+                                view.copy = true;
+                            }
+                        });
+                        if !closed {
+                            ui.colored_label(ui.visuals().warn_fg_color, "Rocket League must be closed.");
+                        }
+                        if data["loading"].as_bool().unwrap_or(false) {
+                            web_muted(ui, "Loading loadouts…");
+                        } else if rows.is_empty() {
+                            web_muted(ui, "Select an account with a Rocket League loadout from quick settings first.");
+                        }
+                        if view.copy && !rows.is_empty() {
+                            let options: Vec<(String, String)> = rows.iter().map(|row| (val_str(&row["position"]), val_str(&row["name"]))).collect();
+                            let current = view.copy_pick.clone().unwrap_or_else(|| options[0].0.clone());
+                            ui.horizontal(|ui| {
+                                if let Some(value) = web_select(ui, "creator_copy", &current, &options, true) {
+                                    view.copy_pick = Some(value);
+                                }
+                                if web_primary(ui, "Continue", closed) {
+                                    let position = current.parse::<u64>().unwrap_or(0);
+                                    view = CreatorView { copy: false, ..Default::default() };
+                                    actions.push(creator_act("begin", json!({ "copy": position })));
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    view.copy = false;
+                                }
+                            });
+                        }
+                    });
+                });
+            });
+            ui.ctx().data_mut(|d| d.insert_temp(view_id, view));
+            return;
+        }
+        if !view.initialized {
+            view.name = val_str(&draft["name"]);
+            view.initialized = true;
+        }
+        view.step = view.step.min(CREATOR_STEPS.len() - 1);
+        let (step_name, step_slot) = CREATOR_STEPS[view.step];
+        let mut goto: Option<usize> = None;
+        let gap = 16.0;
+        let rail = 180.0f32.min(ui.available_width() * 0.25);
+        let body = ui.available_width() - rail - gap;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(egui::vec2(rail, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(rail - 34.0);
+                    let accent = ui.visuals().selection.stroke.color.gamma_multiply(0.6);
+                    for (index, (name, _)) in CREATOR_STEPS.iter().enumerate() {
+                        let fill = if index == view.step { accent } else { egui::Color32::TRANSPARENT };
+                        if ui.add(egui::Button::new(format!("{}. {name}", index + 1)).fill(fill).min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
+                            goto = Some(index);
+                        }
+                    }
+                });
+            });
+            ui.allocate_ui_with_layout(egui::vec2(body, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(body - 34.0);
+                    web_heading(ui, step_name);
+                    if let Some(message) = data["message"].as_str().filter(|text| !text.is_empty() && *text != "Loadout Created") {
+                        ui.colored_label(ui.visuals().warn_fg_color, message);
+                    }
+                    let slots = draft["slots"].as_array().cloned().unwrap_or_default();
+                    if view.step == 0 {
+                        web_muted(ui, "Give this preset a name. Your original loadout stays unchanged.");
+                        ui.add(egui::TextEdit::singleline(&mut view.name).hint_text("Name your preset").char_limit(64).desired_width(f32::INFINITY));
+                    } else if step_name == "Colours" {
+                        if draft["palette"]["loading"].as_bool().unwrap_or(false) {
+                            ui.label("Loading colours…");
+                        }
+                        if let Some(error) = draft["palette"]["error"].as_str().filter(|text| !text.is_empty()) {
+                            ui.colored_label(ui.visuals().warn_fg_color, error);
+                        }
+                        ui.horizontal_top(|ui| {
+                            for team in draft["colours"].as_array().into_iter().flatten() {
+                                ui.vertical(|ui| {
+                                    web_heading(ui, if team["team"].as_u64() == Some(0) { "Blue team" } else { "Orange team" });
+                                    for key in ["primary", "secondary"] {
+                                        if team["palette"][key].is_null() {
+                                            continue;
+                                        }
+                                        let index = team[key].as_u64().unwrap_or(0) as usize;
+                                        let rgb = web_rgb_of(&team["palette"][key][index]);
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("■").color(egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])));
+                                            if ui.button(if key == "primary" { "Primary Colour" } else { "Secondary Colour" }).clicked() {
+                                                view.palette = Some((team["team"].as_u64().unwrap_or(0), key.to_owned()));
+                                            }
+                                        });
+                                    }
+                                });
+                            }
+                        });
+                    } else if let Some(slot_id) = step_slot {
+                        let selected = slots.iter().find(|slot| slot["slot"].as_u64() == Some(slot_id));
+                        if slot_id == 1 {
+                            if let Some(body_slot) = slots.iter().find(|slot| slot["slot"].as_u64() == Some(0)).filter(|slot| slot["product"].as_i64().unwrap_or(0) != 0) {
+                                web_muted(ui, &format!("Choose a decal for {}.", val_str(&body_slot["label"])));
+                            }
+                        }
+                        web_muted(ui, &format!("Selected: {}", selected.and_then(|slot| slot["label"].as_str()).filter(|text| !text.is_empty()).unwrap_or("Default")));
+                        if ui.add(egui::TextEdit::singleline(&mut view.search).hint_text("Search all items").desired_width(f32::INFINITY)).changed() {
+                            view.item_page = 0;
+                        }
+                        if draft["slot"].as_u64() != Some(slot_id) {
+                            ui.label("Loading items…");
+                        } else {
+                            let lower = view.search.trim().to_lowercase();
+                            let items: Vec<Value> = draft["catalog"]["items"].as_array().cloned().unwrap_or_default().into_iter().filter(|item| val_str(&item["label"]).to_lowercase().contains(&lower)).collect();
+                            let optional = ![0, 2, 3, 14, 15].contains(&slot_id);
+                            let tile_w = 150.0;
+                            let columns = (((body - 34.0) / (tile_w + 10.0)).floor() as usize).max(1);
+                            let page_size = (columns * 3).saturating_sub(optional as usize).max(1);
+                            let pages = items.len().div_ceil(page_size).max(1);
+                            view.item_page = view.item_page.min(pages - 1);
+                            let visible: Vec<&Value> = items.iter().skip(view.item_page * page_size).take(page_size).collect();
+                            let ids: Vec<Value> = visible.iter().map(|item| item["id"].clone()).collect();
+                            let signature = json!([slot_id, ids]).to_string();
+                            let known: Vec<Value> = draft["preview_ids"].as_array().cloned().unwrap_or_default();
+                            if view.requested != signature || ids.iter().any(|id| !known.contains(id)) {
+                                view.requested = signature;
+                                actions.push(creator_act("previews", json!({ "ids": ids })));
+                            }
+                            let mut tiles: Vec<Option<&Value>> = Vec::new();
+                            if optional {
+                                tiles.push(None);
+                            }
+                            tiles.extend(visible.iter().map(|item| Some(*item)));
+                            for chunk in tiles.chunks(columns) {
+                                ui.horizontal_top(|ui| {
+                                    for item in chunk {
+                                        let (title, detail, image, on) = match item {
+                                            None => (if slot_id == 13 { "Default" } else { "None" }.to_owned(), String::new(), None, selected.is_none_or(|slot| slot["product"].as_i64().unwrap_or(0) == 0)),
+                                            Some(item) => {
+                                                let preview = &draft["catalog"]["previews"][val_str(&item["id"])];
+                                                (val_str(&item["label"]), if item["owned"].as_bool().unwrap_or(false) { "Owned".to_owned() } else { "Swap required".to_owned() },
+                                                    preview["image"].as_str().map(str::to_owned), selected.is_some_and(|slot| slot["product"] == item["product"]))
+                                            }
+                                        };
+                                        if web_tile(ui, &title, image.as_deref(), &detail, on, true) {
+                                            match item {
+                                                None => actions.push(creator_act("pick", json!({ "product": 0, "replacement": Value::Null }))),
+                                                Some(item) if item["owned"].as_bool().unwrap_or(false) => actions.push(creator_act("pick", json!({ "product": item["product"], "replacement": Value::Null }))),
+                                                Some(item) => {
+                                                    view.pending = Some((*item).clone());
+                                                    view.replacement.clear();
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            web_pager(ui, &mut view.item_page, pages);
+                        }
+                    } else {
+                        ui.label(egui::RichText::new(&view.name).size(20.0).strong());
+                        web_muted(ui, "Review each team's selections before creating your preset. Owned replacement items will also change wherever they are used.");
+                        for slot in &slots {
+                            ui.label(format!("{}: {}", val_str(&slot["name"]), val_str(&slot["label"])));
+                        }
+                        web_heading(ui, "Affected loadouts");
+                        let affected = draft["affected"].as_array().cloned().unwrap_or_default();
+                        if affected.is_empty() {
+                            web_muted(ui, "No existing loadouts use these replacement items.");
+                        }
+                        for loadout in &affected {
+                            web_card(ui, |ui| {
+                                ui.label(egui::RichText::new(val_str(&loadout["name"])).strong());
+                                for reason in loadout["changes"].as_array().into_iter().flatten() {
+                                    ui.label(egui::RichText::new(val_str(reason)).small());
+                                }
+                            });
+                        }
+                    }
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            view.copy = false;
+                            actions.push(creator_act("cancel", Value::Null));
+                        }
+                        if ui.add_enabled(view.step > 0, egui::Button::new("← Back")).clicked() {
+                            goto = Some(view.step - 1);
+                        }
+                        if view.step + 1 < CREATOR_STEPS.len() {
+                            if web_primary(ui, "Next →", true) {
+                                goto = Some(view.step + 1);
+                            }
+                        } else {
+                            let missing: Vec<String> = draft["missing_required"].as_array().into_iter().flatten().map(val_str).collect();
+                            if web_primary(ui, "Create Preset", closed && missing.is_empty() && !view.creating) {
+                                view.creating = true;
+                                view.attempt = data["creatorAttempt"].clone();
+                                actions.push(creator_act("finish", json!({ "name": view.name })));
+                            }
+                            if !missing.is_empty() {
+                                ui.colored_label(ui.visuals().warn_fg_color, format!("Required: {}", missing.join(", ")));
+                            }
+                        }
+                        if !closed {
+                            ui.colored_label(ui.visuals().warn_fg_color, "Close Rocket League before creating the preset.");
+                        }
+                    });
+                });
+            });
+        });
+        if let Some(index) = goto {
+            if view.name.trim().is_empty() && index > 0 {
+                // the web page refocuses the name field instead of leaving it
+            } else {
+                view.step = index;
+                view.search.clear();
+                view.item_page = 0;
+                view.pending = None;
+                view.requested.clear();
+                if CREATOR_STEPS[index].0 == "Review" {
+                    actions.push(creator_act("review", Value::Null));
+                }
+                if let Some(slot) = CREATOR_STEPS[index].1 {
+                    actions.push(creator_act("slot", json!({ "slot": slot })));
+                }
+            }
+        }
+        if let Some(item) = view.pending.clone() {
+            let mut close = false;
+            web_modal(ui.ctx(), "creator_replacement", 480.0, |ui| {
+                web_heading(ui, "Choose an owned item to replace");
+                let body_slot = draft["slots"].as_array().into_iter().flatten().find(|slot| slot["slot"].as_u64() == Some(0));
+                let hint = if draft["slot"].as_u64() == Some(1) && body_slot.is_some_and(|slot| slot["equipped"].as_bool().unwrap_or(false)) {
+                    format!("Choose an owned decal compatible with {}.", body_slot.and_then(|slot| slot["equipped_label"].as_str()).unwrap_or("the body you'll equip in Rocket League"))
+                } else {
+                    "Choose the owned item you'll equip in Rocket League.".to_owned()
+                };
+                ui.label(format!("{hint} It will appear as {}.", val_str(&item["label"])));
+                ui.colored_label(ui.visuals().warn_fg_color, "This also changes other loadouts that use the same owned item.");
+                let mut options = vec![(String::new(), "Choose an owned item".to_owned())];
+                options.extend(draft["replacements"].as_array().into_iter().flatten().map(|entry| (val_str(&entry["index"]), val_str(&entry["label"]))));
+                if let Some(value) = web_select(ui, "creator_replacement_pick", &view.replacement, &options, true) {
+                    view.replacement = value;
+                }
+                if draft["replacements"].as_array().is_none_or(Vec::is_empty) {
+                    web_muted(ui, "No compatible owned replacements are available.");
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    if web_primary(ui, "Use Replacement", !view.replacement.is_empty()) {
+                        actions.push(creator_act("pick", json!({ "product": item["product"], "replacement": view.replacement.parse::<u64>().unwrap_or(0) })));
+                        close = true;
+                    }
+                });
+            });
+            if close {
+                view.pending = None;
+            }
+        }
+        if let Some((team_id, key)) = view.palette.clone() {
+            let team = draft["colours"].as_array().into_iter().flatten().find(|team| team["team"].as_u64() == Some(team_id)).cloned();
+            match team {
+                Some(team) => {
+                    let colours = team["palette"][&key].as_array().cloned().unwrap_or_default();
+                    let columns = if key == "secondary" { 15 } else { 10 };
+                    let mut close = false;
+                    web_modal(ui.ctx(), "creator_palette", 460.0, |ui| {
+                        web_heading(ui, if key == "primary" { "Primary Colour" } else { "Secondary Colour" });
+                        egui::Grid::new("creator_palette_grid").spacing([4.0, 4.0]).show(ui, |ui| {
+                            for (index, entry) in colours.iter().enumerate() {
+                                let rgb = web_rgb_of(entry);
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                                if team[&key].as_u64() == Some(index as u64) {
+                                    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(2.0, egui::Color32::WHITE), egui::StrokeKind::Outside);
+                                }
+                                if response.clicked() {
+                                    actions.push(creator_act("colour", json!({ "team": team_id, "primary": key == "primary", "index": index })));
+                                    close = true;
+                                }
+                                if (index + 1) % columns == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                        if ui.button("Close").clicked() {
+                            close = true;
+                        }
+                    });
+                    if close {
+                        view.palette = None;
+                    }
+                }
+                None => view.palette = None,
+            }
+        }
+        if view.creating {
+            web_modal(ui.ctx(), "creator_busy", 300.0, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Creating loadout…").strong());
+                    web_muted(ui, "Applying item swaps and saving your loadout.");
+                });
+            });
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(view_id, view));
+    }
+}
+
+impl HebnixApp {
+    fn egui_replay_library(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let call = |kind: &str, extra: Value| web_act("replay_library", kind, extra);
+        let ready = data["ready"].as_bool().unwrap_or(false);
+        let playing = data["playing"].as_bool().unwrap_or(false);
+        let warn = ui.visuals().warn_fg_color;
+        web_card(ui, |ui| {
+            if let Some(error) = data["error"].as_str().filter(|text| !text.is_empty()) {
+                ui.colored_label(warn, error);
+            }
+            if let Some(scan) = data["scan"].as_f64() {
+                ui.label(egui::RichText::new("Scanning replay events · 16×").small());
+                ui.add(egui::ProgressBar::new(scan.clamp(0.0, 1.0) as f32));
+                if ui.button("Cancel scan").clicked() {
+                    actions.push(call("cancel_scan", Value::Null));
+                }
+            }
+            if data["scanFailed"].as_bool().unwrap_or(false) && ui.add_enabled(ready, egui::Button::new("Retry event scan")).clicked() {
+                actions.push(call("retry_scan", Value::Null));
+            }
+            ui.horizontal_wrapped(|ui| {
+                let connected = data["connected"].as_bool().unwrap_or(false);
+                let colour = if connected { egui::Color32::from_rgb(80, 200, 120) } else { ui.visuals().weak_text_color() };
+                ui.colored_label(colour, if connected { "Stats API connected" } else { "Stats API disconnected" });
+                if ui.button("Detect current replay").clicked() {
+                    actions.push(call("detect", Value::Null));
+                }
+                let capturing = data["capturing"].as_bool().unwrap_or(false);
+                let keybind = data["keybind"].as_str().filter(|text| !text.is_empty());
+                ui.label("Play/pause key");
+                ui.label(egui::RichText::new(if capturing { "Press a key…" } else { keybind.unwrap_or("Not set") }).strong());
+                if ui.add_enabled(!capturing, egui::Button::new("Set")).clicked() {
+                    actions.push(call("capture", Value::Null));
+                }
+                if ui.add_enabled(keybind.is_some() || capturing, egui::Button::new("Clear")).clicked() {
+                    actions.push(call("clear", Value::Null));
+                }
+            });
+            ui.label(egui::RichText::new(val_str(&data["status"])).small());
+        });
+        ui.add_space(8.0);
+        let model = &data["timeline"];
+        let full = data["full"].as_bool().unwrap_or(false);
+        web_card(ui, |ui| {
+            web_heading(ui, "Playback & Keyframes");
+            if !full || !model.is_object() {
+                ui.label(egui::RichText::new("Waiting for a replay").strong());
+                web_muted(ui, "Open a replay in Rocket League, then return here. Timeline controls become available while you are watching it.");
+                if full {
+                    web_muted(ui, "Could not match this replay to a local file. Check your configured replay folder, then detect again.");
+                }
+                return;
+            }
+            let frame = model["frame"].as_i64().unwrap_or(1);
+            ui.label(egui::RichText::new(format!("{} · {} frames · {} fps", val_str(&model["title"]), model["max"], model["fps"])).strong());
+            ui.horizontal_wrapped(|ui| {
+                if web_primary(ui, if playing { "Pause" } else { "Play timeline" }, ready) {
+                    actions.push(call("toggle", Value::Null));
+                }
+                for (text, target) in [("← Frame", frame - 1), ("Frame →", frame + 1), ("Frame 1", 1)] {
+                    if ui.add_enabled(ready, egui::Button::new(text)).clicked() {
+                        actions.push(call("scrub", json!({ "frame": target })));
+                    }
+                }
+                if ui.add_enabled(ready && !playing, egui::Button::new("+ Keyframe")).clicked() {
+                    actions.push(call("add_key", Value::Null));
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Keyframes");
+                let accent = ui.visuals().selection.stroke.color.gamma_multiply(0.6);
+                for key in model["keys"].as_array().into_iter().flatten() {
+                    let on = model["selected"]["frame"] == key["frame"];
+                    if ui.add(egui::Button::new(format!("Frame {}", key["frame"])).fill(if on { accent } else { egui::Color32::TRANSPARENT })).clicked() {
+                        actions.push(call("pick_key", json!({ "frame": key["frame"] })));
+                    }
+                }
+            });
+            if model["selected"].is_object() {
+                let edit = ready && !playing;
+                let selected = &model["selected"];
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(format!("Keyframe · Frame {}", selected["frame"])).strong());
+                    let choices: Vec<(String, String)> = std::iter::once((String::new(), "+ Add command".to_owned()))
+                        .chain(model["commands"].as_array().into_iter().flatten().enumerate().map(|(index, command)| (index.to_string(), val_str(command)))).collect();
+                    if let Some(value) = web_select(ui, "replay_add_command", "", &choices, edit).and_then(|value| value.parse::<u64>().ok()) {
+                        actions.push(call("add_command", json!({ "index": value })));
+                    }
+                    let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                    if ui.add_enabled(edit, egui::Button::new("Delete keyframe").fill(danger)).clicked() {
+                        actions.push(call("delete_key", Value::Null));
+                    }
+                });
+                for (index, entry) in selected["commands"].as_array().into_iter().flatten().enumerate() {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(val_str(&entry["label"]));
+                        let Some((kind, value)) = entry["command"].as_object().and_then(|map| map.iter().next()) else { return };
+                        let change = |value: Value| call("command_value", json!({ "index": index, "value": value }));
+                        match kind.as_str() {
+                            "Pov" => {
+                                let focus = val_str(&value["focus"]);
+                                let mut players: Vec<(String, String)> = model["players"].as_array().into_iter().flatten()
+                                    .map(|player| (val_str(&player[1]), format!("{} ({})", val_str(&player[0]), val_str(&player[1])))).collect();
+                                if !players.iter().any(|(key, _)| *key == focus) {
+                                    players.insert(0, (focus.clone(), focus.clone()));
+                                }
+                                if let Some(choice) = web_select(ui, &format!("replay_pov_{index}"), &focus, &players, edit) {
+                                    actions.push(change(json!({ "focus": choice })));
+                                }
+                                web_muted(ui, "Player View");
+                            }
+                            "Hud" => {
+                                if let Some(on) = web_toggle(ui, "Visible", value.as_bool().unwrap_or(false), edit) {
+                                    actions.push(change(json!(on)));
+                                }
+                            }
+                            _ => {
+                                let (low, high, speed) = match kind.as_str() {
+                                    "Seek" => (1.0, model["max"].as_f64().unwrap_or(1.0), 1.0),
+                                    "Pause" => (0.1, 3600.0, 0.1),
+                                    _ => (0.0, 16.0, 0.05),
+                                };
+                                let mut number = value.as_f64().unwrap_or(0.0);
+                                let response = ui.add_enabled(edit, egui::DragValue::new(&mut number).range(low..=high).speed(speed));
+                                if response.changed() && !response.dragged() || response.drag_stopped() {
+                                    actions.push(change(json!(number)));
+                                }
+                                if kind == "Speed" && number == 0.0 {
+                                    web_muted(ui, "0 freezes replay progression");
+                                }
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let danger = ui.visuals().error_fg_color.gamma_multiply(0.5);
+                            if ui.add_enabled(edit, egui::Button::new("Remove").fill(danger)).clicked() {
+                                actions.push(call("remove_command", json!({ "index": index })));
+                            }
+                        });
+                    });
+                }
+            } else {
+                web_muted(ui, "Select a frame and add a keyframe, or select a diamond to edit its commands.");
+            }
+        });
+        if model.is_object() {
+            ui.add_space(8.0);
+            Self::egui_replay_track(ui, data, model, ready, actions);
+        }
+    }
+
+    fn egui_replay_track(ui: &mut egui::Ui, data: &Value, model: &Value, ready: bool, actions: &mut Vec<Value>) {
+        let call = |kind: &str, extra: Value| web_act("replay_library", kind, extra);
+        let total = model["total"].as_f64().unwrap_or(1.0).max(0.001);
+        let zoom = model["zoom"].as_f64().unwrap_or(1.0).max(1.0);
+        let start = model["start"].as_f64().unwrap_or(0.0);
+        let fps = model["fps"].as_f64().unwrap_or(30.0).max(1.0);
+        let max_frame = model["max"].as_i64().unwrap_or(1);
+        let span = total / zoom;
+        let zoom_limit = (max_frame as f64 / 4.0).max(1.0);
+        let playhead = model["playhead"].as_f64().unwrap_or(0.0);
+        let view = |zoom: f64, start: f64| call("view", json!({ "zoom": zoom, "start": start }));
+        web_card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("Frame {} / {}", model["frame"], max_frame)).strong());
+                ui.label(val_str(&model["clock"]));
+                if ui.button("−").on_hover_text("Zoom out").clicked() {
+                    actions.push(view((zoom / 1.6).max(1.0), start));
+                }
+                if ui.button("+").on_hover_text("Zoom in").clicked() {
+                    actions.push(view((zoom * 1.6).min(zoom_limit), start));
+                }
+                if ui.button("Fit").clicked() {
+                    actions.push(view(1.0, 0.0));
+                }
+                if ui.button("Follow playhead").clicked() {
+                    actions.push(view(zoom, playhead - span / 2.0));
+                }
+                web_muted(ui, &format!("{zoom:.1}× zoom · G goal · S save · blue/orange team · gold pause"));
+            });
+            if zoom > 1.0 {
+                let mut pan = start;
+                let response = ui.add(egui::Slider::new(&mut pan, 0.0..=(total - span).max(0.001)).show_value(false));
+                if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                    actions.push(view(zoom, pan));
+                }
+            }
+            let height = 74.0;
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click_and_drag());
+            let painter = ui.painter_at(rect);
+            let weak = ui.visuals().weak_text_color();
+            painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+            let x_of = |at: f64| rect.left() + (((at - start) / span).clamp(0.0, 1.0) as f32) * rect.width();
+            let inside = |at: f64| ((at - start) / span) >= 0.0 && ((at - start) / span) <= 1.0;
+            let wanted = (span * fps / 9.0).max(1.0);
+            let base = 10f64.powf(wanted.log10().floor());
+            let step = [1.0, 2.0, 5.0, 10.0].iter().map(|value| value * base).find(|value| *value >= wanted).unwrap_or(base * 10.0);
+            let mut index = ((start * fps / step).ceil() * step).max(0.0);
+            while index <= (start + span) * fps {
+                let seconds = index / fps;
+                let x = x_of(seconds);
+                painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.top() + 8.0)], egui::Stroke::new(1.0, weak));
+                painter.text(egui::pos2(x + 2.0, rect.top() + 9.0), egui::Align2::LEFT_TOP, (index as i64 + 1).to_string(), egui::FontId::proportional(10.0), weak);
+                painter.text(egui::pos2(x + 2.0, rect.top() + 21.0), egui::Align2::LEFT_TOP, format!("{}:{:02}", (seconds / 60.0).floor() as i64, (seconds % 60.0).floor() as i64), egui::FontId::proportional(10.0), weak);
+                index += step;
+            }
+            let gold = egui::Color32::from_rgb(230, 180, 60);
+            let mut hits: Vec<(egui::Rect, Value)> = Vec::new();
+            for key in model["keys"].as_array().into_iter().flatten() {
+                let at = key["at"].as_f64().unwrap_or(0.0);
+                let hold = key["hold"].as_f64().unwrap_or(0.0);
+                if hold > 0.0 && at + hold > start && at < start + span {
+                    painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x_of(at), rect.bottom() - 18.0), egui::pos2(x_of(at + hold), rect.bottom() - 10.0)), 2.0, gold.gamma_multiply(0.5));
+                }
+                if inside(at) {
+                    let centre = egui::pos2(x_of(at), rect.bottom() - 28.0);
+                    painter.text(centre, egui::Align2::CENTER_CENTER, "◆", egui::FontId::proportional(14.0), gold);
+                    hits.push((egui::Rect::from_center_size(centre, egui::vec2(16.0, 16.0)), call("pick_key", json!({ "frame": key["frame"] }))));
+                }
+            }
+            for marker in model["markers"].as_array().into_iter().flatten() {
+                let at = marker["at"].as_f64().unwrap_or(0.0);
+                if !inside(at) {
+                    continue;
+                }
+                let event = val_str(&marker["event"]);
+                let text = if event == "Goal" { "G" } else if event.to_lowercase().contains("save") { "S" } else { "•" };
+                let colour = match marker["team"].as_i64() {
+                    Some(0) => egui::Color32::from_rgb(80, 140, 255),
+                    Some(1) => egui::Color32::from_rgb(255, 150, 60),
+                    _ => weak,
+                };
+                let centre = egui::pos2(x_of(at), rect.bottom() - 10.0);
+                painter.text(centre, egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(13.0), colour);
+                if ready {
+                    hits.push((egui::Rect::from_center_size(centre, egui::vec2(14.0, 14.0)), call("scrub", json!({ "frame": marker["frame"] }))));
+                }
+            }
+            if inside(playhead) {
+                let x = x_of(playhead);
+                painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 90, 90)));
+            }
+            if let Some(pointer) = response.interact_pointer_pos().filter(|_| response.clicked() || response.dragged()) {
+                if let Some((_, action)) = hits.iter().find(|(area, _)| response.clicked() && area.contains(pointer)) {
+                    actions.push(action.clone());
+                } else if ready {
+                    let at = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64;
+                    let frame = (1 + ((start + at * span) * fps).round() as i64).clamp(1, max_frame);
+                    let id = egui::Id::new("replay_scrub_last");
+                    let last: Option<i64> = ui.ctx().data(|d| d.get_temp(id));
+                    if last != Some(frame) {
+                        ui.ctx().data_mut(|d| d.insert_temp(id, frame));
+                        actions.push(call("scrub", json!({ "frame": frame })));
+                    }
+                }
+            }
+            if response.hovered() {
+                let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    let at = ui.input(|input| input.pointer.hover_pos()).map_or(0.5, |pos| ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64);
+                    let next = (zoom * (scroll as f64 * 0.005).exp()).clamp(1.0, zoom_limit);
+                    actions.push(view(next, start + at * (span - total / next)));
+                }
+            }
+            if ready && ui.memory(|memory| memory.focused().is_none()) {
+                let offset = ui.input(|input| (input.key_pressed(egui::Key::ArrowRight) as i64) - (input.key_pressed(egui::Key::ArrowLeft) as i64));
+                if offset != 0 {
+                    actions.push(call("scrub", json!({ "frame": model["frame"].as_i64().unwrap_or(1) + offset })));
+                }
+            }
+        });
+        let _ = data;
+    }
+}
+
+impl HebnixApp {
+    /// Arena previews for the Menu Map tiles come from the same service the arena pages use.
+    fn menu_map_previews(&mut self, ctx: &egui::Context) {
+        use crate::ui::workshop::background_changer::ArenaAction;
+        let key = egui::Id::new("menu_map_images");
+        let mut images: std::collections::HashMap<String, Option<std::sync::Arc<[u8]>>> = ctx.data(|d| d.get_temp(key)).unwrap_or_default();
+        let wanted: Vec<String> = ctx.data(|d| d.get_temp(egui::Id::new("menu_map_visible"))).unwrap_or_default();
+        if wanted.iter().all(|id| images.contains_key(id)) {
+            return;
+        }
+        let rl = self.config.settings.rl_path.clone();
+        let background = &mut self.workshop.background_changer;
+        if let Ok(action) = serde_json::from_value::<ArenaAction>(json!({ "type": "preview", "ids": wanted })) {
+            background.web_action(action, &rl, true, &self.tx, ctx);
+        }
+        if let Some(previews) = background.web_snapshot(&rl, true, ctx)["previews"].as_object() {
+            for (id, value) in previews {
+                let bytes = value.as_str().and_then(|uri| uri.split_once(',')).and_then(|(_, encoded)| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok());
+                images.insert(id.clone(), bytes.map(Into::into));
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(key, images));
     }
 }

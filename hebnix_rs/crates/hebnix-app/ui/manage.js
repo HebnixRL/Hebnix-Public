@@ -3244,9 +3244,6 @@ function appearanceSettings() {
   const labels = state.labels;
   const update = (key, value = null) => send({ type: "appearance", key, value });
   const card = panel();
-  const legacy = toggle("Legacy UI", state.legacy, value => update("legacy", value));
-  legacy.title = "Applies the next time Hebnix starts.";
-  card.append(legacy);
   const line = (label, ...controls) => {
     const row = element("div", "appearance-row");
     row.append(element("span", "", label));

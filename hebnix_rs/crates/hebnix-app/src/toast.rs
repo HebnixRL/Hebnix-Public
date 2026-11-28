@@ -177,6 +177,14 @@ pub fn install_sink(tx: crossbeam_channel::Sender<crate::messages::AppMsg>, ctx:
     let _ = SINK.set((tx, ctx));
 }
 
+/// one line in the in-app console, from any thread
+pub fn console(line: impl Into<String>) {
+    if let Some((tx, ctx)) = SINK.get() {
+        let _ = tx.send(crate::messages::AppMsg::Log(line.into()));
+        ctx.request_repaint();
+    }
+}
+
 /// a running job as a card with a bar. fraction None is unknown length. `done`
 /// removes the card and leaves one normal toast with the text.
 pub fn report(key: &str, text: &str, fraction: Option<f32>, done: bool) {
@@ -189,6 +197,10 @@ pub fn report_failed(key: &str, text: &str) {
 }
 
 fn send(key: &str, text: &str, fraction: Option<f32>, done: bool, failed: bool) {
+    // a finished or failed job always leaves a console line
+    if done && !text.is_empty() {
+        console(if text.starts_with('[') { text.to_string() } else { format!("[Files] {}{text}", if failed { "Failed: " } else { "" }) });
+    }
     if let Some((tx, ctx)) = SINK.get() {
         let _ = tx.send(crate::messages::AppMsg::Progress {
             key: key.to_string(),

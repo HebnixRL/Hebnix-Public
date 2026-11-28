@@ -137,12 +137,12 @@ pub fn start(root: &str) {
         status("Error: select a valid Rocket League installation in Settings.");
         return;
     }
-    // Workshop maps crash without this stock package, so fetch it at startup
+    // Workshop maps crash without these packages, so fetch them at startup
     // instead of waiting for a map install
     let shader_root = root.to_string();
     std::thread::spawn(move || {
-        if let Err(error) = crate::ui::workshop::ensure_shader_package(&shader_root) {
-            tracing::warn!("could not fetch the Workshop shader package: {error}");
+        if let Err(error) = crate::ui::workshop::ensure_workshop_textures(&shader_root) {
+            tracing::warn!("could not fetch the workshop textures: {error}");
         }
     });
     *COOKED.get_or_init(|| Mutex::new(cooked.clone())).lock().unwrap_or_else(|e| e.into_inner()) = cooked.clone();
@@ -206,6 +206,7 @@ pub fn reconcile_async() {
     if BUSY.swap(true, Ordering::AcqRel) { return; }
     std::thread::spawn(move || {
         status("Preparing live features…");
+        let began = std::time::Instant::now();
         let mut attempt = 0;
         loop {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reconcile(&cooked, true, std::process::id())))
@@ -231,6 +232,7 @@ pub fn reconcile_async() {
                     // Warm the host check so a right-click host doesn't wait on it.
                     let _ = super::super::workshop_host::ready(&cooked);
                     status("Live features ready");
+                    crate::toast::console(format!("[Live Cosmetics] Finished in {:.1}s", began.elapsed().as_secs_f32()));
                     break;
                 }
                 Err(error) => {
@@ -246,6 +248,8 @@ pub fn reconcile_async() {
                     }
                     tracing::warn!(attempt, "Live cosmetics: {error}");
                     status(format!("Error: {error}"));
+                    if attempt < 2 { crate::toast::console(format!("[Live Cosmetics] Retrying (attempt {} of 3); the saved journal is re-checked first", attempt + 2)); }
+                    else { crate::toast::console("[Live Cosmetics] Gave up after 3 attempts. Type repatch all with Rocket League closed, and check hebnix.log"); }
                     if attempt == 2 || hebnix_sdk::process::is_rocket_league_running()
                         || crate::watchdog::replacement_is_running(std::process::id()) { break; }
                     // Re-read the durable journal and actual package contents on

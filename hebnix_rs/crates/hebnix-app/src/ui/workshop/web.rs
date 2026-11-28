@@ -18,6 +18,7 @@ pub(crate) enum BrowseMapsAction {
     Load { id: String },
     Unload { id: String },
     Delete { id: String },
+    Forget { id: String },
     EnableMenu,
 }
 
@@ -53,9 +54,26 @@ fn menu_lock_labels() -> Value {
 }
 
 impl WorkshopState {
-    pub(crate) fn menu_map_web_snapshot(&mut self, rl_path: &str, ctx: &egui::Context) -> Value {
+    pub(crate) fn menu_map_web_snapshot(&mut self, rl_path: &str, tx: &Sender<AppMsg>, ctx: &egui::Context) -> Value {
         let maps = self.cached_maps();
-        self.menu_map.web_snapshot(rl_path, &maps, ctx)
+        let mut snapshot = self.menu_map.web_snapshot(rl_path, &maps, ctx);
+        // downloaded maps keep their Steam/zip preview image; reuse the Browse Maps image cache
+        let mut previews = serde_json::Map::new();
+        for map in &maps {
+            let Some(banner) = self.catalog.iter().find(|entry| id_of(entry) == map.id).map(|entry| str_of(entry, "banner_path", "").to_owned()) else { continue };
+            if banner.is_empty() {
+                continue;
+            }
+            self.ensure_image(&banner, tx, ctx);
+            if let Some(ImageState::Ready(bytes)) = self.images.get(&banner) {
+                let uri = self.web_banners.entry(banner.clone()).or_insert_with(|| preview(bytes)).clone();
+                if let Some(uri) = uri {
+                    previews.insert(map.id.clone(), Value::String(uri));
+                }
+            }
+        }
+        snapshot["maps"]["previews"] = Value::Object(previews);
+        snapshot
     }
 
     pub(crate) fn menu_map_web_action(&mut self, action: super::WebMapAction, rl_path: &str, tx: &Sender<AppMsg>, ctx: &egui::Context) {
@@ -283,6 +301,7 @@ impl WorkshopState {
                 }),
                 "busy": busy, "loaded": loaded, "cached": cached,
                 "can_delete": cached && active.is_empty() && !busy,
+                "can_forget": !cached && active.is_empty() && !busy && super::steam_catalog::is_steam_entry(map),
                 "status": if !active.is_empty() {
                     format!("Active on: {}", active.join(", "))
                 } else if is_local_entry(map) { "Imported".into() }
@@ -353,6 +372,7 @@ impl WorkshopState {
             BrowseMapsAction::Load { id } => (id, CardAction::InstallOrDownload),
             BrowseMapsAction::Unload { id } => (id, CardAction::Unload),
             BrowseMapsAction::Delete { id } => (id, CardAction::DeleteCache),
+            BrowseMapsAction::Forget { id } => (id, CardAction::ForgetSearch),
         };
         if id.is_empty() || self.busy.contains(&id) {
             return;
@@ -364,6 +384,11 @@ impl WorkshopState {
         match action {
             CardAction::InstallOrDownload if active.contains(&self.target) => {}
             CardAction::Unload if !active.contains(&self.target) => {}
+            CardAction::ForgetSearch => {
+                if active.is_empty() && !self.is_downloaded(&id) {
+                    self.forget_search(&id);
+                }
+            }
             CardAction::DeleteCache => {
                 if active.is_empty() && self.is_downloaded(&id) {
                     let map = self.catalog[index].clone();

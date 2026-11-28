@@ -77,9 +77,6 @@ pub struct SettingsCfg {
     pub owned_items_only: bool,
     pub hotkey: String,
     pub theme: String,
-    pub legacy_ui: bool,
-    /// Draw the light pages (Home, Console, About) with egui instead of web views.
-    pub egui_light_pages: bool,
     /// UI language code ("en", "de", ...) or "auto" to follow the system
     pub language: String,
     /// Main tab selected when Hebnix starts.
@@ -154,8 +151,6 @@ impl Default for SettingsCfg {
             owned_items_only: false,
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
-            legacy_ui: false,
-            egui_light_pages: false,
             language: crate::i18n::AUTO.to_string(),
             default_tab: "Home".to_string(),
             navigation_memory: BTreeMap::new(),

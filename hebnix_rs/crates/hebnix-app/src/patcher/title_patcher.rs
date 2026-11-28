@@ -744,10 +744,22 @@ fn baseline(
 
 pub fn apply(base: &Path, cooked: &Path, rules: &[TitleOverride]) -> Result<String, String> {
     validate_rules(rules)?;
-    run(base, cooked, false, Some(&|raw| movie::patch(raw, rules)), Some(rules))
+    crate::toast::console(format!("[Titles] Applying {} title override(s)…", rules.len()));
+    let result = run(base, cooked, false, Some(&|raw| movie::patch(raw, rules)), Some(rules));
+    console_result("Applied", &result);
+    result
 }
 pub fn restore(base: &Path, cooked: &Path) -> Result<String, String> {
-    run(base, cooked, false, None, None)
+    crate::toast::console("[Titles] Restoring the original titles…");
+    let result = run(base, cooked, false, None, None);
+    console_result("Restored", &result);
+    result
+}
+fn console_result(done: &str, result: &Result<String, String>) {
+    match result {
+        Ok(_) => crate::toast::console(format!("[Titles] {done}")),
+        Err(error) => crate::toast::console(format!("[Titles] Failed: {error}. The original movie is kept; close Rocket League and try again")),
+    }
 }
 pub(crate) fn restore_for_uninstall(base: &Path, cooked: &Path) -> Result<(), String> {
     if !load_manifest(&folder(base, cooked, "title_upk"))?

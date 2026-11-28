@@ -366,8 +366,6 @@ fn main() -> eframe::Result {
     std::thread::spawn(move || maintenance::first_launch_shortcut(&shortcut_base));
     tracing::info!("startup single-instance guard acquired");
 
-    let modern_ui = !cfg.settings.legacy_ui;
-
     hosts_file::repair_at_startup();
     spoofer::restore_if_crashed(&base_dir);
     tracing::info!("checking legacy WebSocket cleanup");
@@ -402,15 +400,13 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    tracing::info!(modern_ui, "starting main window renderer");
+    tracing::info!("starting main window renderer");
     let result = eframe::run_native(
         "Hebnix",
         options,
         Box::new(move |cc| {
             let mut app = HebnixApp::new(cc);
-            if modern_ui {
-                app.enable_modern_ui(cc);
-            }
+            app.enable_modern_ui(cc);
             Ok(Box::new(app))
         }),
     );

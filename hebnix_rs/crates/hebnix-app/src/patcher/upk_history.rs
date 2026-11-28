@@ -74,8 +74,15 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 
 pub(super) fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = path.with_extension(format!("{}.pending", rand::random::<u64>()));
+    // only game-sized packages are worth a console line; settings files stay quiet
+    let large = bytes.len() > 1 << 20;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if large { crate::toast::console(format!("[Patcher] Writing {name} ({:.1} MB)…", bytes.len() as f64 / 1048576.0)); }
     let result = fs::write(&temporary, bytes).and_then(|()| fs::rename(&temporary, path));
     let _ = fs::remove_file(temporary);
+    if let Err(error) = &result {
+        crate::toast::console(format!("[Patcher] Could not write {name}: {error}. Close Rocket League and check antivirus or file permissions"));
+    }
     result.map_err(|e| format!("{}: {e}", path.display()))
 }
 
