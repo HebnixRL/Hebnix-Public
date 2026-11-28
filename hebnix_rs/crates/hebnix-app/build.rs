@@ -102,25 +102,44 @@ fn embed_multiplayer_assets() {
     collect_files(&root, &mut files);
     files.sort();
 
-    let mut out = String::from("const MULTIPLAYER_ASSETS: &[(&str, &[u8])] = &[\n");
-    for file in files {
+    // deflated into OUT_DIR so the exe carries ~10MB instead of ~27MB; the stamp
+    // lets startup skip extraction without inflating anything
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let packed_dir = out_dir.join("multiplayer_packed");
+    std::fs::create_dir_all(&packed_dir).expect("failed to create multiplayer packed dir");
+    let mut crc = flate2::Crc::new();
+    let mut out = String::from("const MULTIPLAYER_ASSETS: &[(&str, u64, &[u8])] = &[\n");
+    for (index, file) in files.iter().enumerate() {
         println!("cargo:rerun-if-changed={}", file.display());
         let relative = file
             .strip_prefix(&root)
             .expect("multiplayer asset escaped its source directory")
             .to_string_lossy()
             .replace('\\', "/");
+        let raw = std::fs::read(file).expect("failed to read multiplayer asset");
+        crc.update(relative.as_bytes());
+        crc.update(&raw);
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut encoder, &raw).expect("failed to deflate multiplayer asset");
+        let packed = packed_dir.join(format!("{index}.bin"));
+        std::fs::write(&packed, encoder.finish().expect("failed to deflate multiplayer asset"))
+            .expect("failed to write packed multiplayer asset");
         out.push_str(&format!(
-            "    ({:?}, include_bytes!({:?})),\n",
+            "    ({:?}, {}, include_bytes!({:?})),\n",
             relative,
-            file.to_string_lossy()
+            raw.len(),
+            packed.to_string_lossy()
         ));
     }
     out.push_str("];\n");
+    out.push_str(&format!(
+        "const MULTIPLAYER_STAMP: &str = \"{:08x}\";\n",
+        crc.sum()
+    ));
 
-    let out_path =
-        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("multiplayer_assets.rs");
-    std::fs::write(out_path, out).expect("failed to write multiplayer asset manifest");
+    std::fs::write(out_dir.join("multiplayer_assets.rs"), out)
+        .expect("failed to write multiplayer asset manifest");
 }
 
 /// Bakes the Workshop multiplayer directory's shared key into the build.
