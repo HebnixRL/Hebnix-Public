@@ -641,6 +641,27 @@ pub fn ready(cooked: &Path) -> bool {
     answer
 }
 
+/// Join a peer's LAN match without the LAN browser. The Freeplay restart block
+/// travels with the text of FREEPLAY_FILE, so it opens the peer's address the
+/// way the browser does. Returns the socket command that runs it.
+pub fn join_lan(cooked: &Path, host: std::net::Ipv4Addr, password: &str) -> Result<hebnix_sdk::stats::WsCommand, String> {
+    if !cooked.join("Backups").join(FREEPLAY_ENABLED).is_file() {
+        return Err("turn on the Freeplay patch first, it is what joins the match".into());
+    }
+    // URL options are split on '?', and ListenServer_TA.AllowPlayerLogin compares Password exactly
+    if password.chars().any(|c| c == '?' || c == '"' || c.is_whitespace() || c.is_control()) {
+        return Err("the password can't contain spaces, quotes or '?'".into());
+    }
+    let mut url = format!("Open {host}:7777?Lan");
+    if !password.is_empty() {
+        url.push_str(&format!("?Password={password}"));
+    }
+    let file = cooked.parent().unwrap_or(cooked).join(FREEPLAY_FILE);
+    std::fs::write(&file, url).map_err(|e| format!("could not write {}: {e}", file.display()))?;
+    // the command inside FREEPLAY_REQUEST
+    Ok(hebnix_sdk::stats::WsCommand::new("HebnixRestartFreeplayV3"))
+}
+
 /// Put an enabled Freeplay restart back when TAGame.upk lost it, e.g. after a verify.
 pub(crate) fn reapply_freeplay(cooked: &Path) -> Result<(), String> {
     if cooked.join("Backups").join(FREEPLAY_ENABLED).is_file() && !freeplay_patch_intact(cooked) {
