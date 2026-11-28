@@ -8996,7 +8996,8 @@ impl HebnixApp {
             self.select_studio_section(section);
             ui.separator();
         }
-        if !matches!(section, StudioSection::Active | StudioSection::History) {
+        // the sidebar already lists these pages in the modern shell
+        if !modern_navigation && !matches!(section, StudioSection::Active | StudioSection::History) {
             theme::secondary_navigation(ui, "studio_navigation").show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("studio_pages")

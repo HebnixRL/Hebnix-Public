@@ -721,7 +721,7 @@ impl Tracker {
                             let mut x = rect.left() + 14.0;
                             if let Some(badge) = rank_badge(&choice.rank, 20.0) {
                                 let icon = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - 10.0), egui::Vec2::splat(20.0));
-                                badge.paint_at(ui, icon);
+                                ui.put(icon, badge);
                             }
                             x += 30.0;
                             let name = web_playlist_name(&choice.rank.playlist_name);
@@ -1095,7 +1095,8 @@ fn rank_badge(rank: &PlaylistRank, size: f32) -> Option<egui::Image<'static>> {
             .unwrap_or(&TIERS[0])
             .clone(),
     );
-    Some(image.fit_to_exact_size(egui::Vec2::splat(size)))
+    // fit inside the square, keeping the icon's own aspect ratio
+    Some(image.max_size(egui::Vec2::splat(size)))
 }
 
 fn rank_name(rank: &PlaylistRank) -> &'static str {
