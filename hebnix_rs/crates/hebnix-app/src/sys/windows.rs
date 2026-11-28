@@ -299,7 +299,66 @@ pub fn set_startup_enabled(enabled: bool) -> std::io::Result<()> {
 
 /// force-kill RocketLeague.exe (console quit command)
 pub fn kill_rocket_league() -> std::io::Result<()> {
-    hebnix_sdk::process::window::close_rocket_league()
+    match hebnix_sdk::process::window::close_rocket_league() {
+        Err(error) if error.to_string().to_ascii_lowercase().contains("access is denied") => {
+            let Some(pid) = hebnix_sdk::process::find_process("rocketleague.exe") else {
+                return Ok(());
+            };
+            let answer = rfd::MessageDialog::new()
+                .set_title("Rocket League could not close")
+                .set_description("Windows denied permission to close Rocket League. Try closing it as administrator?")
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if answer != rfd::MessageDialogResult::Yes {
+                return Err(error);
+            }
+            close_rocket_league_as_admin(pid)
+        }
+        result => result,
+    }
+}
+
+fn close_rocket_league_as_admin(pid: u32) -> std::io::Result<()> {
+    use std::{os::windows::ffi::OsStrExt, path::PathBuf};
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{INFINITE, WaitForSingleObject},
+            UI::{Shell::{SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW}, WindowsAndMessaging::SW_HIDE},
+        },
+    };
+
+    let system = std::env::var_os("WINDIR").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let file: Vec<u16> = system.join("System32\\taskkill.exe").as_os_str().encode_wide().chain(Some(0)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let parameters: Vec<u16> = format!("/F /PID {pid}\0").encode_utf16().collect();
+    unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(parameters.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info).map_err(|error| std::io::Error::from_raw_os_error(error.code().0))?;
+        if info.hProcess.is_invalid() {
+            return Err(std::io::Error::other("The administrator close request did not start."));
+        }
+        let waited = WaitForSingleObject(info.hProcess, INFINITE);
+        let _ = CloseHandle(info.hProcess);
+        if waited != WAIT_OBJECT_0 {
+            return Err(std::io::Error::other("Timed out waiting for the administrator close request."));
+        }
+    }
+    if hebnix_sdk::process::find_process("rocketleague.exe") == Some(pid) {
+        Err(std::io::Error::other("Rocket League is still running after the administrator close request."))
+    } else {
+        Ok(())
+    }
 }
 
 /// Remove Rocket League's embedded-browser cache, if it exists, including

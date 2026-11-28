@@ -3265,6 +3265,10 @@ function appearanceSettings() {
     return line(title, slider, number);
   };
   if (state.themePage) {
+    card.append(toggle(labels.wry, state.wry && !state.legacy, value => update("wry", value)),
+      element("p", "small text-body-secondary", labels.wryHint),
+      toggle(labels.legacy, state.legacy, value => update("legacy", value)),
+      element("p", "small text-body-secondary", labels.legacyHint));
     card.append(line(labels.themeLabel, loadoutSelect(labels.themeLabel, state.themes.map(name => [name, name]),
       state.theme, value => update("theme", value)),
       button(labels.refresh, () => update("refresh_theme")),

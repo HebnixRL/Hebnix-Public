@@ -112,10 +112,14 @@ pub(super) fn update(p: &UpkPackage, base: usize) -> R<Script> {
         let parameter = field(p, data, "ProductPaint_TA.EmissiveParameterName")?;
         let paired = native(0xc0, &[full.clone(), text("")]);
         let start = base + 3 + active.mem_size();
-        // Keep the game's normal correction/full-bright calculation for car
-        // colours. This helper changes two vectors; it does not rebuild a MIC.
-        let mut apply = guard(start, paired.clone(), context(p, current_mesh(p)?, call(p, "CarMeshComponentBase_TA.SetMaterialColorParams", &[
-            material.clone(), colour.clone(), parameter.clone(), cast(0x60, full)])?, None)?)?;
+        // The stock helper can recalculate TeamColor/TrimColor from the team
+        // paint immediately after our call. Animation owns these already-bound
+        // MICs, so write both normal and full-bright vectors directly.
+        let mut paired_apply = context(p, material.clone(),
+            call(p, "Engine.MaterialInstanceConstant.SetVectorParameterValue", &[parameter.clone(), colour.clone()])?, None)?;
+        paired_apply.append(&context(p, material.clone(),
+            call(p, "Engine.MaterialInstanceConstant.SetVectorParameterValue", &[cast(0x60, full), colour.clone()])?, None)?);
+        let mut apply = guard(start, paired.clone(), paired_apply)?;
         apply.append(&guard(start + apply.mem_size(), native(0x81, &[paired]), context(p, material,
             call(p, "Engine.MaterialInstanceConstant.SetVectorParameterValue", &[parameter, colour])?, None)?)?);
         guard(base, active, apply)

@@ -88,7 +88,9 @@ pub fn close_rocket_league() -> std::io::Result<()> {
     let Some(pid) = super::detector::find_process("rocketleague.exe") else { return Ok(()); };
     let request = game_quit_request(pid);
     if request.is_some() {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // The game accepts this on its own thread, but EAC can make process
+        // teardown slow while denying a normal-user TerminateProcess fallback.
+        let deadline = Instant::now() + Duration::from_secs(12);
         while Instant::now() < deadline {
             if super::detector::find_process("rocketleague.exe") != Some(pid) { return Ok(()); }
             std::thread::sleep(Duration::from_millis(100));
@@ -99,7 +101,7 @@ pub fn close_rocket_league() -> std::io::Result<()> {
     unsafe { let _ = EnumWindows(Some(enum_cb), LPARAM(&mut state as *mut EnumState as isize)); }
     if let Some(hwnd) = state.result {
         if unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok() {
-            let deadline = Instant::now() + Duration::from_secs(4);
+            let deadline = Instant::now() + Duration::from_secs(8);
             while Instant::now() < deadline {
                 if super::detector::find_process("rocketleague.exe") != Some(pid) { return Ok(()); }
                 std::thread::sleep(Duration::from_millis(100));

@@ -69,6 +69,24 @@ fn arena_of(donor: &str) -> Option<&str> {
         .or_else(|| donor.strip_prefix(crate::patcher::background_merger::ARENA_DONOR_PREFIX))
 }
 
+/// The exact arena catalog exposed by the full Map Swapper.
+pub(super) fn map_swapper_arena(package: &str) -> Option<&'static str> {
+    ARENAS.iter().find_map(|(id, label)| id.eq_ignore_ascii_case(package).then_some(*label))
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::map_swapper_arena;
+
+    #[test]
+    fn menu_map_filter_uses_only_map_swapper_arenas() {
+        assert_eq!(map_swapper_arena("Stadium_P"), Some("DFH Stadium"));
+        assert_eq!(map_swapper_arena("stadium_p"), Some("DFH Stadium"));
+        assert_eq!(map_swapper_arena("HoopsStadium_P"), None);
+        assert_eq!(map_swapper_arena("Labs_CirclePillars_P"), None);
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct SwapState {

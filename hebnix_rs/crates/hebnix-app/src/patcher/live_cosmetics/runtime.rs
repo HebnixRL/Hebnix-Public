@@ -1,7 +1,7 @@
 //! Independently assembled UnrealScript hooks. No new native-backed fields.
 use super::super::{script_patch::{Script, function_payload}, upk_package::UpkPackage};
 // Bump whenever generated hooks or their Game Mods/scoreboard dependencies change.
-pub const REVISION: u32 = 43;
+pub const REVISION: u32 = 46;
 #[path = "animation.rs"]
 mod animation;
 #[path = "boost.rs"]
@@ -441,6 +441,9 @@ fn materials(p: &UpkPackage, base: usize) -> R<Script> {
         let wheel_pass = native(0xcc, &[get(p, "HbxWheelColourPass")?, text("1")]);
         let pass = if key == "wheels" { wheel_pass } else { native(0x81, &[wheel_pass]) };
         let condition = enabled;
+        // SetMaterialColors is also the first update after a loadout/settings
+        // change. Use the live expression here so primary and trim do not sit
+        // on their fixed fallback until a later animation binding is reached.
         let rgb = paint_rgb(p, key)?;
         let apply = call(p, "CarMeshComponentBase_TA.SetMaterialColorParams", &[
             var(p, 0x2b, "CarMeshComponentBase_TA.SetMaterialColors.MatInst")?, rgb,
@@ -825,7 +828,11 @@ fn refresh_wheel_colours_ready(p: &UpkPackage, base: usize, car_mesh: Script) ->
     out.append(&set(p, "HbxWheelPendingStamp", stamp)?);
     let stamp = get(p, "HbxWheelPendingStamp")?;
     let changed = native(0xc0, &[stamp.clone(), get_dynamic(p, wheel_key.clone())?]);
-    let needed = items::choose(flag(p, "wheels.enabled")?, changed, was_active)?;
+    // Wheel MICs can be replaced by the renderer after attachment. Revisit
+    // every rainbow pass rather than retaining a binding to a stale MIC.
+    let animated = items::choose(flag(p, "wheels.enabled")?, flag(p, "wheels.rainbow")?, raw(&[0x28]))?;
+    let refresh = items::choose(animated, raw(&[0x27]), changed)?;
+    let needed = items::choose(flag(p, "wheels.enabled")?, refresh, was_active)?;
     let wheel_base = base + out.mem_size();
     let mut update = set_dynamic(p, text("HbxWheelColourPass"), text("1"))?;
     // Animate existing wheel MICs directly. The stock iterator re-enters the
@@ -848,9 +855,10 @@ fn refresh_wheel_colours_ready(p: &UpkPackage, base: usize, car_mesh: Script) ->
             let colour = call(p, "Core.Object.MakeLinearColor", &[
                 cast(STRING_TO_FLOAT, get(p, "HbxWheelLive.R")?), cast(STRING_TO_FLOAT, get(p, "HbxWheelLive.G")?),
                 cast(STRING_TO_FLOAT, get(p, "HbxWheelLive.B")?), float(1.)])?;
-            let mut apply = context(p, car_mesh.clone(),
-                call(p, "CarMeshComponentBase_TA.SetMaterialColorParams", &[material.clone(), colour, cast(0x60, text("CustomColor")), cast(0x60, text("CustomColorFull"))])?, None)?;
-            apply.append(&animation::bind(p, car_mesh.clone(), material.clone(), text("wheels"), cast(0x60, text("CustomColor")), Some("CustomColorFull"))?);
+            let mut apply = context(p, material.clone(),
+                call(p, "Engine.MaterialInstanceConstant.SetVectorParameterValue", &[cast(0x60, text("CustomColor")), colour.clone()])?, None)?;
+            apply.append(&context(p, material.clone(),
+                call(p, "Engine.MaterialInstanceConstant.SetVectorParameterValue", &[cast(0x60, text("CustomColorFull")), colour])?, None)?);
             guard(base, native(0xce, &[material, raw(&[0x2a])]), apply)
         })?;
         let mut apply = guard(start, enabled.clone(), animate)?;

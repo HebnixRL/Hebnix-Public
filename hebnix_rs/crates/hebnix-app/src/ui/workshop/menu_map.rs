@@ -277,7 +277,10 @@ impl MenuMapState {
             }
         }
         match result.arenas {
-            Ok(arenas) => self.arenas = arenas,
+            Ok(mut arenas) => {
+                arenas.retain(|arena| super::background_changer::map_swapper_arena(&arena.package).is_some());
+                self.arenas = arenas;
+            }
             Err(error) => {
                 self.arenas.clear();
                 self.status = error;

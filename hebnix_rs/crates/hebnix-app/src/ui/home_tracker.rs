@@ -452,7 +452,7 @@ impl Tracker {
         }
     }
 
-    fn show_account_picker(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn show_account_picker(&mut self, ui: &mut egui::Ui) {
         let Some(selected) = &self.account else {
             return;
         };
@@ -519,8 +519,6 @@ impl Tracker {
             "subtitle": t("home-tracker-history-window"),
             "history_title": t("home-tracker-history"),
             "empty_history": t("home-tracker-no-history"),
-            "retry_label": t("home-tracker-avatar-retry"),
-            "can_retry": profile.is_some_and(|profile| profile.avatar.is_none()) && checking.is_none(),
             "waiting": account.is_none().then(|| t("home-tracker-waiting")),
             "error": self.error.then(|| t("home-tracker-error")),
             "loading": checking.map(|kind| t(match kind {
@@ -562,6 +560,52 @@ impl Tracker {
     }
 
     #[cfg(windows)]
+    pub(super) fn web_account_picker(&self) -> serde_json::Value {
+        use serde_json::json;
+        let mut choices = BTreeMap::new();
+        for account in self.profiles.keys().filter_map(|key| accounts::Account::from_key(key))
+            .chain(self.launched.clone()).chain(self.saved_accounts.iter().cloned())
+        {
+            choices.insert(account.key.clone(), account);
+        }
+        if let Some(selected) = &self.account {
+            choices.entry(selected.key.clone()).or_insert_with(|| selected.clone());
+        }
+        let label = |account: &accounts::Account| {
+            let name = self.profiles.get(&account.key).map(|profile| profile.name.as_str())
+                .filter(|name| !name.is_empty()).unwrap_or(&account.name);
+            if name == "Current account" || name.starts_with("Account (") { account.key.clone() }
+            else { format!("{name} · {}", account.platform) }
+        };
+        json!({
+            "selected": self.account.as_ref().map(|account| &account.key),
+            "accounts": choices.values().map(|account| json!([account.key, label(account)])).collect::<Vec<_>>(),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_select_account(&mut self, key: &str, ctx: &egui::Context) {
+        let account = self.profiles.keys().filter_map(|key| accounts::Account::from_key(key))
+            .chain(self.launched.clone()).chain(self.saved_accounts.iter().cloned())
+            .find(|account| account.key == key);
+        if let Some(account) = account {
+            self.select_account(account);
+            ctx.request_repaint();
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_select_save_account(&mut self, id: &str, ctx: &egui::Context) {
+        let account = self.profiles.keys().filter_map(|key| accounts::Account::from_key(key))
+            .chain(self.launched.clone()).chain(self.saved_accounts.iter().cloned())
+            .find(|account| account.id.eq_ignore_ascii_case(id));
+        if let Some(account) = account {
+            self.select_account(account);
+            ctx.request_repaint();
+        }
+    }
+
+    #[cfg(windows)]
     pub(super) fn web_select(&mut self, id: i64) {
         if self.account.as_ref().and_then(|account| self.profiles.get(&account.key))
             .is_some_and(|profile| profile.playlists.get(&id).is_some_and(|playlist| playlist.seen == profile.checked))
@@ -570,22 +614,9 @@ impl Tracker {
         }
     }
 
-    #[cfg(windows)]
-    pub(super) fn web_retry_avatar(&mut self, ctx: &egui::Context) {
-        if let Some(account) = &self.account
-            && self.profiles.get(&account.key).is_some_and(|profile| profile.avatar.is_none())
-            && !self.fetch.as_ref().is_some_and(|(key, _, _)| *key == account.key)
-            && let Some(check) = self.requested.get_mut(&account.key)
-        {
-            check.avatar_at = Some(Instant::now());
-            ctx.request_repaint();
-        }
-    }
-
     /// Tracker laid out like the web page: summary strip, detail header, mode list beside the chart.
     #[cfg(windows)]
     pub(super) fn show_modern(&mut self, ui: &mut egui::Ui) {
-        self.show_account_picker(ui);
         let account = self.account.as_ref();
         let profile = account.and_then(|account| self.profiles.get(&account.key));
         let checking = self.fetch.as_ref().and_then(|(key, kind, _)| {
@@ -643,14 +674,6 @@ impl Tracker {
                         ui.add_space(10.0);
                         centred(ui, 24.0, |ui| {
                             ui.add(egui::Label::new(egui::RichText::new(name).size(17.0).strong()).truncate());
-                            if profile.is_some_and(|p| p.avatar.is_none()) && checking.is_none()
-                                && ui.small_button(t("home-tracker-avatar-retry")).clicked()
-                            {
-                                if let Some(check) = self.requested.get_mut(&account.key) {
-                                    check.avatar_at = Some(Instant::now());
-                                }
-                                ui.ctx().request_repaint();
-                            }
                         });
                     }
                     1 => if let Some(p) = current {
@@ -746,7 +769,6 @@ impl Tracker {
     }
 
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
-        self.show_account_picker(ui);
         let account = self.account.as_ref();
         let profile = account.and_then(|account| self.profiles.get(&account.key));
         let checking = self.fetch.as_ref().and_then(|(key, kind, _)| {
@@ -769,19 +791,7 @@ impl Tracker {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 bordered_panel(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.heading(t("home-tracker"));
-                        if let (Some(account), Some(profile)) = (account, profile)
-                            && profile.avatar.is_none()
-                            && checking.is_none()
-                            && ui.small_button(t("home-tracker-avatar-retry")).clicked()
-                        {
-                            if let Some(check) = self.requested.get_mut(&account.key) {
-                                check.avatar_at = Some(Instant::now());
-                            }
-                            ui.ctx().request_repaint();
-                        }
-                    });
+                    ui.heading(t("home-tracker"));
                     ui.weak(t("home-tracker-history-window"));
                     if let Some(account) = account {
                         ui.add_space(4.0);

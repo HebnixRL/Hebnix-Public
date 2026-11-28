@@ -707,6 +707,8 @@ impl HebnixApp {
             "themeLabel": t("settings-theme-label"), "refresh": t("btn-refresh"),
             "import": t("settings-import-themes"), "folder": t("btn-open-folder"),
             "fonts": t("settings-open-fonts-folder"), "hotkey": t("settings-keybind-label"),
+            "wry": "Use Wry UI", "wryHint": "Disable to use the current egui modern UI. Changes immediately.",
+            "legacy": "Legacy UI", "legacyHint": "Use the original themed tabs and layout. Changes immediately.",
             "capture": t(if self.capturing_hotkey { "settings-keybind-listening" } else { "settings-keybind-set" }),
             "language": t("settings-language-label"), "opacity": t("settings-opacity-label"),
             "toast": t("settings-toast-position-label"), "defaultTab": t("system-default-tab"),
@@ -714,6 +716,7 @@ impl HebnixApp {
         json!({
             "page": "appearance-settings", "themePage": self.appearance_subtab == super::AppearanceSubTab::Theme,
             "theme": cfg.theme, "themes": self.theme_options,
+            "wry": cfg.wry_ui, "legacy": cfg.legacy_ui,
             "general": general, "panel": panel, "labels": labels,
         })
     }
@@ -722,6 +725,40 @@ impl HebnixApp {
         let boolean = value.as_bool();
         let number = value.as_f64().map(|n| n as f32).filter(|n| n.is_finite());
         let text = value.as_str().unwrap_or_default();
+        if key == "legacy" {
+            let enabled = boolean.unwrap_or(self.config.settings.legacy_ui);
+            self.config.settings.legacy_ui = enabled;
+            if enabled {
+                #[cfg(windows)]
+                if let Some(navigation) = &mut self.modern_navigation { navigation.hide(); }
+            } else {
+                #[cfg(windows)]
+                if let Some(navigation) = &mut self.modern_navigation
+                    && let Err(error) = navigation.set_egui_shell(!self.config.settings.wry_ui)
+                {
+                    self.console.write(format!("[UI] Could not switch renderer: {error}"));
+                    return;
+                }
+            }
+            self.save_config();
+            ctx.request_repaint();
+            return;
+        }
+        if key == "wry" {
+            let enabled = boolean.unwrap_or(self.config.settings.wry_ui);
+            #[cfg(windows)]
+            if let Some(navigation) = &mut self.modern_navigation {
+                if let Err(error) = navigation.set_egui_shell(!enabled) {
+                    self.console.write(format!("[UI] Could not switch renderer: {error}"));
+                    return;
+                }
+            }
+            self.config.settings.wry_ui = enabled;
+            self.config.settings.legacy_ui = false;
+            self.save_config();
+            ctx.request_repaint();
+            return;
+        }
         let cfg = &mut self.config.settings;
         match key {
             "page" => {
@@ -3759,10 +3796,16 @@ impl HebnixApp {
         let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
         let update = |key: &str, value: Value| json!({ "type": "appearance", "key": key, "value": value });
         web_card(ui, |ui| {
-            if let Some(value) = web_toggle(ui, "Legacy UI", data["legacy"].as_bool().unwrap_or(false), true) {
-                actions.push(update("legacy", json!(value)));
-            }
             if data["themePage"].as_bool().unwrap_or(false) {
+                let legacy = data["legacy"].as_bool().unwrap_or(false);
+                if let Some(value) = web_toggle(ui, &label("wry"), data["wry"].as_bool().unwrap_or(true) && !legacy, true) {
+                    actions.push(update("wry", json!(value)));
+                }
+                ui.label(egui::RichText::new(label("wryHint")).small().weak());
+                if let Some(value) = web_toggle(ui, &label("legacy"), legacy, true) {
+                    actions.push(update("legacy", json!(value)));
+                }
+                ui.label(egui::RichText::new(label("legacyHint")).small().weak());
                 let themes: Vec<(String, String)> = data["themes"].as_array().into_iter().flatten().map(|name| (val_str(name), val_str(name))).collect();
                 web_row(ui, &label("themeLabel"), |ui| {
                     if let Some(value) = web_select(ui, "appearance_theme", &val_str(&data["theme"]), &themes, true) {

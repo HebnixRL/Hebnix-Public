@@ -57,6 +57,7 @@ pub struct Settings {
     pub scoreboard_names: bool,
     pub stadium: TeamColours,
     pub hud: TeamColours,
+    pub hud_matches_stadium: bool,
     pub game_mods: std::collections::BTreeMap<String, bool>,
     pub bindings: std::collections::BTreeMap<String, String>,
     pub instant_mode: u8,
@@ -97,7 +98,12 @@ impl Settings {
         let material_paints = [&self.primary, &self.secondary, &self.trim, &self.decal,
             &self.antenna, &self.topper];
         text.push_str(&format!("HbxLive.materials.animated={}\n", u8::from(material_paints.iter().any(|paint| paint.enabled && paint.rainbow))));
-        for (key, group) in [("stadium", &self.stadium), ("hud", &self.hud)] {
+        let matched_hud;
+        let hud = if self.hud_matches_stadium {
+            matched_hud = TeamColours { enabled: self.hud.enabled, blue: self.stadium.blue, orange: self.stadium.orange };
+            &matched_hud
+        } else { &self.hud };
+        for (key, group) in [("stadium", &self.stadium), ("hud", hud)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(group.enabled)));
             for (team, rgb) in [("blue", group.blue), ("orange", group.orange)] {
                 for (channel, value) in ["r", "g", "b"].into_iter().zip(rgb) {
@@ -272,16 +278,26 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
             }
         }
         if !alignment {
-            for (label, colours) in [("Stadium team colours", &mut settings.stadium), ("HUD team colours", &mut settings.hud)] {
-                changed |= ui.checkbox(&mut colours.enabled, label).changed();
-                if colours.enabled {
+            changed |= ui.checkbox(&mut settings.stadium.enabled, "Stadium team colours").changed();
+            if settings.stadium.enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Blue");
+                    changed |= ui.color_edit_button_srgb(&mut settings.stadium.blue).changed();
+                    ui.label("Orange");
+                    changed |= ui.color_edit_button_srgb(&mut settings.stadium.orange).changed();
+                });
+            }
+            changed |= ui.checkbox(&mut settings.hud.enabled, "HUD team colours").changed();
+            if settings.hud.enabled {
+                changed |= ui.checkbox(&mut settings.hud_matches_stadium, "Match stadium colours").changed();
+                ui.add_enabled_ui(!settings.hud_matches_stadium, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Blue");
-                        changed |= ui.color_edit_button_srgb(&mut colours.blue).changed();
+                        changed |= ui.color_edit_button_srgb(&mut settings.hud.blue).changed();
                         ui.label("Orange");
-                        changed |= ui.color_edit_button_srgb(&mut colours.orange).changed();
+                        changed |= ui.color_edit_button_srgb(&mut settings.hud.orange).changed();
                     });
-                }
+                });
             }
         }
     });
@@ -316,6 +332,19 @@ mod tests {
         assert!(invalid.encode().is_err());
         invalid.alignment.camber = 31.;
         assert!(invalid.encode().is_err());
+    }
+    #[test]
+    fn hud_can_follow_the_stadium_palette_without_overwriting_its_saved_colours() {
+        let mut settings = Settings::default();
+        settings.hud.enabled = true;
+        settings.hud.blue = [0, 255, 0];
+        settings.stadium.blue = [255, 0, 0];
+        settings.hud_matches_stadium = true;
+        let encoded = settings.encode().unwrap();
+        assert!(encoded.contains("HbxLive.hud.enabled=1\n"));
+        assert!(encoded.contains("HbxLive.hud.blue.r=1.0000000\n"));
+        assert!(encoded.contains("HbxLive.hud.blue.g=0.0000000\n"));
+        assert_eq!(settings.hud.blue, [0, 255, 0]);
     }
 }
 

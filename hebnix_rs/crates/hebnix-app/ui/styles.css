@@ -156,6 +156,7 @@
 .tracker-metric { border-inline-start: 1px solid var(--tracker-border); }
 .tracker-person-text { min-width: 0; }
 .tracker-rank-text { min-width: 0; }
+.tracker-modes .tracker-badge { width: 1.55rem; height: 1.55rem; flex: 0 0 1.55rem; object-fit: contain; }
 #rank-card { gap: clamp(.3rem, .8vw, .85rem); }
 #rank-card .tracker-badge { width: 1.55rem; height: 1.55rem; }
 #rank, #rank-division { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -296,12 +296,16 @@ fn restore_attachment_snapshot(p: &UpkPackage, base: usize, mesh: Script, refs: 
 /// Unpainted FX need their native Painted attachment state as well as RGB.
 /// Snapshot the actor's parameter arrays before the first override, then remove
 /// only the state we added and restore those arrays when disabled.
-fn unpainted_fx(p: &UpkPackage, base: usize, target: Script, factory: Script, domain: Script) -> R<Script> {
+fn unpainted_fx(p: &UpkPackage, base: usize, target: Script, _factory: Script, domain: Script) -> R<Script> {
     const SUFFIX: &str = ".HbxLiveOriginalFX";
     let fx = dynamic(p, "FXActor_TA", target)?;
-    let active = enabled(p, domain)?;
+    let active = enabled(p, domain.clone())?;
     let tracked = choose(active.clone(), raw(&[0x27]), not_null(baseline(p, fx.clone(), SUFFIX)?))?;
-    let valid = choose(not_null(bucket(p)?), choose(not_null(fx.clone()), choose(object_eq(&[factory, raw(&[0x2a])]), tracked, raw(&[0x28]))?, raw(&[0x28]))?, raw(&[0x28]))?;
+    // Some stock FX expose a non-null default paint factory even though their
+    // visible colour still lives in the actor's parameter dispenser. Apply
+    // this fallback to every tracked local FX actor; the normal painted route
+    // may run as well, but both write the same requested colour.
+    let valid = choose(not_null(bucket(p)?), choose(not_null(fx.clone()), tracked, raw(&[0x28]))?, raw(&[0x28]))?;
     let start = base + 3 + valid.mem_size();
     let mut body = create_baseline(p, start, fx.clone(), SUFFIX)?;
     let refs = baseline_refs(p, fx.clone(), SUFFIX)?;
@@ -317,10 +321,34 @@ fn unpainted_fx(p: &UpkPackage, base: usize, target: Script, factory: Script, do
     // copies the native parameter arrays without spawning a second effect.
     clone.append(&fx).append(&text("HbxLiveOriginalParameters")).append(&int(0))
         .append(&var(p, 0x20, "ProjectX.ParameterDispenser_X")?).append(&parameters);
-    snapshot.append(&assign(element_at(int(1), refs.clone()), choose(not_null(parameters), clone, raw(&[0x2a]))?));
+    snapshot.append(&assign(element_at(int(1), refs.clone()), choose(not_null(parameters.clone()), clone, raw(&[0x2a]))?));
     let was_active = context(p, fx.clone(), call(p, "ProjectX.FXActor_X.IsStateActive", &[state.clone()])?, Some("ProjectX.FXActor_X.IsStateActive.ReturnValue"))?;
     snapshot.append(&assign(element_at(int(2), refs.clone()), choose(was_active, state.clone(), raw(&[0x2a]))?));
     body.append(&guard(at, active.clone(), guard(begin, empty, snapshot)?)?);
+    // Stock trails and several topper/boost effects have no Painted inventory
+    // attribute. Their colour lives directly in the existing dispenser, so the
+    // normal ProductPaint path above has nothing to apply. Recolour those
+    // existing colour parameters in place; the snapshot restores them exactly.
+    let at = start + body.mem_size();
+    let rgb = call(p, "Core.Object.MakeLinearColor", &[
+        colour_channel(p, domain.clone(), 0)?,
+        colour_channel(p, domain.clone(), 1)?,
+        colour_channel(p, domain.clone(), 2)?,
+        float(1.),
+    ])?;
+    let colours = field(p, parameters.clone(), "ProjectX.ParameterDispenser_X.ColorParams")?;
+    let mut recolour = super::boost::repeat(p, at + 3 + active.mem_size(), "HbxUnpaintedColourIndex", length(colours.clone()), |_base, index| {
+        let pair = element_at(index, colours.clone());
+        let key = member(p, "ProjectX.ParameterDispenser_X.ColorParamPair", "Key", pair.clone(), false)?;
+        let value = member(p, "ProjectX.ParameterDispenser_X.ColorParamPair", "Value", pair.clone(), true)?;
+        let mut apply = assign(value.clone(), rgb.clone());
+        apply.append(&context(p, parameters.clone(), virtual_call(p, "SetLinearColorParameter", &[key, value])?, None)?);
+        Ok(apply)
+    })?;
+    recolour.append(&context(p, fx.clone(), call(p, "ProjectX.FXActor_X.AddState", &[state.clone()])?, None)?);
+    recolour.append(&set_dynamic(p, join(text("HbxNativeFound."), domain.clone()), text("1"))?);
+    recolour.append(&set_dynamic(p, join(text("HbxNativeApplied."), domain.clone()), text("1"))?);
+    body.append(&guard(at, active.clone(), recolour)?);
     let disabled = native(0x81, &[active]);
     let at = start + body.mem_size();
     let nonempty = native(0x97, &[length(refs.clone()), int(0)]);

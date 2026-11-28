@@ -77,6 +77,11 @@ pub struct SettingsCfg {
     pub owned_items_only: bool,
     pub hotkey: String,
     pub theme: String,
+    /// Use the original themed egui navigation instead of either modern shell.
+    #[serde(default)]
+    pub legacy_ui: bool,
+    /// Use the WebView2/Wry navigation and header instead of the egui shell.
+    pub wry_ui: bool,
     /// UI language code ("en", "de", ...) or "auto" to follow the system
     pub language: String,
     /// Main tab selected when Hebnix starts.
@@ -151,6 +156,8 @@ impl Default for SettingsCfg {
             owned_items_only: false,
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
+            legacy_ui: false,
+            wry_ui: true,
             language: crate::i18n::AUTO.to_string(),
             default_tab: "Home".to_string(),
             navigation_memory: BTreeMap::new(),

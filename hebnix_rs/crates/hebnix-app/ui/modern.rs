@@ -284,6 +284,7 @@ pub(crate) enum HeaderAction {
         action: crate::config::ActionButtonAction,
     },
     OwnedAccount { account: String },
+    TrackerAccount { account: String },
     RefreshSave,
     OwnedOnly { enabled: bool },
     MoreSettings,
@@ -419,7 +420,6 @@ pub(crate) enum PresetAction {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum TrackerAction {
     Select { id: i64 },
-    RetryAvatar,
 }
 
 #[derive(serde::Deserialize)]
@@ -559,6 +559,7 @@ pub(crate) struct Navigation {
     parent: ParentWindow,
     ctx: egui::Context,
     sender: crossbeam_channel::Sender<String>,
+    navigation_script: String,
     dialog_tried: bool,
 }
 
@@ -587,7 +588,7 @@ impl Navigation {
         let (webview, content, header) = if egui_shell {
             (None, None, None)
         } else {
-            let webview = Self::build_view(cc, &ctx, PAGE, script, sender.clone())?;
+            let webview = Self::build_view(cc, &ctx, PAGE, script.clone(), sender.clone())?;
             let content =
                 Self::optional_surface(cc, &ctx, ABOUT_PAGE, sender.clone()).map(|mut surface| { surface.wait_for_paint = true; ContentView {
                     page: ContentPage::About,
@@ -619,8 +620,41 @@ impl Navigation {
             parent,
             ctx,
             sender,
+            navigation_script: script,
             dialog_tried: false,
         })
+    }
+
+    /// Swap between the full Wry shell and the egui shell without restarting.
+    /// Content views are rebuilt because their transparency is fixed when the
+    /// underlying WebView2 surface is created.
+    pub(crate) fn set_egui_shell(&mut self, egui_shell: bool) -> wry::Result<()> {
+        if self.egui_shell == egui_shell { return Ok(()); }
+        self.hide();
+        SEE_THROUGH_PAGES.store(egui_shell, std::sync::atomic::Ordering::Relaxed);
+        self.content = None;
+        self.cached_content.clear();
+        self.dialog = None;
+        self.dialog_tried = false;
+        self.webview = None;
+        self.header = None;
+        if !egui_shell {
+            self.webview = Some(Self::build_view(
+                &self.parent, &self.ctx, PAGE, self.navigation_script.clone(), self.sender.clone())?);
+            self.content = Self::optional_surface(&self.parent, &self.ctx, ABOUT_PAGE, self.sender.clone())
+                .map(|mut surface| { surface.wait_for_paint = true; ContentView { page: ContentPage::About, surface } });
+            self.header = Self::optional_surface(&self.parent, &self.ctx, HEADER_PAGE, self.sender.clone());
+        }
+        self.egui_shell = egui_shell;
+        self.shown = false;
+        self.ready = false;
+        self.selected = None;
+        self.content_selection = None;
+        self.size = None;
+        self.workspace = None;
+        self.header_region = None;
+        self.sidebar_theme.clear();
+        Ok(())
     }
 
     fn optional_surface(

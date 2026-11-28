@@ -89,12 +89,8 @@ new ResizeObserver(drawChart).observe(chart);
 new MutationObserver(drawChart).observe(document.documentElement, {
   attributes: true, attributeFilter: ["style", "data-hebnix-theme", "data-bs-theme"],
 });
-field("retry").addEventListener("click", () => send({ type: "retry_avatar" }));
-
 window.showTracker = (data) => {
   field("subtitle").textContent = data.subtitle;
-  field("retry").textContent = data.retry_label;
-  field("retry").hidden = !data.can_retry;
   const status = [data.waiting, data.error, data.loading, data.empty].filter(Boolean).join(" · ");
   field("status").textContent = status;
   field("status").hidden = !status;

@@ -203,6 +203,35 @@ impl OwnedInventory {
         })
     }
 
+    pub(crate) fn show_account_picker(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        self.poll(ui.ctx());
+        let selected = self.accounts.iter().find(|account| Some(&account.path) == self.selected.as_ref())
+            .map(|account| account.display_name.clone()).unwrap_or_else(|| "Latest local save".to_owned());
+        let mut next = None;
+        let mut refresh = false;
+        ui.horizontal(|ui| {
+            ui.label("Account:");
+            egui::ComboBox::from_id_salt("settings_save_account")
+                .selected_text(selected)
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for account in &self.accounts {
+                        if ui.selectable_label(Some(&account.path) == self.selected.as_ref(), &account.display_name).clicked() {
+                            next = Some(account.account_id.clone());
+                        }
+                    }
+                });
+            if ui.add_enabled(self.result.is_none(), egui::Button::new("↻")).on_hover_text("Refresh save").clicked() {
+                refresh = true;
+            }
+        });
+        if refresh { self.refresh(ui.ctx()); }
+        if let Some(id) = next.as_ref() {
+            self.refresh_web(ui.ctx(), Some(id));
+        }
+        next
+    }
+
     pub(crate) fn follow_game_account(&mut self,ctx:&egui::Context,running:bool) {
         use std::time::{Instant,Duration};
         let now=Instant::now();
@@ -247,33 +276,14 @@ impl OwnedInventory {
     pub fn show_with_actions(&mut self, ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui)) {
         self.poll(ui.ctx());
         ui.horizontal_wrapped(|ui| {
-            ui.label("Owned items from save:");
-            let before = self.selected.clone();
+            ui.label("Owned items from the active account");
             let name = self
                 .accounts
                 .iter()
                 .find(|account| Some(&account.path) == self.selected.as_ref())
                 .map(|account| account.display_name.as_str())
                 .unwrap_or("Latest local account");
-            ui.add_enabled_ui(self.result.is_none(), |ui| {
-                egui::ComboBox::from_id_salt("owned_save_account")
-                    .selected_text(name)
-                    .show_ui(ui, |ui| {
-                        for account in &self.accounts {
-                            ui.selectable_value(
-                                &mut self.selected,
-                                Some(account.path.clone()),
-                                &account.display_name,
-                            );
-                        }
-                    });
-            });
-            let changed = before != self.selected;
-            if changed {
-                self.ids.clear();
-                self.paints.clear();
-                self.title_ids.clear();
-            }
+            ui.weak(name);
             let refresh = ui
                 .add_enabled(
                     self.result.is_none(),

@@ -189,7 +189,7 @@ pub(super) fn actor(p: &UpkPackage, base: usize) -> R<Script> {
             let key = member(p, "ProjectX.ParameterDispenser_X.VectorParamPair", "Key", pair.clone(), false)?;
             let name = virtual_call(p, "Caps", &[cast(0x57, key)])?;
             let mut condition = raw(&[0x28]);
-            for word in ["COLOR", "COLOUR", "TINT"] {
+            for word in ["COLOR", "COLOUR", "TINT", "PAINT", "PRIMARY", "SECONDARY", "ACCENT"] {
                 let found = native(0x9b, &[virtual_call(p, "InStr", &[name.clone(), text(word)])?, int(-1)]);
                 let mut either = raw(&[0x45]);
                 either.append(&found).raw(&1u16.to_le_bytes()).raw(&[0x27])
@@ -214,7 +214,7 @@ pub(super) fn actor(p: &UpkPackage, base: usize) -> R<Script> {
             let name = member(p, "Engine.ParticleSystemComponent.ParticleSysParam", "Name", pair.clone(), false)?;
             let name = virtual_call(p, "Caps", &[cast(0x57, name)])?;
             let mut named = raw(&[0x28]);
-            for word in ["COLOR", "COLOUR", "TINT"] {
+            for word in ["COLOR", "COLOUR", "TINT", "PAINT", "PRIMARY", "SECONDARY", "ACCENT"] {
                 let found = native(0x9b, &[virtual_call(p, "InStr", &[name.clone(), text(word)])?, int(-1)]);
                 let mut either = raw(&[0x45]);
                 either.append(&found).raw(&1u16.to_le_bytes()).raw(&[0x27])

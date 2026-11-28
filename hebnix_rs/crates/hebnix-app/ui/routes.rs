@@ -273,10 +273,9 @@ impl HebnixApp {
         }
     }
 
-    pub(super) fn handle_modern_tracker(&mut self, action: TrackerAction, ctx: &egui::Context) {
+    pub(super) fn handle_modern_tracker(&mut self, action: TrackerAction, _ctx: &egui::Context) {
         match action {
             TrackerAction::Select { id } => self.home_tracker.web_select(id),
-            TrackerAction::RetryAvatar => self.home_tracker.web_retry_avatar(ctx),
         }
     }
 
@@ -302,7 +301,8 @@ impl HebnixApp {
                     for (index, tab) in Tab::ALL.iter().enumerate() {
                         let pages = subtabs(*tab);
                         let open = expanded == Some(index) && !pages.is_empty();
-                        let openness = ui.ctx().animate_bool_with_time(egui::Id::new(("nav_open", index)), open, 0.15);
+                        let duration = ui.style().animation_time.min(0.15);
+                        let openness = ui.ctx().animate_bool_with_time(egui::Id::new(("nav_open", index)), open, duration);
                         let chevron = (!pages.is_empty()).then_some(openness);
                         if paint.button(ui, &tab.label(), index == tab_index, chevron).clicked() {
                             if open {
@@ -317,7 +317,7 @@ impl HebnixApp {
                                 let leaves = Self::modern_leaf_options(*page);
                                 let selected = index == tab_index && child == Some(at);
                                 let leaf_open = selected && !leaves.is_empty();
-                                let leaf_t = ui.ctx().animate_bool_with_time(egui::Id::new(("nav_leaf", index, at)), leaf_open, 0.15);
+                                let leaf_t = ui.ctx().animate_bool_with_time(egui::Id::new(("nav_leaf", index, at)), leaf_open, duration);
                                 let chevron = (!leaves.is_empty()).then_some(leaf_t);
                                 if paint.button(ui, &t(key), selected && leaves.is_empty(), chevron).clicked() {
                                     pick = Some((index, Some(at), None));
@@ -398,6 +398,32 @@ impl HebnixApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
                     self.render_network_button(ui);
+                    let settings = ui.button("⚙").on_hover_text("Settings");
+                    egui::Popup::menu(&settings)
+                        .open_memory(settings.clicked().then_some(egui::SetOpenCommand::Toggle))
+                        .align(egui::RectAlign::BOTTOM_END)
+                        .width(360.0)
+                        .show(|ui| {
+                            ui.set_min_width(336.0);
+                            ui.heading("Settings");
+                            ui.separator();
+                            if let Some(account) = self.owned_inventory.show_account_picker(ui) {
+                                self.home_tracker.web_select_save_account(&account, ui.ctx());
+                            }
+                            ui.add_space(8.0);
+                            let mut owned = self.config.settings.owned_items_only;
+                            if ui.checkbox(&mut owned, "Show only owned items").changed() {
+                                self.config.settings.owned_items_only = owned;
+                                self.config.patcher.decal_only_owned = owned;
+                                self.save_config();
+                            }
+                            ui.add_space(8.0);
+                            if ui.button("⚙ More Settings").clicked() {
+                                self.tab = Tab::Settings;
+                                self.hebnix_settings_tab = HebnixSettingsTab::Interface;
+                                ui.close();
+                            }
+                        });
                     ui.label(egui::RichText::new(&self.status_text).strong().size(12.0).color(self.status_color));
                     self.render_action_button(ui);
                 });
@@ -468,6 +494,7 @@ impl HebnixApp {
             "title": page_title,
             "show_action_button": self.config.action_button.show_in_header,
             "inventory": self.owned_inventory.web_snapshot(),
+            "tracker": self.home_tracker.web_account_picker(),
             "ownedOnly": self.config.settings.owned_items_only,
             "controller": self.panel.active,
             "page_warning": ((self.on_active_garage_page() || self.tab == Tab::Items
@@ -541,6 +568,10 @@ impl HebnixApp {
             }
             HeaderAction::OwnedAccount { account } => {
                 self.owned_inventory.refresh_web(ctx, Some(&account));
+                self.home_tracker.web_select_save_account(&account, ctx);
+            }
+            HeaderAction::TrackerAccount { account } => {
+                self.home_tracker.web_select_account(&account, ctx);
             }
             HeaderAction::RefreshSave => {
                 self.owned_inventory.refresh_web(ctx, None);
@@ -1073,8 +1104,9 @@ impl NavPaint {
     /// One full-width row. `chevron` is Some(openness) for rows that open a sub-menu.
     fn button(&self, ui: &mut egui::Ui, label: &str, selected: bool, chevron: Option<f32>) -> egui::Response {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.height), egui::Sense::click());
-        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
-        let pick = ui.ctx().animate_bool_with_time(response.id.with("pick"), selected, 0.15);
+        let animation_time = ui.style().animation_time;
+        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), animation_time.min(0.12));
+        let pick = ui.ctx().animate_bool_with_time(response.id.with("pick"), selected, animation_time.min(0.15));
         let bright = (u32::from(self.selected.r()) * 3 + u32::from(self.selected.g()) * 6 + u32::from(self.selected.b())) / 10 > 150;
         let on_selected = if bright { egui::Color32::from_rgb(16, 18, 28) } else { egui::Color32::WHITE };
         let fill = egui::Color32::TRANSPARENT

@@ -220,24 +220,25 @@ function networkPanel() {
 function renderPanel() {
   body.replaceChildren();
   if (state.panel === "settings") {
-    const label = element("label", "quick-owned-row mb-3", "Owned Items");
-    const accounts = element("select", "form-select form-select-sm");
-    accounts.setAttribute("aria-label", "Owned Items");
     const data = state.inventory;
-    if (!data.accounts.length) accounts.append(new Option(data.loading ? "Loading accounts…" : "No accounts found", ""));
-    data.accounts.forEach(account => accounts.append(new Option(account.label, account.id, false, account.selected)));
-    accounts.disabled = data.loading || !data.accounts.length;
-    accounts.addEventListener("change", () => send({type: "owned_account", account: accounts.value}));
-    const refresh=button("↻",()=>send({type:"refresh_save"}),data.loading,"btn btn-sm btn-outline-secondary ui-icon-button");
+    const row = element("div", "d-flex align-items-center gap-2 mb-3");
+    row.append(element("label", "form-label small mb-0 flex-shrink-0", "Account:"));
+    const picker = element("select", "form-select form-select-sm flex-grow-1");
+    picker.setAttribute("aria-label", "Account");
+    if (!data.accounts.length) picker.append(new Option(data.loading ? "Loading saves…" : "No saves found", ""));
+    data.accounts.forEach(account => picker.append(new Option(account.label, account.id, false, account.selected)));
+    picker.disabled = data.loading || !data.accounts.length;
+    picker.addEventListener("change", () => send({type: "owned_account", account: picker.value}));
+    const refresh=button("↻",()=>send({type:"refresh_save"}),data.loading,"btn btn-sm btn-outline-secondary ui-icon-button flex-shrink-0");
     refresh.title="Refresh save";refresh.setAttribute("aria-label","Refresh save");
-    label.append(accounts,refresh);
+    row.append(picker, refresh);
     const owned = element("label", "d-flex gap-2 align-items-center mb-3", "Show only owned items");
     const check = element("input", "form-check-input mt-0");
     check.type = "checkbox"; check.checked = state.ownedOnly;
     check.addEventListener("change", () => send({type: "owned_only", enabled: check.checked}));
     owned.prepend(check);
     const more=button("⚙ More Settings",()=>send({type:"more_settings"}),false,"btn btn-outline-secondary w-100");
-    body.append(label,owned,more);
+    body.append(row,owned,more);
     if (data.error) body.append(element("p", "small text-warning", data.error));
   }
   if (state.panel === "notifications") notifications();

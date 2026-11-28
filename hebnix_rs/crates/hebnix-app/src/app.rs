@@ -2669,7 +2669,7 @@ impl HebnixApp {
     pub(crate) fn enable_modern_ui(&mut self, cc: &eframe::CreationContext<'_>) {
         let labels = Self::modern_tab_labels();
         let started = std::time::Instant::now();
-        let built = crate::modern_ui::Navigation::new(cc, &labels, true);
+        let built = crate::modern_ui::Navigation::new(cc, &labels, !self.config.settings.wry_ui);
         tracing::info!("Modern UI web views built in {:?}", started.elapsed());
         match built {
             Ok(navigation) => {
@@ -5266,17 +5266,6 @@ impl HebnixApp {
             return;
         };
 
-        if let Some(p) = theme::presentation(ui.ctx()) {
-            let labels: Vec<String> = actions.iter().map(|action| action.label()).collect();
-            let selected = if matches!(p.layout.shell, theme::Shell::Sidebar | theme::Shell::Rail) {
-                p.sidebar_actions(ui, &labels)
-            } else { p.inline_actions(ui, &labels) };
-            if let Some(index) = selected {
-                self.execute_action_button_action(actions[index], ui.ctx());
-            }
-            return;
-        }
-
         if secondary.is_empty() {
             if ui.button(primary.label()).clicked() {
                 self.execute_action_button_action(primary, ui.ctx());
@@ -5289,6 +5278,14 @@ impl HebnixApp {
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.horizontal(|ui| {
+                let main = ui.add(egui::Button::new(primary.label()).corner_radius(
+                    egui::CornerRadius {
+                        nw: 3,
+                        ne: 0,
+                        sw: 3,
+                        se: 0,
+                    },
+                ));
                 let arrow = ui.add(
                     egui::Button::new("")
                         .min_size(egui::vec2(24.0, 0.0))
@@ -5299,14 +5296,6 @@ impl HebnixApp {
                             se: 3,
                         }),
                 );
-                let main = ui.add(egui::Button::new(primary.label()).corner_radius(
-                    egui::CornerRadius {
-                        nw: 3,
-                        ne: 0,
-                        sw: 3,
-                        se: 0,
-                    },
-                ));
                 run_primary = main.clicked();
                 let arrow_visuals = ui.style().interact(&arrow);
                 let center = arrow.rect.center();
@@ -5333,6 +5322,7 @@ impl HebnixApp {
                 );
                 egui::Popup::menu(&popup_anchor)
                     .open_memory(arrow.clicked().then_some(egui::SetOpenCommand::Toggle))
+                    .align(egui::RectAlign::BOTTOM_END)
                     .width(combined_rect.width())
                     .show(|ui| {
                         for &action in secondary {
@@ -5503,6 +5493,36 @@ impl HebnixApp {
                                     });
                                     ui.separator();
                                     if self.appearance_subtab == AppearanceSubTab::Theme {
+                                        #[cfg(windows)]
+                                        {
+                                            let mut mode = if self.config.settings.legacy_ui { 2 }
+                                                else if self.config.settings.wry_ui { 0 } else { 1 };
+                                            let before = mode;
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Interface:");
+                                                ui.selectable_value(&mut mode, 0, "Wry UI");
+                                                ui.selectable_value(&mut mode, 1, "Modern UI");
+                                                ui.selectable_value(&mut mode, 2, "Legacy UI");
+                                            });
+                                            if mode != before {
+                                                let legacy = mode == 2;
+                                                let wry = mode == 0;
+                                                if let Some(navigation) = &mut self.modern_navigation {
+                                                    if legacy {
+                                                        navigation.hide();
+                                                    } else if let Err(error) = navigation.set_egui_shell(!wry) {
+                                                        self.console.write(format!("[UI] Could not switch renderer: {error}"));
+                                                        return;
+                                                    }
+                                                }
+                                                self.config.settings.legacy_ui = legacy;
+                                                self.config.settings.wry_ui = wry;
+                                                self.save_config();
+                                                ctx.request_repaint();
+                                                return;
+                                            }
+                                            ui.add_space(8.0);
+                                        }
                                         let label_w = label_column_width(ui, &[t("settings-theme-label")]);
                                         ui.horizontal_wrapped(|ui| {
                                             crate::i18n::layout::settings_label(ui, label_w, t("settings-theme-label"));
@@ -8453,7 +8473,7 @@ impl eframe::App for HebnixApp {
         }
         let events = self.panel.pad.drain();
         #[cfg(windows)]
-        if let Some(navigation) = &self.modern_navigation {
+        if !self.config.settings.legacy_ui && let Some(navigation) = &self.modern_navigation {
             for event in &events {
                 match event {
                     crate::panel::PadEvent::PrevPage => self.panel.pending_page -= 1,
@@ -8561,7 +8581,7 @@ impl eframe::App for HebnixApp {
         let ctx = &ui.ctx().clone();
         crate::visibility::note_ui_frame(ctx);
         #[cfg(windows)]
-        let modern_mode = self.modern_navigation.is_some();
+        let modern_mode = self.modern_navigation.is_some() && !self.config.settings.legacy_ui;
         #[cfg(windows)]
         if let Some(navigation) = &mut self.modern_navigation {
             navigation.set_theme(&self.config.settings.theme, ctx);
@@ -8671,7 +8691,8 @@ impl eframe::App for HebnixApp {
             #[cfg(target_os = "linux")]
             egui::Panel::top("linux_titlebar").show(ui, |ui| self.render_titlebar(ui));
             #[cfg(target_os = "windows")]
-            let modern_navigation = !self.panel.active && self.show_modern_navigation(ui);
+            let modern_navigation = !self.config.settings.legacy_ui
+                && !self.panel.active && self.show_modern_navigation(ui);
             #[cfg(not(target_os = "windows"))]
             let modern_navigation = false;
             #[cfg(windows)]
