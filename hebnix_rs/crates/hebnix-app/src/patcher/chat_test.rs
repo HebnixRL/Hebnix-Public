@@ -373,8 +373,8 @@ mod tests {
         let legacy = block(&package, script.mem_size() - END.len(), Format::NamedSender).unwrap();
         script.insert_before_tail(END.len(), &legacy);
         replace_script(&mut package, COMMAND, &script).unwrap();
-        if let Some(version) = restart {
-            super::super::workshop_host::attach_freeplay_restart(&mut package, version).unwrap();
+        if restart.is_some() {
+            super::super::workshop_host::attach_freeplay_restart(&mut package).unwrap();
         }
         assert!(edit(&mut package, false).unwrap());
         assert_eq!(payload(&package).unwrap().1.bytes(), before.bytes());

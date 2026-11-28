@@ -320,12 +320,13 @@ pub(crate) fn detach_freeplay_restart(upk: &mut UpkPackage) -> Result<Option<u8>
     Ok(version)
 }
 
-pub(crate) fn attach_freeplay_restart(upk: &mut UpkPackage, version: u8) -> Result<(), String> {
+/// Always the current variant: a detached 1-3 block crashes the game, so it isn't put back.
+pub(crate) fn attach_freeplay_restart(upk: &mut UpkPackage) -> Result<(), String> {
     let (_, mut script) = payload(upk)?;
     if !script.bytes().ends_with(&[0x04, 0x0b, 0x4c]) {
         return Err(format!("{COMMAND} changed layout in this Rocket League version"));
     }
-    let block = freeplay_block(upk, script.mem_size() - END, version)?;
+    let block = freeplay_block(upk, script.mem_size() - END, 4)?;
     script.insert_before_tail(END, &block);
     replace_script(upk, COMMAND, &script)
 }
@@ -373,7 +374,7 @@ pub(crate) fn attach_tail_blocks(upk: &mut UpkPackage, blocks: &[TailBlock]) -> 
     for block in blocks.iter().rev() {
         match block {
             TailBlock::Host => add(upk)?,
-            TailBlock::Freeplay(version) => attach_freeplay_restart(upk, *version)?,
+            TailBlock::Freeplay(_) => attach_freeplay_restart(upk)?,
             TailBlock::ChatTest => super::chat_test::attach(upk)?,
         }
     }
