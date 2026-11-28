@@ -3059,6 +3059,26 @@ impl HebnixApp {
         });
     }
 
+    /// The two-player outline the web page drew (64x48 viewBox), back player dimmed.
+    fn multiplayer_icon(ui: &mut egui::Ui) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 48.0), egui::Sense::hover());
+        let text = ui.visuals().text_color();
+        let at = |x: f32, y: f32| rect.min + egui::vec2(x, y);
+        for (head, base, r, alpha) in [((43.0, 14.0), (43.0, 40.0), 14.0f32, 0.55f32), ((24.0, 11.0), (24.0, 37.0), 14.0, 1.0)] {
+            let stroke = egui::Stroke::new(2.0, text.gamma_multiply(alpha));
+            ui.painter().circle_stroke(at(head.0, head.1), 8.0, stroke);
+            // half disc: arc over the base line, closed by it
+            let mut body: Vec<egui::Pos2> = (0..=24)
+                .map(|step| {
+                    let angle = std::f32::consts::PI * (1.0 + step as f32 / 24.0);
+                    at(base.0 + r * angle.cos(), base.1 + r * angle.sin())
+                })
+                .collect();
+            body.push(body[0]);
+            ui.painter().add(egui::Shape::line(body, stroke));
+        }
+    }
+
     fn egui_multiplayer(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
         let send = |kind: &str, extra: Value| web_act("multiplayer", kind, extra);
         let connection = &data["connection"];
@@ -3075,29 +3095,44 @@ impl HebnixApp {
         if !started {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.set_max_width(560.0);
+                ui.set_max_width(680.0);
                 web_card(ui, |ui| {
+                    ui.add_space(14.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new("Workshop Multiplayer").size(22.0).strong());
-                        ui.add_space(6.0);
+                        Self::multiplayer_icon(ui);
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("Workshop Multiplayer").size(26.0).strong());
+                        ui.add_space(8.0);
                         ui.label(egui::RichText::new(label("intro")).color(muted));
-                        ui.add_space(6.0);
-                        preference(ui, actions, "relay", &label("relay"));
+                        ui.add_space(14.0);
+                        // toggles share one left-aligned column so they line up
+                        let column = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+                            ui.allocate_ui_with_layout(egui::vec2(320.0f32.min(ui.available_width()), 0.0), egui::Layout::top_down(egui::Align::Min), |ui| add(ui));
+                        };
+                        column(ui, &mut |ui| preference(ui, actions, "relay", &label("relay")));
+                        ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            ui.add_space(((ui.available_width() - 220.0) / 2.0).max(0.0));
-                            if web_primary(ui, &label("connect"), !connection["stopping"].as_bool().unwrap_or(false)) {
+                            let (connect, help) = (egui::vec2(150.0, 36.0), egui::vec2(300.0, 36.0));
+                            ui.add_space(((ui.available_width() - connect.x - help.x - ui.spacing().item_spacing.x) / 2.0).max(0.0));
+                            let enabled = !connection["stopping"].as_bool().unwrap_or(false);
+                            if ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label("connect")).strong()).min_size(connect)).clicked() {
                                 actions.push(send("connect", Value::Null));
                             }
-                            if ui.button(label("help")).clicked() {
+                            if ui.add(egui::Button::new(label("help")).min_size(help)).clicked() {
                                 actions.push(send("help", Value::Null));
                             }
                         });
-                        preference(ui, actions, "close", "Disconnect when Hebnix closes");
-                        preference(ui, actions, "toasts", &label("toasts"));
+                        ui.add_space(8.0);
+                        column(ui, &mut |ui| {
+                            preference(ui, actions, "close", "Disconnect when Hebnix closes");
+                            preference(ui, actions, "toasts", &label("toasts"));
+                        });
                         if let Some(status) = connection["status"].as_str().filter(|text| !text.is_empty()) {
+                            ui.add_space(6.0);
                             ui.label(egui::RichText::new(status).small());
                         }
                     });
+                    ui.add_space(14.0);
                 });
             });
             return;
