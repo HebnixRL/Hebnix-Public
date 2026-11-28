@@ -423,10 +423,78 @@ impl HebnixApp {
         })
     }
 
+    /// Dashboard in the web version's look: a status card with large values, then a card with the primary action.
+    fn modern_dashboard(&mut self, ui: &mut egui::Ui, connected: bool) {
+        let green = egui::Color32::from_rgb(110, 220, 140);
+        let visuals = ui.visuals().clone();
+        let border = visuals.text_color().gamma_multiply(0.25);
+        let card = egui::Frame::NONE
+            .fill(visuals.faint_bg_color.gamma_multiply(0.6))
+            .stroke(egui::Stroke::new(1.0, border))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(18, 14));
+        let live = crate::patcher::live_cosmetics::status_snapshot();
+        let live_colour = match live["colour"].as_str() {
+            Some("success") => green,
+            Some("danger") => egui::Color32::LIGHT_RED,
+            _ => egui::Color32::YELLOW,
+        };
+        let stat = |ui: &mut egui::Ui, label: &str, value: &str, colour: egui::Color32, tip: &str| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(label).size(12.5).color(visuals.weak_text_color()));
+                ui.add_space(1.0);
+                ui.label(egui::RichText::new(value).size(18.0).strong().color(colour)).on_hover_text(tip);
+            });
+        };
+        let weak = visuals.text_color();
+        card.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (running, running_colour) = (
+                    t(if self.last_rl_open { "home-running" } else { "home-stopped" }),
+                    if self.last_rl_open { green } else { weak },
+                );
+                stat(ui, "Rocket League", &running, running_colour, "");
+                ui.add_space(28.0);
+                ui.separator();
+                ui.add_space(28.0);
+                let (api, api_colour) = (
+                    t(if connected { "home-connected" } else { "home-disconnected" }),
+                    if connected { green } else { weak },
+                );
+                stat(ui, "Stats API", &api, api_colour, "");
+                ui.add_space(28.0);
+                ui.separator();
+                ui.add_space(28.0);
+                stat(ui, "Live Cosmetics", live["label"].as_str().unwrap_or("Installing"), live_colour, live["detail"].as_str().unwrap_or_default());
+            });
+        });
+        ui.add_space(12.0);
+        let running = self.last_rl_open;
+        let accent = visuals.hyperlink_color;
+        let bright = (u32::from(accent.r()) * 3 + u32::from(accent.g()) * 6 + u32::from(accent.b())) / 10 > 150;
+        let ink = if bright { egui::Color32::from_rgb(16, 18, 28) } else { egui::Color32::WHITE };
+        let mut start = false;
+        card.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let label = egui::RichText::new(if running { "Stop Rocket League  ■" } else { "Start Rocket League  ▶" }).size(15.0).color(ink);
+            let button = egui::Button::new(label).fill(accent).stroke(egui::Stroke::NONE)
+                .corner_radius(6).min_size(egui::vec2(0.0, 38.0));
+            start = ui.add(button).clicked();
+        });
+        if start {
+            self.execute_action_button_action(if running {
+                crate::config::ActionButtonAction::CloseRocketLeague
+            } else {
+                crate::config::ActionButtonAction::StartRocketLeague
+            }, ui.ctx());
+        }
+    }
+
     pub(super) fn render_home(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
         let connected = self.last_rl_open && self.stats.connected();
         ui.ctx().request_repaint_after(Duration::from_millis(250));
-        if crate::theme::presentation(ui.ctx()).is_none_or(|theme| theme.layout.show_page_heading) {
+        if !modern_navigation && crate::theme::presentation(ui.ctx()).is_none_or(|theme| theme.layout.show_page_heading) {
             ui.heading(t("home-title"));
             ui.add_space(8.0);
         }
@@ -443,6 +511,7 @@ impl HebnixApp {
             ui.separator();
         }
         match self.home.tab {
+            HomeTab::Dashboard if modern_navigation => self.modern_dashboard(ui, connected),
             HomeTab::Dashboard => {
                 let green = if ui.visuals().dark_mode {
                     egui::Color32::LIGHT_GREEN
@@ -502,6 +571,8 @@ impl HebnixApp {
                 }
             }
             HomeTab::LiveMatch => live_match(ui, &self.home, connected, self.last_rl_open),
+            #[cfg(windows)]
+            HomeTab::Tracker if modern_navigation => self.home_tracker.show_modern(ui),
             HomeTab::Tracker => self.home_tracker.show(ui),
         }
     }

@@ -97,7 +97,10 @@ impl HebnixApp {
         }
     }
 
-    pub(super) fn render_modern_manager(&mut self, ui: &egui::Ui) -> bool {
+    pub(super) fn render_modern_manager(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.egui_ported_page() && !self.egui_manage_supported() {
+            return false;
+        }
         if !self.has_modern_manager() {
             return false;
         }
@@ -202,6 +205,9 @@ impl HebnixApp {
             _ => self.modern_plugins_data(ui.ctx()),
         };
         data["globalOwnedOnly"] = json!(self.config.settings.owned_items_only);
+        if self.egui_shell() {
+            return self.show_manage_egui(ui, &data);
+        }
         let Some(navigation) = self.modern_navigation.as_mut() else {
             return false;
         };
@@ -1806,4 +1812,1634 @@ fn plugin_id(entry: &Value) -> Option<&str> {
         .or_else(|| entry.get("id"))
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
+}
+
+const RANK_PLAYLIST_ICONS: [egui::ImageSource<'static>; 10] = [
+    egui::include_image!("../assets/ingame-rank/Playlists/0.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/1.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/2.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/3.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/4.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/5.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/6.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/7.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/8.png"),
+    egui::include_image!("../assets/ingame-rank/Playlists/9.png"),
+];
+const RANK_TIER_ICONS: [egui::ImageSource<'static>; 23] = [
+    egui::include_image!("../assets/ingame-rank/Tiers/0.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/1.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/2.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/3.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/4.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/5.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/6.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/7.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/8.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/9.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/10.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/11.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/12.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/13.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/14.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/15.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/16.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/17.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/18.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/19.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/20.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/21.png"),
+    egui::include_image!("../assets/ingame-rank/Tiers/22.png"),
+];
+
+/// Picker state kept while the popup is open: playlist id, tier, division, MMR text.
+type RankDraft = (i32, i32, u8, String);
+
+impl HebnixApp {
+    /// Rank spoofing as the web page draws it: a tile per playlist and a tier-picker popup.
+    pub(super) fn render_rank_tiles(&mut self, ui: &mut egui::Ui) {
+        let draft_id = egui::Id::new("rank_draft");
+        let mut draft: Option<RankDraft> = ui.ctx().data(|d| d.get_temp(draft_id));
+        let busy = self.rank_patch.busy();
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let accent = ui.visuals().selection.stroke.color;
+        let muted = ui.visuals().weak_text_color();
+        ui.label("Choose the rank, division and MMR shown locally in Rocket League.");
+        ui.label(egui::RichText::new("Close Rocket League before applying. Untick a playlist and apply to restore its display.").small().color(muted));
+        ui.add_space(10.0);
+        let columns = 5usize;
+        let gap = 12.0;
+        let width = ((ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32).floor();
+        let numerals = ["I", "II", "III", "IV"];
+        egui::Grid::new("rank_tiles").spacing([gap, gap]).show(ui, |ui| {
+            for (index, &(id, name, _)) in super::RANK_SPOOF_PLAYLISTS.iter().enumerate() {
+                let state = self.spoofer_ranks.entry(id).or_default();
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 242.0), egui::Sense::click());
+                let hover = ui.ctx().animate_bool_with_time(response.id.with("h"), response.hovered() && !busy, 0.12);
+                let border = if state.enabled { accent } else { line.color.lerp_to_gamma(accent, hover) };
+                ui.painter().rect_stroke(rect, 12.0, egui::Stroke::new(1.0, border), egui::StrokeKind::Inside);
+                let icon = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 62.0), egui::Vec2::splat(76.0));
+                egui::Image::new(RANK_PLAYLIST_ICONS[index.min(9)].clone()).fit_to_exact_size(icon.size()).paint_at(ui, icon);
+                ui.painter().text(egui::pos2(rect.center().x, rect.top() + 128.0), egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(14.0), ui.visuals().text_color());
+                let division = if state.rank > 0 && state.rank < 22 { numerals[usize::from(state.division).min(3)].to_owned() } else { "—".to_owned() };
+                let mmr = if state.mmr.trim().is_empty() { "—".to_owned() } else { state.mmr.clone() };
+                for (row, (label, value)) in [("Rank", super::rank_name(state.rank).to_owned()), ("Div", division), ("MMR", mmr)].into_iter().enumerate() {
+                    let y = rect.bottom() - 63.0 + row as f32 * 21.0 + 10.0;
+                    ui.painter().text(egui::pos2(rect.left() + 10.0, y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), muted);
+                    ui.painter().text(egui::pos2(rect.right() - 10.0, y), egui::Align2::RIGHT_CENTER, value, egui::FontId::proportional(12.0), ui.visuals().text_color());
+                }
+                let check = egui::Rect::from_min_size(egui::pos2(rect.right() - 30.0, rect.top() + 8.0), egui::Vec2::splat(22.0));
+                let toggled = ui.put(check, egui::Checkbox::without_text(&mut state.enabled)).hovered();
+                if response.clicked() && !busy && !toggled {
+                    draft = Some((id, state.rank, state.division, state.mmr.clone()));
+                }
+                if (index + 1) % columns == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+        ui.add_space(12.0);
+        let ready = self.web_rank_ready();
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - 292.0) / 2.0).max(0.0));
+            if ui.add_enabled(ready, egui::Button::new(t("spoofer-apply-ranks")).fill(accent.gamma_multiply(0.6)).min_size(egui::vec2(140.0, 30.0)))
+                .on_disabled_hover_text("Set the Rocket League folder and close the game first.").clicked()
+            {
+                action = Some(false);
+            }
+            if ui.add_enabled(ready, egui::Button::new(t("spoofer-restore-ranks")).min_size(egui::vec2(140.0, 30.0)))
+                .on_hover_text(t("spoofer-restore-ranks-help")).clicked()
+            {
+                action = Some(true);
+            }
+        });
+        if busy {
+            ui.horizontal(|ui| { ui.spinner(); ui.label(&self.rank_patch.status); });
+        } else if !self.rank_patch.status.is_empty() {
+            ui.label(egui::RichText::new(&self.rank_patch.status).small());
+        }
+        if let Some(restore) = action {
+            self.update_rank_display(self.swapper_cooked_path(), restore, ui.ctx());
+        }
+
+        let mut apply = None;
+        let mut close = false;
+        if let Some((id, rank, division, mmr)) = draft.as_mut() {
+            let ctx = ui.ctx().clone();
+            let screen = ctx.viewport_rect();
+            egui::Area::new(egui::Id::new("rank_scrim")).order(egui::Order::Foreground).fixed_pos(screen.min).show(&ctx, |ui| {
+                let (rect, response) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(150));
+                close |= response.clicked();
+            });
+            let title = super::RANK_SPOOF_PLAYLISTS.iter().find(|row| row.0 == *id).map_or("", |row| row.1);
+            egui::Area::new(egui::Id::new("rank_picker")).order(egui::Order::Tooltip).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).show(&ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
+                    ui.set_width(760.0f32.min(screen.width() - 40.0));
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(title).size(18.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("×").clicked() { close = true; }
+                        });
+                    });
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical().max_height((screen.height() * 0.5).min(380.0)).show(ui, |ui| {
+                        let columns = 6usize;
+                        let gap = 8.0;
+                        let tile_w = ((ui.available_width() - gap * 5.0) / columns as f32).floor();
+                        egui::Grid::new("rank_tiers").spacing([gap, gap]).show(ui, |ui| {
+                            for tier in 0..=22i32 {
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(tile_w, 92.0), egui::Sense::click());
+                                let selected = *rank == tier;
+                                let hover = ui.ctx().animate_bool_with_time(response.id.with("h"), response.hovered(), 0.1);
+                                let fill = if selected { ui.visuals().widgets.hovered.weak_bg_fill } else { ui.visuals().faint_bg_color.lerp_to_gamma(ui.visuals().widgets.hovered.weak_bg_fill, hover) };
+                                let border = if selected { accent } else { line.color.lerp_to_gamma(accent, hover) };
+                                ui.painter().rect(rect, 8.0, fill, egui::Stroke::new(1.0, border), egui::StrokeKind::Inside);
+                                let icon = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 37.0), egui::vec2(80.0f32.min(tile_w - 8.0), 58.0));
+                                egui::Image::new(RANK_TIER_ICONS[tier as usize].clone()).fit_to_exact_size(icon.size()).paint_at(ui, icon);
+                                ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 14.0), egui::Align2::CENTER_CENTER, super::rank_name(tier), egui::FontId::proportional(12.0), ui.visuals().text_color());
+                                if response.clicked() {
+                                    *rank = tier;
+                                    *mmr = ((super::default_mu_for_tier(tier) * 20.0 + 100.0) as u32).to_string();
+                                    if tier == 0 || tier == 22 { *division = 0; }
+                                }
+                                if (tier as usize + 1) % columns == 0 { ui.end_row(); }
+                            }
+                        });
+                    });
+                    ui.add_space(10.0);
+                    let names = ["Division I", "Division II", "Division III", "Division IV"];
+                    ui.columns(2, |cols| {
+                        cols[0].label("Division");
+                        cols[0].add_enabled_ui(*rank != 0 && *rank != 22, |ui| {
+                            egui::ComboBox::from_id_salt("rank_picker_division")
+                                .selected_text(names[usize::from(*division).min(3)])
+                                .width(ui.available_width())
+                                .show_ui(ui, |ui| {
+                                    for (value, name) in names.into_iter().enumerate() {
+                                        ui.selectable_value(division, value as u8, name);
+                                    }
+                                });
+                        });
+                        cols[1].label("MMR");
+                        cols[1].add(egui::TextEdit::singleline(mmr).desired_width(f32::INFINITY));
+                    });
+                    ui.add_space(4.0);
+                    let recommended = (super::default_mu_for_tier(*rank) * 20.0 + 100.0) as u32;
+                    ui.label(egui::RichText::new(format!("Recommended MMR: {recommended}. You can enter a custom value.")).small().color(muted));
+                    ui.add_space(8.0);
+                    let valid = mmr.trim().parse::<u32>().is_ok_and(|value| (100..=9999).contains(&value));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_enabled(valid && !busy, egui::Button::new("Save").fill(accent.gamma_multiply(0.6)).min_size(egui::vec2(90.0, 28.0))).clicked() {
+                            apply = Some((*id, *rank, *division, mmr.trim().to_owned()));
+                        }
+                        if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(90.0, 28.0))).clicked() { close = true; }
+                    });
+                });
+            });
+            if ctx.input(|input| input.key_pressed(egui::Key::Escape)) { close = true; }
+        }
+        if let Some((id, rank, division, mmr)) = apply {
+            let state = self.spoofer_ranks.entry(id).or_default();
+            state.rank = rank;
+            state.division = if (1..22).contains(&rank) { division } else { 0 };
+            state.mmr = mmr;
+            draft = None;
+        } else if close {
+            draft = None;
+        }
+        ui.ctx().data_mut(|d| match draft {
+            Some(value) => { d.insert_temp(draft_id, value); }
+            None => d.remove::<RankDraft>(draft_id),
+        });
+    }
+}
+
+/// Bordered section like the web `tracker-detail` panel.
+fn web_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let line = ui.visuals().widgets.noninteractive.bg_stroke;
+    egui::Frame::NONE
+        .stroke(line)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(16))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+fn web_heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(16.0).strong());
+}
+
+fn web_muted(ui: &mut egui::Ui, text: &str) {
+    let muted = ui.visuals().weak_text_color();
+    ui.label(egui::RichText::new(text).size(13.0).color(muted));
+}
+
+/// Checkbox row; returns the new value when it changed.
+fn web_toggle(ui: &mut egui::Ui, label: &str, value: bool, enabled: bool) -> Option<bool> {
+    let mut checked = value;
+    let changed = ui.add_enabled(enabled, egui::Checkbox::new(&mut checked, label)).changed();
+    changed.then_some(checked)
+}
+
+impl HebnixApp {
+    /// Pages with an egui view driven by the web snapshot and the web action handler.
+    pub(super) fn egui_manage_supported(&self) -> bool {
+        match self.tab {
+            Tab::Spoofer => matches!(
+                self.spoofer_subtab,
+                SpooferSubTab::Username | SpooferSubTab::Friends | SpooferSubTab::Scoreboard
+            ),
+            Tab::Settings => self.hebnix_settings_tab == HebnixSettingsTab::ActionButton,
+            Tab::GameMods | Tab::Freeplay => true,
+            Tab::Workshop => matches!(self.workshop.view, crate::ui::workshop::WorkshopView::Import | crate::ui::workshop::WorkshopView::MenuMap | crate::ui::workshop::WorkshopView::InGameMenu | crate::ui::workshop::WorkshopView::Multiplayer),
+            _ => false,
+        }
+    }
+
+    fn send_manage(&mut self, message: Value, ctx: &egui::Context) {
+        match serde_json::from_value::<ManageAction>(message) {
+            Ok(action) => self.handle_modern_manager(action, ctx),
+            Err(error) => tracing::debug!(%error, "egui page produced an unknown action"),
+        }
+    }
+
+    /// Draws the page named by `data["page"]`; false leaves it to the older egui view.
+    fn show_manage_egui(&mut self, ui: &mut egui::Ui, data: &Value) -> bool {
+        let mut actions: Vec<Value> = Vec::new();
+        let page = data["page"].as_str().unwrap_or_default();
+        let mut handled = true;
+        egui::ScrollArea::vertical().id_salt(("manage_page", page)).auto_shrink([false, false]).show(ui, |ui| {
+            match page {
+                "player-name" => Self::egui_player_name(ui, data, &mut actions),
+                "player-friends" => Self::egui_friends(ui, data, &mut actions),
+                "player-scoreboard" => Self::egui_scoreboard(ui, data, &mut actions),
+                "action-button" => Self::egui_action_buttons(ui, data, &mut actions),
+                "game-mods" => Self::egui_game_mods(ui, data, &mut actions),
+                "freeplay" => Self::egui_freeplay(ui, data, &mut actions),
+                "add-maps" => Self::egui_add_maps(ui, data, &mut actions),
+                "workshop-menu" => Self::egui_workshop_menu(ui, data, &mut actions),
+                "multiplayer" => Self::egui_multiplayer(ui, data, &mut actions),
+                "menu-map" => Self::egui_menu_map(ui, data, &mut actions),
+                _ => handled = false,
+            }
+        });
+        let ctx = ui.ctx().clone();
+        for action in actions {
+            self.send_manage(action, &ctx);
+        }
+        handled
+    }
+
+    fn egui_player_name(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let max = data["max"].as_u64().unwrap_or(16) as usize;
+        let id = egui::Id::new("player_name_buffer");
+        let mut name: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| data["name"].as_str().unwrap_or_default().to_owned());
+        let width = ui.available_width().min(760.0);
+        ui.add_space(24.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(width);
+            web_card(ui, |ui| {
+                ui.set_width(width - 34.0);
+                ui.vertical(|ui| {
+                    web_muted(ui, "Choose your display name");
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if let Some(enabled) = web_toggle(ui, "Display Name", data["enabled"].as_bool().unwrap_or(false), true) {
+                            actions.push(json!({ "type": "player_name_enabled", "enabled": enabled }));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            web_muted(ui, &format!("{} / {max}", name.chars().count()));
+                        });
+                    });
+                    let response = ui.add(egui::TextEdit::singleline(&mut name).horizontal_align(egui::Align::Center).desired_width(f32::INFINITY).margin(egui::vec2(10.0, 8.0)));
+                    if response.changed() {
+                        name = name.chars().take(max).collect();
+                        actions.push(json!({ "type": "player_name", "name": name, "commit": false }));
+                    }
+                    if response.lost_focus() {
+                        actions.push(json!({ "type": "player_name", "name": name, "commit": true }));
+                    }
+                    ui.add_space(8.0);
+                    web_heading(ui, "Previous names");
+                    ui.add_space(4.0);
+                    let history = data["history"].as_array().cloned().unwrap_or_default();
+                    if history.is_empty() {
+                        web_muted(ui, "No previous names yet.");
+                    } else {
+                        let gap = 8.0;
+                        let cell = ((ui.available_width() - gap * 2.0) / 3.0).floor();
+                        egui::Grid::new("player_name_history").spacing([gap, gap]).show(ui, |ui| {
+                            for (index, entry) in history.iter().enumerate() {
+                                let entry = entry.as_str().unwrap_or_default();
+                                let accent = ui.visuals().selection.stroke.color;
+                                let mut button = egui::Button::new(egui::RichText::new(entry)).truncate().min_size(egui::vec2(cell, 30.0));
+                                if entry == name {
+                                    button = button.fill(accent.gamma_multiply(0.5));
+                                }
+                                if ui.add_sized([cell, 30.0], button).on_hover_text(entry).clicked() {
+                                    name = entry.to_owned();
+                                    actions.push(json!({ "type": "player_name", "name": entry, "commit": true }));
+                                }
+                                if (index + 1) % 3 == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    }
+                    ui.add_space(10.0);
+                    web_muted(ui, "Names are saved automatically.");
+                });
+            });
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(id, name));
+    }
+
+    fn egui_friends(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let id = egui::Id::new("friends_search");
+        let mut term: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
+        ui.horizontal(|ui| {
+            if let Some(enabled) = web_toggle(ui, data["toggle"].as_str().unwrap_or_default(), data["enabled"].as_bool().unwrap_or(false), true) {
+                actions.push(json!({ "type": "friend_names_enabled", "enabled": enabled }));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(data["revert"].as_str().unwrap_or_default()).clicked() {
+                    actions.push(json!({ "type": "revert_friend_names" }));
+                }
+                ui.add(egui::TextEdit::singleline(&mut term).hint_text(data["search"].as_str().unwrap_or_default()).desired_width(220.0).margin(egui::vec2(8.0, 6.0)));
+            });
+        });
+        ui.add_space(6.0);
+        let lower = term.trim().to_lowercase();
+        web_card(ui, |ui| {
+            let rows = data["rows"].as_array().cloned().unwrap_or_default();
+            if rows.is_empty() {
+                web_muted(ui, data["empty"].as_str().unwrap_or_default());
+            }
+            for friend in rows.iter().filter(|friend| {
+                ["name", "alias"].iter().any(|key| friend[key].as_str().unwrap_or_default().to_lowercase().contains(&lower))
+            }) {
+                let friend_id = friend["id"].clone();
+                let mut enabled = friend["enabled"].as_bool().unwrap_or(false);
+                let mut alias = friend["alias"].as_str().unwrap_or_default().to_owned();
+                let mut original = friend["name"].as_str().unwrap_or_default().to_owned();
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut enabled, "").changed() {
+                        actions.push(json!({ "type": "friend_name", "id": friend_id, "enabled": enabled }));
+                    }
+                    ui.add(egui::TextEdit::singleline(&mut original).desired_width(160.0).interactive(false).margin(egui::vec2(8.0, 5.0)));
+                    let edit = ui.add(egui::TextEdit::singleline(&mut alias).hint_text(data["placeholder"].as_str().unwrap_or_default()).desired_width(f32::INFINITY).margin(egui::vec2(8.0, 5.0)));
+                    if edit.lost_focus() && edit.changed() {
+                        actions.push(json!({ "type": "friend_name", "id": friend_id, "name": alias }));
+                    }
+                });
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(id, term));
+    }
+
+    fn egui_scoreboard(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let ready = data["ready"].as_bool().unwrap_or(false);
+        let mut set = |key: &str, value: Value| actions.push(json!({ "type": "scoreboard", "key": key, "value": value }));
+        web_card(ui, |ui| {
+            web_heading(ui, &label("names"));
+            if let Some(value) = web_toggle(ui, &label("enableNames"), data["names"].as_bool().unwrap_or(false), ready) {
+                set("names", json!(value));
+            }
+            if let Some(value) = web_toggle(ui, &label("ignore"), data["ignore"].as_bool().unwrap_or(false), true) {
+                set("ignore", json!(value));
+            }
+        });
+        ui.add_space(12.0);
+        web_card(ui, |ui| {
+            web_heading(ui, &label("mmr"));
+            if let Some(value) = web_toggle(ui, &label("enableMmr"), data["mmr"].as_bool().unwrap_or(false), ready) {
+                set("mmr", json!(value));
+            }
+            let source = data["source"].as_str().unwrap_or_default();
+            for mode in ["playlist", "gamemode", "manual"] {
+                if ui.radio(source == mode, label(mode)).clicked() && source != mode {
+                    set("source", json!(mode));
+                }
+            }
+            if source == "manual" {
+                let current = data["playlist"].as_i64();
+                let playlists = data["playlists"].as_array().cloned().unwrap_or_default();
+                let selected = playlists
+                    .iter()
+                    .find(|entry| entry[0].as_i64() == current)
+                    .and_then(|entry| entry[1].as_str())
+                    .map_or_else(|| label("choose"), str::to_owned);
+                egui::ComboBox::from_id_salt("scoreboard_playlist").selected_text(selected).show_ui(ui, |ui| {
+                    for entry in &playlists {
+                        let id = entry[0].as_i64();
+                        if ui.selectable_label(id == current, entry[1].as_str().unwrap_or_default()).clicked() {
+                            set("playlist", json!(id));
+                        }
+                    }
+                });
+            }
+        });
+        let status = data["status"].as_str().filter(|status| !status.is_empty())
+            .or_else(|| data["loading"].as_bool().unwrap_or(false).then_some("Loading…"));
+        if let Some(status) = status {
+            ui.add_space(8.0);
+            web_muted(ui, status);
+        }
+    }
+
+    fn egui_action_buttons(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        web_card(ui, |ui| {
+            if let Some(enabled) = web_toggle(ui, "Show action button in header", data["showInHeader"].as_bool().unwrap_or(false), true) {
+                actions.push(json!({ "type": "action_button_visibility", "enabled": enabled }));
+            }
+            ui.label(data["intro"].as_str().unwrap_or_default());
+            web_muted(ui, data["hint"].as_str().unwrap_or_default());
+            ui.add_space(6.0);
+            let line = ui.visuals().widgets.noninteractive.bg_stroke;
+            for running in [false, true] {
+                let entries = data[if running { "open" } else { "closed" }].as_array().cloned().unwrap_or_default();
+                let active = entries.iter().filter(|entry| entry["enabled"].as_bool().unwrap_or(false)).count();
+                web_heading(ui, data[if running { "openLabel" } else { "closedLabel" }].as_str().unwrap_or_default());
+                ui.add_space(4.0);
+                for (index, entry) in entries.iter().enumerate() {
+                    let enabled = entry["enabled"].as_bool().unwrap_or(false);
+                    let blocked = enabled && active == 1;
+                    egui::Frame::NONE.stroke(line).corner_radius(6.0).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("{}.", index + 1)).color(ui.visuals().weak_text_color()));
+                            let toggle = web_toggle(ui, entry["label"].as_str().unwrap_or_default(), enabled, !blocked);
+                            if let Some(enabled) = toggle {
+                                actions.push(json!({ "type": "action_button_toggle", "running": running, "index": index, "enabled": enabled }));
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(index + 1 < entries.len(), egui::Button::new("↓")).clicked() {
+                                    actions.push(json!({ "type": "action_button_move", "running": running, "from": index, "to": index + 1 }));
+                                }
+                                if ui.add_enabled(index > 0, egui::Button::new("↑")).clicked() {
+                                    actions.push(json!({ "type": "action_button_move", "running": running, "from": index, "to": index - 1 }));
+                                }
+                            });
+                        });
+                    });
+                    ui.add_space(4.0);
+                }
+                ui.add_space(8.0);
+            }
+        });
+    }
+}
+
+/// Selection, search and confirmation state of the arena editor while its page is open.
+#[derive(Clone, Default)]
+struct ArenaView {
+    full: bool,
+    donor: String,
+    host: String,
+    donor_search: String,
+    host_search: String,
+    bulk_confirm: bool,
+    requested: String,
+}
+
+type ArenaImages = std::collections::HashMap<String, std::sync::Arc<[u8]>>;
+
+impl HebnixApp {
+    /// The arena editor / map swapper as the web page lays it out: two searchable tile grids,
+    /// action buttons, a bulk confirmation and the active changes list.
+    pub(super) fn show_arena_egui(&mut self, ui: &mut egui::Ui, full: bool) {
+        use crate::ui::workshop::background_changer::ArenaAction;
+        let ctx = ui.ctx().clone();
+        let data = self.workshop.background_changer.web_snapshot(&self.config.settings.rl_path, full, &ctx);
+        let view_id = egui::Id::new("arena_view");
+        let images_id = egui::Id::new("arena_images");
+        let mut view: ArenaView = ctx.data(|d| d.get_temp(view_id)).unwrap_or_default();
+        if view.full != full {
+            view = ArenaView { full, ..Default::default() };
+        }
+        let mut images: ArenaImages = ctx.data(|d| d.get_temp(images_id)).unwrap_or_default();
+        if let Some(previews) = data["previews"].as_object() {
+            for (id, value) in previews {
+                if images.contains_key(id) { continue; }
+                let Some(uri) = value.as_str() else { continue };
+                let Some((_, encoded)) = uri.split_once(",") else { continue };
+                if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded) {
+                    images.insert(id.clone(), bytes.into());
+                }
+            }
+        }
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let running = data["running"].as_bool().unwrap_or(false);
+        let no_background = "__HBNX_NO_BACKGROUND__";
+        let muted = ui.visuals().weak_text_color();
+        let mut actions: Vec<Value> = Vec::new();
+        let mut visible: Vec<String> = Vec::new();
+
+        egui::ScrollArea::vertical().id_salt("arena_page").auto_shrink([false, false]).show(ui, |ui| {
+            ui.label(egui::RichText::new(if full {
+                "Choose the map you want to play, then choose the arena it will replace entirely."
+            } else {
+                "Choose the arena you want to play, then choose the fog, sky, and background to borrow."
+            }).color(muted));
+            ui.add_space(10.0);
+            let gap = 16.0;
+            let column = ((ui.available_width() - gap) / 2.0).floor();
+            let grid_height = (ui.ctx().content_rect().height() * 0.53).clamp(240.0, 512.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for side in ["donor", "host"] {
+                    let (title, placeholder) = if side == "donor" {
+                        if full { ("Map you want", "Search maps") } else { ("Background you want", "Search backgrounds") }
+                    } else {
+                        ("Map to apply it to", "Search maps")
+                    };
+                    ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        web_card(ui, |ui| {
+                            ui.set_width(column - 34.0);
+                            web_heading(ui, title);
+                            ui.add_space(4.0);
+                            let search = if side == "donor" { &mut view.donor_search } else { &mut view.host_search };
+                            ui.add(egui::TextEdit::singleline(search).hint_text(placeholder).desired_width(f32::INFINITY).margin(egui::vec2(8.0, 5.0)));
+                            ui.add_space(6.0);
+                            let term = search.trim().to_lowercase();
+                            let rows: Vec<&Value> = data[format!("{side}s")].as_array().into_iter().flatten()
+                                .filter(|row| row["name"].as_str().unwrap_or_default().to_lowercase().contains(&term))
+                                .collect();
+                            let selected = if side == "donor" { &mut view.donor } else { &mut view.host };
+                            let width = ui.available_width() - 10.0;
+                            let columns = (((width + 8.0) / 128.0).floor() as usize).clamp(2, 5);
+                            let tile_w = ((width - 8.0 * (columns as f32 - 1.0)) / columns as f32).floor();
+                            egui::ScrollArea::vertical().id_salt(("arena_grid", side)).max_height(grid_height).min_scrolled_height(grid_height).auto_shrink([false, false]).show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                                egui::Grid::new(("arena_tiles", side)).spacing([8.0, 8.0]).show(ui, |ui| {
+                                    for (index, row) in rows.iter().enumerate() {
+                                        let id = row["id"].as_str().unwrap_or_default();
+                                        let name = row["name"].as_str().unwrap_or_default();
+                                        let (rect, response) = ui.allocate_exact_size(egui::vec2(tile_w, 116.0), egui::Sense::click());
+                                        let on = *selected == id;
+                                        let hover = ui.ctx().animate_bool_with_time(response.id.with("h"), response.hovered(), 0.1);
+                                        let base = ui.visuals().widgets.inactive.weak_bg_fill;
+                                        let fill = base.lerp_to_gamma(ui.visuals().widgets.hovered.weak_bg_fill, hover);
+                                        let accent = ui.visuals().selection.stroke.color;
+                                        let line = ui.visuals().widgets.noninteractive.bg_stroke.color;
+                                        ui.painter().rect(rect, 6.0, fill, egui::Stroke::new(1.0, if on { accent } else { line.lerp_to_gamma(accent, hover * 0.6) }), egui::StrokeKind::Inside);
+                                        let caption_h = 30.0;
+                                        let art = egui::Rect::from_min_max(rect.min + egui::vec2(4.0, 4.0), egui::pos2(rect.right() - 4.0, rect.bottom() - caption_h - 6.0));
+                                        if ui.is_rect_visible(rect) && id != no_background { visible.push(id.to_owned()); }
+                                        if id == no_background {
+                                            let c = art.center();
+                                            ui.painter().circle_stroke(c, 14.0, egui::Stroke::new(1.5, muted));
+                                            ui.painter().line_segment([c + egui::vec2(-9.0, -9.0), c + egui::vec2(9.0, 9.0)], egui::Stroke::new(1.5, muted));
+                                        } else if let Some(bytes) = images.get(id) {
+                                            let source = egui::ImageSource::Bytes { uri: format!("bytes://arena/{id}").into(), bytes: egui::load::Bytes::Shared(bytes.clone()) };
+                                            egui::Image::new(source).fit_to_exact_size(art.size()).corner_radius(3.0).paint_at(ui, art);
+                                        } else if data["previews"].get(id).is_some_and(Value::is_null) {
+                                            ui.painter().rect_stroke(egui::Rect::from_center_size(art.center(), egui::vec2(28.0, 22.0)), 3.0, egui::Stroke::new(1.5, muted), egui::StrokeKind::Inside);
+                                        } else {
+                                            ui.painter().text(art.center(), egui::Align2::CENTER_CENTER, "Loading preview…", egui::FontId::proportional(12.0), muted);
+                                        }
+                                        let cap = egui::Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.bottom() - caption_h - 4.0), rect.max - egui::vec2(4.0, 4.0));
+                                        ui.painter().rect_filled(cap, 3.0, ui.visuals().extreme_bg_color.gamma_multiply(0.8));
+                                        let galley = ui.painter().layout(name.to_owned(), egui::FontId::proportional(12.0), ui.visuals().text_color(), cap.width() - 8.0);
+                                        let pos = egui::pos2(cap.center().x - galley.size().x / 2.0, cap.center().y - galley.size().y / 2.0);
+                                        ui.painter().with_clip_rect(cap).galley(pos, galley, ui.visuals().text_color());
+                                        response.clone().on_hover_text(name);
+                                        if response.clicked() {
+                                            *selected = id.to_owned();
+                                        }
+                                        if (index + 1) % columns == 0 { ui.end_row(); }
+                                    }
+                                });
+                            });
+                        });
+                    });
+                }
+            });
+            // selection must still exist after a refresh
+            for (side, selected) in [("donors", &mut view.donor), ("hosts", &mut view.host)] {
+                if !data[side].as_array().into_iter().flatten().any(|row| row["id"].as_str() == Some(selected.as_str())) {
+                    selected.clear();
+                }
+            }
+            let removal = view.donor == no_background;
+            let can_apply = !busy && !running && !view.donor.is_empty() && !view.host.is_empty()
+                && view.donor.trim_start_matches("arena:").trim_start_matches("full-map:") != view.host;
+            let can_bulk = !busy && !running && !view.donor.is_empty() && !removal && data["bulk_targets"].as_u64().unwrap_or(0) > 0;
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let buttons = if full { 2.0 } else { 4.0 };
+                ui.add_space(((ui.available_width() - buttons * 150.0) / 2.0).max(0.0));
+                if ui.add(egui::Button::new("Refresh").min_size(egui::vec2(140.0, 28.0))).clicked() {
+                    images.clear();
+                    view.requested.clear();
+                    actions.push(json!({ "type": "refresh" }));
+                }
+                if !full {
+                    if ui.add(egui::Button::new("Background folder").min_size(egui::vec2(140.0, 28.0))).clicked() {
+                        actions.push(json!({ "type": "folder" }));
+                    }
+                    if ui.add_enabled(can_bulk, egui::Button::new("Apply to all unchanged maps").min_size(egui::vec2(140.0, 28.0))).clicked() {
+                        view.bulk_confirm = true;
+                    }
+                }
+                let accent = ui.visuals().selection.stroke.color;
+                let label = if removal { "Remove background" } else { "Apply" };
+                if ui.add_enabled(can_apply, egui::Button::new(label).fill(accent.gamma_multiply(0.6)).min_size(egui::vec2(140.0, 28.0))).clicked() {
+                    actions.push(json!({ "type": "apply", "host": view.host, "donor": view.donor }));
+                }
+            });
+            if view.bulk_confirm && !full {
+                ui.add_space(10.0);
+                web_card(ui, |ui| {
+                    ui.label(data["bulk_warning"].as_str().unwrap_or_default());
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(can_bulk, egui::Button::new("Apply to all unchanged maps")).clicked() {
+                            actions.push(json!({ "type": "apply_all", "donor": view.donor }));
+                            view.bulk_confirm = false;
+                        }
+                        if ui.button("Cancel").clicked() { view.bulk_confirm = false; }
+                    });
+                });
+            }
+            if busy {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(data["status"].as_str().unwrap_or("Updating arena patch"));
+                });
+            }
+            let status = if running {
+                "Close Rocket League before applying or restoring changes."
+            } else if !data["changed"].as_bool().unwrap_or(false) || data["status"].as_str().is_some_and(|s| s.starts_with("Restored ") && s.ends_with("original background.")) {
+                ""
+            } else {
+                data["status"].as_str().unwrap_or_default()
+            };
+            if !status.is_empty() && !busy {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(status).color(muted));
+            }
+            let active = data["active"].as_array().cloned().unwrap_or_default();
+            if !active.is_empty() {
+                ui.add_space(12.0);
+                web_card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        web_heading(ui, "Active changes");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add_enabled(!running && !busy, egui::Button::new("Restore all")).clicked() {
+                                actions.push(json!({ "type": "restore_all" }));
+                            }
+                        });
+                    });
+                    for entry in &active {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} → {}", entry[2].as_str().unwrap_or_default(), entry[1].as_str().unwrap_or_default()));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add_enabled(!running && !busy, egui::Button::new("Restore")).clicked() {
+                                    actions.push(json!({ "type": "restore", "host": entry[0] }));
+                                }
+                            });
+                        });
+                    }
+                });
+            }
+        });
+
+        visible.sort();
+        visible.dedup();
+        visible.retain(|id| !images.contains_key(id) && !data["previews"].as_object().is_some_and(|map| map.contains_key(id)));
+        let request = visible.join("\n");
+        if request != view.requested {
+            view.requested = request;
+            if !visible.is_empty() {
+                actions.push(json!({ "type": "preview", "ids": visible }));
+            }
+        }
+        for action in actions {
+            if let Ok(action) = serde_json::from_value::<ArenaAction>(action) {
+                self.workshop.background_changer.web_action(action, &self.config.settings.rl_path, full, &self.tx, &ctx);
+            }
+        }
+        ctx.data_mut(|d| {
+            d.insert_temp(view_id, view);
+            d.insert_temp(images_id, images);
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+}
+
+fn val_str(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// `[[id, label], ...]` or `["a", "b"]` as (value, label) pairs.
+fn web_pairs(value: &Value) -> Vec<(String, String)> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| match entry.as_array() {
+            Some(pair) if pair.len() >= 2 => (val_str(&pair[0]), val_str(&pair[1])),
+            _ => (val_str(entry), val_str(entry)),
+        })
+        .collect()
+}
+
+/// Drop-down over `(value, label)` pairs; returns the picked value when it changed.
+fn web_select(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, current: &str, options: &[(String, String)], enabled: bool) -> Option<String> {
+    let shown = options
+        .iter()
+        .find(|(value, _)| value == current)
+        .map_or_else(|| current.to_owned(), |(_, label)| label.clone());
+    let mut picked = None;
+    ui.add_enabled_ui(enabled, |ui| {
+        egui::ComboBox::from_id_salt(egui::Id::new(id)).selected_text(shown).show_ui(ui, |ui| {
+            for (value, label) in options {
+                if ui.selectable_label(value == current, label).clicked() {
+                    picked = Some(value.clone());
+                }
+            }
+        });
+    });
+    picked
+}
+
+/// Bar for a running patch: a real fraction when one is known, otherwise indeterminate.
+fn web_progress(ui: &mut egui::Ui, busy: bool, progress: &Value) {
+    if !busy {
+        return;
+    }
+    let fraction = progress.as_f64().or_else(|| {
+        let total = progress["total"].as_f64()?;
+        (total > 0.0).then(|| progress["done"].as_f64().unwrap_or(0.0) / total)
+    });
+    let bar = match fraction {
+        Some(fraction) => egui::ProgressBar::new(fraction.clamp(0.0, 1.0) as f32),
+        None => egui::ProgressBar::new(0.0).animate(true),
+    };
+    ui.add(bar.desired_height(8.0));
+    ui.ctx().request_repaint();
+}
+
+fn web_primary(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+    let accent = ui.visuals().selection.stroke.color;
+    ui.add_enabled(enabled, egui::Button::new(label).fill(accent.gamma_multiply(0.6))).clicked()
+}
+
+impl HebnixApp {
+    fn egui_game_mods(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let capturing = data["capturing"].as_str().map(str::to_owned);
+        let muted = ui.visuals().weak_text_color();
+        for module in data["rows"].as_array().into_iter().flatten() {
+            let id = module["id"].as_str().unwrap_or_default().to_owned();
+            let busy = module["busy"].as_bool().unwrap_or(false);
+            let update = |key: &str, value: Value| json!({ "type": "game_mod", "id": id, "key": key, "value": value });
+            web_card(ui, |ui| {
+                if let Some(enabled) = web_toggle(ui, module["label"].as_str().unwrap_or_default(), module["enabled"].as_bool().unwrap_or(false), !busy) {
+                    actions.push(update("enabled", json!(enabled)));
+                }
+                web_muted(ui, module["description"].as_str().unwrap_or_default());
+                if let Some(output) = module["output"].as_str().filter(|text| !text.is_empty()) {
+                    web_muted(ui, output);
+                }
+                if module["keys"].is_array() {
+                    let keyboard_label = module["keyboardLabel"].as_str().unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.label(keyboard_label);
+                        let keys = web_pairs(&module["keys"]);
+                        if let Some(key) = web_select(ui, ("game_mod_key", &id), module["keyboard"].as_str().unwrap_or_default(), &keys, !busy) {
+                            actions.push(update("keyboard", json!(key)));
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let waiting = capturing.as_deref() == Some(id.as_str());
+                        ui.label(egui::RichText::new(labels["pad"].as_str().unwrap_or_default()).strong());
+                        let pad = module["pad"].as_str().unwrap_or_default();
+                        let text = if waiting {
+                            labels["press"].as_str().unwrap_or_default()
+                        } else if pad.is_empty() {
+                            labels["none"].as_str().unwrap_or_default()
+                        } else {
+                            pad
+                        };
+                        ui.label(egui::RichText::new(text).small().color(muted));
+                        if ui.add_enabled(!busy && capturing.is_none(), egui::Button::new(labels["bind"].as_str().unwrap_or_default())).clicked() {
+                            actions.push(update("bind", Value::Null));
+                        }
+                        if !pad.is_empty() && ui.add_enabled(!busy && !waiting, egui::Button::new(labels["clear"].as_str().unwrap_or_default())).clicked() {
+                            actions.push(update("pad", json!("")));
+                        }
+                    });
+                }
+                if id == "instant-suite" {
+                    let names = &module["labels"];
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(value) = web_toggle(ui, names["private"].as_str().unwrap_or_default(), module["private"].as_bool().unwrap_or(false), true) {
+                            actions.push(update("private", json!(value)));
+                        }
+                        if let Some(value) = web_toggle(ui, names["tournaments"].as_str().unwrap_or_default(), module["tournaments"].as_bool().unwrap_or(false), true) {
+                            actions.push(update("tournaments", json!(value)));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(names["mode"].as_str().unwrap_or_default());
+                        let modes = web_pairs(&module["modes"]);
+                        if let Some(value) = web_select(ui, "instant_mode", &val_str(&module["mode"]), &modes, true) {
+                            actions.push(update("mode", json!(value)));
+                        }
+                    });
+                    if module["maps"].is_object() {
+                        if !module["maps"]["enabled"].as_bool().unwrap_or(false) {
+                            ui.colored_label(ui.visuals().warn_fg_color, names["needsMenu"].as_str().unwrap_or_default());
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(names["map"].as_str().unwrap_or_default());
+                            let mut maps = vec![(String::new(), names["pick"].as_str().unwrap_or_default().to_owned())];
+                            maps.extend(web_pairs(&module["maps"]["items"]));
+                            if let Some(value) = web_select(ui, "instant_map", &val_str(&module["map"]), &maps, true).filter(|value| !value.is_empty()) {
+                                actions.push(update("map", json!(value)));
+                            }
+                            if ui.button(names["reload"].as_str().unwrap_or_default()).clicked() {
+                                actions.push(update("reload", Value::Null));
+                            }
+                        });
+                    }
+                }
+                let status = module["status"].as_str().unwrap_or_default();
+                if busy || !status.is_empty() {
+                    web_muted(ui, if status.is_empty() { "Working…" } else { status });
+                }
+                web_progress(ui, busy, &module["progress"]);
+            });
+            ui.add_space(12.0);
+        }
+    }
+
+    fn egui_freeplay(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let enabled = data["enabled"].as_bool().unwrap_or(false);
+        let mut settings: Vec<&Value> = data["rows"].as_array().into_iter().flatten().collect();
+        settings.sort_by_key(|setting| setting["label"].as_str().unwrap_or_default().to_lowercase());
+        web_card(ui, |ui| {
+            if let Some(checked) = web_toggle(ui, "Enable Freeplay Mutators", data["checked"].as_bool().unwrap_or(false), data["canToggle"].as_bool().unwrap_or(false)) {
+                actions.push(json!({ "type": "freeplay_toggle", "enabled": checked }));
+            }
+            if data["patchMissing"].as_bool().unwrap_or(false) {
+                ui.colored_label(ui.visuals().warn_fg_color, "TAGame.upk no longer contains the current Freeplay patch. Close Rocket League and enable Freeplay Mutators again.");
+            }
+            for setting in settings.iter().filter(|setting| setting["group"] == "mode") {
+                Self::egui_freeplay_row(ui, setting, enabled, actions);
+            }
+            if data["heatseeker"].as_bool().unwrap_or(false) {
+                web_muted(ui, "Use a Soccar arena and pick a team when the Heatseeker practice lobby opens.");
+            }
+            if data["lanSession"].as_bool().unwrap_or(false) {
+                web_muted(ui, "This session uses Maps > In-game menu controls.");
+            }
+            if ui.add_enabled(enabled, egui::Button::new("Reset to defaults")).clicked() {
+                actions.push(json!({ "type": "freeplay_reset" }));
+            }
+            if let Some(status) = data["status"].as_str().filter(|text| !text.is_empty()) {
+                web_muted(ui, status);
+            }
+        });
+        ui.add_space(12.0);
+        let gap = 16.0;
+        let column = ((ui.available_width() - gap) / 2.0).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (group, title) in [("ball", "Ball"), ("rules", "Cars and Rules")] {
+                ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    web_card(ui, |ui| {
+                        ui.set_width(column - 34.0);
+                        web_heading(ui, title);
+                        ui.add_space(4.0);
+                        for setting in settings.iter().filter(|setting| setting["group"] == group) {
+                            Self::egui_freeplay_row(ui, setting, enabled, actions);
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    fn egui_freeplay_row(ui: &mut egui::Ui, setting: &Value, enabled: bool, actions: &mut Vec<Value>) {
+        let options: Vec<(String, String)> = setting["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, name)| (index.to_string(), val_str(name)))
+            .collect();
+        let index = setting["index"].as_u64().unwrap_or(0);
+        ui.horizontal(|ui| {
+            ui.label(setting["label"].as_str().unwrap_or_default());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(value) = web_select(ui, ("freeplay", index), &val_str(&setting["pick"]), &options, enabled) {
+                    if let Ok(value) = value.parse::<u64>() {
+                        actions.push(json!({ "type": "freeplay_pick", "index": index, "value": value }));
+                    }
+                }
+            });
+        });
+    }
+}
+
+/// Dimmed backdrop plus a centred popup card; `add` fills the card.
+fn web_modal(ctx: &egui::Context, id: &str, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+    let screen = ctx.viewport_rect();
+    egui::Area::new(egui::Id::new((id, "scrim"))).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+        let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(150));
+    });
+    egui::Area::new(egui::Id::new((id, "card"))).order(egui::Order::Tooltip).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
+            ui.set_width(width.min(screen.width() - 40.0));
+            add(ui);
+        });
+    });
+}
+
+impl HebnixApp {
+    fn egui_add_maps(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let local = &data["local"];
+        let labels = &local["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let menu_busy = data["menu_busy"].as_bool().unwrap_or(false);
+        let locked = data["menu_disabled"].as_bool().unwrap_or(false) || menu_busy;
+        let action = |kind: &str, key: &str, fields: Option<&Vec<String>>| {
+            let mut value = json!({ "type": "add_maps", "action": { "type": kind, "key": key } });
+            if let Some(fields) = fields {
+                value["action"]["fields"] = json!(fields);
+            }
+            value
+        };
+        let buffer_id = egui::Id::new("add_maps_fields");
+        let file = local["file"].as_str().unwrap_or_default().to_owned();
+        let mut buffer: (String, Vec<String>) = ui.ctx().data(|d| d.get_temp(buffer_id)).unwrap_or_default();
+        if buffer.0 != file || buffer.1.len() != 3 {
+            buffer = (file.clone(), local["fields"].as_array().into_iter().flatten().map(val_str).collect());
+            buffer.1.resize(3, String::new());
+        }
+        let has_details = !(local["details"].is_null() || local["details"] == false);
+        ui.add_enabled_ui(!locked, |ui| {
+            web_card(ui, |ui| {
+                web_heading(ui, &label("title"));
+                ui.label(label("intro"));
+                ui.add_space(6.0);
+                if !has_details {
+                    web_heading(ui, &label("file"));
+                    web_muted(ui, &label("types"));
+                    if let Some(done) = local["done"].as_str().filter(|text| !text.is_empty()) {
+                        ui.colored_label(ui.visuals().hyperlink_color, done);
+                    }
+                    if web_primary(ui, &label("choose"), true) {
+                        actions.push(action("local", "file", None));
+                    }
+                } else {
+                    web_heading(ui, &label("details"));
+                    ui.label(&file);
+                    ui.add_space(4.0);
+                    for (index, key) in ["name", "author", "description"].into_iter().enumerate() {
+                        ui.label(label(key));
+                        let edit = if index == 2 {
+                            egui::TextEdit::multiline(&mut buffer.1[index]).desired_rows(3)
+                        } else {
+                            egui::TextEdit::singleline(&mut buffer.1[index])
+                        };
+                        ui.add(edit.desired_width(f32::INFINITY).margin(egui::vec2(8.0, 6.0)));
+                        ui.add_space(4.0);
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button(label("vdf")).clicked() {
+                            actions.push(action("local", "vdf", Some(&buffer.1)));
+                        }
+                        if ui.button(label("image")).clicked() {
+                            actions.push(action("local", "image", Some(&buffer.1)));
+                        }
+                        let banner = local["banner"].as_str().unwrap_or_default();
+                        ui.label(egui::RichText::new(if banner.is_empty() { label("optional") } else { banner.to_owned() }).small());
+                        if !banner.is_empty() && ui.button(label("clear")).clicked() {
+                            actions.push(action("local", "clear", Some(&buffer.1)));
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(label("back")).clicked() {
+                            actions.push(action("local", "back", Some(&buffer.1)));
+                        }
+                        if web_primary(ui, &label("import"), !buffer.1[0].trim().is_empty()) {
+                            actions.push(action("local", "import", Some(&buffer.1)));
+                        }
+                    });
+                }
+                if let Some(notice) = local["notice"].as_str().filter(|text| !text.is_empty()) {
+                    web_muted(ui, notice);
+                }
+                if let Some(error) = local["error"].as_str().filter(|text| !text.is_empty()) {
+                    ui.colored_label(ui.visuals().warn_fg_color, error);
+                }
+            });
+        });
+        if locked {
+            let lock = &data["menu_lock"];
+            web_modal(ui.ctx(), "add_maps_lock", 420.0, |ui| {
+                web_heading(ui, lock["title"].as_str().unwrap_or_default());
+                ui.add_space(6.0);
+                ui.label(lock["body"].as_str().unwrap_or_default());
+                ui.add_space(8.0);
+                let text = if menu_busy { lock["busy"].as_str() } else { lock["enable"].as_str() }.unwrap_or_default();
+                if web_primary(ui, text, !menu_busy) {
+                    actions.push(json!({ "type": "add_maps", "action": { "type": "enable_menu" } }));
+                }
+            });
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(buffer_id, buffer));
+    }
+}
+
+/// `{type: outer, action: {type: kind, ...extra}}`, the shape the web pages post.
+fn web_act(outer: &str, kind: &str, extra: Value) -> Value {
+    let mut action = json!({ "type": kind });
+    if let Some(map) = extra.as_object() {
+        for (key, value) in map {
+            action[key] = value.clone();
+        }
+    }
+    json!({ "type": outer, "action": action })
+}
+
+/// Number box that commits on release / Enter, like the web number inputs.
+fn web_number(ui: &mut egui::Ui, value: f64, range: Option<(f64, f64)>, step: f64, enabled: bool) -> Option<f64> {
+    let mut edited = value;
+    let mut drag = egui::DragValue::new(&mut edited).speed(step);
+    if let Some((low, high)) = range {
+        drag = drag.range(low..=high);
+    }
+    let response = ui.add_enabled(enabled, drag);
+    ((response.drag_stopped() || response.lost_focus()) && edited != value).then_some(edited)
+}
+
+fn web_row<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.label(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add).inner
+    })
+    .inner
+}
+
+impl HebnixApp {
+    fn egui_workshop_menu(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let send = |kind: &str, extra: Value| web_act("workshop_menu", kind, extra);
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let lan_only = data["lanOnly"].as_bool().unwrap_or(false);
+        if data["freeplay"].as_bool().unwrap_or(false) {
+            web_muted(ui, "The active practice session uses the Freeplay tab. LAN settings below apply to Workshop and LAN matches.");
+        }
+        let gap = 16.0;
+        let column = ((ui.available_width() - gap) / 2.0).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(column);
+                if !lan_only {
+                    web_card(ui, |ui| {
+                        web_heading(ui, "In-game Workshop menu");
+                        web_muted(ui, "Adds Workshop to Rocket League’s offline Play menu. Close Rocket League before changing it.");
+                        let enabled = data["enabled"].as_bool();
+                        if let Some(value) = web_toggle(ui, "Enable in-game menu", enabled == Some(true), !busy && enabled.is_some()) {
+                            actions.push(send("enable", json!({ "enabled": value })));
+                        }
+                        if ui.add_enabled(!busy && enabled == Some(true), egui::Button::new("Update Workshop patch")).clicked() {
+                            actions.push(send("update", Value::Null));
+                        }
+                        if let Some(error) = data["error"].as_str().filter(|text| !text.is_empty()) {
+                            ui.colored_label(ui.visuals().warn_fg_color, error);
+                        }
+                        let status = data["status"].as_str().unwrap_or_default();
+                        if busy || !status.is_empty() {
+                            ui.label(if status.is_empty() { "Working…" } else { status });
+                        }
+                        web_progress(ui, busy, &data["progress"]);
+                    });
+                    ui.add_space(8.0);
+                    web_card(ui, |ui| {
+                        web_heading(ui, "Map downloader");
+                        let enabled = data["enabled"].as_bool() == Some(true);
+                        if let Some(value) = web_toggle(ui, "Enable map downloader", data["downloader"].as_bool().unwrap_or(false), !busy && enabled) {
+                            actions.push(send("downloader", json!({ "enabled": value })));
+                        }
+                        web_muted(ui, "With the downloader enabled, press L3 in the Workshop menu to browse maps.");
+                    });
+                    ui.add_space(8.0);
+                    web_card(ui, |ui| {
+                        web_heading(ui, "Local maps");
+                        ui.label(egui::RichText::new(data["folder"].as_str().unwrap_or_default()).small());
+                        if ui.button("Rescan").clicked() {
+                            actions.push(send("rescan", Value::Null));
+                        }
+                        ui.label(egui::RichText::new(format!("{} maps found.", data["count"])).small());
+                    });
+                    ui.add_space(8.0);
+                }
+                web_card(ui, |ui| {
+                    web_heading(ui, "LAN match");
+                    web_muted(ui, "Used when you host a map from the in-game Workshop menu.");
+                    let sizes: Vec<(String, String)> = (1..=4).map(|size| (size.to_string(), format!("{size}v{size}"))).collect();
+                    web_row(ui, "Team size", |ui| {
+                        if let Some(value) = web_select(ui, "lan_team", &val_str(&data["team"]), &sizes, true).and_then(|value| value.parse::<u64>().ok()) {
+                            actions.push(send("team_size", json!({ "value": value })));
+                        }
+                    });
+                    let bots: Vec<(String, String)> = data["botChoices"].as_array().into_iter().flatten().enumerate().map(|(index, name)| (index.to_string(), val_str(name))).collect();
+                    web_row(ui, "Bots", |ui| {
+                        if let Some(value) = web_select(ui, "lan_bots", &val_str(&data["bots"]), &bots, true).and_then(|value| value.parse::<u64>().ok()) {
+                            actions.push(send("bots", json!({ "value": value })));
+                        }
+                    });
+                    for status in data["offers"].as_array().into_iter().flatten() {
+                        ui.label(egui::RichText::new(format!("Peer map: {}", val_str(status))).small());
+                    }
+                });
+                ui.add_space(8.0);
+                web_card(ui, |ui| {
+                    let id = egui::Id::new("lan_access");
+                    let mut form: (bool, String, String) = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_else(|| (
+                        data["custom"].as_bool().unwrap_or(false),
+                        data["name"].as_str().unwrap_or_default().to_owned(),
+                        data["password"].as_str().unwrap_or_default().to_owned(),
+                    ));
+                    web_heading(ui, "LAN match access");
+                    ui.checkbox(&mut form.0, "Use custom LAN credentials");
+                    ui.add_enabled(form.0, egui::TextEdit::singleline(&mut form.1).hint_text("Game default").char_limit(32).desired_width(f32::INFINITY));
+                    ui.add_enabled(form.0, egui::TextEdit::singleline(&mut form.2).password(true).hint_text("No password").char_limit(32).desired_width(f32::INFINITY));
+                    if ui.button("Save LAN match access").clicked() {
+                        actions.push(send("access", json!({ "custom": form.0, "name": form.1, "password": form.2 })));
+                    }
+                    ui.ctx().data_mut(|d| d.insert_temp(id, form));
+                });
+            });
+            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(column);
+                web_card(ui, |ui| {
+                    web_heading(ui, "LAN Mutators");
+                    web_muted(ui, "These settings are used when hosting a LAN match. Heatseeker needs two Soccar goals.");
+                    if lan_only {
+                        if let Some(status) = data["status"].as_str().filter(|text| !text.is_empty()) {
+                            ui.label(status);
+                        }
+                    }
+                    for setting in data["rows"].as_array().into_iter().flatten() {
+                        let options: Vec<(String, String)> = setting["options"].as_array().into_iter().flatten().enumerate().map(|(index, name)| (index.to_string(), val_str(name))).collect();
+                        let index = setting["index"].as_u64().unwrap_or(0);
+                        web_row(ui, setting["label"].as_str().unwrap_or_default(), |ui| {
+                            if let Some(value) = web_select(ui, ("mutator", index), &val_str(&setting["pick"]), &options, true).and_then(|value| value.parse::<u64>().ok()) {
+                                actions.push(send("mutator", json!({ "index": index, "value": value })));
+                            }
+                        });
+                    }
+                    if let Some(extra) = data["extra"].as_str().filter(|text| !text.is_empty()) {
+                        web_muted(ui, &format!("Other tags kept: {extra}"));
+                    }
+                    if ui.button("Reset to defaults").clicked() {
+                        actions.push(send("reset", Value::Null));
+                    }
+                });
+            });
+        });
+    }
+
+    fn egui_multiplayer(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let send = |kind: &str, extra: Value| web_act("multiplayer", kind, extra);
+        let connection = &data["connection"];
+        let options = &data["options"];
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let muted = ui.visuals().weak_text_color();
+        let started = connection["started"].as_bool().unwrap_or(false);
+        let preference = |ui: &mut egui::Ui, actions: &mut Vec<Value>, key: &str, text: &str| {
+            if let Some(enabled) = web_toggle(ui, text, options[key].as_bool().unwrap_or(false), true) {
+                actions.push(send("preference", json!({ "key": key, "enabled": enabled })));
+            }
+        };
+        if !started {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(560.0);
+                web_card(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Workshop Multiplayer").size(22.0).strong());
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(label("intro")).color(muted));
+                        ui.add_space(6.0);
+                        preference(ui, actions, "relay", &label("relay"));
+                        ui.horizontal(|ui| {
+                            ui.add_space(((ui.available_width() - 220.0) / 2.0).max(0.0));
+                            if web_primary(ui, &label("connect"), !connection["stopping"].as_bool().unwrap_or(false)) {
+                                actions.push(send("connect", Value::Null));
+                            }
+                            if ui.button(label("help")).clicked() {
+                                actions.push(send("help", Value::Null));
+                            }
+                        });
+                        preference(ui, actions, "close", "Disconnect when Hebnix closes");
+                        preference(ui, actions, "toasts", &label("toasts"));
+                        if let Some(status) = connection["status"].as_str().filter(|text| !text.is_empty()) {
+                            ui.label(egui::RichText::new(status).small());
+                        }
+                    });
+                });
+            });
+            return;
+        }
+        let gap = 16.0;
+        let left = 320.0f32.min(ui.available_width() * 0.35).floor();
+        let right = (ui.available_width() - left - gap).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(egui::vec2(left, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(left - 34.0);
+                    web_heading(ui, &label("setup"));
+                    ui.label(connection["setup"].as_str().unwrap_or_default());
+                    if connection["checking"].as_bool().unwrap_or(false) {
+                        web_muted(ui, &label("checking"));
+                    }
+                    if connection["close"].as_bool().unwrap_or(false) && ui.button(label("closeGame")).clicked() {
+                        actions.push(send("close_game", Value::Null));
+                    }
+                    if connection["host"].as_bool().unwrap_or(false) {
+                        ui.label(egui::RichText::new(label("password")).small());
+                    }
+                    if let Some(detected) = connection["detected"].as_str().filter(|text| !text.is_empty()) {
+                        ui.label(egui::RichText::new(detected).small());
+                    }
+                    ui.add_space(6.0);
+                    if ui.add_enabled(connection["ready"].as_bool().unwrap_or(false), egui::Button::new("Sync Map Slots"))
+                        .on_hover_text("Prepare your map slots now and load the maps other players are hosting.").clicked()
+                    {
+                        actions.push(send("sync", Value::Null));
+                    }
+                    if ui.button(label("stop")).clicked() {
+                        actions.push(send("disconnect", Value::Null));
+                    }
+                    if ui.button(label("help")).clicked() {
+                        actions.push(send("help", Value::Null));
+                    }
+                    ui.add_space(6.0);
+                    preference(ui, actions, "close", "Disconnect when Hebnix closes");
+                    preference(ui, actions, "toasts", &label("toasts"));
+                });
+            });
+            ui.allocate_ui_with_layout(egui::vec2(right, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(right - 34.0);
+                    let rows = data["rows"].as_array().cloned().unwrap_or_default();
+                    let ready = connection["ready"].as_bool().unwrap_or(false);
+                    ui.vertical_centered(|ui| {
+                        let heading = if !ready {
+                            connection["setup"].as_str().unwrap_or_default().to_owned()
+                        } else if rows.is_empty() {
+                            label("empty")
+                        } else {
+                            data["heading"].as_str().unwrap_or_default().to_owned()
+                        };
+                        ui.label(egui::RichText::new(heading).size(18.0).strong());
+                        if ready && rows.is_empty() {
+                            ui.label(egui::RichText::new("Invite another Hebnix player to connect to Workshop Multiplayer.").color(muted));
+                        }
+                    });
+                    let search_id = egui::Id::new("multiplayer_search");
+                    let mut term: String = ui.ctx().data(|d| d.get_temp(search_id)).unwrap_or_default();
+                    if data["search"].as_bool().unwrap_or(false) {
+                        ui.add(egui::TextEdit::singleline(&mut term).hint_text(label("search")).desired_width(f32::INFINITY));
+                    } else {
+                        term.clear();
+                    }
+                    let lower = term.trim().to_lowercase();
+                    let mut shown = 0;
+                    for peer in rows.iter().filter(|peer| peer["name"].as_str().unwrap_or_default().to_lowercase().contains(&lower)) {
+                        shown += 1;
+                        web_card(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(peer["name"].as_str().unwrap_or_default()).strong());
+                                    if let Some(latency) = peer["latency"].as_f64() {
+                                        ui.label(egui::RichText::new(format!("{} ms", latency.round())).small());
+                                    }
+                                });
+                                if peer["map"].is_object() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(peer["map"]["label"].as_str().unwrap_or_default());
+                                        if peer["map"]["have"].as_bool().unwrap_or(false) {
+                                            ui.colored_label(ui.visuals().hyperlink_color, label("have"));
+                                        } else if ui.add_enabled(!data["busy"].as_bool().unwrap_or(false), egui::Button::new(label("download"))).clicked() {
+                                            actions.push(send("download", json!({ "peer": peer["peer"], "map": peer["map"]["id"] })));
+                                        }
+                                    });
+                                }
+                                if !peer["peer"].is_null() && ui.button(label("block")).clicked() {
+                                    actions.push(send("block", json!({ "peer": peer["peer"] })));
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+                    if shown == 0 && !rows.is_empty() {
+                        web_muted(ui, &label("noMatch"));
+                    }
+                    ui.ctx().data_mut(|d| d.insert_temp(search_id, term));
+                    let own = data["own"].as_array().cloned().unwrap_or_default();
+                    if !own.is_empty() {
+                        egui::CollapsingHeader::new("Your map slots").show(ui, |ui| {
+                            for slot in &own {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(egui::RichText::new(slot["label"].as_str().unwrap_or_default()).small());
+                                    if let Some(status) = slot["status"].as_str().filter(|text| !text.is_empty()) {
+                                        let issues = slot["issues"].as_array().map_or(0, Vec::len);
+                                        let colour = if issues > 0 { ui.visuals().warn_fg_color } else { ui.visuals().hyperlink_color };
+                                        ui.label(egui::RichText::new(format!("· {status}")).small().color(colour));
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    let blocked = data["blocked"].as_array().cloned().unwrap_or_default();
+                    if !blocked.is_empty() {
+                        egui::CollapsingHeader::new(format!("{} blocked players", blocked.len())).show(ui, |ui| {
+                            web_muted(ui, &label("blockHint"));
+                            for entry in &blocked {
+                                ui.horizontal(|ui| {
+                                    ui.label(val_str(&entry[1]));
+                                    if ui.button(label("unblock")).clicked() {
+                                        actions.push(send("unblock", json!({ "peer": entry[0] })));
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    if data["progress"].is_object() {
+                        let total = data["progress"]["total"].as_f64().unwrap_or(0.0);
+                        let done = data["progress"]["done"].as_f64().unwrap_or(0.0);
+                        ui.label(egui::RichText::new(format!("Downloading from a player: {} / {} MB", (done / 1e6).floor(), (total / 1e6).floor())).small());
+                        if total > 0.0 {
+                            ui.add(egui::ProgressBar::new((done / total).clamp(0.0, 1.0) as f32));
+                        }
+                    } else if let Some(transfer) = data["transfer"].as_str().filter(|text| !text.is_empty()) {
+                        ui.label(egui::RichText::new(transfer).small());
+                    }
+                    let status = connection["progress"].as_str().filter(|text| !text.is_empty()).or_else(|| connection["status"].as_str().filter(|text| !text.is_empty()));
+                    if let Some(status) = status {
+                        ui.label(egui::RichText::new(status).small());
+                    }
+                });
+            });
+        });
+        if let Some(warning) = data["warning"].as_str().filter(|text| !text.is_empty()) {
+            web_modal(ui.ctx(), "peer_install", 460.0, |ui| {
+                web_heading(ui, "Install from another player?");
+                ui.add_space(6.0);
+                ui.label(warning);
+                ui.label(label("warning"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(label("cancel")).clicked() {
+                        actions.push(send("confirm", json!({ "accept": false })));
+                    }
+                    if web_primary(ui, &label("confirm"), true) {
+                        actions.push(send("confirm", json!({ "accept": true })));
+                    }
+                });
+            });
+        }
+    }
+
+    fn egui_menu_map(ui: &mut egui::Ui, data: &Value, actions: &mut Vec<Value>) {
+        let labels = &data["labels"];
+        let label = |key: &str| labels[key].as_str().unwrap_or_default().to_owned();
+        let call = |kind: &str, extra: Value| web_act("menu_map", kind, extra);
+        let maps = &data["maps"];
+        let editable = maps["editable"].as_bool().unwrap_or(false);
+        let ready = data["ready"].as_bool().unwrap_or(false);
+        let busy = data["busy"].as_bool().unwrap_or(false);
+        let muted = ui.visuals().weak_text_color();
+        let gap = 16.0;
+        let column = ((ui.available_width() - gap) / 2.0).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(column);
+                web_card(ui, |ui| {
+                    ui.label(label("description"));
+                    web_muted(ui, &label("close"));
+                    if data["loading"].as_bool().unwrap_or(false) {
+                        web_muted(ui, &label("loading"));
+                    }
+                    let workshop = maps["workshop"].as_bool().unwrap_or(false);
+                    ui.horizontal(|ui| {
+                        let accent = ui.visuals().selection.stroke.color;
+                        if ui.add_enabled(editable, egui::Button::new(label("arenas")).fill(if workshop { egui::Color32::TRANSPARENT } else { accent.gamma_multiply(0.6) })).clicked() {
+                            actions.push(call("source", json!({ "workshop": false })));
+                        }
+                        if ui.add_enabled(editable, egui::Button::new(label("workshop")).fill(if workshop { accent.gamma_multiply(0.6) } else { egui::Color32::TRANSPARENT })).clicked() {
+                            actions.push(call("source", json!({ "workshop": true })));
+                        }
+                    });
+                    let id = egui::Id::new("menu_map_search");
+                    let mut term: String = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
+                    ui.add_enabled(editable, egui::TextEdit::singleline(&mut term).hint_text(label("search")).desired_width(f32::INFINITY));
+                    let lower = term.trim().to_lowercase();
+                    ui.ctx().data_mut(|d| d.insert_temp(id, term));
+                    egui::ScrollArea::vertical().id_salt("menu_map_choices").max_height(260.0).show(ui, |ui| {
+                        let accent = ui.visuals().selection.stroke.color;
+                        for choice in maps["choices"].as_array().into_iter().flatten() {
+                            let (key, name) = (val_str(&choice[0]), val_str(&choice[1]));
+                            if !name.to_lowercase().contains(&lower) {
+                                continue;
+                            }
+                            let on = maps["selected"].as_str() == Some(key.as_str());
+                            let button = egui::Button::new(&name).fill(if on { accent.gamma_multiply(0.6) } else { egui::Color32::TRANSPARENT });
+                            if ui.add_enabled(editable, button.min_size(egui::vec2(ui.available_width(), 28.0))).clicked() {
+                                actions.push(call("select", json!({ "id": key })));
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if web_primary(ui, &label("apply"), editable && !maps["selected"].is_null()) {
+                            actions.push(call("apply", Value::Null));
+                        }
+                        if ui.add_enabled(ready && !maps["active"].is_null(), egui::Button::new(label("restore"))).clicked() {
+                            actions.push(call("restore", Value::Null));
+                        }
+                    });
+                    if let Some(active) = maps["active"].as_str() {
+                        ui.label(active);
+                        web_muted(ui, &label("restoreFirst"));
+                    }
+                    let choices = maps["choices"].as_array().map_or(0, Vec::len);
+                    if workshop || (!data["loading"].as_bool().unwrap_or(false) && choices == 0) {
+                        let note = if workshop { if choices > 0 { label("workshopNote") } else { label("workshopEmpty") } } else { label("empty") };
+                        web_muted(ui, &note);
+                    }
+                });
+                ui.add_space(8.0);
+                let car = &data["car"];
+                egui::CollapsingHeader::new(label("carTitle")).show(ui, |ui| {
+                    web_muted(ui, &label("carDescription"));
+                    if !car.is_object() {
+                        web_muted(ui, &label("carNone"));
+                        return;
+                    }
+                    let disabled = !car["on"].as_bool().unwrap_or(false) || !ready;
+                    if let Some(enabled) = web_toggle(ui, &label("carEnable"), car["on"].as_bool().unwrap_or(false), true) {
+                        actions.push(call("car_toggle", json!({ "enabled": enabled })));
+                    }
+                    let coords = car["position"].as_array().map(|values| values.iter().enumerate().map(|(i, v)| format!("{} {:.0}", ["X", "Y", "Z"][i.min(2)], v.as_f64().unwrap_or(0.0))).collect::<Vec<_>>().join("  ")).unwrap_or_default();
+                    ui.label(egui::RichText::new(format!("{}: {} · {} {:.1}°", label("original"), coords, label("yaw"), car["yaw"].as_f64().unwrap_or(0.0))).small().color(muted));
+                    let tweak = car["tweak"].clone();
+                    for (index, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                        let current = tweak["offset"][index].as_f64().unwrap_or(0.0);
+                        web_row(ui, &format!("{} {axis}", label("move")), |ui| {
+                            if let Some(value) = web_number(ui, current, None, 1.0, !disabled) {
+                                let mut next = tweak.clone();
+                                next["offset"][index] = json!(value);
+                                actions.push(call("car", json!({ "tweak": next })));
+                            }
+                        });
+                    }
+                    web_row(ui, &label("yaw"), |ui| {
+                        if let Some(value) = web_number(ui, tweak["yaw"].as_f64().unwrap_or(0.0), Some((-180.0, 180.0)), 0.5, !disabled) {
+                            let mut next = tweak.clone();
+                            next["yaw"] = json!(value);
+                            actions.push(call("car", json!({ "tweak": next })));
+                        }
+                    });
+                    if ui.add_enabled(!disabled, egui::Button::new(label("reset"))).clicked() {
+                        actions.push(call("car", json!({ "tweak": { "offset": [0, 0, 0], "yaw": 0 } })));
+                    }
+                });
+                let camera = &data["camera"];
+                egui::CollapsingHeader::new(label("cameraTitle")).show(ui, |ui| {
+                    web_muted(ui, &label("cameraDescription"));
+                    let rows = camera["rows"].as_array().cloned().unwrap_or_default();
+                    if camera["error"].as_str().is_some_and(|text| !text.is_empty()) || rows.is_empty() {
+                        web_muted(ui, camera["error"].as_str().filter(|text| !text.is_empty()).unwrap_or(&label("cameraNone")));
+                        return;
+                    }
+                    let disabled = !camera["on"].as_bool().unwrap_or(false) || !ready;
+                    if let Some(enabled) = web_toggle(ui, &label("cameraEnable"), camera["on"].as_bool().unwrap_or(false), true) {
+                        actions.push(call("camera_toggle", json!({ "enabled": enabled })));
+                    }
+                    let others: Vec<&Value> = rows.iter().filter(|item| !item["play"].as_bool().unwrap_or(false)).collect();
+                    let selected = rows.iter().find(|item| item["id"] == camera["selected"]);
+                    let on_play = selected.is_some_and(|item| item["play"].as_bool().unwrap_or(false));
+                    ui.horizontal(|ui| {
+                        let accent = ui.visuals().selection.stroke.color;
+                        if let Some(play) = rows.iter().find(|item| item["play"].as_bool().unwrap_or(false))
+                            && ui.add_enabled(!disabled, egui::Button::new(label("play")).fill(if on_play { accent.gamma_multiply(0.6) } else { egui::Color32::TRANSPARENT })).clicked()
+                        {
+                            actions.push(call("camera_select", json!({ "id": play["id"] })));
+                        }
+                        let other = if camera["other"].is_null() { others.first().map(|item| item["id"].clone()).unwrap_or(Value::Null) } else { camera["other"].clone() };
+                        if ui.add_enabled(!disabled && !others.is_empty(), egui::Button::new(label("other")).fill(if on_play { egui::Color32::TRANSPARENT } else { accent.gamma_multiply(0.6) })).clicked() {
+                            actions.push(call("camera_select", json!({ "id": other })));
+                        }
+                    });
+                    if !on_play && !others.is_empty() {
+                        let choices: Vec<(String, String)> = others.iter().map(|item| (val_str(&item["id"]), val_str(&item["label"]))).collect();
+                        if let Some(id) = web_select(ui, "menu_camera", &val_str(&camera["selected"]), &choices, !disabled) {
+                            actions.push(call("camera_select", json!({ "id": id })));
+                        }
+                    }
+                    if let Some(selected) = selected {
+                        let mut tweak = camera["tweak"].clone();
+                        if !tweak.is_object() {
+                            tweak = json!({ "camera": selected["id"], "offset": [0, 0, 0], "pitch": 0, "yaw": 0, "fov": null });
+                        }
+                        let coords = selected["position"].as_array().map(|values| values.iter().enumerate().map(|(i, v)| format!("{} {:.0}", ["X", "Y", "Z"][i.min(2)], v.as_f64().unwrap_or(0.0))).collect::<Vec<_>>().join("  ")).unwrap_or_default();
+                        ui.label(egui::RichText::new(format!("{}: {} · {} {:.1}° · {} {:.1}°", label("original"), coords, label("pitch"), selected["rotation"][0].as_f64().unwrap_or(0.0), label("yaw"), selected["rotation"][1].as_f64().unwrap_or(0.0))).small().color(muted));
+                        for (index, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
+                            web_row(ui, &format!("{} {axis}", label("move")), |ui| {
+                                if let Some(value) = web_number(ui, tweak["offset"][index].as_f64().unwrap_or(0.0), None, 1.0, !disabled) {
+                                    let mut next = tweak.clone();
+                                    next["offset"][index] = json!(value);
+                                    actions.push(call("camera", json!({ "tweak": next })));
+                                }
+                            });
+                        }
+                        for (key, name, low, high) in [("pitch", label("pitch"), -89.0, 89.0), ("yaw", label("yaw"), -180.0, 180.0)] {
+                            web_row(ui, &name, |ui| {
+                                if let Some(value) = web_number(ui, tweak[key].as_f64().unwrap_or(0.0), Some((low, high)), 0.5, !disabled) {
+                                    let mut next = tweak.clone();
+                                    next[key] = json!(value);
+                                    actions.push(call("camera", json!({ "tweak": next })));
+                                }
+                            });
+                        }
+                        if let Some(default_fov) = selected["fov"].as_f64() {
+                            let override_on = !tweak["fov"].is_null();
+                            if let Some(enabled) = web_toggle(ui, &label("fov"), override_on, !disabled) {
+                                let mut next = tweak.clone();
+                                next["fov"] = if enabled { json!(default_fov) } else { Value::Null };
+                                actions.push(call("camera", json!({ "tweak": next })));
+                            }
+                            web_row(ui, &label("fov"), |ui| {
+                                if let Some(value) = web_number(ui, tweak["fov"].as_f64().unwrap_or(default_fov), Some((10.0, 170.0)), 0.5, !disabled && override_on) {
+                                    let mut next = tweak.clone();
+                                    next["fov"] = json!(value);
+                                    actions.push(call("camera", json!({ "tweak": next })));
+                                }
+                            });
+                        }
+                        if ui.add_enabled(!disabled, egui::Button::new(label("reset"))).clicked() {
+                            actions.push(call("camera", json!({ "tweak": { "camera": selected["id"], "offset": [0, 0, 0], "pitch": 0, "yaw": 0, "fov": null } })));
+                        }
+                        web_muted(ui, &label("each"));
+                    }
+                });
+                ui.add_space(8.0);
+                web_card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if !maps["active"].is_null() && ui.add_enabled(maps["canReapply"].as_bool().unwrap_or(false), egui::Button::new(label("reapply"))).on_hover_text(label("reapplyHint")).clicked() {
+                            actions.push(call("reapply", Value::Null));
+                        }
+                        if ui.add_enabled(!busy && !data["loading"].as_bool().unwrap_or(false), egui::Button::new(label("scan"))).clicked() {
+                            actions.push(call("scan", Value::Null));
+                        }
+                    });
+                    if let Some(status) = data["status"].as_str().filter(|text| !text.is_empty()) {
+                        ui.label(status);
+                    }
+                });
+            });
+            ui.allocate_ui_with_layout(egui::vec2(column, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                web_card(ui, |ui| {
+                    ui.set_width(column - 34.0);
+                    web_heading(ui, &label("pluginTitle"));
+                    web_muted(ui, &label("pluginDescription"));
+                    ui.horizontal(|ui| {
+                        if ui.button(label("plugin")).clicked() {
+                            actions.push(call("plugin", Value::Null));
+                        }
+                        if ui.add_enabled(!busy, egui::Button::new(label("import"))).on_hover_text(label("importHint")).clicked() {
+                            actions.push(call("import", Value::Null));
+                        }
+                    });
+                });
+            });
+        });
+    }
 }

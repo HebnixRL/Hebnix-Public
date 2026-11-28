@@ -113,7 +113,39 @@ pub(super) fn subtabs(tab: Tab) -> &'static [(Subtab, &'static str)] {
 }
 
 impl HebnixApp {
-    pub(super) fn render_wry_page(&mut self, ui: &egui::Ui) {
+    /// True when the sidebar, header and pages come from egui rather than web views.
+    pub(super) fn egui_shell(&self) -> bool {
+        self.modern_navigation.as_ref().is_some_and(|nav| nav.egui_shell)
+    }
+
+    /// Pages drawn by egui instead of a web view.
+    pub(super) fn egui_ported_page(&self) -> bool {
+        self.egui_shell()
+    }
+
+    fn egui_light_page(&self) -> bool {
+        self.egui_ported_page()
+    }
+
+    fn render_egui_page(&mut self, ui: &mut egui::Ui) {
+        if let Some(navigation) = self.modern_navigation.as_mut() {
+            navigation.keep_content(None);
+        }
+        egui::CentralPanel::default().show(ui, |ui| {
+            bootstrap_scope(ui, |ui| match self.tab {
+                Tab::Home => self.render_home(ui, true),
+                Tab::Console => self.render_console_tab(ui, false),
+                Tab::About => self.render_about_tab(ui, false),
+                _ => self.render_current_page(ui, true),
+            });
+        });
+    }
+
+    pub(super) fn render_wry_page(&mut self, ui: &mut egui::Ui) {
+        if self.egui_light_page() {
+            self.render_egui_page(ui);
+            return;
+        }
         match self.modern_content_page() {
             Some(ContentPage::About) => { self.render_modern_about(ui); }
             Some(ContentPage::Tracker | ContentPage::LiveMatch) => { self.render_modern_home(ui); }
@@ -166,7 +198,11 @@ impl HebnixApp {
         }
     }
 
-    pub(super) fn render_modern_arena(&mut self, ui: &egui::Ui, full: bool) -> bool {
+    pub(super) fn render_modern_arena(&mut self, ui: &mut egui::Ui, full: bool) -> bool {
+        if self.egui_shell() {
+            self.show_arena_egui(ui, full);
+            return true;
+        }
         let data = self.workshop.background_changer.web_snapshot(
             &self.config.settings.rl_path,
             full,
@@ -186,6 +222,9 @@ impl HebnixApp {
     }
 
     pub(super) fn render_modern_browse_maps(&mut self, ui: &egui::Ui) -> bool {
+        if self.egui_ported_page() {
+            return false;
+        }
         let data =
             self.workshop
                 .browse_web_snapshot(&self.config.settings.rl_path, &self.tx, ui.ctx());
@@ -230,8 +269,132 @@ impl HebnixApp {
         }
     }
 
+    /// Sidebar for the egui shell, drawn to match the web sidebar: bordered rows, a
+    /// chevron on tabs with sub-pages, and an animated sub-menu.
+    pub(super) fn show_egui_sidebar(&mut self, ui: &mut egui::Ui) {
+        let (tab_index, child) = self.modern_tab_selection();
+        let paint = NavPaint::new(ui.ctx());
+        let expanded_id = egui::Id::new("egui_nav_expanded");
+        let mut expanded: Option<usize> = ui.ctx().data(|d| d.get_temp(expanded_id)).unwrap_or(Some(tab_index));
+        let mut pick: Option<(usize, Option<usize>, Option<usize>)> = None;
+        egui::Panel::left("modern_navigation")
+            .exact_size(crate::modern_ui::SIDEBAR_WIDTH)
+            .frame(egui::Frame::NONE.fill(paint.surface).inner_margin(egui::Margin::symmetric(8, 14)))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for (index, tab) in Tab::ALL.iter().enumerate() {
+                        let pages = subtabs(*tab);
+                        let open = expanded == Some(index) && !pages.is_empty();
+                        let openness = ui.ctx().animate_bool_with_time(egui::Id::new(("nav_open", index)), open, 0.15);
+                        let chevron = (!pages.is_empty()).then_some(openness);
+                        if paint.button(ui, &tab.label(), index == tab_index, chevron).clicked() {
+                            if open {
+                                expanded = None;
+                            } else {
+                                expanded = (!pages.is_empty()).then_some(index);
+                                pick = Some((index, None, None));
+                            }
+                        }
+                        Self::animated_group(ui, egui::Id::new(("nav_group", index)), openness, |ui| {
+                            for (at, (page, key)) in pages.iter().enumerate() {
+                                let leaves = Self::modern_leaf_options(*page);
+                                let selected = index == tab_index && child == Some(at);
+                                let leaf_open = selected && !leaves.is_empty();
+                                let leaf_t = ui.ctx().animate_bool_with_time(egui::Id::new(("nav_leaf", index, at)), leaf_open, 0.15);
+                                let chevron = (!leaves.is_empty()).then_some(leaf_t);
+                                if paint.button(ui, &t(key), selected && leaves.is_empty(), chevron).clicked() {
+                                    pick = Some((index, Some(at), None));
+                                }
+                                let memory = format!("{}/{}", tab.config_key(), key);
+                                let current = self.config.settings.navigation_memory.get(&memory).copied();
+                                Self::animated_group(ui, egui::Id::new(("nav_leaves", index, at)), leaf_t, |ui| {
+                                    for (leaf, label) in &leaves {
+                                        if paint.button(ui, label, current == Some(*leaf), None).clicked() {
+                                            pick = Some((index, Some(at), Some(*leaf)));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            });
+        ui.ctx().data_mut(|d| d.insert_temp(expanded_id, expanded));
+        match pick {
+            Some((tab, child, Some(leaf))) => {
+                self.select_modern_tab(tab, child);
+                self.select_modern_leaf(child.unwrap_or(0), leaf);
+            }
+            Some((tab, child, None)) => self.select_modern_tab(tab, child),
+            None => {}
+        }
+    }
+
+    /// Indented, left-ruled group that slides open and fades in like the web sub-menu.
+    fn animated_group(ui: &mut egui::Ui, id: egui::Id, openness: f32, content: impl FnOnce(&mut egui::Ui)) {
+        if openness <= 0.0 {
+            return;
+        }
+        let natural: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(200.0);
+        let width = ui.available_width() - 10.0;
+        let corner = ui.cursor().min;
+        let origin = corner + egui::vec2(10.0, 3.0);
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_size(origin, egui::vec2(width, f32::INFINITY)))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        let visible = egui::Rect::from_min_size(corner, egui::vec2(width + 10.0, (natural + 6.0) * openness));
+        child.set_clip_rect(visible.intersect(ui.clip_rect()));
+        child.set_opacity(openness);
+        child.spacing_mut().item_spacing.y = 3.0;
+        content(&mut child);
+        let full = child.min_rect().height();
+        ui.ctx().data_mut(|d| d.insert_temp(id, full));
+        let rule = egui::Rect::from_min_max(
+            corner + egui::vec2(4.0, 3.0),
+            egui::pos2(corner.x + 5.0, corner.y + 3.0 + full * openness),
+        );
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        ui.painter().with_clip_rect(visible).rect_filled(rule, 0.0, stroke);
+        ui.allocate_space(egui::vec2(ui.available_width(), (full + 6.0) * openness));
+    }
+
+    /// Header for the egui shell: page title plus the controls the legacy top bar has.
+    fn render_egui_header(&mut self, ui: &mut egui::Ui) -> bool {
+        let title = self.modern_page_title();
+        crate::theme::set_workspace_title(ui.ctx(), Some(title.clone()));
+        let warn = self.tab == Tab::Items
+            && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active)
+            && self.last_rl_open;
+        let rule = ui.visuals().widgets.noninteractive.bg_stroke;
+        egui::Panel::top("modern_header")
+            .exact_size(52.0)
+            .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(16, 0)))
+            .show(ui, |ui| {
+            ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().bottom() - 0.5, rule);
+            bootstrap_scope(ui, |ui| ui.horizontal_centered(|ui| {
+                ui.label(egui::RichText::new(&title).size(20.0).strong());
+                if warn {
+                    ui.colored_label(ui.visuals().warn_fg_color, "Close Rocket League before changing item swaps.");
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::ui::toasts::render_bell(ui, &mut self.toast_view, &mut self.toasts);
+                    self.render_network_button(ui);
+                    ui.label(egui::RichText::new(&self.status_text).strong().size(12.0).color(self.status_color));
+                    self.render_action_button(ui);
+                });
+            }));
+        });
+        true
+    }
+
     pub(super) fn render_modern_header(&mut self, ui: &mut egui::Ui) -> bool {
         self.owned_inventory.poll(ui.ctx());
+        if self.modern_navigation.as_ref().is_some_and(|nav| nav.egui_shell) {
+            return self.render_egui_header(ui);
+        }
         use serde_json::json;
         if ui.input(|input| input.pointer.any_pressed())
             && let Some(navigation) = &mut self.modern_navigation
@@ -634,6 +797,9 @@ impl HebnixApp {
     }
 
     pub(super) fn render_modern_replay_upload(&mut self, ui: &egui::Ui) -> bool {
+        if self.egui_ported_page() {
+            return false;
+        }
         let settings = &self.config.replay_upload;
         let (enabled, patch_status) = self.replay_history_patch.toggle_state();
         let (status, pending) = self.auto_upload_replays.web_status();
@@ -844,6 +1010,100 @@ impl HebnixApp {
         });
         (tab, child)
     }
+}
+
+/// Colours and metrics for the sidebar rows, taken from the active theme.
+struct NavPaint {
+    surface: egui::Color32,
+    selected: egui::Color32,
+    text: egui::Color32,
+    height: f32,
+    radius: u8,
+}
+
+impl NavPaint {
+    fn new(ctx: &egui::Context) -> Self {
+        let visuals = ctx.global_style().visuals.clone();
+        match crate::theme::presentation(ctx) {
+            Some(p) => {
+                let nav = &p.components.navigation;
+                Self {
+                    surface: crate::theme::color(&nav.surface),
+                    selected: crate::theme::color(&nav.selected),
+                    text: crate::theme::color(&nav.text),
+                    height: nav.height.max(30.0),
+                    radius: nav.corner_radius.max(5),
+                }
+            }
+            None => Self {
+                surface: visuals.panel_fill,
+                selected: visuals.hyperlink_color,
+                text: visuals.text_color(),
+                height: 34.0,
+                radius: 6,
+            },
+        }
+    }
+
+    /// One full-width row. `chevron` is Some(openness) for rows that open a sub-menu.
+    fn button(&self, ui: &mut egui::Ui, label: &str, selected: bool, chevron: Option<f32>) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), self.height), egui::Sense::click());
+        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        let pick = ui.ctx().animate_bool_with_time(response.id.with("pick"), selected, 0.15);
+        let bright = (u32::from(self.selected.r()) * 3 + u32::from(self.selected.g()) * 6 + u32::from(self.selected.b())) / 10 > 150;
+        let on_selected = if bright { egui::Color32::from_rgb(16, 18, 28) } else { egui::Color32::WHITE };
+        let fill = egui::Color32::TRANSPARENT
+            .lerp_to_gamma(self.text.gamma_multiply(0.09), hover)
+            .lerp_to_gamma(self.selected, pick);
+        let ink = self.text.lerp_to_gamma(on_selected, pick);
+        // the outline only fades in on hover; a selected row is just its fill
+        let border = egui::Color32::TRANSPARENT.lerp_to_gamma(self.text.gamma_multiply(0.4), hover * (1.0 - pick));
+        let painter = ui.painter();
+        painter.rect(rect, egui::CornerRadius::same(self.radius.max(9)), fill, egui::Stroke::new(1.0, border), egui::StrokeKind::Inside);
+        painter.text(
+            egui::pos2(rect.left() + 11.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(14.0),
+            ink,
+        );
+        if let Some(open) = chevron {
+            // a "v" that turns into a "^" as the menu opens
+            let centre = egui::pos2(rect.right() - 16.0, rect.center().y);
+            let dy = 2.5 * (1.0 - 2.0 * open);
+            let points = vec![
+                egui::pos2(centre.x - 4.0, centre.y - dy),
+                egui::pos2(centre.x, centre.y + dy),
+                egui::pos2(centre.x + 4.0, centre.y - dy),
+            ];
+            painter.add(egui::Shape::line(points, egui::Stroke::new(1.4, ink)));
+        }
+        response
+    }
+}
+
+/// Roomier, bordered controls like the web pages use, in the active theme's colours.
+fn bootstrap_scope<R>(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let style = ui.style_mut();
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        style.spacing.interact_size.y = 34.0;
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        let border = style.visuals.text_color().gamma_multiply(0.3);
+        let accent = style.visuals.hyperlink_color;
+        let widgets = &mut style.visuals.widgets;
+        for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+            widget.corner_radius = egui::CornerRadius::same(6);
+            widget.bg_stroke = egui::Stroke::new(1.0, border);
+        }
+        // group frames double as the web panels: soft border, 8px corners
+        widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
+        widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+        widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
+        widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+        render(ui)
+    })
+    .inner
 }
 
 fn ballchasing_url(location: &str) -> Option<url::Url> {

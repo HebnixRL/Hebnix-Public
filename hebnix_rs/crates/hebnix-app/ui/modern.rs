@@ -61,6 +61,14 @@ pub(crate) const SIDEBAR_WIDTH: f32 = 216.0;
 pub(crate) fn styled_controls(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui)) {
     use egui::{Color32, Stroke};
     ui.scope(|ui| {
+        // the egui shell has no web page to match, so these controls follow the active theme
+        if SEE_THROUGH_PAGES.load(std::sync::atomic::Ordering::Relaxed) {
+            let spacing = &mut ui.style_mut().spacing;
+            spacing.button_padding = egui::vec2(9.0, 5.0);
+            spacing.interact_size.y = spacing.interact_size.y.max(26.0);
+            render(ui);
+            return;
+        }
         let mut visuals = egui::Visuals::dark();
         visuals.override_text_color = Some(Color32::from_rgb(232, 240, 253));
         visuals.panel_fill = Color32::from_rgb(13, 23, 38);
@@ -94,6 +102,8 @@ const fn default_action_width() -> u16 {
     180
 }
 const SCHEME: &str = "hebnix-ui";
+// pages are transparent in the egui shell so see-through themes reach them; the CSS supplies the opaque default
+static SEE_THROUGH_PAGES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 const PAGE: &str = "hebnix-ui://app/index.html";
 const ABOUT_PAGE: &str = "hebnix-ui://app/about.html";
 const REPLAY_PAGE: &str = "hebnix-ui://app/replay-upload.html";
@@ -525,7 +535,9 @@ struct WebSurface {
 }
 
 pub(crate) struct Navigation {
-    webview: WebView,
+    // None when egui draws the sidebar and header
+    webview: Option<WebView>,
+    pub(crate) egui_shell: bool,
     messages: crossbeam_channel::Receiver<String>,
     shown: bool,
     ready: bool,
@@ -561,7 +573,8 @@ impl raw_window_handle::HasWindowHandle for ParentWindow {
 }
 
 impl Navigation {
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, tabs: &[TabLabels]) -> wry::Result<Self> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, tabs: &[TabLabels], egui_shell: bool) -> wry::Result<Self> {
+        SEE_THROUGH_PAGES.store(egui_shell, std::sync::atomic::Ordering::Relaxed);
         let labels = serde_json::to_string(tabs).expect("tab labels are serializable");
         let script =
             include_str!("navigation.js").replace("/*TABS*/[]", &labels.replace('<', "\\u003c"));
@@ -571,15 +584,21 @@ impl Navigation {
             _ => return Err(raw_window_handle::HandleError::NotSupported.into()),
         };
         let ctx = cc.egui_ctx.clone();
-        let webview = Self::build_view(cc, &ctx, PAGE, script, sender.clone())?;
-        let content =
-            Self::optional_surface(cc, &ctx, ABOUT_PAGE, sender.clone()).map(|mut surface| { surface.wait_for_paint = true; ContentView {
-                page: ContentPage::About,
-                surface,
-            }});
-        let header = Self::optional_surface(cc, &ctx, HEADER_PAGE, sender.clone());
+        let (webview, content, header) = if egui_shell {
+            (None, None, None)
+        } else {
+            let webview = Self::build_view(cc, &ctx, PAGE, script, sender.clone())?;
+            let content =
+                Self::optional_surface(cc, &ctx, ABOUT_PAGE, sender.clone()).map(|mut surface| { surface.wait_for_paint = true; ContentView {
+                    page: ContentPage::About,
+                    surface,
+                }});
+            let header = Self::optional_surface(cc, &ctx, HEADER_PAGE, sender.clone());
+            (Some(webview), content, header)
+        };
         Ok(Self {
             webview,
+            egui_shell,
             messages,
             shown: false,
             ready: false,
@@ -641,8 +660,8 @@ impl Navigation {
         let ctx = ctx.clone();
         WebViewBuilder::new()
             .with_visible(false)
-            .with_background_color(if page == DIALOG_PAGE { (0, 0, 0, 0) } else { (16, 20, 29, 255) })
-            .with_transparent(page == DIALOG_PAGE)
+            .with_background_color(if page == DIALOG_PAGE || SEE_THROUGH_PAGES.load(std::sync::atomic::Ordering::Relaxed) { (0, 0, 0, 0) } else { (16, 20, 29, 255) })
+            .with_transparent(page == DIALOG_PAGE || SEE_THROUGH_PAGES.load(std::sync::atomic::Ordering::Relaxed))
             .with_hotkeys_zoom(false)
             .with_browser_accelerator_keys(false)
             .with_default_context_menus(false)
@@ -929,6 +948,9 @@ impl Navigation {
         ctx: &egui::Context,
         selected: TabSelection,
     ) -> wry::Result<()> {
+        let Some(webview) = &self.webview else {
+            return Ok(());
+        };
         let scale = ctx.pixels_per_point();
         let height = ctx.input(|input| {
             input
@@ -942,7 +964,7 @@ impl Navigation {
             (height * scale).round() as u32,
         );
         if self.size != Some(size) {
-            self.webview.set_bounds(Rect {
+            webview.set_bounds(Rect {
                 position: PhysicalPosition::new(0, 0).into(),
                 size: size.into(),
             })?;
@@ -952,16 +974,16 @@ impl Navigation {
             let (tab, child, leaf) = selected;
             let child = child.map_or_else(|| "null".to_owned(), |index| index.to_string());
             let leaf = leaf.map_or_else(|| "null".to_owned(), |index| index.to_string());
-            self.webview
+            webview
                 .evaluate_script(&format!("window.selectHebnixTab({tab}, {child}, {leaf})"))?;
             self.selected = Some(selected);
         }
         if self.ready && self.sidebar_theme != self.theme {
-            self.webview.evaluate_script(&format!("window.applyHebnixTheme({})", self.theme))?;
+            webview.evaluate_script(&format!("window.applyHebnixTheme({})", self.theme))?;
             self.sidebar_theme.clone_from(&self.theme);
         }
         if !self.shown {
-            self.webview.set_visible(true)?;
+            webview.set_visible(true)?;
             self.shown = true;
         }
         Ok(())
@@ -1066,8 +1088,8 @@ impl Navigation {
         let style = ctx.global_style();
         let visuals = &style.visuals;
         let color = |value: egui::Color32| {
-            let [r, g, b, _] = value.to_srgba_unmultiplied();
-            format!("#{r:02x}{g:02x}{b:02x}")
+            let [r, g, b, a] = value.to_srgba_unmultiplied();
+            if a == 255 { format!("#{r:02x}{g:02x}{b:02x}") } else { format!("rgba({r},{g},{b},{:.3})", f32::from(a) / 255.0) }
         };
         let presentation = crate::theme::presentation(ctx);
         let values = json!({
@@ -1094,7 +1116,7 @@ impl Navigation {
         use windows::Win32::Foundation::COLORREF;
         let opacity = ctx.data_mut(|data| data.get_temp::<f32>(egui::Id::new("hebnix.theme.opacity"))).unwrap_or(1.0);
         unsafe {
-            let window = GetAncestor(self.webview.hwnd(), GA_ROOT);
+            let window = GetAncestor(windows::Win32::Foundation::HWND(self.parent.0.get() as *mut core::ffi::c_void), GA_ROOT);
             let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
             SetWindowLongPtrW(window, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
             if let Err(error) = SetLayeredWindowAttributes(window, COLORREF(0), (opacity.clamp(0.5, 1.0) * 255.0).round() as u8, LWA_ALPHA) {
@@ -1148,6 +1170,13 @@ impl Navigation {
         page: ContentPage,
         data: &impl serde::Serialize,
     ) -> wry::Result<bool> {
+        if self.content.is_none() {
+            // the egui shell starts without a page view
+            if let Some(mut surface) = Self::optional_surface(&self.parent, &self.ctx, page.url(), self.sender.clone()) {
+                surface.wait_for_paint = true;
+                self.content = Some(ContentView { page, surface });
+            }
+        }
         if self.content.as_ref().is_some_and(|content| content.page != page) {
             if let Some(index) = self.cached_content.iter().position(|content| content.page == page) {
                 let content = self.content.as_mut().unwrap();
@@ -1221,7 +1250,7 @@ impl Navigation {
     pub(crate) fn hide_sidebar(&mut self) {
         if self.shown {
             self.shown = false;
-            if let Err(error) = self.webview.set_visible(false) {
+            if let Some(Err(error)) = self.webview.as_ref().map(|webview| webview.set_visible(false)) {
                 tracing::warn!(%error, "could not hide Wry navigation");
             }
         }

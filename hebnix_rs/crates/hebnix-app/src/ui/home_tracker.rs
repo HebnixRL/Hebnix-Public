@@ -582,6 +582,169 @@ impl Tracker {
         }
     }
 
+    /// Tracker laid out like the web page: summary strip, detail header, mode list beside the chart.
+    #[cfg(windows)]
+    pub(super) fn show_modern(&mut self, ui: &mut egui::Ui) {
+        self.show_account_picker(ui);
+        let account = self.account.as_ref();
+        let profile = account.and_then(|account| self.profiles.get(&account.key));
+        let checking = self.fetch.as_ref().and_then(|(key, kind, _)| {
+            account.filter(|account| account.key == *key).map(|_| *kind)
+        });
+        let playlists: Vec<_> = profile
+            .into_iter()
+            .flat_map(|profile| {
+                profile.playlists.iter().filter(|(_, playlist)| playlist.seen == profile.checked)
+            })
+            .collect();
+        let selected = playlists
+            .iter()
+            .find(|(id, _)| self.selected == Some(**id))
+            .or_else(|| playlists.first());
+        self.selected = selected.map(|(id, _)| **id);
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let muted = ui.visuals().weak_text_color();
+        let accent = ui.visuals().selection.stroke.color;
+
+        egui::ScrollArea::vertical().id_salt("home_tracker").auto_shrink([false, false]).show(ui, |ui| {
+            let Some(account) = account else {
+                ui.label(t("home-tracker-waiting"));
+                return;
+            };
+            if self.error {
+                ui.label(t("home-tracker-error"));
+            }
+            if let Some(kind) = checking {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(t(match kind {
+                        CheckKind::Ratings => "home-tracker-loading",
+                        CheckKind::Avatar => "home-tracker-avatar-loading",
+                    }));
+                });
+            }
+            let name = profile.map(|p| p.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(&account.name);
+            let current = selected.map(|(_, playlist)| *playlist);
+            let change = current.map(|playlist| {
+                playlist.mmr_change().map_or_else(|| "—".into(), |change| {
+                    format!("{}{}", if change > 0 { "+" } else { "" }, format::int(change))
+                })
+            });
+
+            tracker_card(ui, line, |ui| {
+                cells(ui, &[2.0, 1.5, 1.5, 1.2, 1.7], 100.0, line, |i, ui| match i {
+                    0 => {
+                        let avatar = profile.and_then(|p| p.avatar.as_ref());
+                        let source = avatar.map_or_else(
+                            || egui::include_image!("../../assets/hebnix.png"),
+                            |texture| egui::ImageSource::Texture(texture.into()),
+                        );
+                        ui.add(egui::Image::new(source).fit_to_exact_size(egui::Vec2::splat(64.0)).corner_radius(4.0));
+                        ui.add_space(10.0);
+                        centred(ui, 24.0, |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(name).size(17.0).strong()).truncate());
+                            if profile.is_some_and(|p| p.avatar.is_none()) && checking.is_none()
+                                && ui.small_button(t("home-tracker-avatar-retry")).clicked()
+                            {
+                                if let Some(check) = self.requested.get_mut(&account.key) {
+                                    check.avatar_at = Some(Instant::now());
+                                }
+                                ui.ctx().request_repaint();
+                            }
+                        });
+                    }
+                    1 => if let Some(p) = current {
+                        stat(ui, muted, "Current Playlist", web_playlist_name(&p.rank.playlist_name), 15.0);
+                    },
+                    2 => if let Some(p) = current {
+                        stat(ui, muted, "Current MMR", &rating_text(&p.rank), 26.0);
+                    },
+                    3 => if let Some(p) = current {
+                        let rank = if p.rank.playlist_id == CASUAL_PLAYLIST_ID { "—" } else { rank_name(&p.rank) };
+                        if let Some(badge) = rank_badge(&p.rank, 26.0) {
+                            ui.add(badge);
+                        }
+                        stat(ui, muted, "Rank", rank, 15.0);
+                    },
+                    _ => if let Some(change) = &change {
+                        stat(ui, muted, &t("home-tracker-change"), change, 26.0);
+                    },
+                });
+            });
+
+            let Some((_, playlist)) = selected else {
+                if profile.is_some() {
+                    ui.label(t("home-tracker-empty"));
+                }
+                return;
+            };
+            let mut playlist = *playlist;
+            ui.add_space(14.0);
+            tracker_card(ui, line, |ui| {
+                cells(ui, &[4.0, 1.4, 1.4], 90.0, line, |i, ui| match i {
+                    0 => {
+                        if let Some(badge) = rank_badge(&playlist.rank, 40.0) {
+                            ui.add(badge);
+                            ui.add_space(8.0);
+                        }
+                        ui.label(egui::RichText::new(web_playlist_name(&playlist.rank.playlist_name)).size(26.0).strong());
+                    }
+                    1 => stat(ui, muted, "MMR", &rating_text(&playlist.rank), 26.0),
+                    _ => stat(ui, muted, &t("home-tracker-change"), change.as_deref().unwrap_or("—"), 26.0),
+                });
+                let width = ui.available_width();
+                let rule = ui.cursor().min;
+                ui.painter().hline(rule.x..=rule.x + width, rule.y, line);
+                ui.add_space(1.0);
+                egui::Frame::NONE.inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(t("home-tracker-history")).size(14.0).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(t("home-tracker-history-window")).size(13.0).color(muted));
+                        });
+                    });
+                    ui.add_space(8.0);
+                    let height = 360.0;
+                    let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+                    let list = egui::Rect::from_min_size(area.min, egui::vec2(335.0f32.min(area.width() * 0.4), height));
+                    let graph = egui::Rect::from_min_max(egui::pos2(list.right() + 18.0, area.top()), area.max);
+                    let mut modes = ui.new_child(egui::UiBuilder::new().max_rect(list));
+                    egui::ScrollArea::vertical().id_salt("tracker_modes").auto_shrink([false, false]).show(&mut modes, |ui| {
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        for &(id, choice) in &playlists {
+                            let on = self.selected == Some(*id);
+                            let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width() - 12.0, 40.0), egui::Sense::click());
+                            let hover = ui.ctx().animate_bool_with_time(response.id.with("h"), response.hovered(), 0.12);
+                            let fill = if on { accent.gamma_multiply(0.22) } else { ui.visuals().text_color().gamma_multiply(0.05 * hover) };
+                            let stroke = if on { accent } else { line.color.gamma_multiply(1.0 + hover) };
+                            ui.painter().rect(rect, 6.0, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+                            let mut x = rect.left() + 14.0;
+                            if let Some(badge) = rank_badge(&choice.rank, 20.0) {
+                                let icon = egui::Rect::from_min_size(egui::pos2(x, rect.center().y - 10.0), egui::Vec2::splat(20.0));
+                                badge.paint_at(ui, icon);
+                            }
+                            x += 30.0;
+                            let name = web_playlist_name(&choice.rank.playlist_name);
+                            ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(14.5), ui.visuals().text_color());
+                            ui.painter().text(egui::pos2(rect.right() - 14.0, rect.center().y), egui::Align2::RIGHT_CENTER, rating_value(&choice.rank), egui::FontId::proportional(13.5), ui.visuals().strong_text_color());
+                            if response.clicked() {
+                                self.selected = Some(*id);
+                                playlist = choice;
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                    });
+                    let mut plot = ui.new_child(egui::UiBuilder::new().max_rect(graph));
+                    if playlist.changes.is_empty() {
+                        plot.label(t("home-tracker-no-history"));
+                    } else {
+                        chart(&mut plot, &playlist.changes, height);
+                    }
+                });
+            });
+        });
+    }
+
     pub(super) fn show(&mut self, ui: &mut egui::Ui) {
         self.show_account_picker(ui);
         let account = self.account.as_ref();
@@ -697,11 +860,61 @@ impl Tracker {
                     if playlist.changes.is_empty() {
                         ui.label(t("home-tracker-no-history"));
                     } else {
-                        chart(ui, &playlist.changes);
+                        chart(ui, &playlist.changes, 220.0);
                     }
                 });
             });
     }
+}
+
+fn tracker_card(ui: &mut egui::Ui, line: egui::Stroke, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .stroke(line)
+        .corner_radius(6.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui);
+        });
+}
+
+/// One row split into weighted cells with a vertical rule before every cell but the first.
+fn cells(ui: &mut egui::Ui, weights: &[f32], height: f32, line: egui::Stroke, mut add: impl FnMut(usize, &mut egui::Ui)) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    let total: f32 = weights.iter().sum();
+    let mut x = rect.left();
+    for (index, weight) in weights.iter().enumerate() {
+        let width = rect.width() * weight / total;
+        if index > 0 {
+            ui.painter().vline(x, rect.y_range().shrink(18.0), line);
+        }
+        let cell = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(width, height));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(cell.shrink2(egui::vec2(18.0, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        add(index, &mut child);
+        x += width;
+    }
+}
+
+/// Runs `add` in a block of `height` centred on the cell's middle line.
+fn centred(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui)) {
+    let top = ui.max_rect().center().y - height / 2.0;
+    let rect = egui::Rect::from_min_size(egui::pos2(ui.cursor().min.x, top), egui::vec2(ui.available_width(), height));
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)),
+        add,
+    );
+}
+
+fn stat(ui: &mut egui::Ui, muted: egui::Color32, label: &str, value: &str, size: f32) {
+    centred(ui, 15.0 + 2.0 + size * 1.25, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(egui::RichText::new(label).size(13.0).color(muted));
+        ui.add(egui::Label::new(egui::RichText::new(value).size(size).strong()).truncate());
+    });
 }
 
 fn summary(
@@ -921,9 +1134,9 @@ fn division_icon(ui: &mut egui::Ui, rank: &PlaylistRank) -> Option<String> {
     Some(label)
 }
 
-fn chart(ui: &mut egui::Ui, history: &[Change]) {
+fn chart(ui: &mut egui::Ui, history: &[Change], height: f32) {
     let (response, painter) = ui.allocate_painter(
-        egui::vec2(ui.available_width(), 220.0),
+        egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
     );
     let bounds = response.rect;
@@ -1003,7 +1216,7 @@ fn chart(ui: &mut egui::Ui, history: &[Change]) {
         ));
     }
     if points.len() > 1 {
-        let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.45);
+        let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.3);
         let mut area = egui::Mesh::default();
         for &point in &points {
             area.colored_vertex(point, fill);
@@ -1018,13 +1231,10 @@ fn chart(ui: &mut egui::Ui, history: &[Change]) {
             area.add_triangle(top + 1, top + 3, top + 2);
         }
         painter.add(egui::Shape::mesh(area));
-        painter.add(egui::Shape::line(points.clone(), egui::Stroke::new(2.0, accent)));
-    }
-    if let Some(&last) = points.last() {
-        painter.circle_stroke(last, 6.0, egui::Stroke::new(1.0, accent));
+        painter.add(egui::Shape::line(points.clone(), egui::Stroke::new(1.6, accent)));
     }
     for point in points {
-        painter.circle_filled(point, 3.5, accent);
+        painter.circle_filled(point, 3.0, accent);
     }
 }
 

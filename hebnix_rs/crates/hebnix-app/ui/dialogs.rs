@@ -20,10 +20,98 @@ impl HebnixApp {
             return;
         }
         let dialog = self.global_dialog();
+        if self.egui_shell() {
+            if let Some(dialog) = &dialog {
+                self.show_egui_dialog(ctx, dialog);
+            }
+            return;
+        }
         if let Some(navigation) = &mut self.modern_navigation
             && let Err(error) = navigation.show_dialog(ctx, dialog.as_ref())
         {
             tracing::warn!(%error, "could not display Wry dialog");
+        }
+    }
+
+    /// The web dialog drawn as an egui modal: title, lines, error, progress, toggle, buttons.
+    fn show_egui_dialog(&mut self, ctx: &egui::Context, data: &Value) {
+        let id = data["id"].as_str().unwrap_or_default().to_owned();
+        let buttons: Vec<(String, String)> = data["buttons"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|button| {
+                (
+                    button["key"].as_str().unwrap_or_default().to_owned(),
+                    button["label"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        let mut pressed = None;
+        let screen = ctx.viewport_rect();
+        egui::Area::new(egui::Id::new("global_dialog_scrim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_black_alpha(150));
+            });
+        egui::Area::new(egui::Id::new("global_dialog"))
+            .order(egui::Order::Tooltip)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
+                    ui.set_width(420.0f32.min(screen.width() - 40.0));
+                    ui.label(egui::RichText::new(data["title"].as_str().unwrap_or_default()).size(18.0).strong());
+                    ui.add_space(8.0);
+                    egui::ScrollArea::vertical().max_height(screen.height() * 0.5).auto_shrink([true, true]).show(ui, |ui| {
+                        for line in data["lines"].as_array().into_iter().flatten() {
+                            ui.add(egui::Label::new(line.as_str().unwrap_or_default()).wrap());
+                            ui.add_space(4.0);
+                        }
+                    });
+                    if let Some(error) = data["error"].as_str() {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    if let Some(progress) = data.get("progress").filter(|progress| progress.is_object()) {
+                        let total = progress["total"].as_f64().unwrap_or(0.0);
+                        let bar = if total > 0.0 {
+                            egui::ProgressBar::new((progress["value"].as_f64().unwrap_or(0.0) / total) as f32)
+                        } else {
+                            egui::ProgressBar::new(0.0).animate(true)
+                        };
+                        ui.add(bar);
+                        ctx.request_repaint();
+                    }
+                    if let Some(toggle) = data.get("toggle").filter(|toggle| toggle.is_object()) {
+                        let mut checked = toggle["checked"].as_bool().unwrap_or(false);
+                        if ui.checkbox(&mut checked, toggle["label"].as_str().unwrap_or_default()).changed() {
+                            pressed = Some(if checked { "on" } else { "off" }.to_owned());
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for (key, label) in buttons.iter().rev() {
+                            let button = if key == "primary" {
+                                egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+                                    .fill(ui.visuals().hyperlink_color.gamma_multiply(0.85))
+                            } else {
+                                egui::Button::new(label)
+                            };
+                            if ui.add(button).clicked() {
+                                pressed = Some(key.clone());
+                            }
+                        }
+                    });
+                });
+            });
+        if pressed.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+            && buttons.iter().any(|(key, _)| key == "dismiss")
+        {
+            pressed = Some("dismiss".to_owned());
+        }
+        if let Some(key) = pressed {
+            self.handle_global_dialog(&id, &key, ctx);
         }
     }
 

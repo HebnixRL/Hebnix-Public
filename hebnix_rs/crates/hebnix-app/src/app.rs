@@ -2634,7 +2634,7 @@ impl HebnixApp {
     pub(crate) fn enable_modern_ui(&mut self, cc: &eframe::CreationContext<'_>) {
         let labels = Self::modern_tab_labels();
         let started = std::time::Instant::now();
-        let built = crate::modern_ui::Navigation::new(cc, &labels);
+        let built = crate::modern_ui::Navigation::new(cc, &labels, self.config.settings.egui_light_pages);
         tracing::info!("Modern UI web views built in {:?}", started.elapsed());
         match built {
             Ok(navigation) => {
@@ -2727,6 +2727,10 @@ impl HebnixApp {
         };
         navigation.set_theme(&self.config.settings.theme, ui.ctx());
         navigation.keep_content(content);
+        if navigation.egui_shell {
+            self.show_egui_sidebar(ui);
+            return true;
+        }
         if let Err(error) = navigation.show(ui.ctx(), selected) {
             tracing::warn!(%error, "could not display Wry navigation");
             return false;
@@ -4788,6 +4792,12 @@ impl HebnixApp {
     }
 
     fn render_rank_display(&mut self, ui: &mut egui::Ui) {
+        #[cfg(windows)]
+        if self.egui_shell() {
+            crate::theme::page_heading(ui, t("spoofer-rank-spoofing"));
+            self.render_rank_tiles(ui);
+            return;
+        }
         crate::i18n::layout::bordered_panel(ui, |ui| {
             crate::theme::page_heading(ui, t("spoofer-rank-spoofing"));
             ui.label("Choose the rank, division and MMR shown locally in Rocket League.");
@@ -5433,6 +5443,13 @@ impl HebnixApp {
                                     #[cfg(windows)]
                                     if ui.checkbox(&mut self.config.settings.legacy_ui, "Legacy UI")
                                         .on_hover_text("Applies the next time Hebnix starts.")
+                                        .changed()
+                                    {
+                                        self.save_config();
+                                    }
+                                    #[cfg(windows)]
+                                    if ui.checkbox(&mut self.config.settings.egui_light_pages, "Draw sidebar, header, Home, Console and About with egui")
+                                        .on_hover_text("Skips those web views, which saves memory and startup time. Applies the next time Hebnix starts.")
                                         .changed()
                                     {
                                         self.save_config();
@@ -6732,7 +6749,7 @@ impl HebnixApp {
 
     fn render_about_tab(&mut self, ui: &mut egui::Ui, _modern_navigation: bool) {
         #[cfg(target_os = "windows")]
-        if _modern_navigation {
+        if _modern_navigation && !self.egui_shell() {
             if self.maintenance.tab {
                 self.render_modern_manager(ui);
             } else {
@@ -8501,6 +8518,7 @@ impl eframe::App for HebnixApp {
         }
         #[cfg(not(windows))]
         let modern_mode = false;
+        let wry_ui = modern_mode;
         #[cfg(target_os = "windows")]
         if self.hidden
             || (self.quitting && crate::watchdog::has_live_handoff())
@@ -8511,7 +8529,7 @@ impl eframe::App for HebnixApp {
         }
         if self.recovery_running() {
             #[cfg(windows)]
-            if modern_mode {
+            if wry_ui {
                 self.poll_modern_navigation(ctx);
                 if let Some(navigation) = &mut self.modern_navigation { navigation.hide_shell(); }
                 self.show_global_dialog(ctx);
@@ -8563,7 +8581,7 @@ impl eframe::App for HebnixApp {
 
         if self.maintenance_running {
             #[cfg(windows)]
-            if modern_mode {
+            if wry_ui {
                 self.poll_modern_navigation(ctx);
                 if let Some(navigation) = &mut self.modern_navigation { navigation.hide_shell(); }
                 self.show_global_dialog(ctx);
@@ -8581,7 +8599,7 @@ impl eframe::App for HebnixApp {
 
         if self.update_info.is_some() {
             #[cfg(windows)]
-            if modern_mode {
+            if wry_ui {
                 self.poll_modern_navigation(ctx);
                 if let Some(navigation) = &mut self.modern_navigation { navigation.hide_shell(); }
                 self.show_global_dialog(ctx);
@@ -8676,7 +8694,7 @@ impl eframe::App for HebnixApp {
             }
         }
 
-        if self.restart_notice && !self.hidden && !modern_mode {
+        if self.restart_notice && !self.hidden && !wry_ui {
             let mut close = false;
             egui::Window::new(t("about-hebnix"))
                 .id(egui::Id::new("Hebnix"))
@@ -8707,7 +8725,7 @@ impl eframe::App for HebnixApp {
         }
 
         if !self.hidden {
-            if !modern_mode {
+            if !wry_ui {
                 self.render_item_clear_prompt(ctx);
                 self.render_admin_prompt(ctx);
                 self.render_item_action_prompt(ctx);
@@ -8728,7 +8746,7 @@ impl eframe::App for HebnixApp {
             #[cfg(target_os = "linux")]
             self.render_desktop_notice(ctx);
             let repair_was_running = self.epic_repair.running;
-            if modern_mode {
+            if wry_ui {
                 self.epic_repair.poll();
             } else {
                 self.epic_repair.show(ctx);
@@ -8765,25 +8783,25 @@ impl eframe::App for HebnixApp {
         self.workshop.sync_lan_connection(&join_rl_path);
         self.workshop.poll_downloads(&join_rl_path, &self.tx.clone(), ctx);
         self.workshop.panel_mode = self.panel.active;
-        if modern_mode {
+        if wry_ui {
             self.workshop.poll_join_prompt(ctx, &join_rl_path);
         } else {
             self.workshop.render_join_prompt(ctx, &join_rl_path);
         }
         self.plugin_mgr.dispatch_tick_if_due(plugin_tick_interval);
-        if modern_mode {
+        if wry_ui {
             #[cfg(windows)]
             self.render_wry_plugin_windows(ctx);
         } else {
             self.render_plugin_windows(ctx);
         }
-        if !self.hidden && !modern_mode
+        if !self.hidden && !wry_ui
             && !crate::notifications::render_clock_warning(ctx, &mut self.req_clock_warning_open)
         {
             self.render_notification_popup(ctx);
         }
         #[cfg(windows)]
-        if modern_mode {
+        if wry_ui {
             self.req_clock_warning_open |= hebnix_sdk::req_auth::take_clock_warning();
             self.show_global_dialog(ctx);
         }
@@ -8812,7 +8830,7 @@ impl HebnixApp {
             return;
         }
         #[cfg(windows)]
-        if modern_navigation && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active) && self.render_modern_swapper(ui) {
+        if modern_navigation && !self.egui_shell() && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active) && self.render_modern_swapper(ui) {
             return;
         }
         if !modern_navigation {
@@ -8845,11 +8863,16 @@ impl HebnixApp {
                                 let mut categories = crate::swapper::SwapCategory::ALL;
                                 categories.sort_by_key(|category| category.label().to_lowercase());
                                 for category in categories {
-                                    ui.selectable_value(
-                                        &mut self.swapper_subtab,
-                                        PatcherSubTab::Swapper(category),
-                                        category.label(),
-                                    );
+                                    let value = PatcherSubTab::Swapper(category);
+                                    if modern_navigation {
+                                        // full-width outlined rows like the web page's category list
+                                        let row = egui::Button::new(category.label()).selected(self.swapper_subtab == value);
+                                        if ui.add_sized([ui.available_width(), 34.0], row).clicked() {
+                                            self.swapper_subtab = value;
+                                        }
+                                    } else {
+                                        ui.selectable_value(&mut self.swapper_subtab, value, category.label());
+                                    }
                                 }
                             }
                         });
@@ -8915,7 +8938,7 @@ impl HebnixApp {
 
     fn render_upk_studio(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
         #[cfg(windows)]
-        if modern_navigation {
+        if modern_navigation && !self.egui_shell() {
             self.render_modern_manager(ui);
             return;
         }
