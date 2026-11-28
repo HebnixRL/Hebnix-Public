@@ -9,10 +9,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::background_cache::BackgroundCache;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+    EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
     GetWindowThreadProcessId, IsWindowVisible,
 };
 
@@ -22,21 +21,11 @@ fn cached_rl_pid() -> Option<u32> {
     static CACHE: OnceLock<BackgroundCache<Option<u32>>> = OnceLock::new();
     *CACHE
         .get_or_init(|| {
-            let mut sys = System::new();
             BackgroundCache::new("rl-focus", None, Duration::from_millis(500), move |_| {
-                sys.refresh_processes_specifics(
-                    ProcessesToUpdate::All,
-                    true,
-                    ProcessRefreshKind::nothing(),
-                );
-                Some(sys.processes().iter().find_map(|(pid, process)| {
-                    process
-                        .name()
-                        .to_string_lossy()
-                        .to_ascii_lowercase()
-                        .contains("rocketleague")
-                        .then_some(pid.as_u32())
-                }))
+                // Toolhelp does not need to open the protected game process.
+                // Use the same PID source as close/detection, not a richer
+                // sysinfo scan that can lose the name after EAC locks it.
+                Some(super::detector::find_process("rocketleague.exe"))
             })
         })
         .snapshot()
@@ -64,8 +53,13 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
             // reads a cached length, never sends messages, so it can't hang.
             && GetWindowTextLengthW(hwnd) > 0
         {
-            state.result = Some(hwnd);
-            return false.into(); // stop enumeration
+            let mut class = [0u16; 128];
+            let length = GetClassNameW(hwnd, &mut class) as usize;
+            let unreal = String::from_utf16_lossy(&class[..length]).contains("Unreal");
+            if state.result.is_none() || unreal { state.result = Some(hwnd); }
+            // Injected overlays can have a caption and the game's PID. Prefer
+            // the Unreal viewport rather than closing the first overlay found.
+            if unreal { return false.into(); }
         }
         true.into()
     }
@@ -80,6 +74,87 @@ pub fn rocket_league_hwnd() -> Option<HWND> {
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut state as *mut EnumState as isize));
     }
     state.result
+}
+
+/// Ask an active live hook to quit internally, then try the game's viewport.
+/// EAC can deny PROCESS_TERMINATE even for the same user.
+/// Never elevate, and only force-terminate the PID selected at the start.
+pub fn close_rocket_league() -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::time::Instant;
+    use windows::Win32::Foundation::WPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+    let Some(pid) = super::detector::find_process("rocketleague.exe") else { return Ok(()); };
+    let request = game_quit_request(pid);
+    if request.is_some() {
+        // The game accepts this on its own thread, but EAC can make process
+        // teardown slow while denying a normal-user TerminateProcess fallback.
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < deadline {
+            if super::detector::find_process("rocketleague.exe") != Some(pid) { return Ok(()); }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    // Do not use the focus cache here: it may still contain the previous game.
+    let mut state = EnumState { pid, result: None };
+    unsafe { let _ = EnumWindows(Some(enum_cb), LPARAM(&mut state as *mut EnumState as isize)); }
+    if let Some(hwnd) = state.result {
+        if unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok() {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline {
+                if super::detector::find_process("rocketleague.exe") != Some(pid) { return Ok(()); }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    let output = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .creation_flags(0x0800_0000)
+        .output()?;
+    if output.status.success() || super::detector::find_process("rocketleague.exe") != Some(pid) {
+        return Ok(());
+    }
+    Err(std::io::Error::other(format!("Rocket League did not close: {}",
+        String::from_utf8_lossy(&output.stderr).trim())))
+}
+
+struct QuitRequest(std::path::PathBuf);
+impl Drop for QuitRequest {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+fn game_quit_request(pid: u32) -> Option<QuitRequest> {
+    let directory = crate::utils::paths::base_dir().join("state/live-cosmetics");
+    let report = directory.join("runtime.ini");
+    let metadata = std::fs::metadata(&report).ok()?;
+    if metadata.len() > 8192 || metadata.modified().ok()?.elapsed().ok()? > Duration::from_secs(4) { return None; }
+    let text = std::fs::read_to_string(report).ok()?;
+    let session = quit_session(&text)?;
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let path = directory.join("quit.request");
+    std::fs::write(&path, format!("quit:{session}:{pid}:{nonce}")).ok()?;
+    Some(QuitRequest(path))
+}
+fn quit_session(text: &str) -> Option<&str> {
+    if text.len() > 8192 { return None; }
+    if !text.replace('\r', "").ends_with("HbxLiveRuntime.end=1\n") { return None; }
+    let revision: u32 = text.lines().find_map(|line| line.strip_prefix("HbxLiveRuntime.version="))?.parse().ok()?;
+    if revision < 19 { return None; }
+    let session = text.lines().find_map(|line| line.strip_prefix("session="))?;
+    if session.is_empty() || session.len() > 40 || session.contains(['\r', '\n']) { return None; }
+    Some(session)
+}
+
+#[cfg(test)]
+mod quit_tests {
+    use super::quit_session;
+    #[test]
+    fn quit_requires_a_complete_report_from_a_hook_that_supports_it() {
+        assert_eq!(quit_session("HbxLiveRuntime.version=19\nsession=2026.11.27-19.00.00\nHbxLiveRuntime.end=1\n"), Some("2026.11.27-19.00.00"));
+        assert!(quit_session("HbxLiveRuntime.version=18\nsession=old\nHbxLiveRuntime.end=1\n").is_none());
+        assert!(quit_session("HbxLiveRuntime.version=19\nsession=partial\n").is_none());
+        assert!(quit_session("HbxLiveRuntime.version=19\nsession=\nHbxLiveRuntime.end=1\n").is_none());
+    }
 }
 
 /// does the RL window have focus. compares the foreground window's pid to

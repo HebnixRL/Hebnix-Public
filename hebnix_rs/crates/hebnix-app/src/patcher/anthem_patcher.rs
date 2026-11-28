@@ -629,6 +629,246 @@ impl AnthemPatcherState {
     pub fn leave_page(&mut self) {
         self.player = None;
     }
+    fn update(&mut self, cooked: &Path, tx: &Sender<AppMsg>, config: &mut Config, ctx: &egui::Context) {
+        self.poll(config, tx);
+        while let Ok((key, image)) = self.thumbnail_results.try_recv() {
+            self.thumbnails.insert(key, image);
+        }
+        if self.receiver.is_none()
+            && self.scanned_path.as_deref() != Some(cooked)
+            && let Some(catalog) = self.catalog.clone()
+        {
+            let cooked = cooked.to_path_buf();
+            self.scanned_path = Some(cooked.clone());
+            self.job(ctx, "Checking installed anthem audio…", move || {
+                scan(catalog, &cooked).map(JobResult::Scan)
+            });
+        }
+    }
+
+    fn save_patch(&mut self, editor: &Editor, audio: Audio, starts: BTreeMap<String, f64>, cooked: &Path, ctx: &egui::Context) {
+        let key = editor.anthem.key.clone();
+        let mut saved = self.saved.clone();
+        let base = self.base.clone();
+        let cooked = cooked.to_path_buf();
+        let mut desired = self.active_anthems.clone();
+        desired.insert(key.clone(), editor.anthem.name.clone());
+
+        let patch = SavedPatch {
+            name: editor.anthem.name.clone(),
+            upk: editor.anthem.upk.clone(),
+            internal: editor.anthem.internal.clone(),
+            source: String::new(),
+            starts,
+            volume: editor.volume.clamp(0.0, 1.0),
+        };
+        self.player = None;
+        self.job(ctx, "Saving and patching anthem audio…", move || {
+            let dir = base.join("anthems/sources");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            // Immutable source names preserve the previous patch if applying fails.
+            let path = dir.join(format!("{:016x}.wav", rand::random::<u64>()));
+            fs::write(&path, audio.wav()).map_err(|e| e.to_string())?;
+            let mut patch = patch;
+            patch.source = path.to_string_lossy().into_owned();
+            saved.insert(key, patch);
+            let manifest = base.join("anthems/patches.json");
+            let previous = fs::read(&manifest).ok();
+            atomic_write(
+                &manifest,
+                &serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?,
+            )?;
+            match apply(&cooked, desired, saved) {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    let rollback = if let Some(previous) = previous {
+                        atomic_write(&manifest, &previous)
+                    } else {
+                        fs::remove_file(&manifest).map_err(|e| e.to_string())
+                    };
+                    let _ = fs::remove_file(path);
+                    rollback.map_err(|e| {
+                        format!("{error}; could not restore anthem manifest: {e}")
+                    })?;
+                    Err(error)
+                }
+            }
+        });
+    }
+
+    #[cfg(windows)]
+    fn web_thumbnail(&mut self, cooked: &Path, anthem: &Anthem, ctx: &egui::Context) -> Option<String> {
+        let path = cooked.join(&anthem.thumbnail);
+        let key = path.to_string_lossy().into_owned();
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.thumbnails.entry(key.clone()) {
+            entry.insert(None);
+            let _ = self.thumbnail_jobs.send((key.clone(), path, ctx.clone()));
+        }
+        self.thumbnails.get(&key).and_then(|bytes| bytes.as_deref()).and_then(crate::ui::browser::image_url)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, cooked: &Path, tx: &Sender<AppMsg>, config: &mut Config, owned_ids: &HashSet<i64>, visible: &[String], ctx: &egui::Context) -> Value {
+        use serde_json::json;
+        self.update(cooked, tx, config, ctx);
+        let playing = self.player.as_ref().is_some_and(|player| !player.paused() && !player.finished());
+        if playing {
+            ctx.request_repaint_after(std::time::Duration::from_millis(90));
+        }
+        let editor = self.editor.clone().map(|editor| {
+            let region = editor.longest_region();
+            let audio = editor.audio.as_ref();
+            let max_start = audio.zip(region).and_then(|(audio, region)| audio.max_start(region.clip.duration));
+            let position = self.player.as_ref().filter(|_| self.player_imported).map_or(editor.cursor, Player::position);
+            json!({
+                "name": editor.anthem.name, "file": editor.anthem.upk, "image": self.web_thumbnail(cooked, &editor.anthem, ctx),
+                "error": editor.anthem.error, "regions": editor.anthem.regions.len(),
+                "region": region.map(|region| &region.label), "length": region.map(|region| region.clip.duration),
+                "original": region.is_some_and(|region| region.preview_available),
+                "source": Path::new(&editor.source_name).file_name().map(|name| name.to_string_lossy()),
+                "duration": audio.map(Audio::duration), "peaks": audio.map(|audio| &audio.peaks),
+                "start": editor.start, "position": position, "maxStart": max_start, "volume": editor.volume,
+                "playing": playing, "previewType": self.player.as_ref().map(|_| if self.player_imported { "imported" } else { "original" }),
+            })
+        });
+        let mut rows = Vec::new();
+        if editor.is_none() {
+            let entries = self.entries.clone();
+            rows = entries.iter().map(|entry| {
+                let active = self.active_anthems.contains_key(&entry.key);
+                let image = visible.contains(&entry.key).then(|| self.web_thumbnail(cooked, entry, ctx)).flatten();
+                json!({
+                    "id": entry.key, "name": entry.name, "file": entry.upk, "image": image,
+                    "owned": entry.product_id.is_some_and(|id| owned_ids.contains(&id)),
+                    "active": active, "patched": active || self.saved.contains_key(&entry.key),
+                })
+            }).collect();
+        }
+        json!({"page": "anthems", "rows": rows, "editor": editor, "busy": self.receiver.is_some(),
+            "error": self.error, "status": self.status, "active": !self.active_anthems.is_empty()})
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, key: &str, id: Option<String>, value: Value, cooked: &Path, ctx: &egui::Context) {
+        if self.receiver.is_some() {
+            return;
+        }
+        match key {
+            "refresh" => {
+                self.scanned_path = None;
+                self.error = None;
+            }
+            "restore-all" => self.restore_all(cooked, ctx),
+            "patch" => {
+                if let (Some(id), Some(value)) = (id, value.as_bool())
+                    && (self.saved.contains_key(&id) || self.active_anthems.contains_key(&id))
+                {
+                    self.update_enabled(id, value, cooked, ctx);
+                }
+            }
+            "select" => {
+                if let Some(anthem) = self.entries.iter().find(|entry| id.as_deref() == Some(entry.key.as_str())).cloned() {
+                    self.select(anthem, ctx);
+                }
+            }
+            "back" => {
+                self.editor = None;
+                self.player = None;
+                self.error = None;
+                self.status.clear();
+            }
+            _ => {
+                if let Some(mut editor) = self.editor.take() {
+                    self.web_edit(&mut editor, key, &value, cooked, ctx);
+                    self.editor = Some(editor);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn web_edit(&mut self, editor: &mut Editor, key: &str, value: &Value, cooked: &Path, ctx: &egui::Context) {
+        match key {
+            "import" => {
+                let dialog = rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "ogg", "flac"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    self.job(ctx, "Decoding imported audio…", move || Audio::decode(&path).map(|audio| JobResult::Import(audio, name, true)));
+                }
+                return;
+            }
+            "stop" => {
+                self.player = None;
+                if self.player_imported { editor.cursor = editor.start; }
+                return;
+            }
+            "original-toggle" => {
+                if !self.player_imported && let Some(player) = &mut self.player { player.toggle(); }
+                return;
+            }
+            _ => {}
+        }
+        let Some(region) = editor.longest_region().cloned() else { return };
+        if key == "original" && region.preview_available {
+            self.preview(region, cooked, ctx);
+            return;
+        }
+        let Some(audio) = editor.audio.clone() else { return };
+        let length = region.clip.duration;
+        let Some(max_start) = audio.max_start(length) else { return };
+        let number = value.as_f64().filter(|number| number.is_finite());
+        let end = editor.start + length;
+        let upper = (end - 0.001).max(editor.start);
+        let mut restart = None;
+        match key {
+            "start" => {
+                if let Some(value) = number {
+                    editor.start = value.clamp(0.0, max_start);
+                    editor.cursor = editor.start;
+                    self.player = None;
+                }
+            }
+            "seek" => {
+                if let Some(value) = number {
+                    editor.cursor = value.clamp(editor.start, upper);
+                    if self.player_imported && let Some(player) = &self.player {
+                        restart = Some((editor.cursor, player.paused()));
+                    }
+                }
+            }
+            "volume" => {
+                if let Some(value) = number {
+                    editor.volume = value.clamp(0.0, 1.0) as f32;
+                    if self.player_imported && let Some(player) = &self.player {
+                        restart = Some((player.position().clamp(editor.start, upper), player.paused()));
+                    }
+                }
+            }
+            "play" => {
+                if self.player_imported && let Some(player) = &mut self.player && !player.finished() {
+                    player.toggle();
+                } else {
+                    restart = Some((if (editor.start..upper).contains(&editor.cursor) { editor.cursor } else { editor.start }, false));
+                }
+            }
+            "save" => match editor.patch_starts(&audio) {
+                Ok(starts) => self.save_patch(editor, audio.clone(), starts, cooked, ctx),
+                Err(error) => self.error = Some(error),
+            },
+            _ => {}
+        }
+        if let Some((position, paused)) = restart {
+            match Player::play(&audio, position, end, editor.volume) {
+                Ok(mut player) => {
+                    if paused { player.toggle(); }
+                    self.player = Some(player);
+                    self.player_imported = true;
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+    }
+
     pub fn render_tab(
         &mut self,
         ui: &mut egui::Ui,
@@ -637,21 +877,8 @@ impl AnthemPatcherState {
         config: &mut Config,
         owned_ids: &HashSet<i64>,
     ) {
-        self.poll(config, tx);
-        while let Ok((key, image)) = self.thumbnail_results.try_recv() {
-            self.thumbnails.insert(key, image);
-        }
         let ctx = ui.ctx().clone();
-        if self.receiver.is_none()
-            && self.scanned_path.as_deref() != Some(cooked)
-            && let Some(catalog) = self.catalog.clone()
-        {
-            let cooked = cooked.to_path_buf();
-            self.scanned_path = Some(cooked.clone());
-            self.job(&ctx, "Checking installed anthem audio…", move || {
-                scan(catalog, &cooked).map(JobResult::Scan)
-            });
-        }
+        self.update(cooked, tx, config, &ctx);
         if let Some(error) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -1117,53 +1344,7 @@ impl AnthemPatcherState {
                 .on_disabled_hover_text(selections.as_ref().err().cloned().unwrap_or_default())
                 .clicked()
             {
-                let key = editor.anthem.key.clone();
-                let mut saved = self.saved.clone();
-                let base = self.base.clone();
-                let cooked = cooked.to_path_buf();
-                let mut desired = self.active_anthems.clone();
-                desired.insert(key.clone(), editor.anthem.name.clone());
-                let starts = selections.unwrap();
-                let patch = SavedPatch {
-                    name: editor.anthem.name.clone(),
-                    upk: editor.anthem.upk.clone(),
-                    internal: editor.anthem.internal.clone(),
-                    source: String::new(),
-                    starts,
-                    volume: editor.volume.clamp(0.0, 1.0),
-                };
-                self.player = None;
-                self.job(&ctx, "Saving and patching anthem audio…", move || {
-                    let dir = base.join("anthems/sources");
-                    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                    // Immutable source names preserve the previous patch if applying fails.
-                    let path = dir.join(format!("{:016x}.wav", rand::random::<u64>()));
-                    fs::write(&path, audio.wav()).map_err(|e| e.to_string())?;
-                    let mut patch = patch;
-                    patch.source = path.to_string_lossy().into_owned();
-                    saved.insert(key, patch);
-                    let manifest = base.join("anthems/patches.json");
-                    let previous = fs::read(&manifest).ok();
-                    atomic_write(
-                        &manifest,
-                        &serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?,
-                    )?;
-                    match apply(&cooked, desired, saved) {
-                        Ok(result) => Ok(result),
-                        Err(error) => {
-                            let rollback = if let Some(previous) = previous {
-                                atomic_write(&manifest, &previous)
-                            } else {
-                                fs::remove_file(&manifest).map_err(|e| e.to_string())
-                            };
-                            let _ = fs::remove_file(path);
-                            rollback.map_err(|e| {
-                                format!("{error}; could not restore anthem manifest: {e}")
-                            })?;
-                            Err(error)
-                        }
-                    }
-                });
+                self.save_patch(&editor, audio, selections.unwrap(), cooked, &ctx);
             }
         } else {
             ui.add_space(30.0);

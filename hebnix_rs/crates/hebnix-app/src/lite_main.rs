@@ -27,6 +27,8 @@ mod plugins;
 mod runtime_assets;
 mod recovery_tasks;
 mod statsapi_ini;
+#[allow(dead_code)] // lite only resolves fonts; downloads live in the full app
+mod fonts;
 mod theme;
 mod toast;
 mod tray;

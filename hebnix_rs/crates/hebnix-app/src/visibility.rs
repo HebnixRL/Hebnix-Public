@@ -115,7 +115,22 @@ impl Gate {
 static GATE: Mutex<Gate> = Mutex::new(Gate::new());
 
 pub fn queue_toggle() -> bool {
-    GATE.try_lock().is_ok_and(|mut gate| gate.queue())
+    let Ok(mut gate) = GATE.try_lock() else {
+        tracing::warn!("show/hide request could not acquire the visibility gate");
+        return false;
+    };
+    // Also recover here: a previous transition may have stopped before its
+    // completion worker started (for example while dispatching plugin events).
+    if let Some(pending) = gate.expire(Instant::now()) {
+        tracing::warn!(hidden = pending.hidden, "show/hide recovered a stale visibility transition");
+    }
+    let accepted = gate.queue();
+    tracing::info!(accepted, phase = ?gate.phase, "show/hide delivery gate");
+    accepted
+}
+
+pub fn toggle_waiting_for_ui() -> bool {
+    GATE.lock().unwrap().phase == Phase::Queued
 }
 
 pub fn cancel_queued_toggle() {
@@ -184,6 +199,7 @@ fn native_matches(hidden: bool) -> bool {
         return false;
     };
     unsafe {
+        if hidden && !IsWindowVisible(hwnd).as_bool() { return true; }
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let away = WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
         if style & away != if hidden { away } else { 0 } {

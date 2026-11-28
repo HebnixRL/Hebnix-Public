@@ -279,16 +279,24 @@ pub fn install_theme(
     Ok((name, author))
 }
 
-pub(crate) fn import_theme_zip(path: &Path, themes_dir: &Path, fonts_dir: &Path) -> Result<(), String> {
+/// Installs a local theme: a single .toml, or a .zip holding themes, fonts and assets.
+pub(crate) fn import_theme_file(path: &Path, themes_dir: &Path, fonts_dir: &Path) -> Result<(), String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let mut bytes = Vec::new();
     file.take(MAX_THEME_DOWNLOAD + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() as u64 > MAX_THEME_DOWNLOAD {
-        return Err("Theme archive exceeds the 50 MB limit".into());
+        return Err("Theme file exceeds the 50 MB limit".into());
     }
-    install_theme_zip(&bytes, themes_dir, fonts_dir)
+    if bytes.starts_with(b"PK\x03\x04") {
+        return install_theme_zip(&bytes, themes_dir, fonts_dir);
+    }
+    validate_theme(&bytes)?;
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or("The theme's file name is not valid text")?;
+    let filename = safe_filename(name, "toml")?;
+    std::fs::create_dir_all(themes_dir).map_err(|error| error.to_string())?;
+    std::fs::write(themes_dir.join(filename), bytes).map_err(|error| error.to_string())
 }
 
 fn install_theme_zip(bytes: &[u8], themes_dir: &Path, fonts_dir: &Path) -> Result<(), String> {

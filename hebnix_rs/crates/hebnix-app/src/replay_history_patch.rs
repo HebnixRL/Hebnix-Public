@@ -75,19 +75,34 @@ impl State {
         self.enabled && !self.busy()
     }
 
+    pub(crate) fn can_toggle(&self) -> bool {
+        !self.game.as_os_str().is_empty()
+            && !self.busy()
+            && !hebnix_sdk::process::is_rocket_league_running()
+    }
+
+    pub(crate) fn request_enabled(&mut self, ctx: &egui::Context, value: bool) {
+        if value != self.enabled && self.can_toggle() {
+            self.run(ctx, Some(value));
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn toggle_state(&self) -> (bool, &str) {
+        (self.enabled, &self.status)
+    }
+
     pub(crate) fn show(&mut self, ui: &mut egui::Ui) {
         let mut on = self.enabled;
         if ui
             .add_enabled(
-                !self.game.as_os_str().is_empty()
-                    && !self.busy()
-                    && !hebnix_sdk::process::is_rocket_league_running(),
+                self.can_toggle(),
                 egui::Checkbox::new(&mut on, "Enable Auto Upload"),
             )
             .on_disabled_hover_text("Close Rocket League before changing Auto Upload.")
             .changed()
         {
-            self.run(ui.ctx(), Some(on));
+            self.request_enabled(ui.ctx(), on);
         }
         if self.busy() {
             ui.spinner();
@@ -430,7 +445,7 @@ mod tests {
             inspect(&mut package, Some(false)).unwrap();
         }
         detach_freeplay_restart(&mut package).unwrap();
-        attach_freeplay_restart(&mut package, 3).unwrap();
+        attach_freeplay_restart(&mut package).unwrap();
         let before = payload(&package, COMMAND).unwrap().1;
         assert_eq!(inspect(&mut package, Some(true)).unwrap(), (false, true));
         assert_eq!(inspect(&mut package, None).unwrap(), (true, false));
@@ -448,8 +463,8 @@ mod tests {
 
         let source = PathBuf::from(std::env::var_os("HEBNIX_UPK_TEST_SOURCE").unwrap());
         for order in [
-            [TailBlock::Freeplay(3), TailBlock::Host],
-            [TailBlock::Host, TailBlock::Freeplay(3)],
+            [TailBlock::Freeplay(4), TailBlock::Host],
+            [TailBlock::Host, TailBlock::Freeplay(4)],
         ] {
             let mut package = UpkPackage::load(&source).unwrap();
             if inspect(&mut package, None).unwrap().0 {

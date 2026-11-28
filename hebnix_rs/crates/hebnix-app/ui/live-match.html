@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'">
+  <title>Live Match</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="tracker-body">
+  <main class="container-fluid tracker-page live-match-page">
+    <section class="tracker-summary live-summary mb-3" aria-label="Match summary">
+      <div class="tracker-person"><div><small>Rocket League</small><strong id="running"></strong></div></div>
+      <div class="tracker-metric"><small>Stats API</small><strong id="connection"></strong></div>
+      <div class="tracker-metric"><small>Live Cosmetics</small><strong id="live-cosmetics" role="status"></strong>
+        <div id="live-cosmetics-progress" class="progress live-cosmetics-progress" role="progressbar" aria-label="Installing live cosmetics" hidden>
+          <div class="progress-bar"></div>
+        </div>
+      </div>
+    </section>
+    <section id="dashboard-actions" class="tracker-detail p-3 d-flex gap-2" hidden>
+      <button id="dashboard-start" type="button" class="btn btn-primary">Start Rocket League</button>
+    </section>
+    <div class="live-columns">
+      <div id="scoreboard">
+        <div class="d-flex gap-3 align-items-center mb-3" id="match-heading" hidden>
+      <div class="tracker-metric" id="match-clock" hidden><strong class="tracker-number" id="clock"></strong><small id="arena"></small></div>
+      <div class="tracker-metric" id="match-status" hidden><small id="details"></small></div>
+        </div>
+        <p class="tracker-detail p-3 mb-0" id="waiting" role="status" hidden></p>
+        <div class="d-grid gap-3" id="teams"></div>
+        <p class="tracker-detail p-3 mt-3 mb-0" id="spectators" hidden></p>
+      </div>
+      <aside class="tracker-detail live-events">
+        <h2 class="h6 px-3 py-3 mb-0 border-bottom" id="events-title"></h2>
+        <p class="text-body-secondary px-3 py-3 mb-0" id="empty-events" hidden></p>
+        <ol class="list-unstyled mb-0" id="events"></ol>
+      </aside>
+    </div>
+  </main>
+  <script src="/live-match.js"></script>
+</body>
+</html>

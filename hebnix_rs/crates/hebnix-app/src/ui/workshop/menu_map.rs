@@ -43,6 +43,25 @@ enum Action {
     Reapply,
 }
 
+#[cfg(windows)]
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WebMapAction {
+    Source { workshop: bool },
+    Select { id: String },
+    Scan,
+    Apply,
+    Restore,
+    Reapply,
+    Plugin,
+    Import,
+    CarToggle { enabled: bool },
+    Car { tweak: CarTweak },
+    CameraToggle { enabled: bool },
+    CameraSelect { id: String },
+    Camera { tweak: CameraTweak },
+}
+
 #[derive(Default)]
 pub struct MenuMapState {
     arenas: Vec<Arena>,
@@ -73,6 +92,130 @@ pub struct MenuMapState {
 }
 
 impl MenuMapState {
+    #[cfg(windows)]
+    fn web_ready(&self, rl_path: &str) -> bool {
+        !self.busy && self.scan.is_none() && !self.refresh_needed && !self.state_error
+            && self.last_path.as_deref() == Some(rl_path)
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_snapshot(&mut self, rl_path: &str, custom: &[CustomMap], ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        self.ensure_loaded(rl_path, ctx);
+        self.poll_scan();
+        let ready = self.web_ready(rl_path);
+        if self.workshop && !custom.iter().any(|map| map.id == self.selected_custom) {
+            self.selected_custom = custom.first().map(|map| map.id.clone()).unwrap_or_default();
+        }
+        let choices: Vec<_> = if self.workshop {
+            custom.iter().map(|map| (&map.id, &map.name)).collect()
+        } else {
+            self.arenas.iter().map(|map| (&map.package, &map.label)).collect()
+        };
+        let selected = if self.workshop { &self.selected_custom } else { &self.selected };
+        let active = self.active.as_ref().map(|active| {
+            t_args("menu-map-active", &[("map", active.display_name().into())])
+        });
+        let cameras: Vec<_> = self.cameras.iter().map(|camera| {
+            let title = match camera_purpose(&camera.tag) {
+                Some(purpose) => format!("{purpose} ({})", camera.name),
+                None if camera.name == PRESS_ANY_BUTTON_CAMERA => format!("PressAnyButtonToStart ({})", camera.name),
+                None if camera.tag.is_empty() || camera.tag == "CameraActor" => camera.name.clone(),
+                None => format!("{} ({})", camera.tag, camera.name),
+            };
+            let changed = self.camera_tweaks.get(&camera.name).is_some_and(|tweak| !tweak.is_noop());
+            json!({
+                "id": camera.name, "label": if changed { format!("{title} •") } else { title },
+                "position": camera.location, "rotation": camera.rotation, "fov": camera.fov,
+                "play": camera.tag == "MainMenuPlay",
+            })
+        }).collect();
+        let camera = json!({
+            "on": self.camera_on, "rows": cameras, "selected": self.camera_selected, "other": self.camera_other,
+            "error": self.camera_error, "tweak": self.camera_tweaks.get(&self.camera_selected),
+        });
+        let car = self.car_spots.first().map(|spot| json!({
+            "on": self.car_on, "position": spot.location, "yaw": spot.yaw, "tweak": self.car,
+        }));
+        let maps = json!({
+            "workshop": self.workshop, "choices": choices, "selected": selected, "active": active,
+            "canReapply": ready && self.active.as_ref().is_some_and(|active| active.label.is_none() || custom.iter().any(|map| map.id == active.arena)),
+            "editable": ready && self.active.is_none(),
+        });
+        let labels: serde_json::Map<String, serde_json::Value> = [
+            ("description", "menu-map-description"), ("close", "menu-map-close-game"), ("loading", "menu-map-loading"),
+            ("arenas", "menu-map-source-arenas"), ("workshop", "menu-map-source-workshop"),
+            ("choose", "menu-map-choose"), ("search", "render-search-maps"), ("apply", "menu-map-apply"),
+            ("restore", "menu-map-restore"), ("restoreFirst", "menu-map-restore-first"),
+            ("workshopEmpty", "menu-map-workshop-empty"), ("workshopNote", "menu-map-workshop-note"),
+            ("empty", "menu-map-empty"), ("scan", "render-scan-again"),
+            ("cameraTitle", "menu-map-camera-title"), ("cameraDescription", "menu-map-camera-description"),
+            ("cameraNone", "menu-map-camera-none"), ("cameraEnable", "menu-map-camera-enable"),
+            ("play", "menu-map-camera-play"), ("other", "menu-map-camera-other"),
+            ("original", "menu-map-camera-original"), ("move", "menu-map-camera-move"),
+            ("pitch", "menu-map-camera-pitch"), ("yaw", "menu-map-camera-yaw"), ("fov", "menu-map-camera-fov"),
+            ("reset", "menu-map-camera-reset"), ("each", "menu-map-camera-each"),
+            ("carTitle", "menu-map-car-title"), ("carDescription", "menu-map-car-description"),
+            ("carNone", "menu-map-car-none"), ("carEnable", "menu-map-car-enable"),
+            ("pluginTitle", "menu-map-plugin-title"), ("pluginDescription", "menu-map-plugin-description"),
+            ("plugin", "menu-map-plugin-button"), ("import", "menu-map-plugin-import"), ("importHint", "menu-map-plugin-import-hint"),
+            ("reapply", "menu-map-camera-reapply"), ("reapplyHint", "menu-map-camera-reapply-hint"),
+        ].into_iter().map(|(key, label)| (key.to_owned(), json!(t(label)))).collect();
+        json!({
+            "page": "menu-map", "maps": maps, "car": car, "camera": camera, "labels": labels,
+            "ready": ready, "busy": self.busy, "loading": self.scan.is_some(), "status": self.status,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_action(&mut self, action: WebMapAction, rl_path: &str, custom: &[CustomMap], tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        let ready = self.web_ready(rl_path);
+        let editable = ready && self.active.is_none();
+        match action {
+            WebMapAction::Source { workshop } if editable => self.workshop = workshop,
+            WebMapAction::Select { id } if editable => {
+                if self.workshop && custom.iter().any(|map| map.id == id) { self.selected_custom = id; }
+                else if !self.workshop && self.arenas.iter().any(|map| map.package == id) { self.selected = id; }
+            }
+            WebMapAction::Scan if !self.busy && self.scan.is_none() => {
+                self.status.clear();
+                self.refresh(rl_path, ctx);
+            }
+            WebMapAction::Apply if editable => {
+                let map = self.workshop.then(|| custom.iter().find(|map| map.id == self.selected_custom)).flatten();
+                if map.is_some() || !self.workshop && !self.selected.is_empty() { self.launch(Action::Apply, map, rl_path, tx, ctx); }
+            }
+            WebMapAction::Restore if ready && self.active.is_some() => self.launch(Action::Restore, None, rl_path, tx, ctx),
+            WebMapAction::Reapply if ready => {
+                let Some(active) = &self.active else { return };
+                let map = active.label.as_ref().and_then(|_| custom.iter().find(|map| map.id == active.arena));
+                if active.label.is_none() || map.is_some() { self.launch(Action::Reapply, map, rl_path, tx, ctx); }
+            }
+            WebMapAction::Plugin => { let _ = open::that(MENUCAM_URL); }
+            WebMapAction::Import if !self.busy => self.import_menucam(),
+            WebMapAction::CarToggle { enabled } if !self.car_spots.is_empty() => self.car_on = enabled,
+            WebMapAction::Car { mut tweak } if ready && self.car_on && tweak.offset.iter().all(|value| value.is_finite()) && tweak.yaw.is_finite() => {
+                tweak.yaw = tweak.yaw.clamp(-180.0, 180.0);
+                self.car = tweak;
+            }
+            WebMapAction::CameraToggle { enabled } if self.camera_error.is_none() && !self.cameras.is_empty() => self.camera_on = enabled,
+            WebMapAction::CameraSelect { id } if ready && self.camera_on => {
+                if let Some(camera) = self.cameras.iter().find(|camera| camera.name == id) {
+                    if camera.tag != "MainMenuPlay" { self.camera_other.clone_from(&id); }
+                    self.camera_selected = id;
+                }
+            }
+            WebMapAction::Camera { mut tweak } if ready && self.camera_on => {
+                let Some(camera) = self.cameras.iter().find(|camera| camera.name == tweak.camera && camera.name == self.camera_selected) else { return; };
+                if !tweak.offset.iter().all(|value| value.is_finite()) || !tweak.pitch.is_finite() || !tweak.yaw.is_finite() { return; }
+                tweak.pitch = tweak.pitch.clamp(-89.0, 89.0);
+                tweak.yaw = tweak.yaw.clamp(-180.0, 180.0);
+                tweak.fov = camera.fov.and(tweak.fov.filter(|value| value.is_finite()).map(|value| value.clamp(10.0, 170.0)));
+                self.camera_tweaks.insert(tweak.camera.clone(), tweak);
+            }
+            _ => {}
+        }
+    }
     fn refresh(&mut self, rl_path: &str, ctx: &egui::Context) {
         if self.busy {
             return;
@@ -134,7 +277,10 @@ impl MenuMapState {
             }
         }
         match result.arenas {
-            Ok(arenas) => self.arenas = arenas,
+            Ok(mut arenas) => {
+                arenas.retain(|arena| super::background_changer::map_swapper_arena(&arena.package).is_some());
+                self.arenas = arenas;
+            }
             Err(error) => {
                 self.arenas.clear();
                 self.status = error;

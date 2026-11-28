@@ -66,5 +66,9 @@ pub fn directory_key() -> Result<&'static str, String> {
 pub const CRASH_GRACE_WINDOW: Duration = Duration::from_secs(90);
 
 pub fn cleanup_system_state() -> Result<(), String> {
+    // removing rules needs admin, and the query alone costs ~2s of powershell on every quit
+    if !crate::spoofer::is_admin() {
+        return Ok(());
+    }
     firewall::remove_rules()
 }

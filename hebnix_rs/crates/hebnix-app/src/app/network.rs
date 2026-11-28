@@ -422,6 +422,125 @@ pub(super) struct Network {
 }
 
 impl Network {
+    #[cfg(windows)]
+    pub(super) fn web_snapshot(&self) -> Value {
+        let session = self.session.as_ref().filter(|session| !session.token.is_empty());
+        let signed_in = session.is_some();
+        let settings = self.account_settings.as_ref().filter(|_| {
+            session.is_some_and(|session| self.account_settings_session.as_ref() == Some(&session.token))
+        });
+        let players: Vec<_> = self.snapshot.iter().flat_map(|snapshot| &snapshot.friends)
+            .map(|player| {
+                let links: Vec<_> = player.links.iter().enumerate().map(|(index, link)| {
+                    let stats = self.friend_ranks.get(&format!("{}:{}", link.platform, link.platform_id));
+                    let mut ranks: Vec<_> = stats.into_iter().flat_map(|stats| stats.ranks.values()).collect();
+                    ranks.sort_by_key(|rank| rank.playlist_id);
+                    json!({
+                        "index": index, "platform": link.platform, "name": link.display_name,
+                        "loaded": stats.is_some(), "error": stats.and_then(|stats| stats.error.as_deref()),
+                        "ranks": ranks.into_iter().map(|rank| json!({
+                            "mode": rank.playlist_name, "rank": format!("{} {}", rank.tier_name, rank.division_name),
+                        })).collect::<Vec<_>>(),
+                    })
+                }).collect();
+                json!({
+                    "id": player.player_id, "name": player.username, "status": player.status,
+                    "direction": player.direction, "presence": player.presence_label(), "links": links,
+                })
+            }).collect();
+        json!({
+            "signed_in": signed_in, "enabled": self.actions_enabled(), "busy": self.job.is_some(),
+            "error": self.error, "players": players,
+            "warnings": self.snapshot.as_ref().filter(|_| self.rocket_league_running).map(|snapshot| &snapshot.unavailable_updates),
+            "friend_code": settings.map(|settings| &settings.friend_code),
+            "presence": settings.map(|settings| &settings.presence_visibility),
+            "hide_match_users": self.notification_settings.hide_match_users,
+            "hide_presence": self.notification_settings.hide,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_action(&mut self, ctx: &egui::Context, action: WebAction) {
+        use WebAction::*;
+        match action {
+            Notifications { hide_match_users, hide_presence } => {
+                self.notification_settings.hide_match_users = hide_match_users;
+                self.notification_settings.hide = hide_presence;
+                if let Err(error) = self.notification_settings.save() {
+                    self.error = error.to_string();
+                }
+                return;
+            }
+            _ if !self.actions_enabled() => return,
+            _ => {}
+        }
+        let session = self.session.clone().filter(|session| !session.token.is_empty());
+        if matches!(&action, SignIn) && session.is_none() {
+            let session = self.session.clone().unwrap_or_else(|| Session {
+                device: secret(), token: String::new(), player_id: None,
+            });
+            self.start(ctx, move |client| {
+                credential(Some(&session))?;
+                sign_in(client, session)
+            });
+            return;
+        }
+        let Some(session) = session else { return };
+        if self.account_settings_session.as_ref() != Some(&session.token) {
+            self.account_settings_session = Some(session.token.clone());
+            self.account_settings = None;
+            self.account_settings_requested = false;
+        }
+        match action {
+            LoadSettings if self.account_settings.is_none() => {
+                self.account_settings_requested = true;
+                self.account_settings_request(ctx, session, None);
+            }
+            Presence { value } if matches!(value.as_str(), "friends" | "offline") => {
+                self.account_settings_request(ctx, session, Some(value));
+            }
+            Add { code } if code.len() == 8 && code.bytes().all(|byte| byte.is_ascii_alphanumeric()) => {
+                self.start(ctx, move |client| {
+                    request(&client, &session, reqwest::Method::POST, "friends", None,
+                        Some(json!({"operation": "send", "friendCode": code.to_ascii_uppercase()})))?;
+                    Ok(Update::FriendRequestSent)
+                });
+            }
+            Friend { id, operation } => {
+                let Some(player) = self.snapshot.as_ref().and_then(|snapshot| snapshot.friends.iter().find(|player| player.player_id == id)) else { return };
+                let valid = match operation.as_str() {
+                    "remove" => player.status == "accepted",
+                    "block" => matches!(player.status.as_str(), "accepted" | "pending"),
+                    "accept" | "deny" => player.status == "pending" && player.direction == "incoming",
+                    "unblock" => player.status == "blocked",
+                    _ => false,
+                };
+                if valid {
+                    self.start(ctx, move |client| {
+                        request(&client, &session, reqwest::Method::POST, "friends", None,
+                            Some(json!({"peer": id, "operation": operation})))?;
+                        if operation == "remove" { Ok(Update::FriendRemoved(id)) } else { Ok(Update::Modified) }
+                    });
+                }
+            }
+            Ranks { id, index } => {
+                let Some(link) = self.snapshot.as_ref().and_then(|snapshot| snapshot.friends.iter()
+                    .find(|player| player.player_id == id && player.status == "accepted"))
+                    .and_then(|player| player.links.get(index)).cloned() else { return };
+                let key = format!("{}:{}", link.platform, link.platform_id);
+                if !self.friend_ranks.contains_key(&key) {
+                    self.start(ctx, move |_| {
+                        let stats = hebnix_sdk::tracker::TrackerClient::default()
+                            .fetch_profile(&link.platform, &link.platform_id)
+                            .unwrap_or_else(|error| hebnix_sdk::tracker::PlayerStats { error: Some(error), ..Default::default() });
+                        Ok(Update::FriendRanks(key, stats))
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn start(
         &mut self,
         ctx: &egui::Context,
@@ -1123,6 +1242,19 @@ impl Network {
             });
         }
     }
+}
+
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WebAction {
+    SignIn,
+    LoadSettings,
+    Presence { value: String },
+    Notifications { hide_match_users: bool, hide_presence: bool },
+    Add { code: String },
+    Friend { id: String, operation: String },
+    Ranks { id: String, index: usize },
 }
 #[derive(Deserialize)]
 struct LiveFrame {

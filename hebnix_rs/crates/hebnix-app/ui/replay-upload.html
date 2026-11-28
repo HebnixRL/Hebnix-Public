@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src data:">
+  <title>Replay Auto Save &amp; Upload</title>
+  <link rel="stylesheet" href="/bootstrap.min.css"><link rel="stylesheet" href="/styles.css">
+</head>
+<body class="tracker-body">
+<main class="container-fluid tracker-page replay-upload-page" id="replay-page">
+  <div class="replay-upload-layout">
+    <div class="replay-upload-settings">
+      <section class="tracker-detail p-3">
+        <div class="d-flex justify-content-between align-items-center gap-3 mb-2">
+          <h2 class="h5 mb-0">Automatic replays</h2>
+          <div class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" id="enabled"><label class="form-check-label" for="enabled">Enabled</label></div>
+        </div>
+        <p class="small text-body-secondary">Save finished matches automatically. Upload them to ballchasing.com if you want to share or analyse them.</p>
+        <p id="patch-status" class="text-warning small" role="status" hidden></p>
+        <div class="replay-option-row"><div><label for="save_locally" class="fw-semibold">Save on this computer</label><p class="small text-body-secondary mb-0">Keep a local copy of each replay.</p></div><input class="form-check-input" type="checkbox" id="save_locally"></div>
+        <div class="replay-option-row"><div><label for="upload_enabled" class="fw-semibold">Upload to ballchasing.com</label><p class="small text-body-secondary mb-0">Send replays to your ballchasing account.</p></div><input class="form-check-input" type="checkbox" id="upload_enabled"></div>
+        <div id="upload-options" class="mt-3" hidden>
+          <label for="provider" class="form-label small">Upload provider</label>
+          <select id="provider" class="form-select form-select-sm mb-3"><option value="ballchasing.com">ballchasing.com</option></select>
+          <label class="form-label" for="api_key">Ballchasing API key</label>
+          <div class="input-group"><input class="form-control" id="api_key" type="password" autocomplete="off" spellcheck="false" aria-describedby="key-help"><button class="btn btn-outline-secondary" type="button" id="clear_key">Clear</button></div>
+          <p class="form-text mb-0" id="key-help">Use the API key from your ballchasing account. It is saved when you leave this field.</p>
+          <p class="text-warning small mt-2 mb-0" id="missing-key" hidden>Add an API key to enable uploads.</p>
+          <div class="row g-3 mt-1">
+            <div class="col-sm-6"><label class="form-label" for="visibility">Who can see uploads?</label><select class="form-select form-select-sm" id="visibility"><option value="private">Only me</option><option value="unlisted">Anyone with the link</option><option value="public">Everyone</option></select></div>
+            <div class="col-sm-6"><label class="form-label" for="group_id">Replay group <span class="text-body-secondary small">(optional)</span></label><input class="form-control form-control-sm" id="group_id" placeholder="Ballchasing group ID"></div>
+          </div>
+        </div>
+      </section>
+      <section class="tracker-detail p-3">
+        <h2 class="h6">Replay names</h2>
+        <label class="form-label small" for="naming_template">Name new replays using</label>
+        <input class="form-control" id="naming_template" aria-describedby="placeholders">
+        <details class="mt-2"><summary class="small text-body-secondary">Available name placeholders</summary><p class="small text-body-secondary mt-2 mb-0" id="placeholders">{date} · {time} · {time24} · {winning_team} · {gamemode} · {map} · {match_guid}</p></details>
+      </section>
+      <section class="tracker-detail p-3">
+        <div class="d-flex justify-content-between align-items-center gap-3"><h2 class="h6 mb-0">Activity</h2><button class="btn btn-sm btn-outline-secondary" id="check" type="button">Check recent matches</button></div>
+        <p class="mt-3 mb-1" id="status" role="status"></p>
+        <p class="small text-body-secondary mb-0">Matches are checked after they finish or you leave. A replay can take up to three minutes to become available.</p>
+        <details class="mt-3"><summary class="small text-body-secondary">Troubleshooting</summary><div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="debug_logging"><label class="form-check-label" for="debug_logging">Enable debug logging</label></div></details>
+      </section>
+    </div>
+    <section class="tracker-detail p-3 replay-upload-history">
+      <h2 class="h5 mb-1">Recent replays</h2><p class="small text-body-secondary mb-3">Your last 20 saves and uploads.</p>
+      <p class="text-body-secondary" id="empty">Replays will appear here after your next match.</p>
+      <ul class="list-group list-group-flush" id="history"></ul>
+    </section>
+  </div>
+</main>
+<script src="/replay-upload.js"></script>
+</body>
+</html>

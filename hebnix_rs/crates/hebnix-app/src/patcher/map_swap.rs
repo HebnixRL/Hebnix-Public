@@ -195,8 +195,14 @@ pub fn apply_arena(
     donor_source: &Path,
     donor: &str,
 ) -> Result<(String, Vec<String>), String> {
-    build(cooked, host, donor_source, donor, Target::Install)
-        .map(|(staged, layers)| (staged.copy_name, layers))
+    crate::toast::console(format!("[Map Swap] Building {host} with the arena from {donor}…"));
+    let result = build(cooked, host, donor_source, donor, Target::Install)
+        .map(|(staged, layers)| (staged.copy_name, layers));
+    match &result {
+        Ok((name, layers)) => crate::toast::console(format!("[Map Swap] Installed {name} ({} layer(s))", layers.len())),
+        Err(error) => crate::toast::console(format!("[Map Swap] Failed: {error}")),
+    }
+    result
 }
 
 #[cfg(test)]

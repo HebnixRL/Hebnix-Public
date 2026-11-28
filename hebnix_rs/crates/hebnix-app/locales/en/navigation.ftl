@@ -1,7 +1,7 @@
 # Navigation names shared by Hebnix and Hebnix Lite.
 studio-items = Items
 studio-custom-assets = Custom Assets
-studio-appearance = Appearance
+studio-appearance = Visual Patches
 studio-menus = Menus
 studio-player-anthems = Player Anthems
 studio-menu-textures = Menu Textures
@@ -16,7 +16,13 @@ nav-browse = Browse
 nav-auto-upload = Auto Save & Upload
 nav-replay-library = Replay Timeline
 nav-experimental = Experimental
-nav-upk-studio = UPK Studio
+nav-upk-studio = Cosmetics
+nav-garage = Garage
+nav-cosmetics = Cosmetics
+nav-swapper-presets = Swapper Presets
+nav-active-garage = Active Garage
+nav-active-cosmetics = Active Cosmetics
+nav-active-costmetics = Cosmetics
 nav-player = Player
 nav-game-colours = Game Colours
 nav-item-colours = Item Colours
@@ -73,3 +79,19 @@ upk-history-reset-alignment = Reset alignment
 upk-history-restore-original = Restore original
 
 nav-menu-textures-experimental = Menus (experimental)
+nav-map-swapper = Map Swapper
+
+home-dashboard = Dashboard
+
+nav-preset-creator = Preset Creator
+
+nav-match-tools = Match Tools
+nav-match-setup = Match Setup
+nav-match-chat = Chat
+nav-lan-hosting = LAN Hosting
+nav-practice = Practice
+nav-bots-and-podium = Bots & Podium
+nav-live-editor = Live Editor
+
+swapper-save-account = Owned Items
+rl-launch-setup-non-steam-shortcuts-can-t-pass = Non-Steam shortcuts cannot pass Rocket League launch arguments directly. Configure them in your launcher.

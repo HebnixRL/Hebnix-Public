@@ -110,6 +110,19 @@ impl HebnixApp {
         self.game_update.pending && !self.game_update.paused
     }
 
+    #[cfg(windows)]
+    pub(super) fn web_recovery_status(&self) -> Vec<String> {
+        let mut lines = vec![t(if self.game_update.waiting_for_catalogs {
+            "game-update-loading-catalogs"
+        } else {
+            "game-update-working"
+        })];
+        if hebnix_sdk::process::is_rocket_league_running() {
+            lines.push(t("game-update-close-game"));
+        }
+        lines
+    }
+
     pub(super) fn render_game_update_controls(&mut self, ui: &mut egui::Ui) {
         if !self.game_update.pending {
             return;
@@ -195,6 +208,10 @@ impl HebnixApp {
 
     pub(super) fn repatch_from_console(&mut self, ctx: &egui::Context, all: bool) {
         self.start_game_update(ctx, all, false);
+        if all && !hebnix_sdk::process::is_rocket_league_running() {
+            self.console.write("[Recovery] Rebuilding live cosmetics.");
+            crate::patcher::live_cosmetics::reinstall_async();
+        }
     }
 
     fn start_game_update(&mut self, ctx: &egui::Context, all: bool, clear: bool) {

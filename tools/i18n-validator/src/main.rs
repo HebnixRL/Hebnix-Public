@@ -1,5 +1,10 @@
 use fluent_syntax::{ast::Entry, parser};
-use std::{collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 fn parse_message_ids(source: &str) -> Result<BTreeSet<String>, Vec<String>> {
     let resource = parser::parse(source).map_err(|(_resource, errors)| {
@@ -8,14 +13,44 @@ fn parse_message_ids(source: &str) -> Result<BTreeSet<String>, Vec<String>> {
             .map(|error| format!("{error:?}"))
             .collect::<Vec<String>>()
     })?;
-    Ok(resource
-        .body
-        .iter()
-        .filter_map(|entry| match entry {
-            Entry::Message(message) => Some(message.id.name.to_string()),
-            _ => None,
-        })
-        .collect())
+    let mut ids = BTreeSet::new();
+    for entry in &resource.body {
+        if let Entry::Message(message) = entry {
+            if !ids.insert(message.id.name.to_string()) {
+                return Err(vec![format!("duplicate message ID '{}'", message.id.name)]);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+fn read_locale(directory: &Path) -> Result<BTreeSet<String>, String> {
+    let mut files = fs::read_dir(directory)
+        .map_err(|error| format!("Cannot read {}: {error}", directory.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    files.retain(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ftl"));
+    files.sort();
+    if files.is_empty() {
+        return Err(format!(
+            "Configured locale '{}' has no .ftl files.",
+            directory.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for file in files {
+        let text = fs::read_to_string(&file)
+            .map_err(|error| format!("Cannot read {}: {error}", file.display()))?;
+        let parsed = parse_message_ids(&text)
+            .map_err(|errors| format!("{}: {}", file.display(), errors.join("; ")))?;
+        for id in parsed {
+            if !ids.insert(id.clone()) {
+                return Err(format!("{}: duplicate message ID '{id}'", file.display()));
+            }
+        }
+    }
+    Ok(ids)
 }
 
 fn parse_locale_codes(source: &str) -> Result<BTreeSet<String>, String> {
@@ -103,20 +138,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let source = match fs::read_to_string(&english) {
-        Ok(source) => source,
-        Err(error) => {
-            eprintln!("ERROR: Could not read English source: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let english_ids = match parse_message_ids(&source) {
+    let english_ids = match read_locale(&locales.join("en")) {
         Ok(ids) => ids,
-        Err(errors) => {
-            for error in errors {
-                eprintln!("ERROR: English Fluent syntax: {error}");
-            }
+        Err(error) => {
+            eprintln!("ERROR: English Fluent syntax: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -169,74 +194,23 @@ fn main() -> ExitCode {
             continue;
         }
 
-        let files = match fs::read_dir(&directory) {
-            Ok(files) => files,
+        let translated_ids = match read_locale(&directory) {
+            Ok(ids) => ids,
             Err(error) => {
-                eprintln!("ERROR: Cannot read locale {code}: {error}");
+                eprintln!("ERROR: {error}");
                 failed = true;
                 continue;
             }
         };
-
-        let mut ftl_files = Vec::new();
-
-        for file in files {
-            let file = match file {
-                Ok(file) => file,
-                Err(error) => {
-                    eprintln!("ERROR: Cannot read a file entry in locale {code}: {error}");
-                    failed = true;
-                    continue;
-                }
-            };
-
-            let path = file.path();
-
-            if path.extension().and_then(|ext| ext.to_str()) == Some("ftl") {
-                ftl_files.push(path);
-            }
-        }
-
-        if ftl_files.is_empty() {
-            eprintln!("ERROR: Configured locale '{code}' has no .ftl files.");
+        let (unknown, missing) = compare_ids(&english_ids, &translated_ids);
+        for id in unknown {
+            eprintln!("ERROR: [{code}] '{id}' is not defined in English.");
             failed = true;
-            continue;
         }
-
-        for path in ftl_files {
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(error) => {
-                    eprintln!("ERROR: Cannot read {}: {error}", path.display());
-                    failed = true;
-                    continue;
-                }
-            };
-
-            let translated_ids = match parse_message_ids(&text) {
-                Ok(ids) => ids,
-                Err(errors) => {
-                    for error in errors {
-                        eprintln!("ERROR: {}: {error}", path.display());
-                    }
-                    failed = true;
-                    continue;
-                }
-            };
-
-            let (unknown, missing) = compare_ids(&english_ids, &translated_ids);
-
-            for id in unknown {
-                eprintln!("ERROR: [{code}] '{id}' is not defined in English.");
-                failed = true;
-            }
-
-            for id in missing {
-                println!("WARN: [{code}] missing '{id}' (English fallback may be used).");
-            }
-
-            println!("Parsed {}", path.display());
+        for id in missing {
+            println!("WARN: [{code}] missing '{id}' (English fallback may be used).");
         }
+        println!("Parsed {}", directory.display());
     }
 
     for code in actual_locales.difference(&configured_locales) {

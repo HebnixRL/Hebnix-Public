@@ -183,9 +183,24 @@ pub fn presentation(ctx: &egui::Context) -> Option<Arc<Presentation>> {
 /// Render a page or subtab title according to the active theme's layout setting.
 /// Legacy themes retain their existing headings.
 pub fn page_heading(ui: &mut egui::Ui, title: impl Into<egui::RichText>) {
-    if presentation(ui.ctx()).is_none_or(|p| p.layout.show_page_heading) {
+    let title = title.into();
+    let workspace_title = ui.ctx().data_mut(|data| data.get_temp::<String>(egui::Id::new("modern_workspace_title")));
+    if workspace_title.as_deref() != Some(title.text())
+        && presentation(ui.ctx()).is_none_or(|p| p.layout.show_page_heading)
+    {
         ui.heading(title);
     }
+}
+
+pub fn set_workspace_title(ctx: &egui::Context, title: Option<String>) {
+    ctx.data_mut(|data| {
+        let id = egui::Id::new("modern_workspace_title");
+        if let Some(title) = title {
+            data.insert_temp(id, title);
+        } else {
+            data.remove::<String>(id);
+        }
+    });
 }
 
 /// Validation is also used by the ZIP installer; unsupported versions never silently degrade.
@@ -987,7 +1002,6 @@ pub fn show_shell(
     p: &Presentation,
     mut render: impl FnMut(&mut egui::Ui, ShellPart),
 ) {
-    let padding = p.layout.content_padding.round() as i8;
     if matches!(p.layout.shell, Shell::Sidebar | Shell::Rail) {
         let width = if p.layout.shell == Shell::Rail {
             96.0
@@ -1013,6 +1027,11 @@ pub fn show_shell(
             )
             .show(ui, |ui| render(ui, ShellPart::Navigation(false)));
     }
+    show_shell_content(ui, p, |ui| render(ui, ShellPart::Content));
+}
+
+pub fn show_shell_content(ui: &mut egui::Ui, p: &Presentation, render: impl FnOnce(&mut egui::Ui)) {
+    let padding = p.layout.content_padding.round() as i8;
     egui::CentralPanel::default()
         .frame(
             egui::Frame::new()
@@ -1021,7 +1040,7 @@ pub fn show_shell(
         )
         .show(ui, |ui| {
             p.paint_background(ui);
-            render(ui, ShellPart::Content);
+            render(ui);
         });
 }
 

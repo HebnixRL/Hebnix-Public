@@ -56,6 +56,22 @@ pub(in crate::patcher) fn apply_template(
     }
     Ok(result.map(|(bytes, _)| bytes))
 }
+pub(in crate::patcher) fn install_chat_paste(live: &[u8], original: &[u8], patched: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut replacement = None;
+    rewrite_blocks(patched, &mut |header, data| {
+        if abc::has_chat_paste(data)? { replacement = Some((header.to_vec(), data.to_vec())); }
+        Ok(None)
+    })?;
+    let (header, patch) = replacement.ok_or("Missing Chat Paste template")?;
+    let mut baseline = None;
+    rewrite_blocks(original, &mut |name, data| { if name == header { baseline = Some(data.to_vec()); } Ok(None) })?;
+    let baseline = baseline.ok_or("Missing original Chat Paste code")?;
+    rewrite_blocks(live, &mut |name, data| {
+        if name != header { return Ok(None); }
+        if data != baseline { return Err("The chat HUD code contains other edits. Live Chat Paste left them untouched".into()); }
+        Ok(Some((patch.clone(), 1)))
+    }).map(|result| result.map(|(movie, _)| movie))
+}
 
 /// Run `edit` over every DoABC block of a GFx/SWF movie and rebuild the movie
 /// when any block changed. `edit` returns the new ABC and a change count.

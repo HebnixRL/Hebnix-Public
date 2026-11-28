@@ -10,6 +10,7 @@ const MMR_SLOT: &str = "loadFileToStrinG";
 const NAMES_SLOT: &str = "loadFileToStriNg";
 const BOTH_SLOT: &str = "loadFileToStriNG";
 const PATCHED_SLOTS: [&str; 4] = [LOAD, MMR_SLOT, NAMES_SLOT, BOTH_SLOT];
+thread_local! { static LIVE_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Options {
@@ -49,6 +50,7 @@ fn concat(left: Code, right: Code) -> Code {
 }
 
 fn lookup(p: &UpkPackage, playlist: Code, scratch: Code) -> Result<Code, String> {
+    let key = if playlist.bytes == text("name").bytes { "scoreboard.names" } else { "scoreboard.mmr" };
     let pri = variable(p, 1, "GFxData_PRI_TA.PRI")?;
     let event = field(p, pri.clone(), "PRI_TA.GameEvent")?;
     let world = field(p, pri, "Engine.Actor.WorldInfo")?;
@@ -79,12 +81,15 @@ fn lookup(p: &UpkPackage, playlist: Code, scratch: Code) -> Result<Code, String>
     for part in [guid, text("_"), id, text("_"), playlist, text(".mmr")] {
         path = concat(path, part);
     }
-    static_context(
+    let read = static_context(
         p,
         "Core.FileSystem",
         virtual_call(p, LOAD, path.then(scratch))?,
         object(p, "Core.FileSystem.LoadFileToBytes.ReturnValue")?,
-    )
+    )?;
+    if !LIVE_BUILD.with(|live| live.get()) { return Ok(read); }
+    let gate = crate::patcher::live_cosmetics::flag(&p.inner, key)?;
+    conditional(Code { bytes: gate.bytes().to_vec(), refs: gate.refs() }, read, Code::raw(&[0x28]))
 }
 
 fn additions(p: &UpkPackage, path: &str, start: usize, version: u8) -> Result<Code, String> {
@@ -374,6 +379,9 @@ fn prepare(p: &mut UpkPackage, on: bool) -> Result<bool, String> {
 }
 
 pub(crate) fn set_options(game: &Path, options: Options) -> Result<(), String> {
+    if crate::patcher::live_cosmetics::managed() {
+        return crate::patcher::live_cosmetics::set_scoreboard(game, options.show_mmr, options.unanonymize);
+    }
     let desired = match (options.show_mmr, options.unanonymize) {
         (false, false) => SLOT,
         (true, false) => MMR_SLOT,
@@ -430,6 +438,10 @@ pub(crate) fn installed(game: &Path) -> Result<Options, String> {
 }
 
 pub(crate) fn installed_with_version(game: &Path) -> Result<(Options, bool), String> {
+    if crate::patcher::live_cosmetics::managed() {
+        let (show_mmr, unanonymize) = crate::patcher::live_cosmetics::scoreboard_options();
+        return Ok((Options { show_mmr, unanonymize }, false));
+    }
     let mut p = UpkPackage::load(&super::super::game_path::resolve(
         &cooked(game),
         "TAGame.upk",
@@ -452,6 +464,33 @@ pub(crate) fn installed_with_version(game: &Path) -> Result<(Options, bool), Str
             .unwrap_or((true, false)),
     };
     Ok((Options { show_mmr: options.0, unanonymize: options.1 }, legacy))
+}
+
+/// Build both dormant scoreboard features into the shared startup transaction.
+/// The flags are read from the same local file as live cosmetics.
+pub(crate) fn prepare_live(raw: RawPackage) -> Result<(RawPackage, Vec<(String, Vec<u8>, Vec<u8>)>, Vec<(usize, String, String)>), String> {
+    let mut p = UpkPackage::from_inner(raw);
+    let old_names = p.names.clone();
+    let stock = SPECS.iter().all(|(path, _, _, expected)| bytes(&p, path).is_ok_and(|(_, bytes)| hex::encode(Sha256::digest(bytes)) == *expected));
+    if stock {
+        let (slot, _) = checked_slot(&p)?;
+        p.rename_names_same_size(&[(slot, SLOT.into())])?;
+    } else { prepare(&mut p, false)?; }
+    let (slot, _) = checked_slot(&p)?;
+    p.rename_names_same_size(&[(slot, LOAD.into())])?;
+    let result = LIVE_BUILD.with(|live| {
+        live.set(true);
+        let result = SPECS.iter().map(|(path, memory, storage, _)| {
+            let before = bytes(&p, path)?.1.to_vec();
+            let after = payload(&p, path, &before, *memory, *storage, 3)?;
+            Ok((path.to_string(), before, after))
+        }).collect::<Result<Vec<_>, String>>();
+        live.set(false);
+        result
+    })?;
+    let edits = old_names.iter().zip(&p.names).enumerate().filter(|(_, (a, b))| a != b)
+        .map(|(i, (a, b))| (i, a.clone(), b.clone())).collect();
+    Ok((p.inner, result, edits))
 }
 
 #[cfg(test)]

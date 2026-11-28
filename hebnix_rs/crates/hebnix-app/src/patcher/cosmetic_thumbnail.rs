@@ -300,6 +300,18 @@ pub fn extract_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
     preview_png(pixels)
 }
 
+#[cfg(windows)]
+pub(crate) fn extract_arena_preview(path: &Path) -> Result<Vec<u8>, String> {
+    let package = UpkPackage::load(path)?;
+    let (_, pixels) = readable_texture(&package, path, "arena")?;
+    let image = DynamicImage::ImageRgba8(pixels).thumbnail(320, 200).to_rgb8();
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80)
+        .encode_image(&image)
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
+}
+
 /// The thumbnail editor displays the stored colours, including greyscale artwork.
 pub(crate) fn extract_raw_png(path: &Path, category: &str) -> Result<Vec<u8>, String> {
     let package = UpkPackage::load(path)?;

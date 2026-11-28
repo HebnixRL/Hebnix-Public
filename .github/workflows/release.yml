@@ -3,7 +3,7 @@ name: Release
 # Tagged Linux releases (Windows builds are not published here; see build.yml).
 # Push a `v*` tag (e.g. `v2.2.7`), or run manually with an existing tag. The tag
 # is the version: packaging/stamp-version.sh writes it into the Cargo.toml files
-# and APP_VERSION at build time. A numeric suffix (`v2.2.7-2`) is a re-release
+# and APP_VERSION at build time. A numeric suffix (`v2.4.0-2`) is a re-release
 # of the same version: published normally, and it becomes the pacman package
 # release (pkgver 2.2.7, pkgrel 2). Any other suffix (`v2.2.7-test`) is a dry
 # run: published as a prerelease, and the pacman repo is left alone.
@@ -101,9 +101,11 @@ jobs:
         with:
           workspaces: hebnix_rs -> target
 
+      - name: test translation validator
+        run: cargo test --locked --manifest-path tools/i18n-validator/Cargo.toml
+
       - name: check translations
-        run: cargo test -p hebnix-app i18n
-        working-directory: hebnix_rs
+        run: cargo run --locked --manifest-path tools/i18n-validator/Cargo.toml -- .
 
       - name: Build release
         run: make release

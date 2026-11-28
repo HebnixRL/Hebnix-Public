@@ -202,7 +202,7 @@ pub fn assign_host(cooked: &Path, maps: &[WorkshopMap]) -> HostReport {
                 link_or_copy(&map.path, &dest, &key, &label)
             })();
             match copied {
-                Ok(()) => crate::toast::report(&key, &format!("{} is ready for LAN ({slot})", map.title), None, true),
+                Ok(()) => crate::toast::report(&key, "", None, true),
                 Err(e) => {
                     crate::toast::report(&key, &format!("LAN slot failed for {}: {e}", map.title), None, true);
                     report.errors.push(e);
@@ -280,9 +280,9 @@ pub fn place(cooked: &Path, slot: &str, map: &Path, title: &str) -> Result<Place
         return Err(e);
     }
     let text = if existed {
-        format!("{title} is ready to join ({slot})")
+        String::new()
     } else {
-        format!("{title} needs a Rocket League restart once to join ({slot})")
+        format!("Restart Rocket League once to play {title} over LAN")
     };
     crate::toast::report(&key, &text, None, true);
     Ok(if existed { Placed::Swapped } else { Placed::Restart })

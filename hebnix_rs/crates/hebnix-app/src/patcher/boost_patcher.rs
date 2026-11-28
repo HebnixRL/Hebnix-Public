@@ -1978,3 +1978,107 @@ impl BoostPatcherState {
         }
     }
 }
+
+#[cfg(windows)]
+impl BoostPatcherState {
+    fn web_import(&mut self, path: &Path, config: &mut Config, tx: &Sender<AppMsg>) {
+        if self.import_zip(path, tx) {
+            self.source = PatchSource::Custom;
+            config.patcher.boost_source = self.source;
+            let _ = config.save(&self.base_dir);
+        }
+    }
+
+    pub(crate) fn web_snapshot(&mut self, ctx: &egui::Context, config: &mut Config, tx: &Sender<AppMsg>, visible: &[String]) -> serde_json::Value {
+        use serde_json::json;
+        self.poll_ops(tx, config);
+        let mut catalog = serde_json::Value::Null;
+        if self.source == PatchSource::Catalog {
+            let (model, ready) = self.catalog.web_snapshot(ctx, tx, visible);
+            catalog = model;
+            if let Some(path) = ready { self.web_import(&path, config, tx); }
+        }
+        let rows: Vec<_> = self.boosts.iter().map(|item| {
+            let images: Vec<String> = if visible.contains(&item.name) {
+                [&item.background_image, &item.fill_image, &item.glow_image, &item.tint_image]
+                .into_iter().filter_map(|bytes| bytes.as_deref().and_then(crate::ui::browser::image_url)).collect()
+            } else { Vec::new() };
+            json!({
+                "id": item.name, "name": item.name, "images": images,
+                "active": self.active_boost.as_deref() == Some(item.name.as_str()), "delete": self.processing_target.is_none(),
+            })
+        }).collect();
+        json!({
+            "page": "studio-asset", "kind": "boost", "catalog": catalog, "rows": rows,
+            "custom": self.source == PatchSource::Custom, "busy": self.processing_target.is_some(),
+            "active": self.active_boost.is_some(), "confirm": self.confirm_delete.as_ref().map(|item| &item.name),
+            "labels": {
+                "refresh": t("btn-refresh"), "restore": t("ball-restore-original"), "import": t("ball-import-zip"),
+                "applied": t("ball-show-applied"), "search": t("ball-name-or-author"), "downloaded": t("render-view-downloaded"),
+                "apply": t("ball-apply"), "delete": t("presets-delete"), "confirm": t("render-confirm-deletion"),
+                "yes": t("plugin-delete-prompt-yes"), "no": t("plugin-delete-prompt-no"),
+                "ring": t("boost-team-ring-toggle"), "ringHint": t("boost-team-ring-hint"),
+            },
+        })
+    }
+
+    pub(crate) fn web_action(&mut self, key: &str, id: Option<String>, cooked: &Path, config: &mut Config, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        let busy = self.processing_target.is_some();
+        let backups = cooked.join("Backups");
+        match key {
+            "source" => {
+                self.source = if id.as_deref() == Some("custom") { PatchSource::Custom } else { PatchSource::Catalog };
+                config.patcher.boost_source = self.source;
+                let _ = config.save(&self.base_dir);
+            }
+            "refresh" if self.source == PatchSource::Catalog => self.catalog.refresh(ctx),
+            "refresh" => self.refresh_boosts(),
+            "download" if self.source == PatchSource::Catalog && !busy => {
+                if let Some(path) = id.and_then(|id| self.catalog.web_download(id, ctx)) { self.web_import(&path, config, tx); }
+            }
+            "import" if !busy => {
+                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() { self.web_import(&path, config, tx); }
+            }
+            "apply" if self.source == PatchSource::Custom && !busy => {
+                if let Some(item) = self.boosts.iter().find(|item| id.as_deref() == Some(item.name.as_str())).cloned() {
+                    self.spawn_apply_thread(&item, cooked, &backups, tx, ctx);
+                }
+            }
+            "restore" if !busy && self.active_boost.is_some() => self.spawn_restore_thread(cooked, &backups, tx, ctx),
+            "delete" if self.source == PatchSource::Custom && !busy => {
+                self.confirm_delete = self.boosts.iter().find(|item| id.as_deref() == Some(item.name.as_str()) && self.processing_target.is_none()).cloned();
+            }
+            "cancel" => self.confirm_delete = None,
+            "confirm" if !busy => {
+                if let Some(item) = self.confirm_delete.take() {
+                    for path in item.image_paths.values() { let _ = fs::remove_file(path); }
+                    let _ = fs::remove_file(&item.json_path);
+                    if let Some(parent) = item.json_path.parent() { let _ = fs::remove_dir(parent); }
+                    if self.active_boost.as_deref() == Some(item.name.as_str()) {
+                        self.active_boost = None;
+                        config.patcher.active_boost = None;
+                        let _ = config.save(&self.base_dir);
+                    }
+                    self.refresh_boosts();
+                    let _ = tx.send(AppMsg::Log(format!("[Boost] Deleted boost '{}'", item.name)));
+                }
+            }
+            "ring" if !busy && !crate::messages::block_item_action_if_game_running(tx) => {
+                self.processing_target = Some(t("boost-team-ring-toggle"));
+                let cooked = cooked.to_owned();
+                let result = self.local_tx.clone();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let op = match super::title_patcher::toggle_boost_ring(&cooked) {
+                        Ok(enabled) => BoostOp::TeamRingChanged(enabled),
+                        Err(error) => BoostOp::Error(error),
+                    };
+                    let _ = result.send(op);
+                    ctx.request_repaint();
+                });
+            }
+            _ => {}
+        }
+    }
+}

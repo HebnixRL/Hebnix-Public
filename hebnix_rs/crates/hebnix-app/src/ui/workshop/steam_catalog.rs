@@ -14,6 +14,11 @@ use super::steam_download::{self, SearchItem, SearchSort};
 /// downloaded, the menu map picker) without being in the current results
 const DOWNLOADED_FILE: &str = "steam_maps.json";
 
+/// every search result the player has seen, newest first, shown while
+/// nothing is being searched for
+const SEARCH_CACHE_FILE: &str = "steam_search_cache.json";
+const SEARCH_CACHE_LIMIT: usize = 500;
+
 /// one page of workshop results as catalog entries
 #[derive(Debug)]
 pub struct SteamPage {
@@ -22,7 +27,27 @@ pub struct SteamPage {
     pub next_cursor: Option<String>,
 }
 
+/// a pasted workshop link (has a scheme or a domain and an `id=`), as opposed to a name
+fn pasted_link_id(query: &str) -> Option<String> {
+    let query = query.trim();
+    let lower = query.to_ascii_lowercase();
+    let linky = lower.contains("://") || lower.contains(".com/") || lower.starts_with("steamcommunity.com");
+    if linky { steam_download::parse_workshop_id(query) } else { None }
+}
+
 pub fn fetch_page(query: &str, cursor: Option<&str>) -> Result<SteamPage, String> {
+    if let Some(wid) = pasted_link_id(query) {
+        let details = steam_download::fetch_details(&wid)?;
+        let item = SearchItem {
+            wid,
+            title: details.title,
+            author: details.creator,
+            description: details.description,
+            preview_url: details.preview_url,
+            ..Default::default()
+        };
+        return Ok(SteamPage { items: vec![to_catalog_entry(&item)], total: 1, next_cursor: None });
+    }
     let page = steam_download::search(query, SearchSort::Popular, cursor)?;
     Ok(SteamPage {
         items: page.items.iter().map(to_catalog_entry).collect(),
@@ -60,7 +85,53 @@ pub fn thumbnail_url(url: &str) -> String {
 }
 
 pub fn load_downloaded(runtime_dir: &Path) -> Vec<Value> {
-    std::fs::read(runtime_dir.join(DOWNLOADED_FILE))
+    load_entries(&runtime_dir.join(DOWNLOADED_FILE))
+}
+
+pub fn load_search_cache(runtime_dir: &Path) -> Vec<Value> {
+    load_entries(&runtime_dir.join(SEARCH_CACHE_FILE))
+}
+
+/// drops one map from the remembered search results (the X on a Browse Maps tile)
+pub fn forget_search_result(runtime_dir: &Path, id: &str) {
+    let mut maps = load_search_cache(runtime_dir);
+    let before = maps.len();
+    maps.retain(|map| super::id_of(map) != id);
+    if maps.len() == before {
+        return;
+    }
+    let written = serde_json::to_vec(&maps)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| std::fs::write(runtime_dir.join(SEARCH_CACHE_FILE), bytes).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        tracing::warn!("[Workshop] could not save the search cache: {error}");
+    }
+}
+
+/// remembers search results for later viewing (newer results replace older
+/// records of the same map)
+pub fn remember_search_results(runtime_dir: &Path, items: &[Value]) {
+    let fresh: Vec<&Value> = items
+        .iter()
+        .filter(|item| is_steam_entry(item) && valid_wid(&super::id_of(item)))
+        .collect();
+    if fresh.is_empty() {
+        return;
+    }
+    let mut maps = load_search_cache(runtime_dir);
+    maps.retain(|map| !fresh.iter().any(|item| super::id_of(item) == super::id_of(map)));
+    maps.splice(0..0, fresh.into_iter().cloned());
+    maps.truncate(SEARCH_CACHE_LIMIT);
+    let written = serde_json::to_vec(&maps)
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| std::fs::write(runtime_dir.join(SEARCH_CACHE_FILE), bytes).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        tracing::warn!("[Workshop] could not save the search cache: {error}");
+    }
+}
+
+fn load_entries(path: &Path) -> Vec<Value> {
+    std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
         .unwrap_or_default()
@@ -172,6 +243,18 @@ mod tests {
         assert_eq!(downloaded_file(&dir, "42").as_deref(), Some("sjt3"));
         record_downloaded(&dir, &json!({"id": "../x", "steam": true})).unwrap();
         assert_eq!(load_downloaded(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_results_are_cached_newest_first_without_duplicates() {
+        let dir = std::env::temp_dir().join(format!("hebnix-steam-cache-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let map = |id: &str, name: &str| json!({"id": id, "name": name, "steam": true});
+        remember_search_results(&dir, &[map("1", "a"), map("2", "b")]);
+        remember_search_results(&dir, &[map("3", "c"), map("2", "b2"), json!({"id": "x", "steam": true})]);
+        let names: Vec<_> = load_search_cache(&dir).iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, ["c", "b2", "a"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -220,6 +220,11 @@ fn commands(r: &Refs, base: usize) -> Script {
 fn function_index(upk: &UpkPackage) -> Result<usize, String> {
     object(upk, FUNCTION).and_then(|index| usize::try_from(index - 1).map_err(|_| format!("{FUNCTION} is not an export")))
 }
+pub(super) fn live_body(upk: &UpkPackage, base: usize) -> Result<Script, String> { Ok(commands(&refs(upk)?, base)) }
+pub(super) fn normalize_for_live(upk: &mut UpkPackage) -> Result<(), String> {
+    if is_patched(upk)? { remove_commands(upk)?; }
+    Ok(())
+}
 
 fn payload(upk: &UpkPackage, index: usize) -> Vec<u8> {
     let export = &upk.exports[index];
@@ -282,6 +287,7 @@ fn read_saved(backups: &Path) -> Option<Saved> {
 }
 
 pub fn enabled(backups: &Path) -> bool {
+    if super::live_cosmetics::managed() { return super::live_cosmetics::mod_enabled("lan-commands"); }
     read_saved(backups).is_some()
 }
 
@@ -403,8 +409,7 @@ impl State {
     }
 
     /// Draw the toggle.
-    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, mut report: impl FnMut(&str)) {
-        use crate::i18n::t;
+    fn poll(&mut self, ctx: &eframe::egui::Context, mut report: impl FnMut(&str)) {
         if let Some(job) = &self.job {
             match job.try_recv() {
                 Ok(result) => {
@@ -415,9 +420,46 @@ impl State {
                     self.job = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.job = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => ui.ctx().request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
             }
         }
+    }
+
+    pub(crate) fn set_enabled(&mut self, cooked: &Path, backups: &Path, want: bool) {
+        if super::live_cosmetics::managed() {
+            self.status = super::live_cosmetics::set_mod(cooked, "lan-commands", want, None).map(|()| String::new()).unwrap_or_else(|e| e);
+            return;
+        }
+        use crate::i18n::t;
+        if self.busy() { return; }
+        let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.job = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = if want {
+                enable(&cooked, &backups).map(|_| t("game-mod-lan-commands-on"))
+            } else {
+                restore(&cooked, &backups).map(|_| t("game-mod-lan-commands-off"))
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ctx: &eframe::egui::Context, backups: &Path, report: impl FnMut(&str)) -> serde_json::Value {
+        use crate::i18n::t;
+        self.poll(ctx, report);
+        let on = enabled(backups);
+        serde_json::json!({
+            "id": "lan-commands", "enabled": on, "busy": self.busy(), "status": self.status,
+            "label": t("game-mod-lan-commands"), "description": t("game-mod-lan-commands-description"),
+        })
+    }
+
+    pub fn render(&mut self, ui: &mut eframe::egui::Ui, cooked: &Path, backups: &Path, report: impl FnMut(&str)) {
+        use crate::i18n::t;
+        self.poll(ui.ctx(), report);
         let on = enabled(backups);
         let mut want = on;
         ui.add_enabled_ui(!self.busy(), |ui| {
@@ -425,18 +467,7 @@ impl State {
         });
         ui.label(t("game-mod-lan-commands-description"));
         if want != on {
-            let (cooked, backups) = (cooked.to_path_buf(), backups.to_path_buf());
-            let (tx, rx) = std::sync::mpsc::channel();
-            self.job = Some(rx);
-            self.status.clear();
-            std::thread::spawn(move || {
-                let result = if want {
-                    enable(&cooked, &backups).map(|_| t("game-mod-lan-commands-on"))
-                } else {
-                    restore(&cooked, &backups).map(|_| t("game-mod-lan-commands-off"))
-                };
-                let _ = tx.send(result);
-            });
+            self.set_enabled(cooked, backups, want);
         }
         if self.busy() {
             ui.spinner();

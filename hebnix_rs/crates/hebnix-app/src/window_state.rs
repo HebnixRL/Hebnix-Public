@@ -11,10 +11,13 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongW, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, PostMessageW,
-    SW_RESTORE, SW_SHOW, SetLayeredWindowAttributes, SetWindowLongW, ShowWindow, WM_PAINT,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, GetWindowLongW, GetWindowRect, IsWindow, LWA_ALPHA, PostMessageW,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongW,
+    SetWindowPos, WM_PAINT,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
+#[cfg(test)]
+use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, WS_EX_TRANSPARENT};
 
 // Store the address, rather than HWND's non-Send raw pointer. The window remains
 // owned by eframe's UI thread; readers only use it with Win32 window APIs.
@@ -22,6 +25,9 @@ static MAIN_WINDOW: OnceLock<isize> = OnceLock::new();
 static TASKBAR: OnceLock<Option<Sender<TaskbarUpdate>>> = OnceLock::new();
 static TASKBAR_REQUESTED: AtomicU64 = AtomicU64::new(0);
 static TASKBAR_COMPLETED: AtomicU64 = AtomicU64::new(0);
+// Where the window was before it was parked off-screen to hide it.
+static PARKED_FROM: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+const OFFSCREEN: i32 = -32000;
 
 /// An opaque HWND swapchain bypasses DirectComposition for machines where the
 /// transparent visual never appears. Keep the choice stable for every viewport.
@@ -55,27 +61,27 @@ pub fn main_window() -> Option<HWND> {
 /// Show so a stale alpha-zero surface cannot cover the rendered client area.
 pub fn apply_window_visibility(hwnd: HWND, hidden: bool) {
     unsafe {
-        let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let hidden_bits =
-            (WS_EX_LAYERED.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0)
-                as i32;
-        let desired = if hidden {
-            style | hidden_bits
-        } else {
-            style & !hidden_bits
-        };
-        if desired != style {
-            SetWindowLongW(hwnd, GWL_EXSTYLE, desired);
-        }
+        let away=(WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as i32;
+        let style=GetWindowLongW(hwnd,GWL_EXSTYLE);
         if hidden {
-            if let Err(error) = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA) {
-                tracing::warn!(%error, "could not apply main window hidden alpha");
+            SetWindowLongW(hwnd,GWL_EXSTYLE,style | WS_EX_LAYERED.0 as i32 | away);
+            let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),0,LWA_ALPHA);
+            // Layered alpha does not hide a DirectComposition surface, which leaves a
+            // ghost of the window behind. Park it off-screen too (SW_HIDE crashes wgpu).
+            let mut parked = PARKED_FROM.lock().unwrap_or_else(|e| e.into_inner());
+            let mut rect = Default::default();
+            if parked.is_none() && GetWindowRect(hwnd,&mut rect).is_ok() && rect.left > OFFSCREEN / 2 {
+                *parked = Some((rect.left, rect.top));
+                let _=SetWindowPos(hwnd,None,OFFSCREEN,OFFSCREEN,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER);
             }
-        } else if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        } else if !IsWindowVisible(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_SHOW);
+        } else {
+            if let Some((x, y)) = PARKED_FROM.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _=SetWindowPos(hwnd,None,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER);
+            }
+            SetWindowLongW(hwnd,GWL_EXSTYLE,style & !away);
+            let _=SetLayeredWindowAttributes(hwnd,COLORREF(0),255,LWA_ALPHA);
         }
+        set_taskbar_button(hwnd,!hidden);
     }
 }
 
@@ -94,7 +100,14 @@ pub fn wake_ui(ctx: &eframe::egui::Context) {
 }
 
 unsafe fn post_control_wake(hwnd: HWND) -> windows::core::Result<()> {
-    unsafe { PostMessageW(Some(hwnd), WM_PAINT, WPARAM(0), LPARAM(0)) }
+    use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_INTERNALPAINT, RDW_INVALIDATE};
+    unsafe {
+        // Mark a real update region as well as posting the fallback paint.
+        // Merely posting WM_PAINT can be consumed without a lasting redraw
+        // when Winit is buffering events while the game owns the foreground.
+        let _ = RedrawWindow(Some(hwnd), None, None, RDW_INTERNALPAINT | RDW_INVALIDATE);
+        PostMessageW(Some(hwnd), WM_PAINT, WPARAM(0), LPARAM(0))
+    }
 }
 
 pub fn set_taskbar_button(hwnd: HWND, shown: bool) -> u64 {

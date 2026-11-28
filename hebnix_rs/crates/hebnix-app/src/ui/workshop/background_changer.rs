@@ -8,6 +8,10 @@ use serde::Deserialize;
 
 use crate::messages::AppMsg;
 use crate::patcher::background_merger::SCENERY_DONORS;
+#[cfg(windows)]
+mod web;
+#[cfg(windows)]
+pub(crate) use web::ArenaAction;
 
 const ARENAS: &[(&str, &str)] = &[
     ("Stadium_P", "DFH Stadium"),
@@ -61,7 +65,26 @@ const ARENA_LOOK: &str = " — full arena look";
 
 /// The arena package behind an `arena:` donor.
 fn arena_of(donor: &str) -> Option<&str> {
-    donor.strip_prefix(crate::patcher::background_merger::ARENA_DONOR_PREFIX)
+    donor.strip_prefix(crate::patcher::background_merger::FULL_MAP_DONOR_PREFIX)
+        .or_else(|| donor.strip_prefix(crate::patcher::background_merger::ARENA_DONOR_PREFIX))
+}
+
+/// The exact arena catalog exposed by the full Map Swapper.
+pub(super) fn map_swapper_arena(package: &str) -> Option<&'static str> {
+    ARENAS.iter().find_map(|(id, label)| id.eq_ignore_ascii_case(package).then_some(*label))
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::map_swapper_arena;
+
+    #[test]
+    fn menu_map_filter_uses_only_map_swapper_arenas() {
+        assert_eq!(map_swapper_arena("Stadium_P"), Some("DFH Stadium"));
+        assert_eq!(map_swapper_arena("stadium_p"), Some("DFH Stadium"));
+        assert_eq!(map_swapper_arena("HoopsStadium_P"), None);
+        assert_eq!(map_swapper_arena("Labs_CirclePillars_P"), None);
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -89,6 +112,8 @@ pub struct BackgroundChangerState {
     busy: bool,
     apply_all_prompt: bool,
     status: String,
+    #[cfg(windows)]
+    web: web::Previews,
 }
 
 impl Default for BackgroundChangerState {
@@ -105,6 +130,8 @@ impl Default for BackgroundChangerState {
             busy: false,
             apply_all_prompt: false,
             status: t("default-choose-the-arena-you-want-to").to_string(),
+            #[cfg(windows)]
+            web: web::Previews::default(),
         }
     }
 }
@@ -190,7 +217,7 @@ impl BackgroundChangerState {
         for index in &self.installed_hosts {
             let (package, display) = ARENAS[*index];
             self.installed_donors.push(DonorEntry {
-                package: format!("{}{package}", crate::patcher::background_merger::ARENA_DONOR_PREFIX),
+                package: format!("{}{package}", crate::patcher::background_merger::FULL_MAP_DONOR_PREFIX),
                 display: format!("{display}{ARENA_LOOK}"),
                 custom: false,
             });
@@ -294,7 +321,7 @@ impl BackgroundChangerState {
             .map(
                 |helper_message| match (command, host.as_deref(), donor.as_deref()) {
                     ("apply", Some(host), Some(donor)) if arena_of(donor).is_some() => format!(
-                        "{} now looks like {}.",
+                        "{} now loads {}.",
                         Self::message_name(host),
                         Self::message_name(donor)
                     ),
@@ -303,10 +330,7 @@ impl BackgroundChangerState {
                         Self::message_name(host),
                         Self::message_name(donor)
                     ),
-                    ("undo", Some(host), _) => format!(
-                        "Restored {}'s original background.",
-                        Self::message_name(host)
-                    ),
+                    ("undo", _, _) => String::new(),
                     _ => helper_message,
                 },
             );
@@ -447,16 +471,53 @@ impl BackgroundChangerState {
         }
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, tx: &Sender<AppMsg>) {
+    fn restore_mode(&mut self, rl_path: &str, full_map: bool, tx: &Sender<AppMsg>, ctx: &egui::Context) {
+        if self.busy {
+            return;
+        }
+        let hosts: Vec<_> = self.active.iter()
+            .filter(|(_, change)| arena_of(&change.donor).is_some() == full_map)
+            .map(|(host, _)| host.clone()).collect();
+        if hosts.is_empty() {
+            return;
+        }
+        self.busy = true;
+        self.status = t("launch-restoring-all-original-arenas");
+        let cooked = Self::cooked_dir(rl_path);
+        let state = Self::state_dir();
+        let tx = tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut restored = 0;
+            let result = (|| {
+                for host in hosts {
+                    crate::patcher::background_merger::run("undo", &cooked, &state, Some(&host), None)
+                        .map_err(|error| format!("Restored {restored} maps before {host} failed: {error}"))?;
+                    restored += 1;
+                }
+                Ok(format!("Restored {restored} maps."))
+            })();
+            let _ = tx.send(AppMsg::BackgroundChangerDone(result));
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn render(&mut self, ui: &mut egui::Ui, rl_path: &str, tx: &Sender<AppMsg>, full_map: bool) {
         if self.last_rl_path != rl_path {
             self.refresh(rl_path);
+        }
+        if (arena_of(&self.donor).is_some() != full_map) || self.donor.is_empty() {
+            self.donor = self.installed_donors.iter()
+                .find(|entry| arena_of(&entry.package).is_some() == full_map)
+                .map(|entry| entry.package.clone()).unwrap_or_default();
         }
         let ctx = ui.ctx().clone();
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.heading(t("nav-arena-backgrounds"));
+            ui.heading(t(if full_map { "nav-map-swapper" } else { "nav-arena-backgrounds" }));
             ui.separator();
-            ui.label(t("render-keep-an-arena-s-gameplay-and"));
+            if full_map { ui.label("Choose the map you want, then choose the arena it will replace."); }
+            else { ui.label(t("render-keep-an-arena-s-gameplay-and")); }
             ui.add_space(8.0);
             ui.weak(t("render-close-rocket-league-before-applying-or"));
         });
@@ -531,12 +592,14 @@ impl BackgroundChangerState {
                         }
                     });
                     ui.separator();
+                    if !full_map {
                     ui.selectable_value(
                         &mut self.donor,
                         NO_BACKGROUND.to_string(),
                         t("render-no-background"),
                     );
                     ui.separator();
+                    }
                     let query = self.donor_search.trim().to_ascii_lowercase();
                     let matches = |entry: &&DonorEntry| {
                         query.is_empty()
@@ -547,12 +610,13 @@ impl BackgroundChangerState {
                         .installed_donors
                         .iter()
                         .filter(|entry| !entry.custom)
+                        .filter(|entry| arena_of(&entry.package).is_some() == full_map)
                         .filter(matches)
                         .collect();
                     let custom: Vec<_> = self
                         .installed_donors
                         .iter()
-                        .filter(|entry| entry.custom)
+                        .filter(|entry| entry.custom && !full_map)
                         .filter(matches)
                         .collect();
                     let found = !built_in.is_empty() || !custom.is_empty();
@@ -608,7 +672,7 @@ impl BackgroundChangerState {
                     self.open_background_folder();
                 }
             });
-            if arena_of(&self.donor).is_some() {
+            if !full_map && arena_of(&self.donor).is_some() {
                 ui.small(t("render-arena-look-note"));
             }
             if self.donor != NO_BACKGROUND && arena_of(&self.donor).is_none() {
@@ -697,6 +761,7 @@ impl BackgroundChangerState {
             let mut rows: Vec<_> = self
                 .active
                 .iter()
+                .filter(|(_, swap)| arena_of(&swap.donor).is_some() == full_map)
                 .map(|(host, swap)| (host.clone(), swap.donor.clone()))
                 .collect();
             rows.sort_by(|a, b| Self::display_name(&a.0).cmp(&Self::display_name(&b.0)));
@@ -726,7 +791,7 @@ impl BackgroundChangerState {
                     .add_enabled(!self.busy, egui::Button::new(t("app-restore-all")))
                     .clicked()
                 {
-                    self.launch("reset", rl_path, None, None, tx, &ctx);
+                    self.restore_mode(rl_path, full_map, tx, &ctx);
                 }
             }
         });

@@ -39,6 +39,11 @@ fn owned_products(save: &SaveData) -> Result<OwnedProducts, String> {
         .into_iter()
         .filter(|product| product.product_id > 0)
     {
+        let blueprint=product.attributes.as_array().into_iter().flatten().any(|attribute| {
+            let attribute=attribute.as_u64().and_then(|index|save.objects.get(index as usize)).unwrap_or(attribute);
+            attribute["__type"]=="TAGame.ProductAttribute_Blueprint_TA"
+        });
+        if blueprint { continue; }
         products.ids.insert(product.product_id);
         for attribute in product.attributes.as_array().into_iter().flatten() {
             let attribute = if attribute.is_object() {
@@ -77,6 +82,21 @@ fn selected_account_path(accounts: &[SaveAccount], selected: Option<&Path>) -> O
         .map(|account| account.path.clone())
 }
 
+fn primary_account_from_log_line(line:&str)->Option<String> {
+    if !line.contains("SaveGame: Load Player.ControllerId=(0)") {return None}
+    let path=line.split_once("SaveFileName=(")?.1.split(')').next()?;
+    let file=path.rsplit(['\\','/']).next()?;
+    let stem=file.strip_suffix(".save")?.split('_').next()?;
+    (!stem.is_empty()).then(||stem.to_owned())
+}
+fn last_launched_account()->Option<String> {
+    use std::io::{BufRead,BufReader,Read};
+    let log=hebnix_sdk::utils::paths::documents_dir()?.join("My Games/Rocket League/TAGame/Logs/Launch.log");
+    let file=std::fs::File::open(log).ok()?;
+    BufReader::new(file.take(4*1024*1024)).lines().map_while(Result::ok)
+        .filter_map(|line|primary_account_from_log_line(&line)).last()
+}
+
 #[derive(Default)]
 pub struct OwnedInventory {
     pub ids: HashSet<i64>,
@@ -89,6 +109,12 @@ pub struct OwnedInventory {
     >,
     error: Option<String>,
     initial_refresh_attempted: bool,
+    game_was_running: bool,
+    launch_watch_until: Option<std::time::Instant>,
+    next_account_probe: Option<std::time::Instant>,
+    account_probe: Option<Receiver<Option<String>>>,
+    /// The modern header's quick settings hold the account picker, so pages leave it out.
+    pub(crate) in_header: bool,
 }
 
 impl OwnedInventory {
@@ -113,7 +139,9 @@ impl OwnedInventory {
         std::thread::spawn(move || {
             let result = (|| {
                 let accounts = save_file::find_save_accounts(None);
-                let path = selected_account_path(&accounts, selected.as_deref())
+                let logged=selected.is_none().then(last_launched_account).flatten();
+                let preferred=logged.as_ref().and_then(|id|accounts.iter().find(|account|account.account_id.eq_ignore_ascii_case(id))).map(|account|account.path.as_path());
+                let path = selected_account_path(&accounts, selected.as_deref().or(preferred))
                     .ok_or("No Rocket League account save was found in the detected save folder.")?;
                 let save = save_file::load(&path, true)
                     .map_err(|e| format!("Could not read inventory: {e}"))?;
@@ -131,12 +159,16 @@ impl OwnedInventory {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        if self.in_header {
+            self.poll(ui.ctx());
+            return;
+        }
         self.show_with_actions(ui, |_| {});
     }
 
-    pub fn show_with_actions(&mut self, ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui)) {
+    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
         if !self.initial_refresh_attempted {
-            self.refresh(ui.ctx());
+            self.refresh(ctx);
         }
         if let Some(result) = self.result.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.result = None;
@@ -159,34 +191,119 @@ impl OwnedInventory {
                 }
             }
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&self) -> serde_json::Value {
+        let accounts: Vec<_> = self.accounts.iter().map(|account| {
+            serde_json::json!({
+                "id": account.account_id,
+                "label": account.display_name,
+                "selected": self.selected.as_ref() == Some(&account.path),
+            })
+        }).collect();
+        serde_json::json!({
+            "accounts": accounts,
+            "loading": self.result.is_some(),
+            "error": self.error,
+        })
+    }
+
+    pub(crate) fn show_account_picker(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        self.poll(ui.ctx());
+        let selected = self.accounts.iter().find(|account| Some(&account.path) == self.selected.as_ref())
+            .map(|account| account.display_name.clone()).unwrap_or_else(|| "Latest local save".to_owned());
+        let mut next = None;
+        let mut refresh = false;
+        ui.horizontal(|ui| {
+            ui.label("Account:");
+            egui::ComboBox::from_id_salt("settings_save_account")
+                .selected_text(selected)
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for account in &self.accounts {
+                        if ui.selectable_label(Some(&account.path) == self.selected.as_ref(), &account.display_name).clicked() {
+                            next = Some(account.account_id.clone());
+                        }
+                    }
+                });
+            if ui.add_enabled(self.result.is_none(), egui::Button::new("↻")).on_hover_text("Refresh save").clicked() {
+                refresh = true;
+            }
+            if self.result.is_some() {
+                ui.spinner();
+            }
+        });
+        if let Some(error) = &self.error {
+            ui.weak(error);
+        }
+        if refresh { self.refresh(ui.ctx()); }
+        if let Some(id) = next.as_ref() {
+            self.refresh_web(ui.ctx(), Some(id));
+        }
+        next
+    }
+
+    pub(crate) fn follow_game_account(&mut self,ctx:&egui::Context,running:bool) {
+        use std::time::{Instant,Duration};
+        let now=Instant::now();
+        if running && !self.game_was_running {self.launch_watch_until=Some(now+Duration::from_secs(45));self.next_account_probe=Some(now);}
+        self.game_was_running=running;
+        if !running {self.launch_watch_until=None;}
+        if let Some(result)=self.account_probe.as_ref().and_then(|rx|rx.try_recv().ok()) {
+            self.account_probe=None;
+            if let Some(id)=result && self.result.is_none() && self.launch_watch_until.is_some() {
+                if let Some(path)=self.accounts.iter().find(|account|account.account_id.eq_ignore_ascii_case(&id)).map(|account|account.path.clone()) {
+                    if self.selected.as_ref()!=Some(&path) {self.selected=Some(path);self.ids.clear();self.paints.clear();self.title_ids.clear();self.refresh(ctx);}
+                }
+            }
+        }
+        if self.launch_watch_until.is_some_and(|until|now<until) && self.account_probe.is_none() && self.next_account_probe.is_none_or(|next|now>=next) {
+            self.next_account_probe=Some(now+Duration::from_secs(2));
+            let(tx,rx)=unbounded();self.account_probe=Some(rx);let ctx=ctx.clone();
+            std::thread::spawn(move||{let _=tx.send(last_launched_account());ctx.request_repaint();});
+        }
+    }
+
+    pub(crate) fn selected_save(&self) -> Option<&std::path::Path> { self.selected.as_deref() }
+
+    pub(crate) fn selected_account_id(&self) -> Option<&str> {
+        self.accounts.iter().find(|account| Some(&account.path) == self.selected.as_ref()).map(|account| account.account_id.as_str())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn refresh_web(&mut self, ctx: &egui::Context, account: Option<&str>) {
+        if self.result.is_some() {
+            return;
+        }
+        if let Some(id) = account {
+            self.launch_watch_until=None;
+            let Some(account) = self.accounts.iter().find(|account| account.account_id == id) else {
+                return;
+            };
+            self.selected = Some(account.path.clone());
+            self.ids.clear();
+            self.paints.clear();
+            self.title_ids.clear();
+        }
+        self.refresh(ctx);
+    }
+
+    pub fn show_with_actions(&mut self, ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui)) {
+        self.poll(ui.ctx());
+        if self.in_header {
+            ui.horizontal_wrapped(actions);
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
-            ui.label("Owned items from save:");
-            let before = self.selected.clone();
+            ui.label("Owned items from the active account");
             let name = self
                 .accounts
                 .iter()
                 .find(|account| Some(&account.path) == self.selected.as_ref())
                 .map(|account| account.display_name.as_str())
                 .unwrap_or("Latest local account");
-            ui.add_enabled_ui(self.result.is_none(), |ui| {
-                egui::ComboBox::from_id_salt("owned_save_account")
-                    .selected_text(name)
-                    .show_ui(ui, |ui| {
-                        for account in &self.accounts {
-                            ui.selectable_value(
-                                &mut self.selected,
-                                Some(account.path.clone()),
-                                &account.display_name,
-                            );
-                        }
-                    });
-            });
-            let changed = before != self.selected;
-            if changed {
-                self.ids.clear();
-                self.paints.clear();
-                self.title_ids.clear();
-            }
+            ui.weak(name);
             let refresh = ui
                 .add_enabled(
                     self.result.is_none(),
@@ -349,5 +466,17 @@ mod tests {
             ..empty_save()
         };
         assert!(owned_products(&save).is_err());
+    }
+}
+
+#[cfg(test)]
+mod launch_account_tests {
+    use super::primary_account_from_log_line;
+    #[test]
+    fn chooses_only_the_primary_save_load_not_other_player_ids() {
+        assert_eq!(primary_account_from_log_line("[0024.22] SaveGame: Load Player.ControllerId=(0) SaveFileName=(../../TAGame/SaveDataEpic/DBE_Production/0123456789abcdef0123456789abcdef_2.save)"),Some("0123456789abcdef0123456789abcdef".into()));
+        assert_eq!(primary_account_from_log_line("SaveGame: Load Player.ControllerId=(1) SaveFileName=(other.save)"),None);
+        assert_eq!(primary_account_from_log_line("Party: OtherPlayerID=0123456789abcdef0123456789abcdef"),None);
+        assert_eq!(primary_account_from_log_line("SaveGame: Load Player.ControllerId=(0) SaveFileName=(C:\\Games\\SaveData\\76561198000000000.save)"),Some("76561198000000000".into()));
     }
 }

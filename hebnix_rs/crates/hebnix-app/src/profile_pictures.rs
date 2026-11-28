@@ -71,6 +71,7 @@ pub(crate) struct State {
     pending: Option<mpsc::Receiver<Result<Completion, String>>>,
     game: PathBuf,
     enabled: bool,
+    auto_enable_requested: bool,
     needs_update: bool,
     status: String,
     error: bool,
@@ -83,6 +84,8 @@ pub(crate) struct State {
     prune_pending: bool,
     last_account_check: Option<Instant>,
     textures: HashMap<String, egui::TextureHandle>,
+    #[cfg(windows)]
+    web_images: HashMap<String, String>,
 }
 impl State {
     pub(crate) fn busy(&self) -> bool {
@@ -140,6 +143,7 @@ impl State {
             pending: None,
             game: PathBuf::new(),
             enabled: false,
+            auto_enable_requested: false,
             needs_update: false,
             status: String::new(),
             error: false,
@@ -152,6 +156,8 @@ impl State {
             prune_pending: false,
             last_account_check: None,
             textures: HashMap::new(),
+            #[cfg(windows)]
+            web_images: HashMap::new(),
         };
         if !state.settings.history.is_empty() || !state.settings.active.is_empty() {
             state.save();
@@ -205,6 +211,7 @@ impl State {
     ) {
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
+        if !label.is_empty() { crate::toast::console(format!("[Profile Pictures] {label}")); }
         self.status = label.into();
         self.error = false;
         let ctx = ctx.clone();
@@ -228,6 +235,11 @@ impl State {
         });
     }
     pub(crate) fn tick(&mut self, ctx: &egui::Context, game: &Path) {
+        if !self.auto_enable_requested && self.pending.is_none() && !game.as_os_str().is_empty()
+            && self.game == game && !hebnix_sdk::process::is_rocket_league_running() {
+            self.auto_enable_requested = true;
+            self.set_enabled(ctx, game, true);
+        }
         if self.game != game && self.pending.is_none() {
             self.game = game.to_owned();
             self.enabled = false;
@@ -343,6 +355,16 @@ impl State {
         });
         if let Some(result) = result {
             self.pending = None;
+            match &result {
+                Ok(Completion::Started(_, _, Err(error))) => crate::toast::console(format!("[Profile Pictures] Could not start the local avatar service: {error}")),
+                Ok(Completion::Started(true, true, _)) => crate::toast::console("[Profile Pictures] Avatar support needs an update. Close Rocket League to apply it."),
+                Ok(Completion::Started(..)) => {}
+                Ok(Completion::Enabled(on, _)) => crate::toast::console(format!("[Profile Pictures] Avatar support {}", if *on { "enabled" } else { "disabled" })),
+                Ok(Completion::Imported(_)) => crate::toast::console("[Profile Pictures] Picture imported"),
+                Ok(Completion::Uploaded { .. }) => crate::toast::console("[Profile Pictures] Upload finished. Restart Rocket League to see the new avatar"),
+                Ok(Completion::Canceled) => {}
+                Err(error) => crate::toast::console(format!("[Profile Pictures] Failed: {error}")),
+            }
             match result {
                 Ok(Completion::Started(on, needs_update, runtime)) => {
                     self.enabled = on;
@@ -370,11 +392,16 @@ impl State {
                     self.save();
                 }
                 Ok(Completion::Imported(id)) => {
-                    gallery::remember(&mut self.settings.history, id);
+                    // a first picture has nothing to choose between, so it goes straight up
+                    let only = self.settings.history.iter().all(|known| *known == id);
+                    gallery::remember(&mut self.settings.history, id.clone());
                     self.textures
                         .retain(|id, _| self.settings.history.contains(id));
                     self.status = "Picture added. It is NOT uploaded yet: click it under Recent pictures to upload it.".into();
                     self.save();
+                    if only && self.owner.is_some() {
+                        self.upload(ctx, id);
+                    }
                 }
                 Ok(Completion::Uploaded { owner, id }) => {
                     self.settings.pending_upload = None;
@@ -413,7 +440,10 @@ impl State {
         self.spawn(ctx, "Uploading picture…", move || {
             let jpeg = gallery::read(&root, &id)?;
             accounts::authorize(&owner)?;
+            let began = std::time::Instant::now();
+            crate::toast::console(format!("[Profile Pictures] Sending {} KB to the avatar server…", jpeg.len() / 1024));
             service::upload(&owner.id, jpeg.clone())?;
+            crate::toast::console(format!("[Profile Pictures] Server accepted the picture in {:.1}s", began.elapsed().as_secs_f32()));
             fs::create_dir_all(&pictures).map_err(|e| e.to_string())?;
             fs::write(owner.picture_file(&pictures), jpeg).map_err(|e| e.to_string())?;
             Ok(Completion::Uploaded {
@@ -443,6 +473,111 @@ impl State {
             .as_ref()
             .and_then(|a| self.settings.active.get(&a.key))
             .cloned()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, game: &Path) -> serde_json::Value {
+        use base64::Engine;
+        use serde_json::json;
+        let active = self.active_picture();
+        let busy = self.busy();
+        let running = hebnix_sdk::process::is_rocket_league_running();
+        self.web_images.retain(|id, _| self.settings.history.contains(id) || Some(id) == active.as_ref());
+        for id in self.settings.history.iter().chain(active.iter()) {
+            if !self.web_images.contains_key(id) && let Ok(bytes) = gallery::read(&self.root, id) {
+                self.web_images.insert(id.clone(), format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+            }
+        }
+        let rows: Vec<_> = self.settings.history.iter().filter_map(|id| {
+            self.web_images.get(id).map(|image| json!({ "id": id, "image": image }))
+        }).collect();
+        let accounts: Vec<_> = self.save_accounts.iter().map(|account| {
+            let platform = if account.platform == "epic" { "Epic" } else { "Steam" };
+            json!([account.key, format!("{} ({platform})", account.name)])
+        }).collect();
+        json!({
+            "page": "profile-pictures", "enabled": self.enabled, "canToggle": !busy && !running && !game.as_os_str().is_empty(),
+            "running": running, "busy": busy, "accounts": accounts, "account": self.owner.as_ref().map(|a| &a.key),
+            "owner": self.owner.as_ref().map(|a| &a.name), "active": active,
+            "current": active.as_ref().and_then(|id| self.web_images.get(id)), "rows": rows,
+            "update": self.enabled && self.needs_update, "retry": self.enabled && !self.needs_update && !busy && self.runtime.is_none(),
+            "status": self.status, "error": self.error,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, game: &Path, key: &str, value: &serde_json::Value, ctx: &egui::Context) {
+        if self.busy() {
+            crate::toast::console("[Profile Pictures] Busy with the previous step, try again in a moment");
+            return;
+        }
+        match key {
+            "enabled" | "update" if !game.as_os_str().is_empty() && !hebnix_sdk::process::is_rocket_league_running() => {
+                if let Some(enabled) = value.as_bool() { self.set_enabled(ctx, game, enabled); }
+            }
+            "account" if !hebnix_sdk::process::is_rocket_league_running() => {
+                if let Some(key) = value.as_str().filter(|key| self.save_accounts.iter().any(|account| account.key == *key)) {
+                    self.settings.account = Some(key.to_owned());
+                    self.owner = accounts::choose(&self.save_accounts, Some(key), false, None);
+                    self.status.clear();
+                    self.error = false;
+                    self.save();
+                }
+            }
+            "import" => self.import_picture(ctx),
+            "upload" | "remove" => {
+                if let Some(id) = value.as_str().filter(|id| self.settings.history.iter().any(|known| known.as_str() == *id)) {
+                    if key == "upload" { self.upload(ctx, id.to_owned()); }
+                    else { self.remove_recent(id); }
+                }
+            }
+            "retry" if self.enabled && !self.needs_update && self.runtime.is_none() => self.retry_connection(ctx),
+            "enabled" | "update" | "account" => crate::toast::console(if game.as_os_str().is_empty() && key != "account" {
+                "[Profile Pictures] Not changed: no Rocket League folder is set in Settings"
+            } else {
+                "[Profile Pictures] Not changed: close Rocket League first"
+            }),
+            _ => {}
+        }
+    }
+
+    /// Follows the save account picked in the header's quick settings.
+    #[cfg(windows)]
+    pub(crate) fn select_save_account(&mut self, id: &str) {
+        let Some(key) = self.save_accounts.iter().find(|account| account.id.eq_ignore_ascii_case(id)).map(|account| account.key.clone()) else {
+            return;
+        };
+        if self.settings.account.as_deref() == Some(key.as_str())
+            || self.busy()
+            || hebnix_sdk::process::is_rocket_league_running()
+        {
+            return;
+        }
+        self.owner = accounts::choose(&self.save_accounts, Some(&key), false, None);
+        self.settings.account = Some(key);
+        self.status.clear();
+        self.error = false;
+        self.save();
+    }
+
+    fn import_picture(&mut self, ctx: &egui::Context) {
+        let root = self.root.clone();
+        self.spawn(ctx, "", move || {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Import profile picture")
+                .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+            let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file() else {
+                return Ok(Completion::Canceled);
+            };
+            gallery::import(&root, &file).map(Completion::Imported)
+        });
+    }
+
+    fn retry_connection(&mut self, ctx: &egui::Context) {
+        let pictures = self.pictures();
+        self.spawn(ctx, "Connecting…", move || {
+            Ok(Completion::Started(true, false, service::Runtime::start(&pictures).map(Some)))
+        });
     }
     fn account_picker(&mut self, ui: &mut egui::Ui, running: bool, busy: bool) {
         if !self.save_accounts.is_empty() {
@@ -513,17 +648,7 @@ impl State {
                     .add_enabled(!busy, egui::Button::new("Import picture…"))
                     .clicked()
                 {
-                    let root = self.root.clone();
-                    self.spawn(ui.ctx(), "", move || {
-                        let dialog = rfd::FileDialog::new()
-                            .set_title("Import profile picture")
-                            .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-                        let Some(file) = crate::winutil::parent_file_dialog(dialog).pick_file()
-                        else {
-                            return Ok(Completion::Canceled);
-                        };
-                        gallery::import(&root, &file).map(Completion::Imported)
-                    });
+                    self.import_picture(ui.ctx());
                 }
             });
         });
@@ -717,14 +842,7 @@ impl State {
                         && !busy
                         && left.button("Retry connection").clicked()
                     {
-                        let pictures = self.pictures();
-                        self.spawn(left.ctx(), "Connecting…", move || {
-                            Ok(Completion::Started(
-                                true,
-                                false,
-                                service::Runtime::start(&pictures).map(Some),
-                            ))
-                        });
+                        self.retry_connection(left.ctx());
                     }
                     if let Some(id) = self.active_picture() {
                         if let Some(texture) = self.texture(left.ctx(), &id) {

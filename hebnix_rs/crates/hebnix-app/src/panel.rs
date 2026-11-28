@@ -340,7 +340,7 @@ impl Panel {
     }
 
     /// Move the window one step along the slide-in, if one is under way.
-    fn step_slide(&mut self, ctx: &egui::Context) {
+    pub(crate) fn step_slide(&mut self, ctx: &egui::Context) {
         #[cfg(target_os = "linux")]
         if let Some((start, next, pos, size)) = self.settle {
             let elapsed = start.elapsed();

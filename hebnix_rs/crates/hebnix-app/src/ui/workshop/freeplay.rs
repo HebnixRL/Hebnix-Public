@@ -123,26 +123,7 @@ impl State {
                 )
                 .changed()
             {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let cooked = cooked.clone();
-                let ctx = ui.ctx().clone();
-                let (tags, options) = launch_settings(&self.picks);
-                self.patch_job = Some(rx);
-                self.status = "Updating Freeplay patch…".into();
-                std::thread::spawn(move || {
-                    let result =
-                        workshop_host::set_freeplay_patch(&cooked, enabled).and_then(|()| {
-                            workshop_menu::store_solo_preferences(
-                                &cooked,
-                                enabled,
-                                &format!("{tags}{options}"),
-                                !options.is_empty(),
-                            )?;
-                            Ok(enabled)
-                        });
-                    let _ = tx.send(result);
-                    ctx.request_repaint();
-                });
+                self.toggle_patch(&cooked, enabled, ui.ctx());
             }
             if self.enabled && self.patch_ready == Some(false) {
                 ui.weak("TAGame.upk no longer contains the current Freeplay patch. Close Rocket League and enable Freeplay Mutators again.");
@@ -216,10 +197,37 @@ impl State {
                     });
                 });
         });
+        self.store_changes(&cooked, previous_picks);
+    }
+
+    fn toggle_patch(&mut self, cooked: &Path, enabled: bool, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cooked = cooked.to_owned();
+        let ctx = ctx.clone();
+        let (tags, options) = launch_settings(&self.picks);
+        self.patch_job = Some(rx);
+        self.status = "Updating Freeplay patch…".into();
+        std::thread::spawn(move || {
+            let result =
+                workshop_host::set_freeplay_patch(&cooked, enabled).and_then(|()| {
+                    workshop_menu::store_solo_preferences(
+                        &cooked,
+                        enabled,
+                        &format!("{tags}{options}"),
+                        !options.is_empty(),
+                    )?;
+                    Ok(enabled)
+                });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    fn store_changes(&mut self, cooked: &Path, previous_picks: Vec<usize>) {
         if self.enabled && self.picks != previous_picks {
             let (tags, options) = launch_settings(&self.picks);
             self.status = match workshop_menu::store_solo_preferences(
-                &cooked,
+                cooked,
                 true,
                 &format!("{tags}{options}"),
                 !options.is_empty(),
@@ -231,6 +239,62 @@ impl State {
                 }
             };
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, rl_path: &str, ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        let interval = Duration::from_millis(500);
+        if self.session_check.is_none_or(|(checked, _)| checked.elapsed() >= interval) {
+            self.session_check = Some((Instant::now(), current_session_origin()));
+        }
+        ctx.request_repaint_after(interval);
+        let rows: Vec<_> = lan_mutators::SETTINGS.iter().enumerate().filter_map(|(index, setting)| {
+            let group = freeplay_group(setting.label)?;
+            let options: Vec<_> = setting.options.iter().map(|(name, _)| *name).collect();
+            Some(json!({
+                "index": index, "group": group, "label": setting.label,
+                "pick": self.picks.get(index).copied().unwrap_or(0), "options": options,
+            }))
+        }).collect();
+        json!({
+            "page": "freeplay", "rows": rows, "enabled": self.enabled,
+            "checked": self.enabled && self.patch_ready != Some(false),
+            "canToggle": Path::new(rl_path).join("TAGame/CookedPCConsole").is_dir()
+                && !hebnix_sdk::process::is_rocket_league_running() && !self.patch_busy(),
+            "patchMissing": self.enabled && self.patch_ready == Some(false),
+            "heatseeker": lan_mutators::heatseeker(&self.picks),
+            "lanSession": self.session_check.is_some_and(|(_, origin)| origin == SessionOrigin::WorkshopOrLan),
+            "status": self.status,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_toggle(&mut self, rl_path: &str, enabled: bool, ctx: &egui::Context) {
+        let cooked = Path::new(rl_path).join("TAGame/CookedPCConsole");
+        if cooked.is_dir() && !hebnix_sdk::process::is_rocket_league_running() && !self.patch_busy() {
+            self.toggle_patch(&cooked, enabled, ctx);
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_pick(&mut self, rl_path: &str, pick: Option<(usize, usize)>) {
+        if !self.enabled {
+            return;
+        }
+        let previous = self.picks.clone();
+        self.picks.resize(lan_mutators::SETTINGS.len(), 0);
+        match pick {
+            Some((index, value)) => {
+                let Some(setting) = lan_mutators::SETTINGS.get(index) else { return };
+                if freeplay_group(setting.label).is_none() || value >= setting.options.len() {
+                    return;
+                }
+                self.picks[index] = value;
+            }
+            None => self.picks.fill(0),
+        }
+        self.store_changes(&Path::new(rl_path).join("TAGame/CookedPCConsole"), previous);
     }
 
     pub(crate) fn poll_patch(&mut self, ctx: &egui::Context, rl_path: &str) {
@@ -302,6 +366,17 @@ impl State {
             }
             ctx.request_repaint_after(Duration::from_secs(2));
         }
+    }
+}
+
+#[cfg(windows)]
+fn freeplay_group(label: &str) -> Option<&str> {
+    match label {
+        "Game Mode" => Some("mode"),
+        "Free Play" | "Bot Loadouts" => None,
+        "Number Of Balls" => Some("ball"),
+        label if label.starts_with("Ball") => Some("ball"),
+        _ => Some("rules"),
     }
 }
 

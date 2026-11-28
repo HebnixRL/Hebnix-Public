@@ -14,7 +14,7 @@ pub enum Edit {
     Delete { position: usize },
     Move { from: usize, to: usize, expected: Vec<u32> },
     Equip { position: usize, changes: Vec<(usize, usize, u64, u64)> },
-    Update { position: usize, name: String, changes: Vec<(usize, usize, u64, u64)>, colours: [[u8; 2]; 2], expected: Preset },
+    Update { position: usize, name: String, changes: Vec<(usize, usize, u64, u64)>, colours: [[u8; 2]; 2], stock_engines: [Option<i32>;2], expected: Preset },
     Import(Vec<Preset>),
 }
 
@@ -43,12 +43,13 @@ pub fn plan(raw: &[u8], edit: &Edit) -> Result<Option<Vec<u8>>, String> {
             move_preset(&mut doc, *from, *to)?
         },
         Edit::Equip { position, changes } => equip(&mut doc, *position, changes)?,
-        Edit::Update { position, name, changes, colours, expected } => {
+        Edit::Update { position, name, changes, colours, stock_engines, expected } => {
             if export_preset(raw, *position)? != *expected { return Err("The preset changed; reopen the editor.".into()); }
             let renamed = rename(&mut doc, *position, name)?;
             let equipped = equip(&mut doc, *position, changes)?;
             let recoloured = update_colours(&mut doc, *position, *colours, expected)?;
-            renamed || equipped || recoloured
+            let engines=stock_engine_audio(&mut doc,*position,*stock_engines)?;
+            renamed || equipped || recoloured || engines
         },
         Edit::Import(presets) => import(&mut doc, presets)?,
     };
@@ -155,6 +156,27 @@ fn equip(doc: &mut Document, position: usize, changes: &[(usize, usize, u64, u64
         let (props, _) = fields(&obj.bytes)?;
         let f = field(&props, "OnlineProducts128", "ArrayProperty")?;
         replace_field(&mut obj.bytes, f, &payload);
+    }
+    Ok(true)
+}
+
+fn stock_engine_audio(doc:&mut Document,position:usize,engines:[Option<i32>;2])->Result<bool,String> {
+    if engines.iter().all(Option::is_none){return Ok(false)}
+    let set=*set_refs(doc)?.get(position).ok_or("no such preset")? as usize;
+    let loadouts=array_u32(&doc.objects[set].bytes,"Loadouts")?;
+    if loadouts.len()!=2{return Err("unsupported loadout shape".into())}
+    for (team,product) in engines.into_iter().enumerate() {
+        let Some(product)=product else{continue};
+        if product<0{return Err("invalid engine audio".into())}
+        let obj=doc.objects.get_mut(loadouts[team] as usize).ok_or("invalid loadout reference")?;
+        let mut products=array_u32(&obj.bytes,"Products")?;let mut instances=instance_array(&obj.bytes)?;
+        if products.len()!=SLOTS || instances.len()!=SLOTS{return Err("unsupported loadout slot count".into())}
+        products[13]=product as u32;instances[13]=(0,0);
+        set_array(&mut obj.bytes,"Products",&products)?;
+        let mut payload=(SLOTS as u32).to_le_bytes().to_vec();
+        for (upper,lower) in instances{payload.extend(instance_blob(upper,lower));}
+        let (props,_)=fields(&obj.bytes)?;let f=field(&props,"OnlineProducts128","ArrayProperty")?;
+        replace_field(&mut obj.bytes,f,&payload);
     }
     Ok(true)
 }
@@ -274,12 +296,13 @@ fn delete(doc: &mut Document, position: usize) -> Result<bool, String> {
         return Err("no such preset".into());
     }
     if refs.len() <= 1 {
-        return Err("keep at least one preset".into());
+        return Err("Cannot delete the last loadout. Keep at least one preset.".into());
     }
     let profile = profile_index(doc)?;
     let equipped = read_scalar(&doc.objects[profile].bytes, "EquippedLoadoutSet")?;
     if equipped == refs[position] as i64 {
-        return Err("equip another preset before deleting this one".into());
+        let replacement=refs.iter().copied().enumerate().find(|(index,_)| *index != position).map(|(_,reference)|reference).ok_or("Cannot delete the last loadout. Keep at least one preset.")?;
+        put_scalar(&mut doc.objects[profile].bytes,"EquippedLoadoutSet",replacement as i64)?;
     }
     refs.remove(position);
     set_array(&mut doc.objects[profile].bytes, "LoadoutSets", &refs)?;
@@ -891,6 +914,22 @@ mod tests {
         assert_eq!(read_scalar(paint, "Team").unwrap(), 1);
         assert_eq!(read_scalar(paint, "TeamColorID").unwrap(), 40);
         assert!(!mark_orange_loadouts(&mut doc).unwrap());
+    }
+
+    #[test]
+    fn deleting_equipped_loadout_selects_first_survivor_and_protects_last() {
+        let mut profile=empty();
+        append_array(&mut profile,"LoadoutSets",&[1,2,3]).unwrap();
+        insert_property(&mut profile,"EquippedLoadoutSet","ObjectProperty",&1u32.to_le_bytes()).unwrap();
+        let mut doc=Document {header:vec![],root:empty(),tail:vec![],objects:vec![obj("TAGame.ProfileLoadoutSave_TA",0,profile)]};
+        assert!(delete(&mut doc,0).unwrap());
+        assert_eq!(set_refs(&doc).unwrap(),vec![2,3]);
+        assert_eq!(read_scalar(&doc.objects[0].bytes,"EquippedLoadoutSet").unwrap(),2);
+        assert!(delete(&mut doc,0).unwrap());
+        let before=doc.objects[0].bytes.clone();
+        assert!(delete(&mut doc,0).is_err());
+        assert_eq!(doc.objects[0].bytes,before);
+        assert_eq!(read_scalar(&doc.objects[0].bytes,"EquippedLoadoutSet").unwrap(),3);
     }
 
     #[test]

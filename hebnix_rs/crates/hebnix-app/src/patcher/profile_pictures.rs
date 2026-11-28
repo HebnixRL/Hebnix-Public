@@ -136,6 +136,33 @@ fn matches(package: &UpkPackage, receipt: &Receipt, on: bool) -> bool {
                 .is_ok_and(|(_, b)| b == if on { &e.patched } else { &e.original })
         })
 }
+/// Name what differs so a report shows which patch owns it.
+fn foreign_edit(package: &UpkPackage, receipt: &Receipt) -> String {
+    let mut drift = Vec::new();
+    for n in &receipt.names {
+        let current = package.names.get(n.index);
+        if current != Some(&n.original) && current != Some(&n.patched) {
+            drift.push(format!("name {} is {:?}", n.index, current));
+        }
+    }
+    for e in &receipt.exports {
+        if !bytes(package, &e.path).is_ok_and(|(_, b)| b == e.original || b == e.patched) {
+            drift.push(format!("{} was edited", e.path));
+        }
+    }
+    let detail = if drift.is_empty() { "the functions are a mix of patched and original code".to_string() } else { drift.join(", ") };
+    format!("The profile picture UI functions were changed by another patch ({detail}). Refusing to overwrite them.")
+}
+fn live_restored_baseline(package: &UpkPackage, receipt: &Receipt) -> bool {
+    if !receipt.exports.iter().all(|e| bytes(package, &e.path).is_ok_and(|(_, b)| b == e.original)) { return false; }
+    let path = crate::config::base_dir().join("state/live-cosmetics/transaction.json");
+    let Some(journal) = fs::read(path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else { return false; };
+    receipt.names.iter().all(|name| {
+        let Some(current) = package.names.get(name.index) else { return false; };
+        current == &name.original || journal["names"].as_array().is_some_and(|names| names.iter().any(|edit|
+            edit[0].as_u64() == Some(name.index as u64) && edit[1].as_str() == Some(name.original.as_str()) && edit[2].as_str() == Some(current.as_str())))
+    })
+}
 
 // Workshop's author-name fix shares our callback host. A package restored by
 // another Hebnix feature can have that fix toggled since this receipt was made.
@@ -329,8 +356,8 @@ fn workshop_baseline(directory: &Path) -> Result<(UpkPackage, Option<(Receipt, b
     let enabled = matches(&package, &saved, true);
     if enabled {
         restore_snapshot(&mut package, &saved)?;
-    } else if !matches(&package, &saved, false) && !restored_workshop_variant(&package, &saved) {
-        return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+    } else if !matches(&package, &saved, false) && !restored_workshop_variant(&package, &saved) && !live_restored_baseline(&package, &saved) {
+        return Err(foreign_edit(&package, &saved));
     }
     Ok((package, Some((saved, enabled))))
 }
@@ -536,6 +563,23 @@ fn set_enabled_checked(
             .into());
         }
     }
+    let cache_scope = format!("profile-pictures-v{PATCH_VERSION}-{on}");
+    if !upgrading {
+        if let Some(saved) = &receipt {
+            let wanted = if on { &saved.enabled_sha256 } else { &saved.disabled_sha256 };
+            if let Some(bytes) = super::package_cache::get(&cache_scope, &source_digest)
+                .filter(|bytes| wanted.as_ref().is_some_and(|wanted| hex::encode(Sha256::digest(bytes)) == *wanted)) {
+                ensure_closed()?;
+                if file_digest(&source)? != source_digest { return Err("Game package changed during cached avatar preparation".into()); }
+                let mut saved = saved.clone(); saved.active = Some(on);
+                super::upk_history::replace(&receipt_path(game), &serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?)?;
+                ensure_closed()?;
+                super::upk_history::replace(&source, &bytes)?;
+                timing("restored verified cached package", started);
+                return Ok(if on { "Native profile pictures enabled." } else { "Native profile pictures disabled." }.into());
+            }
+        }
+    }
     let mut package = UpkPackage::load(&source)?;
     timing("load and index", started);
     if let Some(saved) = &receipt {
@@ -548,7 +592,7 @@ fn set_enabled_checked(
             .into());
         }
         if !matches(&package, saved, !on) && !(upgrading && matches(&package, saved, true)) {
-            if restored_workshop_variant(&package, saved) {
+            if restored_workshop_variant(&package, saved) || live_restored_baseline(&package, saved) {
                 if !on {
                     return Ok("Native profile pictures are disabled.".into());
                 }
@@ -556,7 +600,7 @@ fn set_enabled_checked(
                 // preserving its current Workshop author-name setting on undo.
                 upgrading = true;
             } else {
-                return Err("The profile picture UI functions were changed by another patch. Refusing to overwrite them.".into());
+                return Err(foreign_edit(&package, saved));
             }
         }
     } else {
@@ -675,12 +719,12 @@ fn set_enabled_checked(
     }
     let path = receipt_path(game);
     fs::create_dir_all(path.parent().ok_or("Invalid receipt path")?).map_err(|e| e.to_string())?;
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    fs::copy(&temporary, &source).map_err(|e| e.to_string())?;
+    super::upk_history::replace(&path, &serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?)?;
+    let staged = fs::read(&temporary).map_err(|e| e.to_string())?;
+    super::package_cache::remember(&cache_scope, &source_digest, &staged);
+    ensure_closed()?;
+    if file_digest(&source)? != source_digest { return Err("Game package changed while caching avatar preparation".into()); }
+    super::upk_history::replace(&source, &staged)?;
     let _ = fs::remove_file(temporary);
     timing("complete", started);
     Ok(if on {
@@ -889,12 +933,20 @@ fn validate(code: &Code) -> Result<(), String> {
                     }
                 }
                 0x57 => {
-                    if self.take(1)?[0] != 0x28 {
-                        return Err("Unsupported array token".into());
+                    match self.take(1)?[0] {
+                        0x00 => {
+                            if self.take(1)?[0] != 0 { return Err("Unsupported array element mode".into()); }
+                            self.expression(depth + 1)?;
+                            self.expression(depth + 1)?;
+                        }
+                        0x01 => self.expression(depth + 1)?,
+                        0x28 => {
+                            self.expression(depth + 1)?;
+                            self.take(2)?;
+                            self.parameters(depth + 1)?;
+                        }
+                        _ => return Err("Unsupported array token".into()),
                     }
-                    self.expression(depth + 1)?;
-                    self.take(2)?;
-                    self.parameters(depth + 1)?;
                 }
                 0x2a => (),
                 0x2c => {

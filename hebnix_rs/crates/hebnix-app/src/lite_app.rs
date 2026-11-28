@@ -22,7 +22,7 @@ use crate::plugins::PluginManager;
 use crate::tray::Tray;
 use crate::{dpi_fix, statsapi_ini, theme, winutil};
 
-pub const APP_VERSION: &str = "2.3.5";
+pub const APP_VERSION: &str = "2.4.0";
 pub const DEFAULT_WIDTH: f32 = 760.0;
 pub const DEFAULT_HEIGHT: f32 = 520.0;
 pub const MIN_WIDTH: f32 = 520.0;
@@ -2423,9 +2423,9 @@ impl LiteApp {
             if ui.button(t("settings-import-themes")).clicked() {
                 let dialog = rfd::FileDialog::new()
                     .set_title(t("settings-import-themes"))
-                    .add_filter("ZIP", &["zip"]);
+                    .add_filter("Theme", &["toml", "zip"]);
                 if let Some(path) = winutil::parent_file_dialog(dialog).pick_file() {
-                    match crate::deep_link::import_theme_zip(&path, &self.themes_dir, &self.fonts_dir) {
+                    match crate::deep_link::import_theme_file(&path, &self.themes_dir, &self.fonts_dir) {
                         Ok(()) => {
                             self.theme_options = theme::list_themes(&self.themes_dir);
                             let selected = self.config.settings.theme.clone();

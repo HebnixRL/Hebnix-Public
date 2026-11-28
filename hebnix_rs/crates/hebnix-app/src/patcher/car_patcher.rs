@@ -190,6 +190,126 @@ fn archive_already_imported(cars_dir: &Path, files: &[PathBuf]) -> bool {
 }
 
 impl CarPatcherState {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(
+        &mut self,
+        ctx: &egui::Context,
+        config: &mut Config,
+        tx: &Sender<AppMsg>,
+        visible: &[String],
+    ) -> Value {
+        use serde_json::json;
+        let catalog = if self.source == PatchSource::Catalog {
+            let (model, archive) = self.catalog.web_snapshot(ctx, tx, visible);
+            if let Some(archive) = archive {
+                self.web_import(&archive, true, config, tx);
+            }
+            model
+        } else {
+            Value::Null
+        };
+        let mut rows: Vec<_> = self.cars.iter().map(|car| {
+            let id = car.json_path.to_string_lossy();
+            let target = self.resolve_body(car.body_id);
+            let active = target.as_ref().ok().and_then(|target| self.active_cars.get(&target.upk_path));
+            let error = car.support.as_ref().err().or_else(|| target.as_ref().err());
+            let images = visible.iter().find(|visible_id| visible_id.as_str() == id)
+                .and_then(|_| crate::ui::browser::image_url(car.thumbnail.as_deref().unwrap_or(&self.fallback_image)))
+                .into_iter().collect::<Vec<_>>();
+            (error.is_some(), json!({
+                "id": id, "name": car.name, "images": images, "error": error,
+                "subtitle": target.as_ref().map(|target| target.name.clone()).unwrap_or_else(|_| format!("BodyID {}", car.body_id)),
+                "active": active == Some(&car.name), "restore": active.is_some(), "delete": active.is_none(),
+            }))
+        }).collect();
+        rows.sort_by_key(|(unavailable, _)| *unavailable);
+        let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
+        json!({
+            "page": "studio-asset", "kind": "car", "catalog": catalog, "rows": rows,
+            "custom": self.source == PatchSource::Custom, "active": !self.active_cars.is_empty(),
+            "error": self.catalog_error,
+            "labels": {
+                "refresh": t("btn-refresh"), "restore": t("ball-restore-original"), "import": t("ball-import-zip"),
+                "applied": t("ball-show-applied"), "search": t(if self.source == PatchSource::Custom { "tab-search-local-patches" } else { "ball-name-or-author" }),
+                "downloaded": t("render-view-downloaded"), "apply": t("ball-apply"), "delete": t("presets-delete"),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    fn web_import(&mut self, path: &Path, catalog: bool, config: &mut Config, tx: &Sender<AppMsg>) {
+        match self.import_zip(path, tx) {
+            Ok(_) if catalog => {
+                self.source = PatchSource::Custom;
+                config.patcher.car_source = self.source;
+                let _ = config.save(&self.base_dir);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                let _ = tx.send(AppMsg::Log(format!("[Cars] Import failed: {error}")));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(
+        &mut self,
+        key: &str,
+        id: Option<String>,
+        cooked: &Path,
+        config: &mut Config,
+        tx: &Sender<AppMsg>,
+        ctx: &egui::Context,
+    ) {
+        let backups = cooked.join("Backups");
+        let result = match key {
+            "source" => {
+                self.source = if id.as_deref() == Some("custom") { PatchSource::Custom } else { PatchSource::Catalog };
+                config.patcher.car_source = self.source;
+                let _ = config.save(&self.base_dir);
+                Ok(())
+            }
+            "refresh" if self.source == PatchSource::Catalog => {
+                self.catalog.refresh(ctx);
+                Ok(())
+            }
+            "refresh" => {
+                self.refresh_cars();
+                Ok(())
+            }
+            "download" if self.source == PatchSource::Catalog => {
+                if let Some(path) = id.and_then(|id| self.catalog.web_download(id, ctx)) {
+                    self.web_import(&path, true, config, tx);
+                }
+                Ok(())
+            }
+            "import" => {
+                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    self.web_import(&path, false, config, tx);
+                }
+                Ok(())
+            }
+            "restore" if id.is_none() => self.restore_all(cooked, &backups, tx, config).map(|_| ()),
+            "apply" | "restore" | "delete" if self.source == PatchSource::Custom => {
+                let Some(car) = self.cars.iter().find(|car| id.as_deref() == Some(car.json_path.to_string_lossy().as_ref())).cloned() else {
+                    return;
+                };
+                match key {
+                    "apply" => self.apply(&car, cooked, &backups, tx, config),
+                    "restore" => self.resolve_body(car.body_id).and_then(|target| self.restore(&target.upk_path, cooked, &backups, tx, config)),
+                    _ => self.delete_local_patch(&car).map(|()| {
+                        let _ = tx.send(AppMsg::Log(format!("[Cars] Deleted local patch '{}'.", car.name)));
+                    }),
+                }
+            }
+            _ => return,
+        };
+        if let Err(error) = result {
+            let _ = tx.send(AppMsg::Log(format!("[Cars] Action failed: {error}")));
+        }
+    }
+
     pub fn new(base_dir: &Path, config: &Config) -> Self {
         let cars_dir = base_dir.join("cars");
         let _ = fs::create_dir_all(&cars_dir);
@@ -781,6 +901,16 @@ impl CarPatcherState {
     }
 
     pub(crate) fn active_preview(&self, target: &str, name: &str) -> Option<egui::Image<'static>> {
+        self.active_car(target, name).map(|car| self.patch_image(car))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn active_preview_bytes(&self, target: &str, name: &str) -> Option<&[u8]> {
+        let car = self.active_car(target, name)?;
+        Some(car.thumbnail.as_deref().unwrap_or(self.fallback_image.as_ref()))
+    }
+
+    fn active_car(&self, target: &str, name: &str) -> Option<&CarPatch> {
         let matching = self.cars.iter().filter(|car| car.name == name);
         matching
             .clone()
@@ -794,7 +924,6 @@ impl CarPatcherState {
                 let car = matching.next()?;
                 matching.next().is_none().then_some(car)
             })
-            .map(|car| self.patch_image(car))
     }
 
     fn render_tile(&self, ui: &mut egui::Ui, car: &CarPatch) -> Option<TileAction> {

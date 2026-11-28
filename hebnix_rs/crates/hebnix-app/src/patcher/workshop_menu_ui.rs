@@ -168,6 +168,11 @@ impl Movie {
         swf: &[u8],
         out: &Path,
     ) -> Result<(), String> {
+        self.replace_movie(upk, swf)?;
+        upk.save_fast(out)
+    }
+
+    pub(super) fn replace_movie(&self, upk: &mut UpkPackage, swf: &[u8]) -> Result<(), String> {
         let (index, tag, value, size) = self.locate(upk)?;
         let export = &upk.exports[index];
         let old =
@@ -181,8 +186,7 @@ impl Movie {
         bytes.extend(len.to_le_bytes());
         bytes.extend(swf);
         bytes.extend_from_slice(&old[value + size..]);
-        upk.replace_title_export(index, &bytes)?;
-        upk.save_fast(out)
+        upk.replace_title_export(index, &bytes)
     }
 
     /// whether the live package holds the patched movie
@@ -250,21 +254,32 @@ impl Movie {
     /// Recover only the movie, keeping the live package's other exports.
     pub(super) fn apply(&self, cooked: &Path, backups: &Path) -> Result<(), String> {
         let live = game_path::resolve(cooked, self.package);
-        let mut upk = UpkPackage::load(&live)?;
-        let backup = self.backup_path(backups);
-        let current = self.movie(&upk)?;
-        let current_hash = digest(&current);
+        let source_digest = super::profile_pictures::file_digest(&live)?;
         let desired = if super::workshop_menu::downloader_on(cooked) {
             self.patched
-        } else {
-            self.menu_only()?.unwrap_or(self.patched)
-        };
+        } else { self.menu_only()?.unwrap_or(self.patched) };
+        let cache_scope = format!("workshop-movie-v1-{}-{}", self.package, digest(desired));
+        let backup = self.backup_path(backups);
+        if backup.is_file() && backup_guard::check(cooked, backups, &self.marker(), |name| self.is_backup(name)).is_ok() {
+            if let Some(bytes) = super::package_cache::get(&cache_scope, &source_digest) {
+                if hebnix_sdk::process::is_rocket_league_running() { return Err("Close Rocket League before changing the in-game menu".into()); }
+                if super::profile_pictures::file_digest(&live)? != source_digest { return Err("Menu package changed during cached preparation".into()); }
+                if digest(&bytes) != source_digest { super::upk_history::replace(&live, &bytes)?; }
+                return Ok(());
+            }
+        }
+        let mut upk = UpkPackage::load(&live)?;
+        let current = self.movie(&upk)?;
+        let current_hash = digest(&current);
         let already_current = current_hash == digest(desired);
         if already_current
             && backup_guard::check(cooked, backups, &self.marker(), |name| self.is_backup(name))
                 .is_ok()
             && self.clean_movie(&backup).is_some()
         {
+            if let Ok(bytes) = fs::read(&live) {
+                if digest(&bytes) == source_digest { super::package_cache::remember(&cache_scope, &source_digest, &bytes); }
+            }
             return Ok(());
         }
         let vanilla = if current_hash == self.vanilla {
@@ -325,6 +340,7 @@ impl Movie {
             result?;
         }
         if let Some(merged) = merged {
+            if super::profile_pictures::file_digest(&live)? != source_digest { return Err("Menu package changed during preparation".into()); }
             self.install_movie(cooked, &mut upk, &merged)?;
         }
         Ok(())
@@ -342,6 +358,11 @@ impl Movie {
         let result = self.with_movie(upk, desired, &temp).and_then(|()| {
             let saved = UpkPackage::load(&temp)?;
             if digest(&self.movie(&saved)?) == digest(desired) {
+                drop(saved);
+                let staged = fs::read(&temp).map_err(|error| error.to_string())?;
+                let scope = format!("workshop-movie-v1-{}-{}", self.package, digest(desired));
+                super::package_cache::remember(&scope, &digest(&before), &staged);
+                if hebnix_sdk::process::is_rocket_league_running() { return Err("Close Rocket League before installing menu changes".into()); }
                 if fs::read(&live).map_err(|error| error.to_string())? != before {
                     return Err(format!("{} changed while preparing the menu patch", self.package));
                 }

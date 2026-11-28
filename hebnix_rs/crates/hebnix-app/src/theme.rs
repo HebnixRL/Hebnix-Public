@@ -32,6 +32,9 @@ pub struct ThemeFile {
     /// leave blank to use the default font.
     #[serde(default)]
     pub font: Option<String>,
+    /// Where to download `font` from when it isn't installed. Asks the user first.
+    #[serde(default)]
+    pub font_source: Option<crate::fonts::FontSource>,
     /// Optional global UI behaviour and sizing overrides.
     #[serde(default)]
     pub style: ThemeStyle,
@@ -125,8 +128,7 @@ pub fn find_font_file(fonts_dir: &Path, name: &str) -> Option<std::path::PathBuf
     None
 }
 
-/// stems of the .ttf/.otf files in fonts_dir, sorted (Linux overlay font picker)
-#[cfg(target_os = "linux")]
+/// stems of the .ttf/.otf files in fonts_dir, sorted (Linux overlay font picker, theme editor)
 pub fn list_fonts(fonts_dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(fonts_dir)
         .into_iter()
@@ -169,8 +171,8 @@ fn theme_fonts(fonts_dir: &Path, font_name: Option<&str>, bundled: bool) -> egui
     let mut fonts = egui::FontDefinitions::default();
 
     if let Some(name) = font_name {
-        let data = find_font_file(fonts_dir, name).and_then(|path| std::fs::read(path).ok())
-            .map(egui::FontData::from_owned)
+        let data = crate::fonts::resolve(fonts_dir, name)
+            .map(|(bytes, index)| egui::FontData { index, ..egui::FontData::from_owned(bytes) })
             .or_else(|| (bundled && name.eq_ignore_ascii_case("Barlow-Medium")).then(||
                 egui::FontData::from_static(include_bytes!("../../../examples/fonts/Barlow-Medium.ttf"))));
         if let Some(data) = data {
@@ -236,7 +238,7 @@ fn apply_widget_state(target: &mut egui::style::WidgetVisuals, source: &ThemeWid
     }
 }
 
-fn parse_color(s: &str) -> Option<Color32> {
+pub(crate) fn parse_color(s: &str) -> Option<Color32> {
     let s = s.trim().trim_start_matches('#');
     if !s.is_ascii() { return None; }
     let bytes = match s.len() {
@@ -333,6 +335,23 @@ pub fn list_themes(themes_dir: &Path) -> Vec<String> {
     names
 }
 
+/// The font a theme asks for and where it can be downloaded, without applying the theme.
+pub fn theme_font(themes_dir: &Path, name: &str) -> Option<(String, Option<crate::fonts::FontSource>)> {
+    if name == "Dark" || name == "Light" {
+        return None;
+    }
+    let text = std::fs::read_to_string(themes_dir.join(format!("{name}.toml"))).ok()?;
+    let theme = parse_theme(&text).ok()?;
+    Some((theme.font.filter(|font| !font.trim().is_empty())?, theme.font_source))
+}
+
+const WIDGET_OVERRIDES: &str = "theme_widget_overrides";
+
+/// The equipped theme's own [widgets] colours, so restyled scopes can leave those alone.
+pub fn widget_overrides(ctx: &egui::Context) -> ThemeWidgets {
+    ctx.data(|d| d.get_temp(egui::Id::new(WIDGET_OVERRIDES))).unwrap_or_default()
+}
+
 /// apply a theme by name. Errs (for the caller to log) if the file is
 /// missing/invalid, caller falls back to Dark.
 pub fn apply_theme(
@@ -350,6 +369,21 @@ pub fn apply_theme(
         Some(parse_theme(&text)?)
     };
     prepare_presentation(ctx, loaded.as_ref(), themes_dir)?;
+    let widgets = loaded.as_ref().map(|theme| theme.widgets.clone()).unwrap_or_default();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(WIDGET_OVERRIDES), widgets));
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        ctx.style_mut_of(theme, |style| {
+            // thin floating bars that widen a little on hover
+            let scroll = &mut style.spacing.scroll;
+            scroll.floating = true;
+            scroll.foreground_color = true;
+            scroll.bar_width = 4.0;
+            scroll.floating_width = 2.0;
+            scroll.bar_inner_margin = 0.0;
+            scroll.bar_outer_margin = 0.0;
+            scroll.handle_min_length = 28.0;
+        });
+    }
     match name {
         "Dark" => {
             ctx.set_theme(egui::Theme::Dark);

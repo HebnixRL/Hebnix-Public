@@ -13,17 +13,9 @@ pub fn send_control<T>(tx: &Sender<T>, ctx: &egui::Context, message: T) -> bool 
     true
 }
 
-/// Ignore toggles during an unfinished transition, without queuing a replay.
-/// Busy is a successful no-op; false means the consumer has disconnected.
+/// Deliver toggles directly, as in the original hotkey path.
 pub fn send_toggle_control<T>(tx: &Sender<T>, ctx: &egui::Context, message: T) -> bool {
-    if !crate::visibility::queue_toggle() {
-        return true;
-    }
-    if !send_control(tx, ctx, message) {
-        crate::visibility::cancel_queued_toggle();
-        return false;
-    }
-    true
+    send_control(tx, ctx, message)
 }
 
 #[cfg(test)]
@@ -50,6 +42,11 @@ fn message_batch<T>(
     let start = Instant::now();
     let mut remaining = 128;
     std::iter::from_fn(move || {
+        // Visibility and tray commands have their own bounded producer. They
+        // must not be deferred by the background queue's two-millisecond budget.
+        if let Some(message) = priority.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            return Some(message);
+        }
         // Check before receiving: stopping a frame must not discard the next event.
         if remaining == 0 || start.elapsed() >= Duration::from_millis(2) {
             if !rx.is_empty() || priority.as_ref().is_some_and(|rx| !rx.is_empty()) {
@@ -58,10 +55,7 @@ fn message_batch<T>(
             return None;
         }
         remaining -= 1;
-        priority
-            .as_ref()
-            .and_then(|rx| rx.try_recv().ok())
-            .or_else(|| rx.try_recv().ok())
+        rx.try_recv().ok()
     })
 }
 
@@ -70,23 +64,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toggle_bursts_are_not_queued_and_quit_bypasses_the_gate() {
+    fn visibility_bypasses_an_exhausted_background_budget() {
         let ctx = egui::Context::default();
         let (tx, rx) = crossbeam_channel::unbounded();
-        for _ in 0..1000 {
-            assert!(send_toggle_control(&tx, &ctx, "toggle"));
-        }
-        assert!(send_control(&tx, &ctx, "quit"));
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["toggle", "quit"]);
-        crate::visibility::cancel_queued_toggle();
+        let (control_tx, control_rx) = crossbeam_channel::unbounded();
+        tx.send("background").unwrap();
+        let mut batch = priority_messages(&control_rx, &rx, &ctx);
+        assert_eq!(batch.next(), Some("background"));
+        std::thread::sleep(Duration::from_millis(5));
+        control_tx.send("show/hide").unwrap();
+        assert_eq!(batch.next(), Some("show/hide"));
+    }
 
+    #[test]
+    fn toggles_are_delivered_without_a_visibility_gate() {
+        let ctx=egui::Context::default();
+        let (tx,rx)=crossbeam_channel::unbounded();
+        assert!(send_toggle_control(&tx,&ctx,"toggle"));
+        assert!(send_toggle_control(&tx,&ctx,"toggle"));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(),["toggle","toggle"]);
         drop(rx);
-        assert!(!send_toggle_control(&tx, &ctx, "disconnected"));
-        assert!(
-            crate::visibility::queue_toggle(),
-            "failed sends must release their reservation"
-        );
-        crate::visibility::cancel_queued_toggle();
+        assert!(!send_toggle_control(&tx,&ctx,"disconnected"));
     }
 
     #[test]

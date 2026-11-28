@@ -11,6 +11,26 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum WebAction {
+    Detect,
+    Capture,
+    Clear,
+    CancelScan,
+    RetryScan,
+    Toggle,
+    Scrub { frame: i64 },
+    AddKey,
+    PickKey { frame: i64 },
+    DeleteKey,
+    AddCommand { index: usize },
+    RemoveCommand { index: usize },
+    CommandValue { index: usize, value: serde_json::Value },
+    View { zoom: f64, start: f64 },
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 enum Command {
     Pov { focus: String, perspective: String },
@@ -103,6 +123,120 @@ pub struct ReplayTimeline {
     last_attach_check: Option<Instant>,
 }
 impl ReplayTimeline {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, folder: Result<PathBuf, String>, ws: &WsStatsClient, ctx: &egui::Context) -> serde_json::Value {
+        let mut error = None;
+        match folder {
+            Ok(path) if self.folder.as_ref() != Some(&path) => { self.folder = Some(path); self.refresh_files(); }
+            Err(message) => error = Some(message),
+            _ => {}
+        }
+        if self.metadata.is_none() && ws.connected() && self.last_attach_check.is_none_or(|at| at.elapsed() > Duration::from_secs(2)) {
+            self.last_attach_check = Some(Instant::now());
+            self.attach_current(ws, ctx);
+        }
+        let total = self.duration().max(1.0 / self.fps());
+        let span = total / self.zoom;
+        self.view_start = self.view_start.clamp(0.0, (total - span).max(0.0));
+        let selected = self.selected_key.and_then(|frame| self.keys.iter().find(|key| key.frame == frame)).map(|key| {
+            let commands: Vec<_> = key.commands.iter().map(|command| json!({"label": command.label(), "command": command})).collect();
+            json!({"frame": key.frame, "commands": commands})
+        });
+        let keys: Vec<_> = self.keys.iter().map(|key| json!({
+            "frame": key.frame, "at": self.position(key.frame), "count": key.commands.len(), "hold": Self::hold_seconds(key),
+        })).collect();
+        let markers: Vec<_> = self.markers.iter().map(|marker| json!({
+            "frame": marker.frame, "at": self.position(marker.frame), "event": marker.event, "player": marker.player, "team": marker.team,
+        })).collect();
+        let timeline = self.metadata.as_ref().map(|meta| json!({
+            "title": meta.title, "fps": self.fps(), "frame": self.selected, "max": self.max_frame(),
+            "clock": format!("{} / {}", clock(self.position(self.selected)), clock(total)),
+            "playhead": self.position(self.selected) + self.hold.map_or(0.0, |(at, seconds)| at.elapsed().as_secs_f64().min(seconds)),
+            "total": total, "zoom": self.zoom, "start": self.view_start,
+            "keys": keys, "markers": markers, "selected": selected, "players": self.players,
+            "commands": Command::defaults().map(|command| command.label()),
+        }));
+        json!({
+            "page": "replay-library", "connected": ws.connected(), "ready": self.ready(ws),
+            "scan": self.scan.as_ref().map(|scan| scan.frame as f64 / self.max_frame() as f64),
+            "scanFailed": self.scan_failed, "status": self.status, "error": error,
+            "keybind": self.keybind.to_uppercase(), "capturing": self.capture_rx.is_some(),
+            "full": self.full_replay, "playing": self.playing, "timeline": timeline,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, action: WebAction, ws: &WsStatsClient, ctx: &egui::Context) {
+        let ready = self.ready(ws);
+        let editing = ready && !self.playing;
+        let selected = self.selected_key.and_then(|frame| self.keys.iter().position(|key| key.frame == frame));
+        match action {
+            WebAction::Detect => { self.last_attach_check = None; self.refresh_files(); }
+            WebAction::Capture if self.capture_rx.is_none() => self.capture_keybind(ctx),
+            WebAction::Clear => {
+                self.capture_rx = None;
+                self.capture_guard = None;
+                self.keybind.clear();
+                if let Some(hotkey) = &mut self.hotkey { hotkey.clear(); }
+                self.hotkey_rx.try_iter().for_each(drop);
+                self.save_keybind();
+            }
+            WebAction::CancelScan if self.scan.is_some() => self.finish_scan(ws, false, "Event scan cancelled; no cache saved."),
+            WebAction::RetryScan if self.scan_failed && ready => self.start_analysis(ws, ctx),
+            WebAction::Toggle if ready => self.toggle(ws),
+            WebAction::Scrub { frame } if ready => self.scrub(frame.clamp(1, self.max_frame()), ws),
+            WebAction::AddKey if editing => {
+                if !self.keys.iter().any(|key| key.frame == self.selected) {
+                    self.keys.push(Keyframe { frame: self.selected, commands: Vec::new() });
+                    self.keys.sort_by_key(|key| key.frame);
+                }
+                self.selected_key = Some(self.selected);
+                self.save();
+            }
+            WebAction::PickKey { frame } if self.keys.iter().any(|key| key.frame == frame) => self.selected_key = Some(frame),
+            WebAction::DeleteKey if editing => {
+                if let Some(index) = selected {
+                    self.keys.remove(index);
+                    self.selected_key = None;
+                    self.save();
+                }
+            }
+            WebAction::AddCommand { index } if editing => {
+                if let (Some(key), Some(command)) = (selected, Command::defaults().into_iter().nth(index)) {
+                    self.keys[key].commands.push(command);
+                    self.save();
+                }
+            }
+            WebAction::RemoveCommand { index } if editing => {
+                if let Some(key) = selected && index < self.keys[key].commands.len() {
+                    self.keys[key].commands.remove(index);
+                    self.save();
+                }
+            }
+            WebAction::CommandValue { index, value } if editing => {
+                let max_frame = self.max_frame();
+                let Some(command) = selected.and_then(|key| self.keys[key].commands.get_mut(index)) else { return };
+                match command {
+                    Command::Pov { focus, perspective } => {
+                        let Some(value) = value.as_str().filter(|value| self.players.iter().any(|(_, shortcut)| shortcut.to_string() == *value)) else { return };
+                        *focus = value.to_owned();
+                        *perspective = "PlayerView".into();
+                    }
+                    Command::Speed(speed) => { if let Some(value) = value.as_f64() { *speed = value.clamp(0.0, 16.0); } }
+                    Command::Hud(visible) => { if let Some(value) = value.as_bool() { *visible = value; } }
+                    Command::Pause(seconds) => { if let Some(value) = value.as_f64() { *seconds = value.clamp(0.1, 3600.0); } }
+                    Command::Seek(target) => { if let Some(value) = value.as_i64() { *target = value.clamp(1, max_frame); } }
+                }
+                self.save();
+            }
+            WebAction::View { zoom, start } if zoom.is_finite() && start.is_finite() => {
+                self.zoom = zoom.clamp(1.0, (self.max_frame() as f64 / 4.0).max(1.0));
+                let total = self.duration().max(1.0 / self.fps());
+                self.view_start = start.clamp(0.0, total - total / self.zoom);
+            }
+            _ => {}
+        }
+    }
     pub fn new(base: &Path, ctx: &egui::Context) -> Self {
         let project_dir = base.join("replay-timelines");
         let mut keybind = std::fs::read_to_string(project_dir.join("play-pause-key.txt"))

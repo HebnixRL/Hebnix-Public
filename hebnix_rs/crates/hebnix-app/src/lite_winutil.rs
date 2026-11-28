@@ -242,40 +242,7 @@ pub fn is_startup_enabled() -> bool {
 }
 
 pub fn kill_rocket_league() -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "RocketLeague.exe"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .and_then(|output| {
-            if output.status.success() || !hebnix_sdk::process::is_rocket_league_running() {
-                return Ok(());
-            }
-            if kill_rocket_league_elevated()? {
-                return Ok(());
-            }
-            Err(std::io::Error::other(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ))
-        })
-}
-
-fn kill_rocket_league_elevated() -> std::io::Result<bool> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            "$process = Start-Process -FilePath 'taskkill.exe' -ArgumentList '/F','/IM','RocketLeague.exe' -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $process.ExitCode",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    Ok(output.status.success() || !hebnix_sdk::process::is_rocket_league_running())
+    hebnix_sdk::process::window::close_rocket_league()
 }
 
 pub fn clear_rocket_league_web_cache() -> std::io::Result<()> {

@@ -13,8 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod browser;
+mod engine_ownership;
 mod item_name;
 mod thumbnail_patcher;
+#[cfg(windows)]
+mod web;
+#[cfg(windows)]
+pub(crate) use web::{WebSwap, web_category};
 #[cfg(test)]
 mod browser_tests;
 
@@ -97,7 +102,7 @@ impl SwapCategory {
     /// Catalogue `paintable` describes official inventory variants, not whether
     /// a visual asset can accept a local material colour override.
     pub fn supports_recolour(self) -> bool {
-        !matches!(self, Self::Engines | Self::Anthems)
+        !matches!(self, Self::Engines | Self::Anthems | Self::Finishes)
     }
 }
 
@@ -176,6 +181,27 @@ fn item_identity(item: &SwapItem) -> String {
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| item.name.to_ascii_lowercase()))
     )
+}
+
+fn decal_body_is_owned(label: &str, product: Option<i64>, owned: &HashSet<i64>) -> bool {
+    // Stock Octane is available without a separate OnlineProduct instance.
+    // Keep it in the body selector when the owned-items filter is enabled.
+    label.trim().eq_ignore_ascii_case("Octane")
+        || product.is_some_and(|id| owned.contains(&id))
+}
+
+#[cfg(test)]
+mod decal_body_ownership_tests {
+    use super::*;
+    #[test]
+    fn stock_octane_does_not_require_an_online_inventory_instance() {
+        let empty = HashSet::new();
+        assert!(decal_body_is_owned("Octane", Some(23), &empty));
+        assert!(decal_body_is_owned("OCTANE", None, &empty));
+        assert!(!decal_body_is_owned("Octane ZSR", Some(1568), &empty));
+        assert!(!decal_body_is_owned("Fennec", Some(4284), &empty));
+        assert!(decal_body_is_owned("Fennec", Some(4284), &HashSet::from([4284])));
+    }
 }
 
 fn can_recolour_owned(category: SwapCategory, item: &SwapItem, owned_ids: &HashSet<i64>) -> bool {
@@ -466,6 +492,7 @@ pub struct SwapperState {
     walkthrough_applied_at: Option<Instant>,
     owned_only: bool,
     thumbnails: HashMap<String, Option<Arc<[u8]>>>,
+    engine_ownership: engine_ownership::State,
     failed_thumbnails: HashMap<String, String>,
     thumbnail_jobs: Sender<(String, PathBuf, String, egui::Context)>,
     thumbnail_results: Receiver<(String, Result<Arc<[u8]>, String>)>,
@@ -584,6 +611,7 @@ impl SwapperState {
             walkthrough_applied_at: None,
             owned_only: false,
             thumbnails: HashMap::new(),
+            engine_ownership: engine_ownership::State::default(),
             failed_thumbnails: HashMap::new(),
             thumbnail_jobs,
             thumbnail_results,
@@ -659,6 +687,17 @@ impl SwapperState {
         cooked_pc: &Path,
         item: &SwapItem,
     ) {
+        self.queue_thumbnail_for_context(ui.ctx(), category, filename, cooked_pc, item);
+    }
+
+    fn queue_thumbnail_for_context(
+        &mut self,
+        ctx: &egui::Context,
+        category: SwapCategory,
+        filename: &str,
+        cooked_pc: &Path,
+        item: &SwapItem,
+    ) {
         let key = thumbnail_key(category, filename, item);
         if !self.thumbnails.contains_key(&key) {
             self.thumbnails.insert(key.clone(), None);
@@ -673,7 +712,7 @@ impl SwapperState {
                     }
                 },
                 thumbnail_kind(category, item),
-                ui.ctx().clone(),
+                ctx.clone(),
             ));
         }
     }
@@ -681,6 +720,20 @@ impl SwapperState {
     fn resolved_items(
         &mut self,
         ui: &mut egui::Ui,
+        category: SwapCategory,
+        cooked_pc: &Path,
+        items: &[SwapItem],
+    ) -> Option<Arc<Vec<ResolvedItem>>> {
+        let resolved = self.resolve_items(ui.ctx(), category, cooked_pc, items);
+        if resolved.is_none() {
+            ui.weak(t("resolved-items-preparing-items"));
+        }
+        resolved
+    }
+
+    fn resolve_items(
+        &mut self,
+        ctx: &egui::Context,
         category: SwapCategory,
         cooked_pc: &Path,
         items: &[SwapItem],
@@ -716,17 +769,12 @@ impl SwapperState {
                 cooked_pc.to_path_buf(),
                 items.to_vec(),
                 generation,
-                ui.ctx().clone(),
+                ctx.clone(),
             ));
         }
-        let resolved = self
-            .resolutions
+        self.resolutions
             .get(&category)
-            .and_then(|entry| entry.items.clone());
-        if resolved.is_none() {
-            ui.weak(t("resolved-items-preparing-items"));
-        }
-        resolved
+            .and_then(|entry| entry.items.clone())
     }
 
     pub fn owned_only(&self) -> bool {
@@ -738,11 +786,19 @@ impl SwapperState {
     }
 
     pub fn set_catalogs(&mut self, catalogs: &HashMap<String, Value>) -> Result<(), String> {
+        self.set_catalog_categories(catalogs, &SwapCategory::ALL)
+    }
+
+    pub(crate) fn set_catalog_categories(
+        &mut self,
+        catalogs: &HashMap<String, Value>,
+        categories: &[SwapCategory],
+    ) -> Result<(), String> {
         let bodies = catalogs
             .get(SwapCategory::Bodies.slug())
             .ok_or_else(|| "The bodies catalog was not downloaded".to_string())?;
         let mut parsed = HashMap::new();
-        for category in SwapCategory::ALL {
+        for &category in categories {
             let root = catalogs
                 .get(category.slug())
                 .ok_or_else(|| format!("The {} catalog was not downloaded", category.slug()))?;
@@ -1595,7 +1651,7 @@ impl SwapperState {
         let mut categories: Vec<_> = SwapCategory::ALL.into_iter().filter(|c| c.supports_recolour()).collect();
         categories.sort_by_key(|category| category.label().to_lowercase());
         for category in categories {
-            ui.selectable_value(&mut self.recolour_category, category, category.label());
+            crate::i18n::layout::side_select(ui, &mut self.recolour_category, category, category.label());
         }
         if before != self.recolour_category {
             self.recolour_selected.clear();
@@ -2686,7 +2742,7 @@ impl SwapperState {
             let car_allowed = |car: &(String, String, Option<i64>)| {
                 !self.owned_only
                     || is_universal_car(&car.1)
-                    || car.2.is_some_and(|id| owned_ids.contains(&id))
+                    || decal_body_is_owned(&car.1, car.2, owned_ids)
             };
             if self.selected_car.as_ref().is_some_and(|selected| {
                 !cars
@@ -3175,6 +3231,22 @@ mod recolour_tests {
         SwapperState::parse_catalog(category, &json!({category.slug(): [
             {"name":"Test item", "upk_path":file, "id":123, "paintable":false, "audio_bnk":"unchanged.bnk"}
         ]}), &Value::Null).unwrap().remove(0)
+    }
+
+    #[test]
+    fn preset_swaps_copy_the_wanted_item_over_the_owned_replacement() {
+        let mut wanted=catalog_item(SwapCategory::Bodies,"wanted_SF.upk");
+        wanted.name="Wanted car".into(); wanted.product_id=Some(456);
+        let mut owned=catalog_item(SwapCategory::Bodies,"owned_SF.upk");
+        owned.name="Owned car".into(); owned.product_id=Some(123);
+        let mut state=SwapperState::new(Path::new("nonexistent-preset-direction-test"));
+        state.catalogs.insert(SwapCategory::Bodies,Arc::new(vec![wanted,owned]));
+        let (swaps,skipped)=state.bakkes_preset_swaps(&[SwapPick {category:SwapCategory::Bodies,stock_product:123,product:456,paint:0}]);
+        assert!(skipped.is_empty()); assert_eq!(swaps.len(),1);
+        assert_eq!(swaps[0]["source_product"],456);
+        assert_eq!(swaps[0]["target_product"],123);
+        assert_eq!(swaps[0]["source_name"],"Wanted car");
+        assert_eq!(swaps[0]["target_name"],"Owned car");
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub struct ConsoleLine {
 }
 
 impl ConsoleLine {
-    fn display(&self, timestamps: bool) -> String {
+    pub(crate) fn display(&self, timestamps: bool) -> String {
         if timestamps {
             format!("[{}] {}", self.time, self.text)
         } else {
@@ -164,6 +164,33 @@ impl ConsoleState {
         self.suggestions.truncate(5);
     }
 
+    #[cfg(windows)]
+    pub(crate) fn edit_web_input(&mut self, value: String, plugin_names: Option<&[String]>) {
+        self.input = value;
+        self.last_input = self.input.clone();
+        if let Some(plugin_names) = plugin_names {
+            self.update_suggestions(plugin_names);
+        } else {
+            self.suggestions.clear();
+            self.suggestion_index = None;
+        }
+    }
+
+    pub(crate) fn submit(&mut self) -> Option<String> {
+        let raw = self.input.trim().to_owned();
+        if raw.is_empty() {
+            return None;
+        }
+        self.write(format!("> {raw}"));
+        self.history.push(raw.clone());
+        self.history_index = self.history.len();
+        self.input.clear();
+        self.last_input.clear();
+        self.suggestions.clear();
+        self.suggestion_index = None;
+        Some(raw)
+    }
+
     /// render the console. returns a command line when the user submits one.
     /// `timestamps` is the System setting that prefixes each line with its time.
     pub fn render(
@@ -189,8 +216,8 @@ impl ConsoleState {
         });
 
         // Reserve space for the input row at the bottom.
-        let input_height = 32.0;
-        let log_height = (ui.available_height() - input_height - 8.0).max(60.0);
+        let input_height = 40.0;
+        let log_height = (ui.available_height() - input_height - 14.0).max(60.0);
 
         egui::Frame::group(ui.style())
             .fill(ui.visuals().extreme_bg_color)
@@ -297,6 +324,8 @@ impl ConsoleState {
                 .hint_text(t("render-enter-system-command"))
                 .font(egui::TextStyle::Monospace)
                 .lock_focus(!self.suggestions.is_empty()) // else tab should walk focus off the input
+                // egui 0.35 ignores min_size.y on a TextEdit, so the margin sets the height
+                .margin(egui::Margin::symmetric(10, 11))
                 .desired_width(f32::INFINITY),
         );
 
@@ -329,17 +358,7 @@ impl ConsoleState {
                 // Enter with an active suggestion applies it.
                 apply_suggestion = self.suggestions.get(i).cloned();
             } else {
-                let raw = self.input.trim().to_string();
-                if !raw.is_empty() {
-                    self.write(format!("> {raw}"));
-                    self.history.push(raw.clone());
-                    self.history_index = self.history.len();
-                    self.input.clear();
-                    self.last_input.clear();
-                    self.suggestions.clear();
-                    self.suggestion_index = None;
-                    submitted = Some(raw);
-                }
+                submitted = self.submit();
             }
             response.request_focus();
         }

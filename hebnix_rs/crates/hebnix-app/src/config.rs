@@ -73,12 +73,23 @@ pub enum BlackInfinium {
 #[serde(default)]
 pub struct SettingsCfg {
     pub black_infinium: BlackInfinium,
+    #[serde(default)]
+    pub owned_items_only: bool,
     pub hotkey: String,
     pub theme: String,
+    /// Theme font downloads the user said no to, so switching themes doesn't ask again.
+    #[serde(default)]
+    pub declined_font_downloads: Vec<String>,
+    /// Use the original themed egui navigation instead of either modern shell.
+    #[serde(default)]
+    pub legacy_ui: bool,
+    /// Use the WebView2/Wry navigation and header instead of the egui shell.
+    pub wry_ui: bool,
     /// UI language code ("en", "de", ...) or "auto" to follow the system
     pub language: String,
     /// Main tab selected when Hebnix starts.
     pub default_tab: String,
+    pub navigation_memory: BTreeMap<String, usize>,
     /// One-time migration to the Home dashboard; later startup choices persist.
     #[serde(default)]
     pub home_default_migrated: bool,
@@ -145,10 +156,15 @@ pub struct SettingsCfg {
 impl Default for SettingsCfg {
     fn default() -> Self {
         Self {
+            owned_items_only: false,
             hotkey: "f2".to_string(),
             theme: "Dark".to_string(),
+            declined_font_downloads: Vec::new(),
+            legacy_ui: false,
+            wry_ui: true,
             language: crate::i18n::AUTO.to_string(),
             default_tab: "Home".to_string(),
+            navigation_memory: BTreeMap::new(),
             home_default_migrated: true,
             window_opacity: 0.96,
             start_in_tray: false,
@@ -393,6 +409,7 @@ pub struct ActionButtonEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActionButtonCfg {
+    pub show_in_header: bool,
     pub rocket_league_closed: Vec<ActionButtonEntry>,
     pub rocket_league_open: Vec<ActionButtonEntry>,
 }
@@ -400,6 +417,7 @@ pub struct ActionButtonCfg {
 impl Default for ActionButtonCfg {
     fn default() -> Self {
         Self {
+            show_in_header: false,
             rocket_league_closed: ActionButtonAction::CLOSED
                 .into_iter()
                 .map(|action| ActionButtonEntry {
@@ -560,6 +578,43 @@ impl Config {
         let cfg = Config::default();
         let _ = cfg.save(base_dir);
         cfg
+    }
+
+    /// Navigation must never rewrite patcher manifests on the UI thread.
+    pub(crate) fn save_navigation_memory(&self, base_dir:&Path) {
+        use std::sync::{OnceLock,mpsc};
+        type Job=(PathBuf,BTreeMap<String,usize>);
+        static WRITER:OnceLock<mpsc::Sender<Job>>=OnceLock::new();
+        let writer=WRITER.get_or_init(|| {
+            let(tx,rx)=mpsc::channel::<Job>();
+            std::thread::Builder::new().name("navigation-save".into()).spawn(move||{
+                while let Ok(mut job)=rx.recv() {
+                    while let Ok(next)=rx.try_recv(){job=next;}
+                    let result=(||->std::io::Result<()> {
+                        let bytes=serde_json::to_vec(&job.1).map_err(std::io::Error::other)?;
+                        let path=job.0.join("navigation-memory.json");
+                        let temporary=job.0.join("navigation-memory.tmp");
+                        std::fs::write(&temporary,bytes)?;
+                        std::fs::rename(temporary,path)
+                    })();
+                    if let Err(error)=result {tracing::warn!(%error,"could not save navigation memory");}
+                }
+            }).expect("could not start navigation settings writer");
+            tx
+        });
+        let _=writer.send((base_dir.to_owned(),self.settings.navigation_memory.clone()));
+    }
+
+    pub(crate) fn restore_navigation_memory(&mut self,base_dir:&Path) {
+        let path=base_dir.join("navigation-memory.json");
+        // A normal settings save also includes navigation; prefer it when newer.
+        let newer=std::fs::metadata(&path).and_then(|m|m.modified()).ok()
+            .zip(std::fs::metadata(base_dir.join("config.toml")).and_then(|m|m.modified()).ok())
+            .is_none_or(|(navigation,config)|navigation>config);
+        if newer && let Ok(bytes)=std::fs::read(path)
+            && let Ok(memory)=serde_json::from_slice::<BTreeMap<String,usize>>(&bytes) {
+            self.settings.navigation_memory=memory;
+        }
     }
 
     pub fn save(&self, base_dir: &Path) -> std::io::Result<()> {

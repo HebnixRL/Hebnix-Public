@@ -46,3 +46,7 @@ hebnix_rs/crates/hebnix-app/src/_color_scanner.rs
 
 /tools/i18n-validator/target/
 /tools
+/build
+
+# Local Decal Studio experiment payloads are not part of Hebnix.
+/hebnix_rs/crates/hebnix-app/assets/decal-studio/

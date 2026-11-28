@@ -571,6 +571,63 @@ pub(super) fn rebase_hud_movie(
     result.map(|()| true)
 }
 
+/// Titles recorded on the shared HUD: its rules, and the HUD payload it restores to.
+pub(super) struct HudTitles {
+    pub rules: Vec<TitleOverride>,
+    pub original: Vec<u8>,
+}
+
+/// The Titles layer on the live HUD export, when it is intact. Another HUD edit
+/// strips it first, edits the payload underneath, then puts it back with
+/// `retitle_hud` and `sync_hud_titles`. Its restore record stays valid.
+pub(super) fn hud_titles(cooked: &Path, package: &UpkPackage, index: usize) -> Result<Option<HudTitles>, String> {
+    let root = folder(&crate::config::base_dir(), cooked, "title_upk");
+    let manifest = load_manifest(&root)?;
+    let Some(entry) = manifest.entries.iter().find(|entry| {
+        entry.file.eq_ignore_ascii_case(BOOST_HUD) && entry.export == index
+    }) else {
+        return Ok(None);
+    };
+    if hash(data(package, index)?) != entry.patched {
+        return Ok(None);
+    }
+    let original = match read_snapshot(&root, &entry.original)? {
+        Some(bytes) => bytes,
+        None => data(&UpkPackage::load(&root.join(format!("{BOOST_HUD}.original")))?, index)?.to_vec(),
+    };
+    if hash(&original) != entry.original {
+        return Err("The HUD Titles baseline failed verification.".into());
+    }
+    let rules = manifest
+        .rules
+        .ok_or("Apply your current Titles settings again so Hebnix can keep them while changing the HUD.")?;
+    Ok(Some(HudTitles { rules, original }))
+}
+
+/// `package`'s HUD export with Titles applied again. Nothing is written.
+pub(super) fn retitle_hud(package: &UpkPackage, index: usize, rules: &[TitleOverride]) -> Result<Vec<u8>, String> {
+    rewrite_movie_export(package, index, &|raw| movie::patch(raw, rules))?
+        .map(|(payload, _)| payload)
+        .ok_or_else(|| "Could not reapply Titles to the shared HUD movie.".into())
+}
+
+/// Point Titles' restore record at a HUD that was edited underneath it.
+pub(super) fn sync_hud_titles(cooked: &Path, index: usize, original: &[u8], patched: &[u8]) -> Result<(), String> {
+    let root = folder(&crate::config::base_dir(), cooked, "title_upk");
+    let mut manifest = load_manifest(&root)?;
+    let entry = manifest
+        .entries
+        .iter_mut()
+        .find(|entry| entry.file.eq_ignore_ascii_case(BOOST_HUD) && entry.export == index)
+        .ok_or("The HUD Titles restore record is missing.")?;
+    entry.original = hash(original);
+    entry.patched = hash(patched);
+    save_snapshot(&root, &entry.original, original)?;
+    save_snapshot(&root, &entry.patched, patched)?;
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+    super::upk_history::replace(&root.join("manifest.json"), &bytes)
+}
+
 fn capture_legacy_patch(package: &UpkPackage, root: &Path, entry: &Entry) -> Result<(), String> {
     if snapshot(root, &entry.patched)?.is_file() {
         return Ok(());
@@ -687,10 +744,22 @@ fn baseline(
 
 pub fn apply(base: &Path, cooked: &Path, rules: &[TitleOverride]) -> Result<String, String> {
     validate_rules(rules)?;
-    run(base, cooked, false, Some(&|raw| movie::patch(raw, rules)), Some(rules))
+    crate::toast::console(format!("[Titles] Applying {} title override(s)…", rules.len()));
+    let result = run(base, cooked, false, Some(&|raw| movie::patch(raw, rules)), Some(rules));
+    console_result("Applied", &result);
+    result
 }
 pub fn restore(base: &Path, cooked: &Path) -> Result<String, String> {
-    run(base, cooked, false, None, None)
+    crate::toast::console("[Titles] Restoring the original titles…");
+    let result = run(base, cooked, false, None, None);
+    console_result("Restored", &result);
+    result
+}
+fn console_result(done: &str, result: &Result<String, String>) {
+    match result {
+        Ok(_) => crate::toast::console(format!("[Titles] {done}")),
+        Err(error) => crate::toast::console(format!("[Titles] Failed: {error}. The original movie is kept; close Rocket League and try again")),
+    }
 }
 pub(crate) fn restore_for_uninstall(base: &Path, cooked: &Path) -> Result<(), String> {
     if !load_manifest(&folder(base, cooked, "title_upk"))?

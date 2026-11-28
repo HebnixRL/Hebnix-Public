@@ -588,6 +588,60 @@ pub struct ImportWizard {
 }
 
 impl ImportWizard {
+    #[cfg(windows)]
+    pub(super) fn web_snapshot(&self) -> serde_json::Value {
+        use serde_json::json;
+        let labels = json!({
+            "title": t("render-import-a-map"), "intro": t("render-add-a-map-that-isn-t"),
+            "file": t("render-step-1-choose-the-map-file"), "types": t("render-a-upk-or-udk-file-or"),
+            "choose": t("render-choose-map-file"), "details": t("render-step-2-details"),
+            "vdf": t("render-import-details-from-a-vdf-file"), "name": t("render-name"),
+            "author": t("render-author"), "description": t("render-description"),
+            "image": t("render-choose-image"), "clear": t("spoofer-clear"),
+            "optional": t("render-optional-banner-shown-on-the-map"), "back": t("multiplayer-back"),
+            "import": t("render-import-map-2"),
+        });
+        json!({
+            "details": self.step == Step::Details, "file": self.map_file.as_ref().map(|path| path.display().to_string()),
+            "banner": self.banner.as_ref().map(|path| path.display().to_string()),
+            "fields": [self.meta.name.as_str(), self.meta.author.as_str(), self.meta.description.as_str()],
+            "notice": self.notice, "error": self.error, "labels": labels,
+            "done": self.done.as_ref().map(|name| t_args("render-imported-name", &[("name", name.as_str().into())])),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_action(&mut self, key: &str, fields: Option<[String; 3]>, cache: &Path, runtime: &Path) -> Option<LocalMap> {
+        if self.step == Step::Details && let Some([name, author, description]) = fields {
+            self.meta.name = name;
+            self.meta.author = author;
+            self.meta.description = description;
+        }
+        match key {
+            "file" if self.step == Step::File => self.pick_map_file(),
+            "vdf" if self.step == Step::Details => self.import_vdf(),
+            "image" if self.step == Step::Details => {
+                let dialog = rfd::FileDialog::new().add_filter(t("render-image"), &["png", "jpg", "jpeg", "webp", "bmp"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() { self.banner = Some(path); }
+            }
+            "clear" => self.banner = None,
+            "back" => self.reset(),
+            "import" if self.step == Step::Details && !self.meta.name.trim().is_empty() => {
+                let path = self.map_file.as_deref()?;
+                match import_map(cache, runtime, path, &self.meta, self.banner.as_deref()) {
+                    Ok(map) => {
+                        if !self.published_file_id.is_empty() { let _ = write_item_vdf(cache, &map, &self.published_file_id); }
+                        self.reset();
+                        self.done = Some(map.name.clone());
+                        return Some(map);
+                    }
+                    Err(error) => self.error = error,
+                }
+            }
+            _ => {}
+        }
+        None
+    }
     fn reset(&mut self) {
         if let Some(dir) = self.zip_dir.take() {
             let _ = std::fs::remove_dir_all(dir);

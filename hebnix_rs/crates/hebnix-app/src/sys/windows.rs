@@ -90,12 +90,10 @@ pub fn focus_existing_instance() {
     unsafe {
         let name = wide("Hebnix");
         if let Ok(hwnd) = FindWindowW(None, PCWSTR(name.as_ptr())) {
-            if !hwnd.is_invalid() {
-                if !IsWindowVisible(hwnd).as_bool() {
-                    let _ = ShowWindow(hwnd, SW_SHOW);
-                }
-                let _ = SetForegroundWindow(hwnd);
+            if !IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_SHOW);
             }
+            let _ = SetForegroundWindow(hwnd);
         }
     }
 }
@@ -301,48 +299,66 @@ pub fn set_startup_enabled(enabled: bool) -> std::io::Result<()> {
 
 /// force-kill RocketLeague.exe (console quit command)
 pub fn kill_rocket_league() -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    std::process::Command::new("taskkill")
-        .args(["/F", "/IM", "RocketLeague.exe"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .and_then(|output| {
-            if output.status.success() || !hebnix_sdk::process::is_rocket_league_running() {
+    match hebnix_sdk::process::window::close_rocket_league() {
+        Err(error) if error.to_string().to_ascii_lowercase().contains("access is denied") => {
+            let Some(pid) = hebnix_sdk::process::find_process("rocketleague.exe") else {
                 return Ok(());
+            };
+            let answer = rfd::MessageDialog::new()
+                .set_title("Rocket League could not close")
+                .set_description("Windows denied permission to close Rocket League. Try closing it as administrator?")
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if answer != rfd::MessageDialogResult::Yes {
+                return Err(error);
             }
-
-            // Rocket League can be elevated independently of Hebnix.  A
-            // normal user process cannot terminate an elevated process, so
-            // retry via Windows' on-demand UAC prompt instead of requiring
-            // the whole app to be launched as administrator.
-            if !crate::spoofer::is_admin() && kill_rocket_league_elevated()? {
-                return Ok(());
-            }
-
-            Err(std::io::Error::other(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            ))
-        })
+            close_rocket_league_as_admin(pid)
+        }
+        result => result,
+    }
 }
 
-fn kill_rocket_league_elevated() -> std::io::Result<bool> {
-    #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+fn close_rocket_league_as_admin(pid: u32) -> std::io::Result<()> {
+    use std::{os::windows::ffi::OsStrExt, path::PathBuf};
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{INFINITE, WaitForSingleObject},
+            UI::{Shell::{SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW}, WindowsAndMessaging::SW_HIDE},
+        },
+    };
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            "$process = Start-Process -FilePath 'taskkill.exe' -ArgumentList '/F','/IM','RocketLeague.exe' -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $process.ExitCode",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    Ok(output.status.success() || !hebnix_sdk::process::is_rocket_league_running())
+    let system = std::env::var_os("WINDIR").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let file: Vec<u16> = system.join("System32\\taskkill.exe").as_os_str().encode_wide().chain(Some(0)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let parameters: Vec<u16> = format!("/F /PID {pid}\0").encode_utf16().collect();
+    unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(parameters.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info).map_err(|error| std::io::Error::from_raw_os_error(error.code().0))?;
+        if info.hProcess.is_invalid() {
+            return Err(std::io::Error::other("The administrator close request did not start."));
+        }
+        let waited = WaitForSingleObject(info.hProcess, INFINITE);
+        let _ = CloseHandle(info.hProcess);
+        if waited != WAIT_OBJECT_0 {
+            return Err(std::io::Error::other("Timed out waiting for the administrator close request."));
+        }
+    }
+    if hebnix_sdk::process::find_process("rocketleague.exe") == Some(pid) {
+        Err(std::io::Error::other("Rocket League is still running after the administrator close request."))
+    } else {
+        Ok(())
+    }
 }
 
 /// Remove Rocket League's embedded-browser cache, if it exists, including

@@ -8,8 +8,9 @@ use std::{
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum HomeTab {
+pub(super) enum HomeTab {
     #[default]
+    Dashboard,
     LiveMatch,
     Tracker,
 }
@@ -21,7 +22,7 @@ struct MatchEvent {
 
 #[derive(Default)]
 pub(super) struct HomeState {
-    tab: HomeTab,
+    pub(super) tab: HomeTab,
     snapshot: Option<UpdateStateData>,
     updated: Option<Instant>,
     match_guid: Option<String>,
@@ -357,24 +358,161 @@ fn live_match(ui: &mut egui::Ui, home: &HomeState, connected: bool, running: boo
 }
 
 impl HebnixApp {
-    pub(super) fn render_home(&mut self, ui: &mut egui::Ui) {
+    #[cfg(windows)]
+    pub(super) fn live_match_web_data(&self) -> serde_json::Value {
+        use serde_json::json;
+        let running = self.last_rl_open;
+        let connected = running && self.stats.connected();
+        let game = self.home.snapshot.as_ref().filter(|_| connected).map(|state| {
+            let mut teams: Vec<_> = state.game.teams.iter().collect();
+            teams.sort_by_key(|team| team.team_num);
+            let teams: Vec<_> = teams.into_iter().map(|team| {
+                let colour = team_colour(team);
+                let name = if team.name.is_empty() {
+                    t(if team.team_num == 0 { "home-blue-team" } else { "home-orange-team" })
+                } else {
+                    team.name.clone()
+                };
+                let mut players: Vec<_> = state.players.iter().filter(|player| player.team_num == team.team_num).collect();
+                players.sort_by_key(|player| std::cmp::Reverse(player.score));
+                json!({
+                    "name": name, "score": team.score,
+                    "colour": format!("#{:02x}{:02x}{:02x}", colour.r(), colour.g(), colour.b()),
+                    "players": players.iter().map(|p| {
+                        json!([p.name, p.score, p.goals, p.assists, p.saves, p.shots])
+                    }).collect::<Vec<_>>(),
+                })
+            }).collect();
+            json!({
+                "clock": match_clock(Some((state.game.time_seconds, state.game.overtime))),
+                "arena": crate::discord_presence::display_map_name(&state.game.arena),
+                "ended": (self.home.ended || state.game.has_winner).then(|| t("home-match-ended")),
+                "replay": state.game.replay.then(|| t("home-replay")),
+                "stale": self.home.updated.map(|time| time.elapsed().as_secs()).filter(|seconds| *seconds >= 5)
+                    .map(|seconds| format!("{}: {seconds}s", t("home-last-update"))),
+                "teams": teams,
+                "spectators": state.players.iter().filter(|player| {
+                    !state.game.teams.iter().any(|team| team.team_num == player.team_num)
+                }).map(|player| &player.name).collect::<Vec<_>>(),
+            })
+        });
+        let columns = [
+            "home-player",
+            "home-score",
+            "home-goals",
+            "home-assists",
+            "home-saves",
+            "home-shots",
+        ].map(|key| t(key));
+        json!({
+            "dashboard": self.home.tab == HomeTab::Dashboard,
+            "running": running,
+            "connected": connected,
+            "live_cosmetics": crate::patcher::live_cosmetics::status_snapshot(),
+            "running_label": t(if running { "home-running" } else { "home-stopped" }),
+            "connection_label": t(if connected { "home-connected" } else { "home-disconnected" }),
+            "waiting": t(if !running { "home-launch-hint" } else if !connected { "home-api-hint" } else { "home-match-hint" }),
+            "events_title": t("home-events"),
+            "empty_events": t("home-no-events"),
+            "spectator_label": t("home-spectator"),
+            "columns": columns,
+            "game": game,
+            "events": self.home.events.iter().filter(|_| connected)
+                .map(|event| json!({ "clock": match_clock(event.clock), "message": event.message }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// Dashboard in the web version's look: a status card with large values, then a card with the primary action.
+    fn modern_dashboard(&mut self, ui: &mut egui::Ui, connected: bool) {
+        let green = egui::Color32::from_rgb(110, 220, 140);
+        let visuals = ui.visuals().clone();
+        let border = visuals.text_color().gamma_multiply(0.25);
+        let card = egui::Frame::NONE
+            .fill(visuals.faint_bg_color.gamma_multiply(0.6))
+            .stroke(egui::Stroke::new(1.0, border))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(18, 14));
+        let live = crate::patcher::live_cosmetics::status_snapshot();
+        let live_colour = match live["colour"].as_str() {
+            Some("success") => green,
+            Some("danger") => egui::Color32::LIGHT_RED,
+            _ => egui::Color32::YELLOW,
+        };
+        let stat = |ui: &mut egui::Ui, label: &str, value: &str, colour: egui::Color32, tip: &str| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(label).size(12.5).color(visuals.weak_text_color()));
+                ui.add_space(1.0);
+                ui.label(egui::RichText::new(value).size(18.0).strong().color(colour)).on_hover_text(tip);
+            });
+        };
+        let weak = visuals.text_color();
+        card.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (running, running_colour) = (
+                    t(if self.last_rl_open { "home-running" } else { "home-stopped" }),
+                    if self.last_rl_open { green } else { weak },
+                );
+                stat(ui, "Rocket League", &running, running_colour, "");
+                ui.add_space(28.0);
+                ui.separator();
+                ui.add_space(28.0);
+                let (api, api_colour) = (
+                    t(if connected { "home-connected" } else { "home-disconnected" }),
+                    if connected { green } else { weak },
+                );
+                stat(ui, "Stats API", &api, api_colour, "");
+                ui.add_space(28.0);
+                ui.separator();
+                ui.add_space(28.0);
+                stat(ui, "Live Cosmetics", live["label"].as_str().unwrap_or("Installing"), live_colour, live["detail"].as_str().unwrap_or_default());
+            });
+        });
+        ui.add_space(12.0);
+        let running = self.last_rl_open;
+        let accent = visuals.hyperlink_color;
+        let bright = (u32::from(accent.r()) * 3 + u32::from(accent.g()) * 6 + u32::from(accent.b())) / 10 > 150;
+        let ink = if bright { egui::Color32::from_rgb(16, 18, 28) } else { egui::Color32::WHITE };
+        let mut start = false;
+        card.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let label = egui::RichText::new(if running { "Stop Rocket League  ■" } else { "Start Rocket League  ▶" }).size(15.0).color(ink);
+            let button = egui::Button::new(label).fill(accent).stroke(egui::Stroke::NONE)
+                .corner_radius(6).min_size(egui::vec2(0.0, 38.0));
+            start = ui.add(button).clicked();
+        });
+        if start {
+            self.execute_action_button_action(if running {
+                crate::config::ActionButtonAction::CloseRocketLeague
+            } else {
+                crate::config::ActionButtonAction::StartRocketLeague
+            }, ui.ctx());
+        }
+    }
+
+    pub(super) fn render_home(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
         let connected = self.last_rl_open && self.stats.connected();
         ui.ctx().request_repaint_after(Duration::from_millis(250));
-        if crate::theme::presentation(ui.ctx()).is_none_or(|theme| theme.layout.show_page_heading) {
+        if !modern_navigation && crate::theme::presentation(ui.ctx()).is_none_or(|theme| theme.layout.show_page_heading) {
             ui.heading(t("home-title"));
             ui.add_space(8.0);
         }
-        ui.horizontal_wrapped(|ui| {
-            for (tab, key) in [
-                (HomeTab::LiveMatch, "home-live-match"),
-                (HomeTab::Tracker, "home-tracker"),
-            ] {
-                ui.selectable_value(&mut self.home.tab, tab, t(key));
-            }
-        });
-        ui.separator();
+        if !modern_navigation {
+            ui.horizontal_wrapped(|ui| {
+                for (tab, key) in [
+                    (HomeTab::Dashboard, "home-dashboard"),
+                    (HomeTab::LiveMatch, "home-live-match"),
+                    (HomeTab::Tracker, "home-tracker"),
+                ] {
+                    ui.selectable_value(&mut self.home.tab, tab, t(key));
+                }
+            });
+            ui.separator();
+        }
         match self.home.tab {
-            HomeTab::LiveMatch => {
+            HomeTab::Dashboard if modern_navigation => self.modern_dashboard(ui, connected),
+            HomeTab::Dashboard => {
                 let green = if ui.visuals().dark_mode {
                     egui::Color32::LIGHT_GREEN
                 } else {
@@ -410,11 +548,31 @@ impl HebnixApp {
                                 "home-disconnected"
                             }),
                         );
+                        ui.separator();
+                        ui.strong("Live Cosmetics");
+                        let live = crate::patcher::live_cosmetics::status_snapshot();
+                        let colour = match live["colour"].as_str() {
+                            Some("success") => green,
+                            Some("danger") => egui::Color32::LIGHT_RED,
+                            _ => egui::Color32::YELLOW,
+                        };
+                        ui.colored_label(colour, live["label"].as_str().unwrap_or("Installing"))
+                            .on_hover_text(live["detail"].as_str().unwrap_or_default());
                     });
                 });
                 ui.add_space(8.0);
-                live_match(ui, &self.home, connected, self.last_rl_open);
+                let running = self.last_rl_open;
+                if ui.button(if running { "Stop Rocket League  ■" } else { "Start Rocket League  ▶" }).clicked() {
+                    self.execute_action_button_action(if running {
+                        crate::config::ActionButtonAction::CloseRocketLeague
+                    } else {
+                        crate::config::ActionButtonAction::StartRocketLeague
+                    }, ui.ctx());
+                }
             }
+            HomeTab::LiveMatch => live_match(ui, &self.home, connected, self.last_rl_open),
+            #[cfg(windows)]
+            HomeTab::Tracker if modern_navigation => self.home_tracker.show_modern(ui),
             HomeTab::Tracker => self.home_tracker.show(ui),
         }
     }

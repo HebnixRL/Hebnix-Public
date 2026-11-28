@@ -27,8 +27,6 @@ const ORANGE_COLOUR_BLIND: &str = "cdcc4c3f6666e63ecdcccc3d0000803f0000803f66662
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColourAction {
     Apply,
-    /// Car colours from a preset, applied with the current stadium and HUD settings.
-    ApplyCars(CarColours),
     Restore,
     ApplyBall {
         source: usize,
@@ -117,7 +115,7 @@ impl Default for ColourSettings {
             heatseeker_glow: false,
             heatseeker_max_speed: [255, 64, 0],
             car_colours: false,
-            custom_colours: vec![[255, 0, 0]],
+            custom_colours: Vec::new(),
             custom_colour: None,
             applied_car_colours: None,
             applied: false,
@@ -172,6 +170,100 @@ pub struct ColoursState {
 }
 
 impl ColoursState {
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, ball: bool, backups: &Path) -> serde_json::Value {
+        use serde_json::json;
+        self.poll();
+        self.load_active(backups);
+        let page = if ball {
+            let balls = super::ball_visual::BALLS;
+            let can_colour = super::ball_visual::colour_texture(self.ball_source, self.ball_donor).is_some();
+            let active = self.ball_swaps.iter().find(|swap| swap.source == self.ball_source);
+            let applied = active.map(|swap| t_args("ball-appearance-applied-super-super2", &[
+                ("original", balls[swap.source].0.into()), ("replacement", balls[swap.donor].0.into()),
+            ]));
+            let labels = json!({
+                "description": t("ball-appearance-change-the-ball-s-shape-locally"),
+                "hint": t("ball-appearance-experimental-visual-swap-collision-and-p"),
+                "source": t("ball-appearance-original-ball"), "donor": t("ball-appearance-replace-appearance-with"),
+                "colour": t("ball-appearance-include-replacement-colours-experimental"),
+                "colourHint": t(if can_colour { "ball-appearance-copies-the-colour-texture-special-shader" }
+                    else { "ball-appearance-colours-are-available-for-normal-selecte" }),
+                "restoreFirst": t("ball-appearance-restore-this-ball-before-choosing-anothe"),
+                "apply": t("ball-appearance-apply-ball-appearance"), "restore": t("ball-appearance-restore-ball-appearance"),
+            });
+            json!({
+                "page": "ball-appearance", "labels": labels, "balls": balls.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+                "source": self.ball_source, "donor": self.ball_donor, "colours": self.ball_colours,
+                "canColour": can_colour, "applied": applied, "ballError": self.ball_state_error,
+                "canRestore": active.is_some() && self.ball_state_error.is_none(),
+                "canApply": active.is_none() && self.ball_source != self.ball_donor && self.ball_state_error.is_none(),
+            })
+        } else {
+            let labels: serde_json::Map<String, serde_json::Value> = [
+                ("description", "render-stadium-hud-and-garage-palette-colours"), ("stadium", "render-stadium-colours"),
+                ("stadiumOn", "render-apply-stadium-colours"), ("stadiumHint", "render-banners-flags-and-field-lines"),
+                ("blue", "colours-blue-team"), ("orange", "colours-orange-team"), ("defaults", "render-defaults"),
+                ("swap", "render-swap-teams"), ("hud", "render-hud-colours"), ("hudOn", "render-apply-hud-colours"),
+                ("hudHint", "render-boost-meter-and-scoreboard"), ("match", "render-match-stadium"),
+                ("palette", "render-extended-colour-palette"), ("paletteOn", "render-add-pure-white-to-pure-black"),
+                ("paletteHint", "render-only-you-see-these-colours-disable"), ("car", "render-custom-car-colours"),
+                ("carOn", "render-apply-custom-car-colours"), ("carHint", "render-custom-car-colours-hint"),
+                ("custom", "colours-custom-colour"), ("heatseeker", "render-heatseeker-ball-glow"),
+                ("heatseekerOn", "render-override-the-maximum-speed-glow-locally"), ("heatseekerHint", "render-changes-the-high-speed-bloom-and"),
+                ("maxSpeed", "colours-max-speed"), ("apply", "render-apply-colours"), ("restore", "ball-restore-original"), ("choose", "colours-status-choose"),
+            ].into_iter().map(|(key, label)| (key.to_owned(), json!(t(label)))).collect();
+            json!({
+                "page": "game-colours", "labels": labels, "settings": self.settings, "defaults": ColourSettings::default(),
+                "canRestore": self.settings.applied || backups.join(BACKUP_NAME).is_file(),
+                "backup": t_args("render-pristine-backup-backup-name", &[("backup", BACKUP_NAME.into())]),
+            })
+        };
+        let mut page = page;
+        page["busy"] = json!(self.busy);
+        page["status"] = json!(self.status);
+        page["error"] = json!(self.error);
+        page
+    }
+
+    /// Adds colours to the custom car colours and ticks them on. New colours go at the
+    /// end, so palette cells loadouts already use keep their place.
+    pub(crate) fn add_custom_colours(&mut self, backups_dir: &Path, colours: impl IntoIterator<Item = [u8; 3]>) {
+        self.load_active(backups_dir);
+        for colour in colours {
+            if !self.settings.custom_colours.contains(&colour) {
+                self.settings.custom_colours.push(colour);
+            }
+        }
+        self.settings.car_colours = true;
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_colour_settings(&mut self, mut settings: ColourSettings) {
+        settings.applied = self.settings.applied;
+        settings.applied_car_colours = self.settings.applied_car_colours.clone();
+        settings.custom_colour = None;
+        self.settings = settings;
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_ball_action(&mut self, key: &str, value: &serde_json::Value) -> Option<ColourAction> {
+        if self.busy { return None; }
+        let index = value.as_u64().and_then(|index| usize::try_from(index).ok()).filter(|index| *index < super::ball_visual::BALLS.len());
+        let active = self.ball_swaps.iter().any(|swap| swap.source == self.ball_source);
+        let support = super::ball_visual::colour_texture(self.ball_source, self.ball_donor).is_some();
+        match key {
+            "source" => { if let Some(index) = index { self.ball_source = index; } }
+            "donor" => { if let Some(index) = index.filter(|index| *index != self.ball_source) { self.ball_donor = index; } }
+            "colours" if support => self.ball_colours = value.as_bool().unwrap_or(self.ball_colours),
+            "apply" if !active && self.ball_source != self.ball_donor && self.ball_state_error.is_none() => {
+                return Some(ColourAction::ApplyBall { source: self.ball_source, donor: self.ball_donor, colours: self.ball_colours && support });
+            }
+            "restore" if active && self.ball_state_error.is_none() => return Some(ColourAction::RestoreBall { source: self.ball_source }),
+            _ => {}
+        }
+        None
+    }
     pub(crate) fn invalidate_active(&mut self) {
         self.loaded_backups_dir = None;
     }
@@ -553,7 +645,7 @@ impl ColoursState {
         self.busy = true;
         self.error = false;
         self.status = match action {
-            ColourAction::Apply | ColourAction::ApplyCars(_) => t("colours-status-applying"),
+            ColourAction::Apply => t("colours-status-applying"),
             ColourAction::Restore => t("colours-status-restoring"),
             ColourAction::ApplyBall { .. } => t("colours-status-preparing-ball"),
             ColourAction::RestoreBall { .. } => t("colours-status-restoring-ball"),
@@ -571,9 +663,6 @@ impl ColoursState {
                 let result = match action.clone() {
                     ColourAction::Apply => {
                         apply(&cooked_pc, &backups_dir, &settings, settings.car_colours_patch())
-                    }
-                    ColourAction::ApplyCars(cars) => {
-                        apply(&cooked_pc, &backups_dir, &settings, Some(cars))
                     }
                     ColourAction::Restore => restore(&cooked_pc, &backups_dir),
                     ColourAction::ApplyBall {
@@ -593,7 +682,7 @@ impl ColoursState {
                 }
                 .map(|_| action);
                 let message = match &result {
-                    Ok(ColourAction::Apply | ColourAction::ApplyCars(_)) => {
+                    Ok(ColourAction::Apply) => {
                         "[Colours] Colours applied. Start Rocket League to see them.".to_string()
                     }
                     Ok(ColourAction::Restore) => "[Colours] Original colours restored.".to_string(),
@@ -622,7 +711,7 @@ impl ColoursState {
         let Ok(result) = rx.try_recv() else { return };
         self.busy = false;
         match result {
-            Ok(ColourAction::Apply | ColourAction::ApplyCars(_)) => {
+            Ok(ColourAction::Apply) => {
                 self.settings.applied = true;
                 self.status = t("colours-status-applied");
                 self.error = false;
@@ -941,6 +1030,61 @@ fn changed_colour_exports(
     Ok(changes)
 }
 
+/// Palette-only edits change the final grayscale row of three existing
+/// exports. Build those small payloads directly rather than compressing and
+/// decompressing an entire intermediate TAGame package to discover the diff.
+fn palette_only_exports(
+    original: &super::upk_package::UpkPackage,
+    settings: &ColourSettings,
+    cars: Option<&CarColours>,
+) -> Result<Option<std::collections::HashMap<usize, Vec<u8>>>, String> {
+    if settings.stadium_colours || settings.hud_colours || settings.heatseeker_glow || cars.is_some() {
+        return Ok(None);
+    }
+    let mut changes = std::collections::HashMap::new();
+    if !settings.extended_palette { return Ok(Some(changes)); }
+    let mut valid = 0;
+    for path in ["CarColors.BlueTeamV3", "CarColors.OrangeTeamV3", "CarColors.CustomTeam"] {
+        let Some(index) = original.find_object(path).filter(|i| *i > 0) else { continue; };
+        let index = index as usize - 1;
+        let export = &original.exports[index];
+        let (props, _) = original.serialized_props(export)?;
+        let property = |name: &str, kind: &str| props.iter().find(|p| p.name == name && p.tag_type == kind);
+        let (Some(hue), Some(values), Some(colours)) = (property("HueCount", "IntProperty"),
+            property("ValueCount", "IntProperty"), property("Colors", "ArrayProperty")) else { continue; };
+        let baseline = colour_payload(original, index)?;
+        let hue_count = usize_from_i32(read_i32(baseline, hue.value_offset)?, "hue count")?;
+        let value_count = usize_from_i32(read_i32(baseline, values.value_offset)?, "value count")?;
+        let count = usize_from_i32(read_i32(baseline, colours.value_offset)?, "colour count")?;
+        if hue_count == 0 || value_count <= 1 || hue_count.checked_mul(value_count) != Some(count)
+            || count.checked_mul(16).and_then(|n| n.checked_add(4)) != Some(colours.size) {
+            continue;
+        }
+        let row = colours.value_offset + 4 + (count - hue_count) * 16;
+        let end = row.checked_add(hue_count * 16).ok_or("Palette size overflow")?;
+        if end > baseline.len() { return Err("Truncated extended palette export".into()); }
+        let mut payload = baseline.to_vec();
+        for index in 0..hue_count {
+            let value = 1.0 - index as f32 / (hue_count - 1).max(1) as f32;
+            let at = row + index * 16;
+            for channel in 0..3 { payload[at + channel * 4..at + channel * 4 + 4].copy_from_slice(&value.to_le_bytes()); }
+            payload[at + 12..at + 16].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        valid += 1;
+        if payload != baseline { changes.insert(index, payload); }
+    }
+    Ok((valid > 0).then_some(changes))
+}
+fn desired_colour_exports(
+    original: &super::upk_package::UpkPackage,
+    original_bytes: &[u8],
+    settings: &ColourSettings,
+    cars: Option<&CarColours>,
+) -> Result<std::collections::HashMap<usize, Vec<u8>>, String> {
+    if let Some(changes) = palette_only_exports(original, settings, cars)? { return Ok(changes); }
+    changed_colour_exports(original, render_colour_exports(original_bytes, settings, cars)?)
+}
+
 fn edit_live_colours(
     cooked: &Path,
     backups: &Path,
@@ -954,13 +1098,13 @@ fn edit_live_colours(
     let (original_bytes, previous) = colour_source(cooked, backups, &before)?;
     let original = UpkPackage::from_bytes(original_bytes.clone())?;
     let desired = match settings {
-        Some((settings, cars)) => changed_colour_exports(&original, render_colour_exports(&original_bytes, settings, cars)?)?,
+        Some((settings, cars)) => desired_colour_exports(&original, &original_bytes, settings, cars)?,
         None => Default::default(),
     };
     let previous = match previous {
         Some(previous) => {
             let cars = previous.applied_car_colours.clone().or_else(|| previous.car_colours_patch());
-            changed_colour_exports(&original, render_colour_exports(&original_bytes, &previous, cars.as_ref())?)?
+            desired_colour_exports(&original, &original_bytes, &previous, cars.as_ref())?
         }
         None => Default::default(),
     };
@@ -1008,6 +1152,7 @@ fn edit_live_colours(
         }
         changed = true;
     }
+    drop(original); // Baseline payloads have been merged; release the decompressed archive before packing.
     if settings.is_some() {
         super::upk_history::replace(&backups.join(BACKUP_NAME), &original_bytes)?;
     }
@@ -1017,6 +1162,7 @@ fn edit_live_colours(
     let stage = cooked.join(format!("TAGame.colours-{:016x}.tmp", rand::random::<u64>()));
     let result = (|| {
         package.save_fast(&stage)?;
+        drop(package);
         let output = fs::read(&stage).map_err(|error| error.to_string())?;
         UpkPackage::from_bytes(output.clone())?;
         if hebnix_sdk::process::is_rocket_league_running() {
@@ -2180,28 +2326,32 @@ pub(crate) fn loadout_palettes(cooked: &Path) -> Result<[Vec<[u8; 3]>; 3], Strin
     Ok(palettes)
 }
 
-/// Palette indices `cars` will have once applied: Blue, Orange and Accent cells for
-/// (blue primary, orange primary, blue accent, orange accent), rendered the way `apply` does.
-pub(crate) fn car_colour_indices(cooked: &Path, cars: &CarColours) -> Result<[Option<u8>; 4], String> {
+/// The custom car colours saved with the last apply (the defaults when there is none).
+pub(crate) fn saved_custom_colours(cooked: &Path) -> Vec<[u8; 3]> {
+    let mut settings: ColourSettings = fs::read(cooked.join("Backups").join(STATE_NAME))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    settings.migrate();
+    settings.custom_colours
+}
+
+/// Palette cells the `wanted` colours land in once `custom` is applied as the custom
+/// car colours, rendered the way Apply does. Palettes: 0 Blue, 1 Orange, 2 Accent.
+pub(crate) fn custom_colour_cells(cooked: &Path, custom: &[[u8; 3]], wanted: &[(usize, [u8; 3])]) -> Result<Vec<u8>, String> {
     let backups = cooked.join("Backups");
     let original = fs::read(backups.join(BACKUP_NAME))
         .or_else(|_| fs::read(super::game_path::resolve(cooked, "TAGame.upk")))
         .map_err(|error| format!("Could not read TAGame.upk: {error}"))?;
     let settings = active_colour_settings(&backups).unwrap_or_default();
-    let rendered = render_colour_exports(&original, &settings, Some(cars))?;
+    let cars = CarColours { extra: custom.to_vec(), ..CarColours::default() };
+    let rendered = render_colour_exports(&original, &settings, Some(&cars))?;
     let palettes = palettes_of(&super::upk_package::UpkPackage::from_bytes(rendered)?)?;
-    let find = |palette: &[[u8; 3]], colour: Option<[u8; 3]>| -> Result<Option<u8>, String> {
-        let Some(colour) = colour else { return Ok(None) };
-        let index = palette.iter().position(|cell| *cell == colour)
+    wanted.iter().map(|&(palette, colour)| {
+        let index = palettes.get(palette).and_then(|cells| cells.iter().position(|cell| *cell == colour))
             .ok_or("A custom car colour is missing from the patched palette")?;
-        u8::try_from(index).map(Some).map_err(|_| "The car palette is too full for this colour".into())
-    };
-    Ok([
-        find(&palettes[0], cars.blue_primary)?,
-        find(&palettes[1], cars.orange_primary)?,
-        find(&palettes[2], cars.blue_accent)?,
-        find(&palettes[2], cars.orange_accent)?,
-    ])
+        u8::try_from(index).map_err(|_| "The car palette is too full for this colour".into())
+    }).collect()
 }
 
 fn palettes_of(package: &super::upk_package::UpkPackage) -> Result<[Vec<[u8; 3]>; 3], String> {
@@ -2548,3 +2698,18 @@ fn usize_from_i32(value: i32, label: &str) -> Result<usize, String> {
 fn usize_from_i64(value: i64, label: &str) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("Invalid negative {label}"))
 }
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires HEBNIX_PALETTE_PROBE pointing to a clean TAGame package"]
+fn direct_extended_palette_matches_the_existing_package_transform() {
+    let raw = std::fs::read(std::env::var_os("HEBNIX_PALETTE_PROBE").expect("clean TAGame path")).unwrap();
+    let original = super::upk_package::UpkPackage::from_bytes(raw.clone()).unwrap();
+    let settings = ColourSettings { extended_palette: true, stadium_colours: false, hud_colours: false,
+        heatseeker_glow: false, car_colours: false, ..Default::default() };
+    let fast = palette_only_exports(&original, &settings, None).unwrap().unwrap();
+    let previous = changed_colour_exports(&original, render_colour_exports(&raw, &settings, None).unwrap()).unwrap();
+    assert_eq!(fast, previous);
+    assert!(fast.len() <= 3);
+}
+

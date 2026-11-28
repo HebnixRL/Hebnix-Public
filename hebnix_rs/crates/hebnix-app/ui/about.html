@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'">
+  <title>About</title>
+  <link rel="stylesheet" href="/bootstrap.min.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="about-page">
+  <main class="container py-5">
+    <section class="card about-card mx-auto">
+      <div class="card-body p-4 p-lg-5 text-center">
+        <img class="d-block mx-auto mb-4" src="/tracker-logo.png" alt="Hebnix" width="128" height="128">
+        <p class="text-body-secondary" id="version"></p>
+        <a href="https://hebnix.com" data-link="website">hebnix.com</a>
+        <hr>
+        <h2 class="h6">Built by</h2>
+        <p class="d-flex flex-wrap gap-3">
+          <a href="https://github.com/Hebbins" data-link="hebbins">Hebbins</a>
+          <a href="https://github.com/nixvio64" data-link="nixvio64">nixvio64</a>
+          <a href="https://github.com/xplodingeggo" data-link="xplodingeggo">xplodingeggo</a>
+        </p>
+        <h2 class="h6">Contributors</h2>
+        <p class="d-flex flex-wrap gap-3">
+          <a href="https://github.com/rlyvision" data-link="rlyvision">rlyvision</a>
+          <a href="https://github.com/noxygalaxy" data-link="noxygalaxy">noxygalaxy</a>
+          <a href="https://github.com/F0xyN0xy" data-link="foxynoxy">FoxyNoxy</a>
+        </p>
+        <button class="btn btn-outline-secondary mt-2" id="maintenance" type="button" hidden>Maintenance</button>
+      </div>
+    </section>
+  </main>
+  <script src="/about.js"></script>
+</body>
+</html>

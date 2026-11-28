@@ -16,10 +16,16 @@ use hebnix_sdk::save_file::{self, SaveAccount, bakkes_code, loadout_code};
 use hebnix_sdk::utils::constants::{SAVE_PATH_EPIC, SAVE_PATH_STEAM};
 use serde_json::{Value, json};
 
+#[cfg(windows)]
+pub(crate) mod web;
+#[cfg(windows)]
+mod creator;
+
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum SaveMode {
-    #[default]
+    // New preset is hidden for now; imports only replace an existing preset
     New,
+    #[default]
     Replace,
 }
 
@@ -55,8 +61,20 @@ enum PaletteLoad {
     Ready(Result<Palettes, String>),
 }
 
+/// shows a colour appended to the game palette before the patched palette is reloaded
+fn show_palette_cell(palettes: &mut Palettes, team: usize, primary: bool, index: u8, rgb: [u8; 3]) {
+    let palette = &mut palettes[if primary { team } else { 2 }];
+    let index = usize::from(index);
+    if palette.len() <= index {
+        palette.resize(index + 1, [0; 3]);
+    }
+    palette[index] = rgb;
+}
+
 #[derive(Default)]
 pub struct LoadoutsPanel {
+    #[cfg(windows)]
+    summary_job: Option<Receiver<SaveSummary>>,
     accounts: Vec<SaveAccount>,
     save: Option<PathBuf>,
     names: Vec<String>,
@@ -75,6 +93,21 @@ pub struct LoadoutsPanel {
     target: usize,
     name: String,
     plan: Option<(PlanKey, Result<Plan, String>)>,
+    #[cfg(windows)]
+    web_previews: Vec<usize>,
+    #[cfg(windows)]
+    creator: Option<creator::Creator>,
+    #[cfg(windows)]
+    creator_attempt: u64,
+}
+
+#[cfg(windows)]
+struct SaveSummary {
+    save: Option<PathBuf>,
+    accounts: Vec<SaveAccount>,
+    names: Vec<String>,
+    bodies: Vec<i64>,
+    message: String,
 }
 
 enum LoadoutDialog {
@@ -106,7 +139,7 @@ impl LoadoutsPanel {
     }
 
     fn finish(&mut self, result: Result<(), String>) {
-        self.message = result.err().unwrap_or_default();
+        self.message = result.err().map(|error| if error.contains("Cannot delete the last loadout") { "Cannot delete the last loadout. Keep at least one preset.".into() } else { error }).unwrap_or_default();
         self.reload();
     }
 
@@ -181,7 +214,7 @@ impl LoadoutsPanel {
             self.page = 0;
             self.dialog = None;
             self.code = None;
-            self.mode = SaveMode::New;
+            self.mode = SaveMode::Replace;
             self.base = 0;
             self.target = 0;
         }
@@ -335,7 +368,7 @@ impl LoadoutsPanel {
         });
         ui.weak(t("loadouts-bakkes-base-hint"));
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.mode, SaveMode::New, t("loadouts-bakkes-mode-new"));
+            // ui.radio_value(&mut self.mode, SaveMode::New, t("loadouts-bakkes-mode-new"));
             ui.radio_value(&mut self.mode, SaveMode::Replace, t("loadouts-bakkes-mode-replace"));
         });
         match self.mode {
@@ -730,6 +763,16 @@ impl LoadoutsPanel {
                                                     ui.add(egui::TextEdit::singleline(search).hint_text(t("loadouts-search-items")));
                                                     let query = search.trim().to_lowercase();
                                                     egui::ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
+                                                        if slot==13 {
+                                                            let mut engines:Vec<_>=swapper.owned_engine_audio_ids().iter().filter_map(|&id|Some((swapper.product_name(SwapCategory::Engines,id)?,id))).collect();
+                                                            engines.sort_unstable();
+                                                            for (label,id) in engines {
+                                                                if label.to_lowercase().contains(&query) && ui.selectable_label(product as i64==id,label).clicked() {
+                                                                    preset.teams[*team].products[13]=id as i32;preset.teams[*team].items[13]=None;
+                                                                    changes.retain(|(t,s,_,_)| *t!=*team || *s!=13);
+                                                                }
+                                                            }
+                                                        }
                                                         let mut choices: Vec<_> = owned.iter().filter_map(|&(id, upper, lower, paint)| {
                                                             if !swapper.loadout_item_compatible(category, id as i64, preset.teams[*team].products[0] as i64) { return None; }
                                                             let mut label = swapper.product_name(category, id as i64)?;
@@ -758,7 +801,7 @@ impl LoadoutsPanel {
                                 );
                                 if !name.is_empty() && save.clicked() {
                                     let colours = preset.teams.each_ref().map(|team| [team.team_color, team.custom_color]);
-                                    edit = Some(Edit::Update { position, name: name.to_owned(), changes: changes.clone(), colours, expected: expected.clone() });
+                                    edit = Some(Edit::Update { position, name: name.to_owned(), changes: changes.clone(), colours, stock_engines:std::array::from_fn(|team|(preset.teams[team].products[13]!=expected.teams[team].products[13] && preset.teams[team].items[13].is_none() && !changes.iter().any(|(t,s,_,_)| *t==team && *s==13)).then_some(preset.teams[team].products[13])), expected: expected.clone() });
                                 }
                                 cancel = ui.button(t("loadouts-cancel")).clicked();
                             });
@@ -850,7 +893,7 @@ fn tile_action(ui: &mut egui::Ui, action: &str, label: &str) -> egui::Response {
         .fit_to_exact_size(egui::vec2(14.0, 14.0))
         .tint(tint);
     let label = t(label);
-    let response = ui.add_sized([24.0, 20.0], egui::Button::image(icon).frame(false));
+    let response = ui.add_sized([24.0, 24.0], egui::Button::image(icon).frame(false));
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
@@ -1086,17 +1129,23 @@ fn save_plan(save: &Path, cooked_pc: &Path, plan: &Plan, presets: &mut PresetSto
     }
     let mut copy = loadout_preset(save, plan.base)?;
     copy.name = plan.name.clone();
-    // The colours are appended to the game palettes, so equip the cells they will land in.
+    // The colours are appended to the custom car colours (and so to the game
+    // palettes) when the preset is applied, so equip the cells they will land in.
     if plan.cars != CarColours::default() {
-        let [blue, orange, blue_accent, orange_accent] =
-            crate::patcher::colours::car_colour_indices(cooked_pc, &plan.cars)?;
-        for (team, primary, accent) in [(0, blue, blue_accent), (1, orange, orange_accent)] {
-            if let Some(index) = primary {
-                copy.teams[team].team_color = index;
+        let mut custom = crate::patcher::colours::saved_custom_colours(cooked_pc);
+        let cells = [(0, 0, true, plan.cars.blue_primary), (1, 1, true, plan.cars.orange_primary),
+            (0, 2, false, plan.cars.blue_accent), (1, 2, false, plan.cars.orange_accent)];
+        let wanted: Vec<_> = cells.iter().filter_map(|&(_, palette, _, colour)| colour.map(|colour| (palette, colour))).collect();
+        for &(_, colour) in &wanted {
+            if !custom.contains(&colour) {
+                custom.push(colour);
             }
-            if let Some(index) = accent {
-                copy.teams[team].custom_color = index;
-            }
+        }
+        let mut indices = crate::patcher::colours::custom_colour_cells(cooked_pc, &custom, &wanted)?.into_iter();
+        for (team, _, primary, colour) in cells {
+            if colour.is_none() { continue; }
+            let Some(index) = indices.next() else { break };
+            if primary { copy.teams[team].team_color = index; } else { copy.teams[team].custom_color = index; }
         }
     }
     apply_loadout_edit(save, &Edit::Import(vec![copy]))?;

@@ -21,7 +21,7 @@ than one `.ftl` file, they are merged.
 2. Translate the text after each `=`. Keep the ids and the `{ $variables }`.
 3. Add a row to `locales.toml`. Leave `status = "draft"` until a fluent speaker
    has reviewed it. Drafts show up as `Name (draft)` in the language picker.
-4. Run `cargo test -p hebnix-app i18n`.
+4. From the repository root, run `cargo run --locked --manifest-path tools/i18n-validator/Cargo.toml -- .`.
 
 No code changes, the build picks the folder up automatically.
 
@@ -65,21 +65,20 @@ maps-count =
 
 ## Checks
 
-`cargo test -p hebnix-app i18n` fails on:
+From the repository root:
 
-- a `.ftl` file that doesn't parse
-- a message id that isn't in `en`
-- different `{ $variables }` than the English message
-- a plural selector without a `*[other]` default
-- a language in `locales.toml` without a folder (or the other way round)
-- a key used in code that `en` doesn't define
-
-It only warns about untranslated ids (they fall back to English). To make that a
-failure too: `HEBNIX_I18N_STRICT=1`. For the todo list per language:
-
+```sh
+cargo test --locked --manifest-path tools/i18n-validator/Cargo.toml
+cargo run --locked --manifest-path tools/i18n-validator/Cargo.toml -- .
 ```
-cargo test -p hebnix-app i18n::tests::report -- --ignored --nocapture
-```
+
+These checks run independently of the application build. They fail on malformed
+Fluent files, duplicate message IDs, translated IDs absent from English, or
+invalid/missing locale folders. Every `.ftl` file in each language is merged
+before comparing message IDs.
+
+Missing translations are warnings and use English fallback. The validator does
+not currently check source-code key usage, variable parity, or translation quality.
 
 ## Notes
 

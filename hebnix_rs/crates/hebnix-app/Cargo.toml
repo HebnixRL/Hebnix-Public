@@ -1,6 +1,6 @@
 [package]
 name = "hebnix-app"
-version = "2.3.5"
+version = "2.4.0"
 edition = "2024"
 
 [features]
@@ -24,7 +24,7 @@ crossbeam-channel.workspace = true
 dirs = "6.0.0"
 encoding_rs = "0.8"
 egui_extras = { version = "0.35.0", features = ["image", "svg", "gif"] }
-hebnix-sdk = { version = "2.3.5", path = "../hebnix-sdk" }
+hebnix-sdk = { version = "2.4.0", path = "../hebnix-sdk" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "ico", "bmp", "webp", "gif"] }
 # zune-jpeg 0.5.15 corrupts non-interleaved baseline JPEG banners (#419).
 jpeg-decoder = { version = "0.3.2", default-features = false }
@@ -44,7 +44,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 toml = "1.1.2"
-time = { version = "0.3.55", features = ["local-offset"] }
+fontdb = "0.24"
+time ={ version = "0.3.55", features = ["local-offset"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tray-icon = "0.24.1"
@@ -72,10 +73,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 eframe = "0.35.0"
+rfd = { version = "0.17.2", features = ["common-controls-v6"] }
 webview2-com = "0.39.1"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_DirectWrite", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Networking_WinInet", "Win32_Storage_FileSystem", "Win32_NetworkManagement_Dns", "Foundation", "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Media_Control", "Storage_Streams"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_DirectWrite", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_RestartManager", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Networking_WinInet", "Win32_Storage_FileSystem", "Win32_NetworkManagement_Dns", "Foundation", "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Media_Control", "Storage_Streams"] }
 windows-numerics = "0.3.1"
 winreg = "0.56.0"
+wry = { version = "0.57.3", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
@@ -103,6 +106,7 @@ javascriptcore-rs = "1.1.2"
 [build-dependencies]
 embed-manifest = "1.5.0"
 embed-resource = "3.0.6"
+flate2 = "1.0"
 
 [dev-dependencies]
 fluent-syntax = "0.12.0"

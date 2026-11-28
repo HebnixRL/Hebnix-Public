@@ -184,7 +184,7 @@ fn watchdog_owner() -> Option<u32> {
         .ok()
 }
 
-fn replacement_is_running(parent_pid: u32) -> bool {
+pub(crate) fn replacement_is_running(parent_pid: u32) -> bool {
     let Some(owner) = watchdog_owner().filter(|owner| *owner != parent_pid) else {
         return false;
     };

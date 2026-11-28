@@ -2851,7 +2851,30 @@ impl DecalPatcherState {
             .map(|car| car.car_key.clone())
     }
 
-    fn decal_targets_for_body(&self, body_car_key: &str) -> Vec<(String, SkinInfo)> {
+    pub(crate) fn catalog_cars(&self) -> Vec<(String, String)> {
+        let mut cars = self.car_skins.iter()
+            .filter(|car| !car.car_key.eq_ignore_ascii_case("universal"))
+            .map(|car| (car.car_key.clone(), car.car_name.clone()))
+            .collect::<Vec<_>>();
+        let bodies = self.bodies_catalog.as_ref()
+            .and_then(|catalog| catalog.get("bodies"))
+            .and_then(Value::as_array);
+        for body in bodies.into_iter().flatten() {
+            let Some(name) = body.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let normalized = normalize_catalog_name(name);
+            if !cars.iter().any(|(key, label)| {
+                normalize_catalog_name(key) == normalized || normalize_catalog_name(label) == normalized
+            }) {
+                cars.push((name.to_owned(), name.to_owned()));
+            }
+        }
+        cars.sort_by(|left, right| left.1.cmp(&right.1));
+        cars
+    }
+
+    pub(crate) fn decal_targets_for_body(&self, body_car_key: &str) -> Vec<(String, SkinInfo)> {
         let mut targets = self
             .car_skins
             .iter()
@@ -2920,8 +2943,17 @@ impl DecalPatcherState {
     fn build_backend_entry(&self, decal: &DecalItem) -> Result<DecalZipEntry, String> {
         let mut fields_map = HashMap::new();
         let mut field_labels = HashMap::new();
+        // Both fields target the same decal artwork slot. Bundles can include
+        // both, so prefer the explicit body diffuse and keep the legacy field
+        // only when it is the sole diffuse alias.
+        let has_diffuse = decal
+            .fields
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("diffuse"));
         for (key, path) in &decal.fields {
-            if key.to_ascii_lowercase().starts_with("chassis.") {
+            if key.to_ascii_lowercase().starts_with("chassis.")
+                || (has_diffuse && key.eq_ignore_ascii_case("1_diffuse_skin"))
+            {
                 continue;
             }
             {
@@ -3613,6 +3645,162 @@ impl DecalPatcherState {
     }
 
     /// One row per patched target, independent of the library's filter and page.
+    #[cfg(windows)]
+    pub(crate) fn web_snapshot(&mut self, config: &mut Config, tx: &Sender<AppMsg>, owned: &HashSet<i64>, visible: &[String], ctx: &egui::Context) -> Value {
+        use serde_json::json;
+        self.handle_op_result(tx, config);
+        let catalog = if self.source == PatchSource::Catalog {
+            let (model, archive) = self.catalog.web_snapshot(ctx, tx, visible);
+            if let Some(archive) = archive { self.web_import(&archive, tx, config); }
+            model
+        } else { Value::Null };
+        let key_ok = self.validate_key_file();
+        let active = self.active_decals.iter().map(|(key, name)| {
+            let image = self.decals.iter().find(|decal| &decal.name == name)
+                .and_then(|decal| decal.preview_image.as_deref()).and_then(crate::ui::browser::image_url);
+            json!({"id": key, "name": name, "target": self.target_display_name(key), "image": image})
+        }).collect::<Vec<_>>();
+        let mut active = active;
+        active.sort_by_cached_key(|row| row["target"].as_str().unwrap_or_default().to_lowercase());
+        let rows = self.decals.iter().map(|decal| {
+            let visible = visible.contains(&decal.name);
+            let body = self.car_key_for_body_id(decal.body_id).or_else(|| self.body_by_decal.get(&decal.name).cloned());
+            let targets = if visible {
+                body.as_ref().map(|body| self.visible_decal_targets_for_body(body, owned, config.patcher.decal_only_owned)
+                    .into_iter().map(|(car, skin)| {
+                        let patched = self.target_is_patched(&car, &skin);
+                        (format!("{car}|{}", skin.id), skin.name, patched)
+                    }).collect::<Vec<_>>()).unwrap_or_default()
+            } else { Vec::new() };
+            let patched = self.active_decals.values().any(|name| name == &decal.name);
+            json!({
+                "id": decal.name, "name": decal.name, "body": body, "subtitle": self.lookup_body_name(decal.body_id),
+                "images": if visible { decal.preview_image.as_deref().and_then(crate::ui::browser::image_url).into_iter().collect::<Vec<_>>() } else { Vec::new() },
+                "targets": targets, "target": self.target_by_decal.get(&decal.name), "active": patched, "delete": !patched,
+                "chassis": decal.fields.keys().any(|key| key.to_ascii_lowercase().starts_with("chassis.")),
+                "speed": self.speed_by_decal.get(&decal.name).copied().unwrap_or(1.0),
+            })
+        }).collect::<Vec<_>>();
+        let bodies = self.car_skins.iter().filter(|car| !car.car_key.eq_ignore_ascii_case("UNIVERSAL"))
+            .map(|car| (&car.car_key, &car.car_name)).collect::<Vec<_>>();
+        json!({
+            "page": "studio-asset", "kind": "decal", "catalog": catalog, "rows": rows, "bodies": bodies,
+            "custom": self.source == PatchSource::Custom, "busy": self.processing_target.is_some(), "progress": self.progress,
+            "status": self.progress_label, "active": !self.active_decals.is_empty(), "activeDecals": active,
+            "ownedOnly": config.patcher.decal_only_owned, "speed": config.speed_patch.items_page,
+            "confirm": self.confirm_delete.as_ref().map(|decal| &decal.name), "confirmRestore": self.restore_all_confirmed,
+            "catalogError": self.catalog_error, "error": key_ok.err(),
+            "labels": {
+                "refresh": t("btn-refresh"), "restore": t("ball-restore-original"), "import": t("ball-import-zip"),
+                "applied": t("ball-show-applied"), "search": t("ball-name-or-author"), "downloaded": t("render-view-downloaded"),
+                "apply": t("ball-apply"), "delete": t("presets-delete"), "confirm": t("render-confirm-deletion"),
+                "yes": t("plugin-delete-prompt-yes"), "no": t("plugin-delete-prompt-no"),
+                "target": t("tab-decal-to-patch"), "restoreTitle": t("tab-confirm-restore-all-decals"),
+                "active": t("tab-active-decal-patches"), "empty": t("tab-no-active-decal-patches"),
+                "retry": t("tab-retry-loading-catalog"),
+            },
+        })
+    }
+
+    #[cfg(windows)]
+    fn web_import(&mut self, path: &Path, tx: &Sender<AppMsg>, config: &mut Config) {
+        match self.import_zip(path, tx) {
+            Ok(()) => {
+                self.source = PatchSource::Custom;
+                config.patcher.decal_source = self.source;
+                let _ = config.save(&self.base_dir);
+            }
+            Err(error) => { let _ = tx.send(AppMsg::Log(format!("[Decals] Import failed: {error}"))); }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn web_action(&mut self, key: &str, id: Option<String>, value: Value, cooked: &Path, owned: &HashSet<i64>, tx: &Sender<AppMsg>, config: &mut Config, ctx: &egui::Context) {
+        if self.processing_target.is_some() { return; }
+        let backups = cooked.join("Backups");
+        let id = id.as_deref().unwrap_or_default();
+        let result = match key {
+            "source" => {
+                self.source = if id == "custom" { PatchSource::Custom } else { PatchSource::Catalog };
+                config.patcher.decal_source = self.source;
+                let _ = config.save(&self.base_dir);
+                Ok(())
+            }
+            "refresh" if self.source == PatchSource::Catalog => { self.catalog.refresh(ctx); Ok(()) }
+            "refresh" => { self.refresh_decals(); Ok(()) }
+            "reload" => { let _ = tx.send(AppMsg::ReloadCatalogs); Ok(()) }
+            "owned" => {
+                config.patcher.decal_only_owned = value.as_bool().unwrap_or(false);
+                let _ = config.save(&self.base_dir);
+                Ok(())
+            }
+            "download" if self.source == PatchSource::Catalog => {
+                if let Some(path) = self.catalog.web_download(id.into(), ctx) { self.web_import(&path, tx, config); }
+                Ok(())
+            }
+            "import" => {
+                let dialog = rfd::FileDialog::new().add_filter(t("ball-zip-archives"), &["zip"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() { self.web_import(&path, tx, config); }
+                Ok(())
+            }
+            "restore" if id.is_empty() && !self.active_decals.is_empty() && self.validate_key_file().is_ok() => {
+                self.restore_all_confirmed = true;
+                Ok(())
+            }
+            "restore" if self.active_decals.contains_key(id) => {
+                let Some((car, skin)) = id.split_once('|') else { return };
+                self.restore_decal_from_skin(car, skin, cooked, &backups, tx, ctx)
+            }
+            "restore-all" if std::mem::take(&mut self.restore_all_confirmed) => self.restore_all_decals(cooked, &backups, tx, ctx),
+            "cancel" => { self.confirm_delete = None; self.restore_all_confirmed = false; Ok(()) }
+            "confirm" => {
+                if let Some(decal) = self.confirm_delete.take() && !self.active_decals.values().any(|name| name == &decal.name) {
+                    self.delete_decal(&decal.name, tx, config)
+                } else { Ok(()) }
+            }
+            "body" | "target" | "speed" | "apply" | "delete" if self.source == PatchSource::Custom => {
+                let Some(decal) = self.decals.iter().find(|decal| decal.name == id) else { return };
+                let body = self.car_key_for_body_id(decal.body_id);
+                match key {
+                    "body" if body.is_none() => {
+                        let Some(value) = value.as_str().filter(|value| self.car_skins.iter().any(|car| car.car_key == *value && !car.car_key.eq_ignore_ascii_case("UNIVERSAL"))) else { return };
+                        self.body_by_decal.insert(id.into(), value.into());
+                        self.target_by_decal.remove(id);
+                        Ok(())
+                    }
+                    "speed" => {
+                        if let Some(speed) = value.as_f64().filter(|speed| speed.is_finite() && (0.1..=20.0).contains(speed)) {
+                            self.speed_by_decal.insert(id.into(), speed as f32);
+                        }
+                        Ok(())
+                    }
+                    "delete" if !self.active_decals.values().any(|name| name == id) => {
+                        self.confirm_delete = Some(decal.clone());
+                        Ok(())
+                    }
+                    "target" | "apply" => {
+                        let target = if key == "target" { value.as_str() } else { self.target_by_decal.get(id).map(String::as_str) };
+                        let Some((car, skin)) = target.and_then(|target| target.split_once('|')) else { return };
+                        let Some(body) = body.or_else(|| self.body_by_decal.get(id).cloned()) else { return };
+                        if !self.visible_decal_targets_for_body(&body, owned, config.patcher.decal_only_owned).iter()
+                            .any(|(owner, row)| owner == car && row.id == skin && !self.target_is_patched(owner, row)) { return; }
+                        if key == "target" {
+                            self.target_by_decal.insert(id.into(), format!("{car}|{skin}"));
+                            Ok(())
+                        } else {
+                            let (car, skin) = (car.to_owned(), skin.to_owned());
+                            let speed = if config.speed_patch.items_page { self.speed_by_decal.get(id).copied().unwrap_or(1.0) } else { 1.0 };
+                            self.apply_decal_to_skin(id, &car, &skin, speed, cooked, &backups, tx, ctx)
+                        }
+                    }
+                    _ => return,
+                }
+            }
+            _ => return,
+        };
+        if let Err(error) = result { let _ = tx.send(AppMsg::Log(format!("[Decals] {error}"))); }
+    }
+
     fn render_active_decals(&self, ui: &mut egui::Ui, busy: bool) -> Option<(String, String)> {
         let mut restore = None;
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -3718,7 +3906,10 @@ impl DecalPatcherState {
         owned_inventory: &mut crate::owned_inventory::OwnedInventory,
     ) {
         self.handle_op_result(tx, config);
-        ui.heading(t("nav-decals"));
+        // the browser below repeats it, and the modern header has its own title
+        if !owned_inventory.in_header {
+            ui.heading(t("nav-decals"));
+        }
         owned_inventory.show_with_actions(ui, |ui| {
             let label = "Show only owned items";
             let width = ui.spacing().icon_width
@@ -5133,6 +5324,30 @@ mod decal_pack_tests {
                 .unwrap()
                 .contains("Diffuse")
         );
+    }
+    #[test]
+    fn bundle_prefers_diffuse_over_legacy_alias() {
+        let fixture = Fixture::new();
+        let mut state = DecalPatcherState::new(&fixture.0, &Config::default());
+        for name in ["legacy.png", "art.png", "finish.png"] {
+            fs::write(fixture.0.join(name), image_bytes()).unwrap();
+        }
+        let manifest = fixture.0.join("item.json");
+        fs::write(
+            &manifest,
+            br#"{"Bundle":{"BodyID":4284,"Body":{"1_Diffuse_Skin":"legacy.png","Diffuse":"art.png","Skin_Mask":"finish.png"}}}"#,
+        )
+        .unwrap();
+        state.parse_decal_json(&manifest);
+        let mut decal = state.decals[0].clone();
+        let entry = state.build_backend_entry(&decal).unwrap();
+        assert_eq!(entry.fields.len(), 2);
+        assert_eq!(entry.field_labels["Diffuse"], "art.png");
+        assert!(entry.fields.contains_key("Skin_Mask"));
+
+        decal.fields.remove("Diffuse");
+        let entry = state.build_backend_entry(&decal).unwrap();
+        assert_eq!(entry.field_labels["1_Diffuse_Skin"], "legacy.png");
     }
     #[test]
     fn chassis_fields_and_finish_masks_do_not_match_body_diffuse() {

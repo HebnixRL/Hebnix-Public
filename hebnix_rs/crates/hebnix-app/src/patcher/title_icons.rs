@@ -58,6 +58,8 @@ struct Loader {
     install: Option<PathBuf>,
     result: Option<crossbeam_channel::Receiver<Result<Pixels, String>>>,
     icons: Arc<Icons>,
+    #[cfg(windows)]
+    web_icons: Arc<std::collections::BTreeMap<String, String>>,
 }
 
 fn key() -> egui::Id {
@@ -75,6 +77,8 @@ pub fn prepare(ctx: &egui::Context, install: &Path) {
     if cache.install.as_deref() != Some(install) {
         cache.install = Some(install.to_path_buf());
         cache.icons = Arc::default();
+        #[cfg(windows)]
+        { cache.web_icons = Arc::default(); }
         cache.result = None;
         if !install.as_os_str().is_empty() {
             let (tx, rx) = crossbeam_channel::bounded(1);
@@ -91,6 +95,15 @@ pub fn prepare(ctx: &egui::Context, install: &Path) {
         cache.result = None;
         match result {
             Ok(images) => {
+                #[cfg(windows)]
+                {
+                    use base64::Engine;
+                    cache.web_icons = Arc::new(images.iter().filter_map(|(token, image)| {
+                        let pixels = image::imageops::thumbnail(image, 32, 32);
+                        let png = cosmetic_thumbnail::preview_png(pixels).ok()?;
+                        Some((token.clone(), format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))))
+                    }).collect());
+                }
                 cache.icons = Arc::new(
                     images
                         .into_iter()
@@ -111,6 +124,13 @@ pub fn prepare(ctx: &egui::Context, install: &Path) {
             Err(error) => tracing::debug!("Inline title icons unavailable: {error}"),
         }
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn web_loaded(ctx: &egui::Context) -> Arc<std::collections::BTreeMap<String, String>> {
+    ctx.data(|data| data.get_temp::<Arc<Mutex<Loader>>>(key()))
+        .map(|cache| cache.lock().unwrap_or_else(|error| error.into_inner()).web_icons.clone())
+        .unwrap_or_default()
 }
 
 pub fn loaded(ctx: &egui::Context) -> Arc<Icons> {

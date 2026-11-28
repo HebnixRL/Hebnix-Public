@@ -125,28 +125,23 @@ fn compose(source: &RgbaImage, original: Option<&RgbaImage>, size: (u32, u32), t
     out
 }
 
-impl HebnixApp {
-    pub(super) fn render_menu_textures_page(&mut self, ui: &mut egui::Ui) {
-        let cooked = PathBuf::from(&self.config.settings.rl_path)
-            .join("TAGame")
-            .join("CookedPCConsole");
-        let backups = cooked.join("Backups");
-        let state = &mut self.menu_textures;
-        if let Some(result) = poll(&mut state.loading) {
-            state.textures = Some(result);
+impl MenuTextureState {
+    fn update(&mut self, cooked: &Path, backups: &Path) {
+        if let Some(result) = poll(&mut self.loading) {
+            self.textures = Some(result);
         }
-        if let Some(result) = poll(&mut state.pending) {
-            state.status = Some(result.map(|_| "Saved. Restart Rocket League to see it.".into()));
-            state.revision += 1;
-            state.textures = None;
-            state.manifest = patches::menu_load(&backups).unwrap_or_default();
+        if let Some(result) = poll(&mut self.pending) {
+            self.status = Some(result.map(|_| "Saved. Restart Rocket League to see it.".into()));
+            self.revision += 1;
+            self.textures = None;
+            self.manifest = patches::menu_load(backups).unwrap_or_default();
         }
-        if state.install != cooked && state.pending.is_none() {
-            state.install = cooked.clone();
-            state.keep_alpha = true;
-            state.file = None;
-            state.textures = None;
-            state.files = fs::read_dir(&cooked)
+        if self.install != cooked && self.pending.is_none() {
+            self.install = cooked.to_path_buf();
+            self.keep_alpha = true;
+            self.file = None;
+            self.textures = None;
+            self.files = fs::read_dir(&cooked)
                 .map(|dir| {
                     dir.flatten()
                         .filter_map(|e| e.file_name().into_string().ok())
@@ -157,9 +152,162 @@ impl HebnixApp {
                         .collect()
                 })
                 .unwrap_or_default();
-            state.files.sort_by_key(|n| n.to_ascii_lowercase());
-            state.manifest = patches::menu_load(&backups).unwrap_or_default();
+            self.files.sort_by_key(|n| n.to_ascii_lowercase());
+            self.manifest = patches::menu_load(backups).unwrap_or_default();
         }
+    }
+}
+
+impl HebnixApp {
+    #[cfg(windows)]
+    pub(super) fn web_menu_textures(&mut self, ctx: &egui::Context) -> serde_json::Value {
+        use serde_json::json;
+        let cooked = self.swapper_cooked_path();
+        let state = &mut self.menu_textures;
+        state.update(&cooked, &cooked.join("Backups"));
+        if let Some(file) = &state.file
+            && state.textures.is_none() && state.loading.is_none() && state.pending.is_none()
+        {
+            let path = cooked.join(file);
+            state.loading = Some(spawn(ctx, move || patches::menu_textures(&path)));
+        }
+        let package = state.manifest.packages.iter().find(|package| {
+            state.file.as_ref().is_some_and(|file| package.file.eq_ignore_ascii_case(file))
+        });
+        let patched: HashSet<_> = package.into_iter().flat_map(|package| package.patches.iter().map(|patch| patch.export)).collect();
+        let query = state.pack_search.to_lowercase();
+        let pack = state.pack.iter().filter(|(name, _)| name.contains(&query)).take(80).map(|(name, bytes)| {
+            json!({"name": name, "image": crate::ui::browser::image_url(bytes)})
+        }).collect::<Vec<_>>();
+        let rows = state.textures.as_ref().and_then(|result| result.as_ref().ok()).into_iter().flatten().map(|texture| {
+            json!({
+                "id": texture.export, "name": strip(&texture.name), "size": texture.size,
+                "selected": state.selected.contains(&texture.export), "patched": patched.contains(&texture.export),
+                "image": texture.png.as_ref().ok().and_then(|bytes| crate::ui::browser::image_url(bytes)),
+                "error": texture.png.as_ref().err(),
+            })
+        }).collect::<Vec<_>>();
+        let message = state.status.as_ref().map(|status| match status { Ok(message) | Err(message) => message });
+        let error = state.textures.as_ref().and_then(|result| result.as_ref().err());
+        json!({
+            "page": "menu-textures", "packages": state.files, "file": state.file, "rows": rows,
+            "active": state.manifest.count(), "restoreCount": state.selected.intersection(&patched).count(),
+            "busy": state.pending.is_some(), "loading": state.loading.is_some(),
+            "message": message, "error": error, "tile": state.tile, "keepAlpha": state.keep_alpha,
+            "replacement": state.replacement.as_ref().map(|(name, bytes)| json!({"name": name, "image": crate::ui::browser::image_url(bytes)})),
+            "pack": pack, "packCount": state.pack.len(), "packSearch": state.pack_search,
+            "closed": !self.last_rl_open && !self.first_status,
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn web_menu_texture_action(&mut self, key: &str, value: serde_json::Value, ctx: &egui::Context) {
+        let cooked = self.swapper_cooked_path();
+        let backups = cooked.join("Backups");
+        let state = &mut self.menu_textures;
+        if state.pending.is_some() {
+            return;
+        }
+        let text = value.as_str().unwrap_or_default();
+        match key {
+            "package" if state.files.iter().any(|file| file == text) => {
+                state.file = Some(text.to_owned());
+                state.loading = None;
+                state.textures = None;
+                state.selected.clear();
+            }
+            "reload" => state.textures = None,
+            "tile" => state.tile = value.as_bool().unwrap_or(false),
+            "alpha" => state.keep_alpha = value.as_bool().unwrap_or(false),
+            "pack-search" => state.pack_search = text.chars().take(256).collect(),
+            "pack-select" => {
+                if let Some(source) = state.pack.iter().find(|(name, _)| name == text) {
+                    state.replacement = Some(source.clone());
+                }
+            }
+            "pack" => {
+                let mut dialog = rfd::FileDialog::new().add_filter("Resource pack", &["zip"]);
+                if let Some(dir) = std::env::var_os("APPDATA")
+                    .map(|dir| PathBuf::from(dir).join("PrismLauncher").join("instances"))
+                    .filter(|dir| dir.is_dir())
+                {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    match read_pack(&path) {
+                        Ok(pack) => state.pack = pack,
+                        Err(error) => state.status = Some(Err(error)),
+                    }
+                }
+            }
+            "image" => {
+                let dialog = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]);
+                if let Some(path) = crate::winutil::parent_file_dialog(dialog).pick_file() {
+                    match fs::read(&path) {
+                        Ok(bytes) => {
+                            let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                            state.replacement = Some((name, bytes.into()));
+                        }
+                        Err(error) => state.status = Some(Err(error.to_string())),
+                    }
+                }
+            }
+            "clear" => state.selected.clear(),
+            "restore-all" if !self.last_rl_open && !self.first_status && state.manifest.count() > 0 => {
+                state.status = None;
+                state.pending = Some(spawn(ctx, move || patches::menu_restore_all(&cooked, &backups)));
+            }
+            "select" | "select-all" | "apply" | "restore" => {
+                let (Some(file), Some(Ok(textures))) = (state.file.clone(), &state.textures) else { return };
+                match key {
+                    "select" => {
+                        if let Some(texture) = textures.iter().find(|texture| value.as_u64() == Some(texture.export as u64) && texture.png.is_ok())
+                            && !state.selected.remove(&texture.export)
+                        {
+                            state.selected.insert(texture.export);
+                        }
+                    }
+                    "select-all" => state.selected = textures.iter().filter(|texture| texture.png.is_ok()).map(|texture| texture.export).collect(),
+                    "apply" if !self.last_rl_open && !self.first_status && !state.selected.is_empty() => {
+                        let Some((name, bytes)) = state.replacement.clone() else { return };
+                        let jobs = textures.iter().filter(|texture| state.selected.contains(&texture.export))
+                            .map(|texture| (texture.export, texture.size, texture.png.as_ref().ok().cloned()))
+                            .collect::<Vec<_>>();
+                        let (tile, keep_alpha) = (state.tile, state.keep_alpha);
+                        state.status = None;
+                        state.pending = Some(spawn(ctx, move || {
+                            let source = image::load_from_memory(&bytes).map_err(|error| error.to_string())?.to_rgba8();
+                            let changes = jobs.into_iter().map(|(export, size, original)| {
+                                let original = original.filter(|_| keep_alpha)
+                                    .and_then(|png| image::load_from_memory(&png).ok()).map(|image| image.to_rgba8());
+                                (export, name.clone(), compose(&source, original.as_ref(), size, tile))
+                            }).collect();
+                            patches::menu_apply(&cooked, &backups, &file, changes)
+                        }));
+                    }
+                    "restore" if !self.last_rl_open && !self.first_status => {
+                        let exports = state.manifest.packages.iter().filter(|package| package.file.eq_ignore_ascii_case(&file))
+                            .flat_map(|package| package.patches.iter().map(|patch| patch.export))
+                            .filter(|export| state.selected.contains(export)).collect::<Vec<_>>();
+                        if !exports.is_empty() {
+                            state.status = None;
+                            state.pending = Some(spawn(ctx, move || patches::menu_restore(&cooked, &backups, &file, &exports)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn render_menu_textures_page(&mut self, ui: &mut egui::Ui) {
+        let cooked = PathBuf::from(&self.config.settings.rl_path)
+            .join("TAGame")
+            .join("CookedPCConsole");
+        let backups = cooked.join("Backups");
+        let state = &mut self.menu_textures;
+        state.update(&cooked, &backups);
 
         egui::ScrollArea::vertical()
             .id_salt("menu_textures_page")
