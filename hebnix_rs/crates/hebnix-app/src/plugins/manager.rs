@@ -173,7 +173,10 @@ impl PluginManager {
             };
 
             if enabled {
-                match self.instantiate(&disc) {
+                let started = std::time::Instant::now();
+                let loaded = self.instantiate(&disc);
+                tracing::info!("plugin {} instantiated in {:?}", disc.slug, started.elapsed());
+                match loaded {
                     Ok(runtime) => {
                         plugin.runtime = Some(runtime);
                         if let Err(e) = Self::call_callback_on(&mut plugin, "on_load", ()) {

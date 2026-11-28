@@ -2633,7 +2633,10 @@ impl HebnixApp {
     #[cfg(target_os = "windows")]
     pub(crate) fn enable_modern_ui(&mut self, cc: &eframe::CreationContext<'_>) {
         let labels = Self::modern_tab_labels();
-        match crate::modern_ui::Navigation::new(cc, &labels) {
+        let started = std::time::Instant::now();
+        let built = crate::modern_ui::Navigation::new(cc, &labels);
+        tracing::info!("Modern UI web views built in {:?}", started.elapsed());
+        match built {
             Ok(navigation) => {
                 self.modern_navigation = Some(navigation);
                 let (tab, _) = self.modern_tab_selection();

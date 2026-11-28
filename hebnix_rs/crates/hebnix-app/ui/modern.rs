@@ -543,6 +543,21 @@ pub(crate) struct Navigation {
     header_region: Option<(i32, i32, i32, i32, i32)>,
     theme: String,
     sidebar_theme: String,
+    // pages and the dialog are built on first use, each WebView2 costs ~90ms at startup
+    parent: ParentWindow,
+    ctx: egui::Context,
+    sender: crossbeam_channel::Sender<String>,
+    dialog_tried: bool,
+}
+
+/// the main window's HWND, kept so views can be built after startup
+struct ParentWindow(std::num::NonZeroIsize);
+
+impl raw_window_handle::HasWindowHandle for ParentWindow {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let handle = raw_window_handle::Win32WindowHandle::new(self.0);
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Win32(handle)) })
+    }
 }
 
 impl Navigation {
@@ -551,20 +566,18 @@ impl Navigation {
         let script =
             include_str!("navigation.js").replace("/*TABS*/[]", &labels.replace('<', "\\u003c"));
         let (sender, messages) = crossbeam_channel::unbounded();
-        let webview = Self::build_view(cc, &cc.egui_ctx, PAGE, script, sender.clone())?;
+        let parent = match raw_window_handle::HasWindowHandle::window_handle(cc)?.as_raw() {
+            raw_window_handle::RawWindowHandle::Win32(handle) => ParentWindow(handle.hwnd),
+            _ => return Err(raw_window_handle::HandleError::NotSupported.into()),
+        };
+        let ctx = cc.egui_ctx.clone();
+        let webview = Self::build_view(cc, &ctx, PAGE, script, sender.clone())?;
         let content =
-            Self::optional_surface(cc, ABOUT_PAGE, sender.clone()).map(|mut surface| { surface.wait_for_paint = true; ContentView {
+            Self::optional_surface(cc, &ctx, ABOUT_PAGE, sender.clone()).map(|mut surface| { surface.wait_for_paint = true; ContentView {
                 page: ContentPage::About,
                 surface,
             }});
-        let cached_content = [ContentPage::Tracker, ContentPage::LiveMatch, ContentPage::BrowseMaps,
-            ContentPage::Arena, ContentPage::Manage, ContentPage::Swapper, ContentPage::Console, ContentPage::ReplayUpload]
-            .into_iter().filter_map(|page| Self::optional_surface(cc, page.url(), sender.clone()).map(|mut surface| {
-                surface.wait_for_paint = true;
-                ContentView { page, surface }
-            })).collect();
-        let header = Self::optional_surface(cc, HEADER_PAGE, sender.clone());
-        let dialog = Self::optional_surface(cc, DIALOG_PAGE, sender);
+        let header = Self::optional_surface(cc, &ctx, HEADER_PAGE, sender.clone());
         Ok(Self {
             webview,
             messages,
@@ -574,9 +587,9 @@ impl Navigation {
             content_selection: None,
             size: None,
             content,
-            cached_content,
+            cached_content: Vec::new(),
             header,
-            dialog,
+            dialog: None,
             header_panel: None,
             action_inset: 0,
             action_width: default_action_width(),
@@ -584,15 +597,20 @@ impl Navigation {
             header_region: None,
             theme: "null".into(),
             sidebar_theme: String::new(),
+            parent,
+            ctx,
+            sender,
+            dialog_tried: false,
         })
     }
 
     fn optional_surface(
-        cc: &eframe::CreationContext<'_>,
+        parent: &impl raw_window_handle::HasWindowHandle,
+        ctx: &egui::Context,
         page: &'static str,
         sender: crossbeam_channel::Sender<String>,
     ) -> Option<WebSurface> {
-        match Self::build_view(cc, &cc.egui_ctx, page, String::new(), sender) {
+        match Self::build_view(parent, ctx, page, String::new(), sender) {
             Ok(webview) => Some(WebSurface {
                 webview,
                 ready: false,
@@ -1103,6 +1121,10 @@ impl Navigation {
     }
 
     pub(crate) fn show_dialog(&mut self, ctx: &egui::Context, data: Option<&serde_json::Value>) -> wry::Result<()> {
+        if data.is_some() && self.dialog.is_none() && !self.dialog_tried {
+            self.dialog_tried = true;
+            self.dialog = Self::optional_surface(&self.parent, &self.ctx, DIALOG_PAGE, self.sender.clone());
+        }
         let Some(dialog) = &mut self.dialog else { return Ok(()) };
         let Some(data) = data else {
             if dialog.shown { dialog.webview.evaluate_script("window.clearDialog()")?; }
@@ -1132,6 +1154,13 @@ impl Navigation {
                 content.surface.webview.evaluate_script("document.activeElement?.blur();document.documentElement.style.pointerEvents='none';")?;
                 std::mem::swap(content, &mut self.cached_content[index]);
                 content.surface.webview.evaluate_script("if(document.documentElement)document.documentElement.style.pointerEvents='auto';")?;
+            } else if let Some(mut surface) = Self::optional_surface(&self.parent, &self.ctx, page.url(), self.sender.clone()) {
+                // first visit: build the page now and keep the old one cached
+                surface.wait_for_paint = true;
+                let content = self.content.as_mut().unwrap();
+                content.surface.webview.evaluate_script("document.activeElement?.blur();document.documentElement.style.pointerEvents='none';")?;
+                let previous = std::mem::replace(content, ContentView { page, surface });
+                self.cached_content.push(previous);
             }
         }
         let Some(content) = &mut self.content else {
