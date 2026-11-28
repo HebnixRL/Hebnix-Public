@@ -289,10 +289,15 @@ impl HebnixApp {
         let mut expanded: Option<usize> = ui.ctx().data(|d| d.get_temp(expanded_id)).unwrap_or(Some(tab_index));
         let mut pick: Option<(usize, Option<usize>, Option<usize>)> = None;
         egui::Panel::left("modern_navigation")
-            .exact_size(crate::modern_ui::SIDEBAR_WIDTH)
+            .default_size(crate::modern_ui::SIDEBAR_WIDTH)
+            .size_range(crate::modern_ui::SIDEBAR_WIDTH..=420.0)
             .frame(egui::Frame::NONE.fill(paint.surface).inner_margin(egui::Margin::symmetric(8, 14)))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                // still scrolls with the wheel and by dragging
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     for (index, tab) in Tab::ALL.iter().enumerate() {
                         let pages = subtabs(*tab);
