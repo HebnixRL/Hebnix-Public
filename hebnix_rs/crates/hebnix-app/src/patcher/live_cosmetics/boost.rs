@@ -51,10 +51,18 @@ pub(super) fn repeat(p: &UpkPackage, base: usize, key: &str, length: Script,
 }
 
 pub(super) fn refresh(p: &UpkPackage, base: usize, mesh: Script, menu: bool) -> R<Script> {
-    let valid = native(0xce, &[mesh.clone(), raw(&[0x2a])]);
-    // Native boost updates can reset parameters without replacing the actor.
-    // Keep this bounded by the controller's 10 Hz refresh, not a colour stamp.
-    let body = refresh_inner(p, base + 3 + valid.mem_size(), mesh, menu)?;
+    let previous_key = join(text("HbxBoostMode."), cast(0x56, mesh.clone()));
+    let active = super::items::choose(flag(p, "boost.enabled")?, raw(&[0x27]),
+        native(0xcc, &[get_dynamic(p, previous_key)?, text("1")]))?;
+    let key = join(text("HbxBoostAppliedState."), cast(0x56, mesh.clone()));
+    let stamp = join(join(join(super::items::vanity_stamp(p, "boost")?, get(p, "HbxLoadoutGeneration")?), text("|")), get(p, "HbxBoostNativeGeneration")?);
+    let changed = native(0xc0, &[stamp.clone(), get_dynamic(p, key.clone())?]);
+    let needed = super::items::choose(active, changed, raw(&[0x28]))?;
+    let valid = super::items::choose(native(0xce, &[mesh.clone(), raw(&[0x2a])]), needed, raw(&[0x28]))?;
+    // Native events invalidate this stamp below. Solid boost colours do not
+    // need a continuous scan of actor/dispenser/particle parameter arrays.
+    let mut body = refresh_inner(p, base + 3 + valid.mem_size(), mesh, menu)?;
+    body.append(&set_dynamic(p, key, stamp)?);
     guard(base, valid, body)
 }
 fn refresh_inner(p: &UpkPackage, base: usize, mesh: Script, menu: bool) -> R<Script> {
@@ -222,7 +230,11 @@ pub(super) fn actor(p: &UpkPackage, base: usize) -> R<Script> {
     remember.append(&enabled).raw(&3u16.to_le_bytes()).append(&text("1"))
         .raw(&3u16.to_le_bytes()).append(&text("0"));
     body.append(&set_dynamic(p, active_key, remember)?);
-    guard(base, local, guard(active_base, active, body)?)
+    let mut out = guard(base, local.clone(), guard(active_base, active, body)?)?;
+    let generation = cast(0x44, cast(STRING_TO_FLOAT, get(p, "HbxBoostNativeGeneration")?));
+    out.append(&guard(base + out.mem_size(), native(0x81, &[local]), set(p, "HbxBoostNativeGeneration",
+        cast(INT_TO_STRING, native(0x92, &[generation, int(1)])))?)?);
+    Ok(out)
 }
 
 pub(super) fn prepare_imports(p: &mut UpkPackage) -> R<Vec<(usize, Vec<u8>, Vec<u8>)>> {

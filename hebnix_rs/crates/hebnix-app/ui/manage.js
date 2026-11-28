@@ -1736,7 +1736,8 @@ function presetCreator() {
       button("Copy Existing Loadout", () => { view.copy = true; render(); }, !state.rows.length || !state.closed));
     start.append(options);
     if (!state.closed) start.append(element("p","small text-warning mt-2 mb-0","Rocket League must be closed."));
-    if (!state.rows.length) start.append(element("p", "small text-body-secondary", "Select an account with a Rocket League loadout from quick settings first."));
+    if (state.loading) start.append(element("p", "small text-body-secondary", "Loading loadouts…"));
+    else if (!state.rows.length) start.append(element("p", "small text-body-secondary", "Select an account with a Rocket League loadout from quick settings first."));
     if (view.copy && state.rows.length) {
       const choose = loadoutSelect("Loadout to copy", state.rows.map(row => [row.position, row.name]), state.rows[0].position, () => {});
       const copy = element("div", "d-flex align-items-center justify-content-center gap-2 mt-3");
@@ -2808,7 +2809,8 @@ function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings
     clearTimeout(timer);
     timer = setTimeout(() => send({type: "live_cosmetics", settings}), 100);
   });
-  section.append(element("h2", "h6", kind === "alignment" ? "Live Wheel Alignment · All local cars" : "Live Colours"),
+  section.append(element("h2", "h6", kind === "alignment" ? "Live Wheel Alignment · All local cars" : "Colours"));
+  if (kind === "alignment") section.append(
     element("p", "small text-body-secondary", "Changes are saved automatically and update in Rocket League. Values remain available while Hebnix is closed."),
     element("p", "small text-body-secondary live-setup-status", "Live cosmetics: " + (state.live.status || "Starting…")));
   if (kind === "alignment") {
@@ -2836,7 +2838,7 @@ function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings
     for (const [key, label] of [["primary", "Primary paint"], ["secondary", "Secondary paint"], ["trim", "Body / trim"], ["decal", "Decal"], ["wheels", "Wheels"],
       // ["antenna", "Antenna"],
       ["topper", "Topper"], ["boost", "Boost"], ["trail", "Trail"], ["goal_explosion", "Goal explosion"], ["banner", "Player banner"], ["avatar_border", "Avatar border"], ["heatseeker", "Heatseeker ball"]]) {
-      if (key === "primary") section.append(element("p", "small text-body-secondary", "Colours apply to your currently equipped items."), element("h3", "h6 mt-3 mb-3", "Car Colours"));
+      if (key === "primary") section.append(element("h3", "h6 mt-3 mb-3", "Car Colours"));
       if (key === "boost") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Effects"));
       if (key === "banner") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Player Colours"));
       if (key === "heatseeker") section.append(element("hr", "my-4"), element("h3", "h6 mb-3", "Heatseeker Ball"));
@@ -2845,13 +2847,17 @@ function liveCosmeticEditor(kind, settings = structuredClone(state.live.settings
       input.type = "color";
       input.value = "#" + settings[key].rgb.map(b => b.toString(16).padStart(2, "0")).join("");
       input.setAttribute("aria-label", label);
-      const rainbow = key !== "goal_explosion";
-      if (!rainbow) settings[key].rainbow = false;
+      if (key === "goal_explosion") settings[key].rainbow = false;
       input.disabled = !!settings[key].rainbow;
       input.addEventListener("input", () => { settings[key].rgb = input.value.slice(1).match(/../g).map(b => parseInt(b, 16)); save(); });
       row.append(toggle(label, settings[key].enabled, on => { settings[key].enabled = on; save(); }), input);
-      if (rainbow) row.append(toggle("Rainbow", !!settings[key].rainbow, on => { settings[key].rainbow = on; input.disabled = on; save(); }));
+      // Rainbow goal explosions rebuild FX state and are disabled.
+      if (key !== "goal_explosion") row.append(toggle("Rainbow", !!settings[key].rainbow, on => { settings[key].rainbow = on; input.disabled = on; save(); }));
       section.append(row);
+      if (key === "goal_explosion") {
+        row.classList.remove("mb-3");
+        section.append(element("p", "small text-body-secondary mt-1 mb-3", "Only in game"));
+      }
     }
   }
   return section;
@@ -2908,7 +2914,6 @@ function gameColours() {
     const blue = key + "_blue", orange = key + "_orange";
     section.append(field(labels.blue, settings[blue], rgb => { settings[blue] = rgb; saveTeamColours(key); }),
       field(labels.orange, settings[orange], rgb => { settings[orange] = rgb; saveTeamColours(key); }));
-    if (liveSettings) section.append(element("p", "small text-body-secondary", "Live · changes are saved automatically. Disable to use the game's colours."));
     const options = element("div", "d-flex gap-2");
     if (key === "hud") options.append(button(labels.match, () => {
       settings.hud_blue = settings.stadium_blue.slice();
@@ -2934,22 +2939,35 @@ function gameColours() {
       group(labels.hud, labels.hudOn, labels.hudHint, "hud_colours", section => teamSection(section, "hud")),
     ];
     // the garage palette's custom colours, which loadouts and BakkesMod imports use
-    const carGroup = () => group(labels.car, labels.carOn, labels.carHint, "car_colours", section => {
-      settings.custom_colours.forEach((rgb, index) => {
+    const carGroup = () => {
+      const section = panel();
+      section.append(element("h2", "h6", labels.car), toggle(labels.carOn, settings.car_colours, enabled => {
+        settings.car_colours = enabled; draw();
+      }), element("p", "small text-body-secondary", labels.carHint));
+      if (settings.car_colours) settings.custom_colours.forEach((rgb, index) => {
         const row = element("div", "d-flex gap-2");
         row.append(field(labels.custom, rgb, next => { settings.custom_colours[index] = next; }),
           icon("×", "Remove colour", () => { settings.custom_colours.splice(index, 1); draw(); }));
         section.append(row);
       });
-      section.append(icon("+", "Add colour", () => { settings.custom_colours.push([255, 0, 0]); draw(); }));
-    });
+      if (settings.car_colours) section.append(icon("+", "Add colour", () => { settings.custom_colours.push([255, 0, 0]); draw(); }));
+      section.append(element("hr", "my-3"), toggle(labels.paletteOn, settings.extended_palette, enabled => {
+        settings.extended_palette = enabled;
+      }), element("p", "small text-body-secondary", labels.paletteHint),
+        element("p", "small text-body-secondary", "Rocket League must be closed to apply palette colours."),
+        button("Apply palette colours", () => send({ type: "game_colours", settings, restore: false }), state.busy, "primary"));
+      if (liveSettings) {
+        const status = state.status === labels.choose ? "" : state.status;
+        section.append(element("p", state.error ? "text-warning mt-2 mb-0" : "small mt-2 mb-0", status || (state.busy ? "Working…" : "")));
+      }
+      return section;
+    };
     if (liveSettings) {
       controls.replaceChildren(...teamGroups, carGroup());
       return;
     }
     controls.replaceChildren(
       ...(state.liveManaged ? [] : teamGroups),
-      group(labels.palette, labels.paletteOn, labels.paletteHint, "extended_palette", () => {}),
       carGroup(),
       ...(!state.liveManaged ? [group(labels.heatseeker, labels.heatseekerOn, labels.heatseekerHint, "heatseeker_glow",
         section => section.append(field(labels.maxSpeed, settings.heatseeker_max_speed, rgb => { settings.heatseeker_max_speed = rgb; })))] : []));
@@ -2957,14 +2975,7 @@ function gameColours() {
   draw();
   const apply = restore => send({ type: "game_colours", settings, restore });
   if (liveSettings) {
-    // palette colours are a game file patch, unlike the live colours above
-    const palette = panel();
-    // the default status covers stadium/HUD too, which are live on this page
-    const status = state.status === labels.choose ? "" : state.status;
-    palette.append(element("p", "small text-body-secondary", "Rocket League must be closed to apply palette colours."),
-      button("Apply palette colours", () => apply(false), state.busy, "primary"),
-      element("p", state.error ? "text-warning mt-2 mb-0" : "small mt-2 mb-0", status || (state.busy ? "Working…" : "")));
-    content.append(controls, palette);
+    content.append(controls);
     return;
   }
   const status = panel();

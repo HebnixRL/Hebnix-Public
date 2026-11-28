@@ -20,6 +20,7 @@ pub(super) const STUDIO_APPEARANCE: &[(super::ItemsMode, &str)] = &[
     (super::ItemsMode::GameColours, "nav-game-colours"),
     (super::ItemsMode::BallAppearance, "nav-ball-shape"),
     (super::ItemsMode::WheelAlignment, "app-wheel-alignment"),
+    (super::ItemsMode::GoalExplosionScale, "nav-goal-explosion-scale"),
     (super::ItemsMode::SpeedPatch, "app-speed-patch"),
     (super::ItemsMode::GoalExplosion, "goal-explosion-volume-title"),
     (
@@ -78,13 +79,13 @@ impl HebnixApp {
             Tab::About => self.maintenance.tab,
             Tab::Plugins => true,
             Tab::Spoofer => true,
-            Tab::Settings => true,
+            Tab::Settings => !self.on_active_garage_page(),
             Tab::Freeplay => true,
             Tab::GameMods | Tab::LiveEditor => true,
             Tab::Replays => self.replays_subtab == super::ReplaysSubTab::ReplayTimeline,
             Tab::Patcher => matches!(
                 self.items_mode,
-                super::ItemsMode::SpeedPatch | super::ItemsMode::GoalExplosion | super::ItemsMode::Manage | super::ItemsMode::WheelAlignment
+                super::ItemsMode::SpeedPatch | super::ItemsMode::GoalExplosion | super::ItemsMode::Manage | super::ItemsMode::WheelAlignment | super::ItemsMode::GoalExplosionScale
                     | super::ItemsMode::GameColours | super::ItemsMode::BallAppearance | super::ItemsMode::MenuTextures | super::ItemsMode::History
             ) || self.on_studio_asset_page(),
             Tab::Workshop => matches!(self.workshop.view, crate::ui::workshop::WorkshopView::InGameMenu | crate::ui::workshop::WorkshopView::Import | crate::ui::workshop::WorkshopView::Multiplayer | crate::ui::workshop::WorkshopView::MenuMap),
@@ -121,6 +122,11 @@ impl HebnixApp {
             Tab::Settings if self.hebnix_settings_tab == HebnixSettingsTab::Directories => {
                 self.web_files()
             }
+            Tab::Settings if self.on_active_cosmetics_page() => self.web_active_patches(ui.ctx()),
+            Tab::Settings if self.on_active_history_page() => {
+                let cooked = self.swapper_cooked_path();
+                self.upk_history.web_snapshot(&cooked, &self.swapper)
+            }
             Tab::Settings => self.web_action_button_data(),
             Tab::Patcher if self.items_mode == super::ItemsMode::Manage => self.web_active_patches(ui.ctx()),
             Tab::Patcher if self.items_mode == super::ItemsMode::History => {
@@ -135,11 +141,9 @@ impl HebnixApp {
                     let backups = self.swapper_cooked_path().join("Backups");
                     self.colours.web_snapshot(self.items_mode == super::ItemsMode::BallAppearance, &backups)
                 } else if self.items_mode == super::ItemsMode::WheelAlignment {
-                    let cooked = self.swapper_cooked_path();
-                    let mut model = self.wheel_alignment.web_snapshot(&cooked, ui.ctx());
-                model["catalogLoading"] = json!(self.catalogs_loading);
-                    model["catalogError"] = json!(self.catalogs_error);
-                    model
+                    self.web_live_editor(super::LiveEditorPage::Wheels)
+                } else if self.items_mode == super::ItemsMode::GoalExplosionScale {
+                    self.web_live_editor(super::LiveEditorPage::GoalExplosion)
                 } else if self.items_mode == super::ItemsMode::GoalExplosion {
                     let backups = self.swapper_cooked_path().join("Backups");
                     json!({ "page": "goal-explosion", "panels": [
@@ -187,19 +191,19 @@ impl HebnixApp {
                 let cooked = self.swapper_cooked_path();
                 let selected_save = self.owned_inventory.selected_save().map(std::path::Path::to_path_buf);
                 self.loadouts.sync_global_save(selected_save.as_deref(), false);
+                if self.items_subtab == super::ItemsSubTab::PresetCreator {
+                    self.loadouts.creator_page_snapshot(&mut self.swapper, &cooked, ui.ctx())
+                } else {
                 let mut model = self.loadouts.web_snapshot(
                     &mut self.swapper,
                     self.catalogs_loading,
                     &cooked,
                     ui.ctx(),
                 );
-                if self.items_subtab == super::ItemsSubTab::PresetCreator {
-                    model["page"] = json!("preset-creator");
-                    model["creator"] = self.loadouts.creator_snapshot(&mut self.swapper, &cooked, ui.ctx());
-                }
                 model["catalogLoading"] = json!(self.catalogs_loading);
                 model["catalogError"] = json!(self.catalogs_error);
                 model
+                }
             }
             Tab::Plugins if self.plugins_subtab == PluginsSubTab::Settings => self.web_plugin_settings(ui.ctx()),
             _ => self.modern_plugins_data(ui.ctx()),
@@ -335,7 +339,8 @@ impl HebnixApp {
     }
 
     fn on_live_colours_page(&self) -> bool {
-        self.tab == Tab::LiveEditor || self.tab == Tab::Items && self.items_subtab == super::ItemsSubTab::Colours
+        self.tab == Tab::Patcher && matches!(self.items_mode, super::ItemsMode::WheelAlignment | super::ItemsMode::GoalExplosionScale)
+            || self.tab == Tab::Items && self.items_subtab == super::ItemsSubTab::Colours
     }
 
     /// a loadout colour outside the stock palette: add it to the custom car colours,
@@ -1106,7 +1111,8 @@ impl HebnixApp {
                 .profile_pictures
                 .web_snapshot(std::path::Path::new(&self.config.settings.rl_path)),
             SpooferSubTab::TitleRank => {
-                let rows: Vec<_> = super::RANK_SPOOF_PLAYLISTS.iter().enumerate().map(|(icon, &(id, name, _))| {
+                let rows: Vec<_> = super::RANK_SPOOF_PLAYLISTS.iter().map(|&(id, name, _)| {
+                    let icon = [10, 11, 13, 27, 28, 29, 30, 34, 61, 63].iter().position(|key| *key == id).unwrap_or(0);
                     let rank = self.spoofer_ranks.entry(id).or_default();
                     json!({ "id": id, "name": name, "icon": icon, "enabled": rank.enabled, "rank": rank.rank, "division": rank.division, "mmr": rank.mmr })
                 }).collect();
@@ -1286,7 +1292,7 @@ impl HebnixApp {
                     self.patcher_anthem.web_action(&key, id, value, &cooked, ctx);
                 }
             }
-            ManageAction::UpkHistory { key, index, value } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::History => {
+            ManageAction::UpkHistory { key, index, value } if self.on_active_history_page() => {
                 let cooked = self.swapper_cooked_path();
                 self.upk_history.web_action(&cooked, &key, index, value, ctx);
             }
@@ -1326,18 +1332,11 @@ impl HebnixApp {
             ManageAction::BallAppearance { key, value } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::BallAppearance => {
                 if let Some(action) = self.colours.web_ball_action(&key, &value) { self.web_colour_action(action, ctx); }
             }
-            ManageAction::WheelSelect { index } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::WheelAlignment => {
-                self.wheel_alignment.web_select(index);
-            }
             ManageAction::LiveCosmetics { settings } if self.on_live_colours_page() => {
                 let cooked = self.swapper_cooked_path();
                 if let Err(error) = crate::patcher::live_cosmetics::update(&cooked, settings) {
                     self.console.write(format!("[Live Cosmetics] {error}"));
                 }
-            }
-            ManageAction::WheelApply { settings, remove } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::WheelAlignment => {
-                let cooked = self.swapper_cooked_path();
-                self.wheel_alignment.web_run(&cooked, settings, remove, ctx);
             }
             ManageAction::MenuMap { action } if self.tab == Tab::Workshop && self.workshop.view == crate::ui::workshop::WorkshopView::MenuMap => {
                 self.workshop.menu_map_web_action(action, &self.config.settings.rl_path, &self.tx, ctx);
@@ -1370,7 +1369,7 @@ impl HebnixApp {
             ManageAction::ReplayLibrary { action } if self.tab == Tab::Replays => {
                 self.replay_timeline.web_action(action, &self.ws_stats, ctx);
             }
-            ManageAction::StudioRestore { kind, target } if self.tab == Tab::Patcher && self.items_mode == super::ItemsMode::Manage => {
+            ManageAction::StudioRestore { kind, target } if self.on_active_cosmetics_page() => {
                 self.web_restore_patch(kind.as_deref(), target.as_deref(), ctx);
             }
             ManageAction::GameMod { id, key, value } if self.game_mod_visible(&id) => self.web_game_mod(&id, &key, value, ctx),

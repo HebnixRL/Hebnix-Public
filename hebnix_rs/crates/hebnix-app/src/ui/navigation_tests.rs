@@ -7,6 +7,10 @@ fn saved_tabs_survive_the_studio_reorganisation() {
         assert_eq!(Tab::from_config_key(key), Tab::Patcher);
     }
     assert_eq!(Tab::from_config_key("Items"), Tab::Items);
+    assert_eq!(Tab::from_config_key("Garage"), Tab::Items);
+    assert_eq!(Tab::from_config_key("Cosmetics"), Tab::Patcher);
+    assert_eq!(Tab::from_config_key("Live Editor"), Tab::Patcher);
+    assert!(!Tab::ALL.contains(&Tab::LiveEditor));
     for key in ["Spoofer", "Customisation", "Player"] {
         assert_eq!(Tab::from_config_key(key), Tab::Spoofer);
     }
@@ -15,16 +19,15 @@ fn saved_tabs_survive_the_studio_reorganisation() {
     for tab in Tab::ALL {
         assert_eq!(Tab::from_config_key(tab.config_key()), tab);
     }
-    assert_eq!(Tab::ALL.len(), 13);
+    assert_eq!(Tab::ALL.len(), 12);
     assert_eq!(Tab::ALL[0], Tab::Home);
     assert_eq!(Tab::ALL[1], Tab::Workshop);
     assert_eq!(Tab::ALL[2], Tab::Items);
     assert_eq!(Tab::ALL[3], Tab::Patcher);
-    assert_eq!(Tab::ALL[4], Tab::LiveEditor);
-    assert_eq!(Tab::ALL[5], Tab::Freeplay);
-    assert_eq!(Tab::ALL[6], Tab::GameMods);
+    assert_eq!(Tab::ALL[4], Tab::Freeplay);
+    assert_eq!(Tab::ALL[5], Tab::GameMods);
     assert_eq!(
-        Tab::ALL[8..],
+        Tab::ALL[7..],
         [Tab::Replays, Tab::Plugins, Tab::Settings, Tab::Console, Tab::About]
     );
     assert_eq!(Tab::from_config_key("unknown"), Tab::Home);

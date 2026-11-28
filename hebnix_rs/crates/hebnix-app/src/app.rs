@@ -118,12 +118,12 @@ const RANK_SPOOF_PLAYLISTS: &[(i32, &str, u8)] = &[
     (10, "Ranked 1v1", 2),
     (11, "Ranked 2v2", 4),
     (13, "Ranked 3v3", 6),
+    (61, "Quads", 8),
+    (34, "Tournaments", 6),
     (27, "Hoops", 4),
     (28, "Rumble", 6),
     (29, "Dropshot", 6),
     (30, "Snow Day", 6),
-    (34, "Tournaments", 6),
-    (61, "Quads", 8),
     (63, "Heatseeker", 4),
 ];
 
@@ -413,12 +413,11 @@ enum Tab {
 }
 
 impl Tab {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 12] = [
         Self::Home,
         Self::Workshop,
         Self::Items,
         Self::Patcher,
-        Self::LiveEditor,
         Self::Freeplay,
         Self::GameMods,
         Self::Spoofer,
@@ -436,8 +435,8 @@ impl Tab {
             Self::Console => t("tab-console"),
             Self::Workshop => t("tab-workshop"),
             Self::Spoofer => t("nav-player"),
-            Self::Items => t("tab-patcher"),
-            Self::Patcher => t("nav-upk-studio"),
+            Self::Items => t("nav-garage"),
+            Self::Patcher => t("nav-cosmetics"),
             Self::Freeplay => t("tab-freeplay"),
             Self::GameMods => t("nav-match-tools"),
             Self::LiveEditor => t("nav-live-editor"),
@@ -471,7 +470,8 @@ impl Tab {
     fn from_config_key(key: &str) -> Self {
         // Keep saved defaults from earlier navigation layouts working.
         match key {
-            "Colours" | "UPK Studio" | "Patcher" => return Self::Patcher,
+            "Live Editor" | "Cosmetics" | "Colours" | "UPK Studio" | "Patcher" => return Self::Patcher,
+            "Garage" => return Self::Items,
             "Workshop" => return Self::Workshop,
             "Player" | "Customisation" => return Self::Spoofer,
             _ => {}
@@ -537,6 +537,7 @@ enum ItemsMode {
     Patching,
     SpeedPatch,
     WheelAlignment,
+    GoalExplosionScale,
     BallAppearance,
     GameColours,
     ArenaBackgrounds,
@@ -563,7 +564,7 @@ impl ItemsMode {
             Self::Swapper | Self::Recolour | Self::ItemsActive | Self::Presets => return None,
             Self::SpeedPatch => StudioSection::Appearance,
             Self::Patching | Self::ItemNames => StudioSection::CustomAssets,
-            Self::WheelAlignment | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds | Self::GoalExplosion | Self::MenuTextures => StudioSection::Appearance,
+            Self::WheelAlignment | Self::GoalExplosionScale | Self::BallAppearance | Self::GameColours | Self::ArenaBackgrounds | Self::GoalExplosion | Self::MenuTextures => StudioSection::Appearance,
             Self::Manage => StudioSection::Active,
             Self::History => StudioSection::History,
         })
@@ -614,12 +615,28 @@ enum AppearanceSubTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HebnixSettingsTab {
+    Active,
     Interface,
     Directories,
     Preferences,
     Discord,
     ActionButton,
     System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveSettingsPage {
+    Garage,
+    Cosmetics,
+    History,
+}
+
+impl ActiveSettingsPage {
+    const PAGES: [(Self, &'static str); 3] = [
+        (Self::Garage, "nav-garage"),
+        (Self::Cosmetics, "nav-active-costmetics"),
+        (Self::History, "upk-history"),
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -723,6 +740,7 @@ pub struct HebnixApp {
     live_editor_page: LiveEditorPage,
     plugins_subtab: PluginsSubTab,
     hebnix_settings_tab: HebnixSettingsTab,
+    active_settings_page: ActiveSettingsPage,
     appearance_subtab: AppearanceSubTab,
     spoofer_subtab: SpooferSubTab,
     patcher_subtab: PatcherSubTab,
@@ -1365,6 +1383,7 @@ impl HebnixApp {
             live_editor_page: LiveEditorPage::Wheels,
             plugins_subtab: PluginsSubTab::Installed,
             hebnix_settings_tab: HebnixSettingsTab::Interface,
+            active_settings_page: ActiveSettingsPage::Garage,
             appearance_subtab: AppearanceSubTab::General,
             spoofer_subtab: SpooferSubTab::Username,
             patcher_subtab: PatcherSubTab::Car,
@@ -2703,7 +2722,7 @@ impl HebnixApp {
                 }
                 Action::Manage(action) => self.handle_modern_manager(action, ctx),
                 Action::Swapper(action)
-                    if self.tab == Tab::Items && matches!(self.items_subtab, ItemsSubTab::Swapper | ItemsSubTab::Active) =>
+                    if self.on_active_garage_page() || self.tab == Tab::Items && self.items_subtab == ItemsSubTab::Swapper =>
                 {
                     self.handle_modern_swapper(action, ctx);
                 }
@@ -2908,10 +2927,9 @@ impl HebnixApp {
                 &[
                     ItemsSubTab::Swapper,
                     ItemsSubTab::Colours,
-                    ItemsSubTab::Active,
-                    ItemsSubTab::Presets,
                     ItemsSubTab::Loadouts,
                     ItemsSubTab::PresetCreator,
+                    ItemsSubTab::Presets,
                 ],
                 &mut self.items_subtab,
                 step,
@@ -2936,6 +2954,7 @@ impl HebnixApp {
                     HebnixSettingsTab::Discord,
                     HebnixSettingsTab::ActionButton,
                     HebnixSettingsTab::System,
+                    HebnixSettingsTab::Active,
                 ],
                 &mut self.hebnix_settings_tab,
                 step,
@@ -2947,7 +2966,7 @@ impl HebnixApp {
     fn panel_pages(&self) -> Vec<Tab> {
         let mut pages = vec![Tab::Workshop, Tab::Plugins];
         if self.config.settings.panel_advanced {
-            pages.extend([Tab::Items, Tab::LiveEditor, Tab::Freeplay, Tab::GameMods, Tab::Spoofer, Tab::Settings]);
+            pages.extend([Tab::Items, Tab::Patcher, Tab::Freeplay, Tab::GameMods, Tab::Spoofer, Tab::Settings]);
         }
         pages
     }
@@ -5397,6 +5416,17 @@ impl HebnixApp {
     }
 
     fn render_hebnix_settings(&mut self, ui: &mut egui::Ui, modern_navigation: bool) {
+        if self.hebnix_settings_tab == HebnixSettingsTab::Active {
+            #[cfg(windows)]
+            if modern_navigation {
+                if self.active_settings_page == ActiveSettingsPage::Garage {
+                    self.render_modern_swapper(ui);
+                } else {
+                    self.render_modern_manager(ui);
+                }
+                return;
+            }
+        }
         let ctx = ui.ctx().clone();
 
         if !modern_navigation {
@@ -5406,6 +5436,7 @@ impl HebnixApp {
                     .show(ui, |ui| {
                         crate::panel::followed(ui, |ui| {
                             let tabs = [
+                                (HebnixSettingsTab::Active, t("nav-active")),
                                 (HebnixSettingsTab::Interface, t("nav-settings-appearance")),
                                 (HebnixSettingsTab::Directories, t("nav-files-folders")),
                                 (HebnixSettingsTab::Preferences, t("settings-nav-preferences")),
@@ -5429,6 +5460,7 @@ impl HebnixApp {
                     .show(ui, |ui| {
                         crate::i18n::layout::bordered_panel(ui, |ui| {
                             crate::theme::page_heading(ui, match self.hebnix_settings_tab {
+                                HebnixSettingsTab::Active => t("nav-active"),
                                 HebnixSettingsTab::Interface => t("nav-settings-appearance"),
                                 HebnixSettingsTab::Directories => t("nav-files-folders"),
                                 HebnixSettingsTab::Preferences => t("settings-heading-preferences"),
@@ -6230,6 +6262,21 @@ impl HebnixApp {
                                     self.render_action_button_settings(ui);
                                 }
 
+                                HebnixSettingsTab::Active => {
+                                    let previous = self.active_settings_page;
+                                    Self::page_tabs(ui, &mut self.active_settings_page, &ActiveSettingsPage::PAGES);
+                                    if previous != self.active_settings_page && self.active_settings_page == ActiveSettingsPage::History {
+                                        self.upk_history.enter();
+                                    }
+                                    match self.active_settings_page {
+                                        ActiveSettingsPage::Garage => {
+                                            let cooked = PathBuf::from(&self.config.settings.rl_path).join("TAGame").join("CookedPCConsole");
+                                            self.render_active_items(ui, &cooked, &cooked.join("Backups"));
+                                        }
+                                        ActiveSettingsPage::Cosmetics => self.render_editor_content(ui, ItemsMode::Manage),
+                                        ActiveSettingsPage::History => self.render_editor_content(ui, ItemsMode::History),
+                                    }
+                                }
                                 HebnixSettingsTab::Preferences => {
                                     use crate::config::BlackInfinium;
                                     ui.label(t("preferences-black-infinium"));
@@ -8838,10 +8885,9 @@ impl HebnixApp {
                 for (value, key) in [
                     (ItemsSubTab::Swapper, "nav-swapper"),
                     (ItemsSubTab::Colours, "nav-colours"),
-                    (ItemsSubTab::Active, "nav-active"),
-                    (ItemsSubTab::Presets, "presets-presets"),
                     (ItemsSubTab::Loadouts, "loadouts-title"),
                     (ItemsSubTab::PresetCreator, "nav-preset-creator"),
+                    (ItemsSubTab::Presets, "nav-swapper-presets"),
                 ] {
                     ui.selectable_value(&mut self.items_subtab, value, t(key));
                 }
@@ -8948,8 +8994,6 @@ impl HebnixApp {
                 for (value, key) in [
                     (StudioSection::CustomAssets, "studio-custom-assets"),
                     (StudioSection::Appearance, "studio-appearance"),
-                    (StudioSection::Active, "nav-active"),
-                    (StudioSection::History, "upk-history"),
                 ] {
                     ui.selectable_value(&mut section, value, t(key));
                 }
@@ -8991,6 +9035,7 @@ impl HebnixApp {
                                 (ItemsMode::GameColours, "nav-game-colours"),
                                 (ItemsMode::BallAppearance, "nav-ball-shape"),
                                 (ItemsMode::WheelAlignment, "app-wheel-alignment"),
+                                (ItemsMode::GoalExplosionScale, "nav-goal-explosion-scale"),
                                 (ItemsMode::SpeedPatch, "app-speed-patch"),
                                 (ItemsMode::GoalExplosion, "goal-explosion-volume-title"),
                                 (ItemsMode::MenuTextures, "nav-menu-textures-experimental"),
@@ -9510,13 +9555,9 @@ impl HebnixApp {
                         });
                     });
                 } else if mode == ItemsMode::WheelAlignment {
-                    if self.catalogs_loading {
-                        ui.spinner();
-                    }
-                    if let Some(error) = &self.catalogs_error {
-                        ui.label(error);
-                    }
-                    self.wheel_alignment.render(ui, &cooked_pc);
+                    crate::patcher::live_cosmetics::render(ui, &cooked_pc, true);
+                } else if mode == ItemsMode::GoalExplosionScale {
+                    crate::patcher::live_cosmetics::render_goal_explosion(ui, &cooked_pc);
                 } else if mode == ItemsMode::BallAppearance {
                     self.colours.poll();
                     if let Some(action) = self.colours.render_ball_appearance(ui, &backups_dir) {

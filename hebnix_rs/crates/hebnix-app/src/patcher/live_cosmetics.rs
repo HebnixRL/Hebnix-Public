@@ -81,6 +81,7 @@ impl Settings {
         text.push_str(&format!("HbxLive.goal-explosion.enabled={}\nHbxLive.goal-explosion.scale={}\n", u8::from(self.goal_explosion_scale != 0.), self.goal_explosion_scale));
         for (key, paint) in [("primary", &self.primary), ("secondary", &self.secondary), ("heatseeker", &self.heatseeker), ("trim", &self.trim), ("wheels", &self.wheels), ("boost", &self.boost), ("decal", &self.decal), ("antenna", &self.antenna), ("topper", &self.topper), ("trail", &self.trail), ("goal_explosion", &self.goal_explosion), ("banner", &self.banner), ("avatar_border", &self.avatar_border)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(paint.enabled)));
+            // Goal FX rebuild particle state when repainted. Keep rainbow disabled.
             text.push_str(&format!("HbxLive.{key}.rainbow={}\n", u8::from(paint.rainbow && key != "goal_explosion")));
             for (channel, value) in ["r", "g", "b"].into_iter().zip(paint.rgb) {
                 // Material parameters use linear RGB.
@@ -91,6 +92,11 @@ impl Settings {
         }
         let item_paints = [&self.trim, &self.wheels, &self.boost, &self.decal, &self.antenna, &self.topper, &self.trail, &self.goal_explosion];
         text.push_str(&format!("HbxLive.items.enabled={}\n", u8::from(item_paints.iter().any(|paint| paint.enabled))));
+        // Wheel/boost/UI animation have dedicated update paths. Only these
+        // colours need the car's native material iterator to keep running.
+        let material_paints = [&self.primary, &self.secondary, &self.trim, &self.decal,
+            &self.antenna, &self.topper];
+        text.push_str(&format!("HbxLive.materials.animated={}\n", u8::from(material_paints.iter().any(|paint| paint.enabled && paint.rainbow))));
         for (key, group) in [("stadium", &self.stadium), ("hud", &self.hud)] {
             text.push_str(&format!("HbxLive.{key}.enabled={}\n", u8::from(group.enabled)));
             for (team, rgb) in [("blue", group.blue), ("orange", group.orange)] {
@@ -118,7 +124,9 @@ impl Settings {
 fn preferences() -> PathBuf { crate::config::base_dir().join("live-cosmetics.json") }
 fn values() -> Settings {
     let mut slot = SETTINGS.lock().unwrap_or_else(|e| e.into_inner());
-    slot.get_or_insert_with(|| fs::read(preferences()).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or_default()).clone()
+    let settings = slot.get_or_insert_with(|| fs::read(preferences()).ok().and_then(|b| serde_json::from_slice::<Settings>(&b).ok()).filter(|s| s.validate().is_ok()).unwrap_or_default());
+    settings.goal_explosion.rainbow = false;
+    settings.clone()
 }
 pub fn snapshot() -> serde_json::Value {
     let running = hebnix_sdk::process::is_rocket_league_running();
@@ -209,6 +217,7 @@ pub fn has_native_bridge(package: &super::upk_package::UpkPackage) -> bool {
     package.image[e.serial_offset..e.serial_offset + e.serial_size].windows(b"HbxLive.refresh".len()).any(|w| w == b"HbxLive.refresh")
 }
 pub fn update(cooked: &Path, mut settings: Settings) -> Result<(), String> {
+    settings.goal_explosion.rainbow = false;
     settings.validate()?;
     for value in [&mut settings.alignment.camber, &mut settings.alignment.vertical, &mut settings.alignment.lateral] { *value = (*value * 2.).round() / 2.; }
     let text = settings.encode()?;
@@ -244,9 +253,12 @@ pub fn render(ui: &mut eframe::egui::Ui, cooked: &Path, alignment: bool) {
                     changed |= ui.checkbox(&mut paint.enabled, label).changed();
                     ui.add_enabled_ui(!paint.rainbow, |ui| { changed |= ui.color_edit_button_srgb(&mut paint.rgb).changed(); });
                     // Rainbow only applies to an enabled paint, so ticking it enables the paint too.
-                    if label == "Goal explosion" { paint.rainbow = false; }
-                    else if ui.checkbox(&mut paint.rainbow, "Rainbow").changed() { paint.enabled |= paint.rainbow; changed = true; }
+                    if label == "Goal explosion" {
+                        // Rainbow goal explosions are disabled: repeated FX setup stutters.
+                        paint.rainbow = false;
+                    } else if ui.checkbox(&mut paint.rainbow, "Rainbow").changed() { paint.enabled |= paint.rainbow; changed = true; }
                 });
+                if label == "Goal explosion" { ui.label(eframe::egui::RichText::new("Only in game").small().weak()); }
             }
         }
         if !alignment {
@@ -287,6 +299,7 @@ mod tests {
         assert!(text.starts_with("\nHbxLive.version=1\n"));
         assert!(text.ends_with("HbxLive.end=1\n"));
         assert!(text.contains("HbxLive.primary.enabled=0\n"));
+        assert!(text.contains("HbxLive.materials.animated=0\n"));
         for line in text.lines().filter(|l| !l.is_empty()) { assert!(line.split_once('=').unwrap().1.parse::<f32>().unwrap().is_finite()); }
         let mut invalid = Settings::default();
         invalid.alignment.camber = f32::NAN;
